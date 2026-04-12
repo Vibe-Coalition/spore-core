@@ -1376,13 +1376,11 @@
     opacity: 0; transition: opacity .15s ease;
   }
   #code-viewer.active { display: flex; opacity: 1; }
-  /* Docked mode: fills the canvas pane */
+  /* Docked mode: covers the entire canvas pane including controls */
   #code-viewer.cv-docked {
-    position: relative !important; top: auto !important; left: auto !important;
-    right: auto !important; bottom: auto !important;
-    width: 100% !important; height: auto !important;
-    flex: 1; min-height: 0; border-radius: 0;
-    border: none; box-shadow: none; z-index: auto;
+    position: absolute !important; inset: 0 !important;
+    width: 100% !important; height: 100% !important;
+    border-radius: 0; border: none; box-shadow: none; z-index: 50;
   }
   @keyframes cv-fade-in { from { opacity: 0; } to { opacity: 1; } }
   #code-viewer.cv-docked.cv-entering { animation: cv-fade-in .2s ease forwards; }
