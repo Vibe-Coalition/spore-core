@@ -81,15 +81,6 @@ Learner + Maintainer (background workers)
 
 Each agent runs as a Docker container behind Traefik. The visual knowledge graph in the web panel provides a live window into the agent's understanding — you can see nodes form, relationships shift, and memories evolve as the agent converses.
 
-## Minimum configuration
-
-Set these in the agent's `.env`:
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...   # required (unless using openrouter/ or gemini/ models)
-GEMINI_API_KEY=...              # recommended — enables semantic vector search
-```
-
 Platform gateways auto-enable when their tokens are set — all are optional:
 
 | Gateway | Token(s) needed |
