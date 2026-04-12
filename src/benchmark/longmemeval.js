@@ -73,8 +73,8 @@ class LongMemEvalRunner {
     this.llmClient = llmClient;
     this.log = log;
     this.broadcast = broadcast || (() => {});
-    this.learnerModel = learnerModel || config.learnerModel || 'claude-haiku-4-5';
-    this.answerModel = answerModel || config.learnerModel || 'claude-haiku-4-5';
+    this.learnerModel = learnerModel || config.learnerModel || config.casualModel || config.model;
+    this.answerModel = answerModel || config.learnerModel || config.casualModel || config.model;
 
     this.phase = 'idle';
     this.cancelled = false;
@@ -606,7 +606,7 @@ Answer based on our past conversations. Be specific — include names, dates, nu
   async _identifyMissingInfo(question, answer) {
     try {
       const response = await this.llmClient.messages.create({
-        model: 'claude-haiku-4-5',
+        model: this.learnerModel,
         max_tokens: 80,
         temperature: 0,
         messages: [{

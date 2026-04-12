@@ -1468,7 +1468,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 Be specific — cite facts, dates, and patterns. If the answer involves reasoning beyond what's explicitly stated, say so. If information is missing or uncertain, acknowledge it. Be direct and insightful, not generic.`, cache_control: { type: 'ephemeral' } }];
 
       const response = await this.anthropicClient.messages.create({
-        model: this.config.learnerModel || 'claude-haiku-4-5',
+        model: this.config.learnerModel || this.config.casualModel || this.config.model,
         max_tokens: 1500,
         system,
         messages: [{ role: 'user', content: `Question: ${question}\n\nEntity context:\n${fullContext}` }],

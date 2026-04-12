@@ -18,12 +18,13 @@ if (fs.existsSync(envPath)) {
 }
 
 const DEFAULTS = {
-  // Model tiering — escalation: casual → normal → planner
-  casualModel: 'claude-haiku-4-5',
-  normalModel: 'claude-sonnet-4-6',
-  plannerModel: 'claude-opus-4-6',
-  subagentModel: 'claude-sonnet-4-6',
-  learnerModel: 'claude-haiku-4-5',
+  // Model tiering — resolved from ANIMA_MODEL / per-tier env vars at load time.
+  // No hardcoded provider — the user's configured model is used for all tiers.
+  casualModel: null,
+  normalModel: null,
+  plannerModel: null,
+  subagentModel: null,
+  learnerModel: null,
   model: null, // DEPRECATED — backward compat; resolved to plannerModel at load time
   agentId: 'anima',
   /** Optional YYYY-MM-DD — authoritative "born" date for prompt tenure math (overrides graph node created). */
@@ -253,7 +254,7 @@ function loadConfigFresh() {
 
   // Vision fallback model (used when active model lacks VLM support)
   if (process.env.ANIMA_VISION_FALLBACK_MODEL) config.visionFallbackModel = process.env.ANIMA_VISION_FALLBACK_MODEL;
-  if (!config.visionFallbackModel) config.visionFallbackModel = 'claude-sonnet-4-6';
+  if (!config.visionFallbackModel) config.visionFallbackModel = null;
 
   // Custom providers: ANIMA_PROVIDER_<NAME>_URL, _KEY, _AUTH_HEADER
   // e.g. ANIMA_PROVIDER_TOGETHER_URL=https://api.together.xyz/v1 → config.customProviders.together
@@ -401,7 +402,7 @@ function loadConfigFresh() {
   if (config.model && !config.plannerModel) config.plannerModel = config.model;
   // Ensure `model` always points at the top-tier model for downstream compat
   // (provider init, /model command, app.js logging, detectBackend, etc.)
-  config.model = config.plannerModel || config.normalModel || 'claude-sonnet-4-6';
+  config.model = config.plannerModel || config.normalModel || config.casualModel || null;
 
   const root = __dirname;
   if (config.graphDbPath && !path.isAbsolute(config.graphDbPath)) {

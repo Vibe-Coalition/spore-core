@@ -36,7 +36,7 @@ class Maintainer {
     this.log = log;
     this.client = anthropicClient;
     this.db = db;
-    this.model = config.learnerModel || 'claude-haiku-4-5';
+    this.model = config.learnerModel || config.casualModel || config.model;
     this._isOAuth = config._isOAuth || false;
     this._running = false;
     this._lastGraphChangeAt = 0;

@@ -1749,17 +1749,23 @@ async function handleRequest(req, res) {
       const sharedDefaults = parseEnvFile(DEFAULTS_FILE);
       const resolve = (val, key) => (val && String(val).trim()) ? val : (sharedDefaults[key] || '');
 
+      // Resolve the base model — use whatever the user configured, no hardcoded fallback
+      const baseModel = sharedDefaults.ANIMA_MODEL || '';
+      if (!baseModel) {
+        return json(res, { error: 'No model configured. Set up a provider in Settings before creating an agent.' }, 400);
+      }
+
       // Write .env — API keys come from the vault at startup, not .env
       const envLines = [
         `DISCORD_TOKEN=${discordToken || ''}`,
         `AGENT_ID=${agentId}`,
         `ANIMA_DISPLAY_NAME=${displayName}`,
         `ANIMA_NICKNAMES=${nicknamesList.join(', ')}`,
-        `ANIMA_MODEL=${sharedDefaults.ANIMA_MODEL || 'claude-sonnet-4-6'}`,
-        `ANIMA_CASUAL_MODEL=${sharedDefaults.ANIMA_CASUAL_MODEL || sharedDefaults.ANIMA_MODEL || 'claude-sonnet-4-6'}`,
-        `ANIMA_NORMAL_MODEL=${sharedDefaults.ANIMA_NORMAL_MODEL || sharedDefaults.ANIMA_MODEL || 'claude-sonnet-4-6'}`,
-        `ANIMA_PLANNER_MODEL=${sharedDefaults.ANIMA_PLANNER_MODEL || sharedDefaults.ANIMA_MODEL || 'claude-sonnet-4-6'}`,
-        `ANIMA_SUBAGENT_MODEL=${sharedDefaults.ANIMA_SUBAGENT_MODEL || sharedDefaults.ANIMA_MODEL || 'claude-sonnet-4-6'}`,
+        `ANIMA_MODEL=${baseModel}`,
+        `ANIMA_CASUAL_MODEL=${sharedDefaults.ANIMA_CASUAL_MODEL || baseModel}`,
+        `ANIMA_NORMAL_MODEL=${sharedDefaults.ANIMA_NORMAL_MODEL || baseModel}`,
+        `ANIMA_PLANNER_MODEL=${sharedDefaults.ANIMA_PLANNER_MODEL || baseModel}`,
+        `ANIMA_SUBAGENT_MODEL=${sharedDefaults.ANIMA_SUBAGENT_MODEL || baseModel}`,
         `ANIMA_HEALTH_PORT=${healthPort}`,
         `ANIMA_LOG_LEVEL=info`,
         `GRAPH_DB_PATH=${BARE_MODE ? path.join(newDir, 'data', 'graph.db') : '/data/graph.db'}`,

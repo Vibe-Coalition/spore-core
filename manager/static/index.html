@@ -2837,12 +2837,18 @@ async function saveProviderSetup() {
     if (model) {
       const prefixed = model.includes('/') ? model : `${provName}/${model}`;
       updates['ANIMA_MODEL'] = prefixed;
+      for (const k of ['ANIMA_CASUAL_MODEL','ANIMA_NORMAL_MODEL','ANIMA_PLANNER_MODEL','ANIMA_SUBAGENT_MODEL'])
+        updates[k] = prefixed;
     }
   } else {
     if (_activePreset.envKey && key) {
       updates[_activePreset.envKey] = key;
     }
-    if (model) updates['ANIMA_MODEL'] = model;
+    if (model) {
+      updates['ANIMA_MODEL'] = model;
+      for (const k of ['ANIMA_CASUAL_MODEL','ANIMA_NORMAL_MODEL','ANIMA_PLANNER_MODEL','ANIMA_SUBAGENT_MODEL'])
+        updates[k] = model;
+    }
   }
 
   if (Object.keys(updates).length) {

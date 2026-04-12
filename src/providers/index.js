@@ -44,7 +44,7 @@ let _customProviderNames = new Set();
 
 /** Detect which backend a model string targets */
 function detectBackend(model) {
-  if (!model) return 'anthropic';
+  if (!model) return 'none';
   if (model.startsWith('openrouter/')) return 'openrouter';
   if (model.startsWith('local/')) return 'local';
   if (model.startsWith('gemini/')) return 'gemini';
@@ -108,6 +108,7 @@ const _VIDEO_PATTERNS  = /\bvl\b|video/i;
  * null = genuinely unknown, will be probed at runtime.
  */
 function _inferCapabilities(model) {
+  if (!model) return { tools: null, vision: null, audio: null, video: null };
   const backend = detectBackend(model);
 
   if (backend === 'anthropic') return { tools: true, vision: true, audio: false, video: false };
@@ -909,15 +910,18 @@ class MultiProvider {
     }
 
     if (_hasImages(adapted) && !caps.vision) {
-      adapted = { ...adapted, model: this.config.visionFallbackModel || 'claude-sonnet-4-6' };
+      const fb = this.config.visionFallbackModel || this.config.model;
+      if (fb) adapted = { ...adapted, model: fb };
     }
 
     if (_hasAudio(adapted) && !caps.audio) {
-      adapted = { ...adapted, model: this.config.audioFallbackModel || this.config.visionFallbackModel || 'claude-sonnet-4-6' };
+      const fb = this.config.audioFallbackModel || this.config.visionFallbackModel || this.config.model;
+      if (fb) adapted = { ...adapted, model: fb };
     }
 
     if (_hasVideo(adapted) && !caps.video) {
-      adapted = { ...adapted, model: this.config.videoFallbackModel || this.config.visionFallbackModel || 'claude-sonnet-4-6' };
+      const fb = this.config.videoFallbackModel || this.config.visionFallbackModel || this.config.model;
+      if (fb) adapted = { ...adapted, model: fb };
     }
 
     return adapted;

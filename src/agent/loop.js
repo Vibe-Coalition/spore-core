@@ -28,12 +28,15 @@ class AgentLoop {
    * Initialize the Anthropic client
    */
   init() {
-    const backend = detectBackend(this.config.model);
-    if (backend === 'anthropic' && !this.config.anthropicApiKey) {
-      this.log.warn('No Anthropic API key configured — agent AI is disabled. Add ANTHROPIC_API_KEY to .env and restart.');
+    if (!this.config.model) {
+      this.log.warn('No model configured — agent AI is disabled. Set up a provider in the Manager, create a new agent, and restart.');
       return false;
     }
-    // client is injected by app.js (MultiProvider); create a fallback only if missing
+    const backend = detectBackend(this.config.model);
+    if (backend === 'anthropic' && !this.config.anthropicApiKey) {
+      this.log.warn('No Anthropic API key configured — agent AI is disabled. Set up a provider in the Manager and restart.');
+      return false;
+    }
     if (!this.client) this.client = new MultiProvider(this.config);
     this.log.info(`Agent loop initialized — tiers: casual=${this.config.casualModel} normal=${this.config.normalModel} planner=${this.config.plannerModel} (${backend})`);
     return true;
@@ -56,6 +59,13 @@ class AgentLoop {
    * @returns {Promise<Object>} Result with response text and usage
    */
   async processMessage(opts) {
+    if (!this.client) {
+      const msg = 'No LLM provider configured — set up a provider in the Manager and restart this agent.';
+      this.log.error(msg);
+      if (opts.onError) opts.onError(new Error(msg));
+      return { text: msg, error: true };
+    }
+
     const sessionKey = this.sessions.constructor.buildKey(
       opts.channelId, opts.isDm, opts.userId
     );

@@ -369,7 +369,7 @@ class Learner {
         : [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }];
 
       const response = await this.client.messages.create({
-        model: this.config.learnerModel || 'claude-haiku-4-5',
+        model: this.config.learnerModel || this.config.casualModel || this.config.model,
         max_tokens: 4096,
         system,
         messages: [{ role: 'user', content: combinedExchange }],
@@ -497,7 +497,7 @@ Return ONLY valid JSON (same schema as extraction):
       : [{ type: 'text', text: verifyPrompt, cache_control: { type: 'ephemeral' } }];
 
     const response = await this.client.messages.create({
-      model: this.config.learnerModel || 'claude-haiku-4-5',
+      model: this.config.learnerModel || this.config.casualModel || this.config.model,
       max_tokens: 2048,
       system,
       messages: [{ role: 'user', content: exchange }],
@@ -1367,7 +1367,7 @@ ${structuredTemplate}`;
         : [{ type: 'text', text: compactSystem, cache_control: { type: 'ephemeral' } }];
 
       const response = await this.client.messages.create({
-        model: this.config.learnerModel || 'claude-haiku-4-5',
+        model: this.config.learnerModel || this.config.casualModel || this.config.model,
         max_tokens: summaryBudget,
         system,
         messages: [{ role: 'user', content: transcript }],
@@ -1548,7 +1548,7 @@ ${structuredTemplate}`;
     const userContent = `## Conversation exchange\n${combinedExchange.substring(0, 4000)}\n\n## Tool calls (${allToolCalls.length} total)\n${toolSummary}\n\n## Existing skills\n${existingSummary}`;
 
     const response = await this.client.messages.create({
-      model: this.config.learnerModel || 'claude-haiku-4-5',
+      model: this.config.learnerModel || this.config.casualModel || this.config.model,
       max_tokens: 2048,
       system,
       messages: [{ role: 'user', content: userContent }],
