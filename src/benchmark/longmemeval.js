@@ -364,16 +364,10 @@ class LongMemEvalRunner {
     } catch {}
   }
 
-  /** Poll until the learner queue and batch buffer are fully drained. */
+  /** Poll until the learner queue is fully drained. */
   async _waitForLearnerIdle() {
-    // Flush any pending batch buffer first
-    if (this.learner._batchBuffer && this.learner._batchBuffer.length > 0) {
-      try { await this.learner._flushBatch(); } catch {}
-    }
-
     let waited = 0;
-    while (this.learner._running || this.learner._queue.length > 0 ||
-           (this.learner._batchBuffer && this.learner._batchBuffer.length > 0)) {
+    while (this.learner._running || this.learner._queue.length > 0) {
       await sleep(200);
       waited += 200;
       if (waited > 60000) {

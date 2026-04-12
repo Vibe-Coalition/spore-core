@@ -162,17 +162,11 @@ class Learner {
     this._sharedDbs = {};
     this._sharedProjects = [];
     this._sharedGraphsLastCheck = 0;
-    this.stats = { runs: 0, entities: 0, aspects: 0, updates: 0, edges: 0, errors: 0, skipped: 0, queued: 0, batched: 0, skillsCreated: 0, skillsUpdated: 0 };
+    this.stats = { runs: 0, entities: 0, aspects: 0, updates: 0, edges: 0, errors: 0, skipped: 0, queued: 0, skillsCreated: 0, skillsUpdated: 0 };
     this._running = false;
     this._queue = [];
     this._maxQueue = 10;
 
-    // Token batching: accumulate exchanges before triggering extraction
-    this._batchBuffer = [];
-    this._batchTokens = 0;
-    this._batchTokenThreshold = config.learnerBatchTokens || 1000;
-    this._batchFlushTimer = null;
-    this._batchMaxWaitMs = config.learnerBatchMaxWaitMs || 60_000;
 
     // Automatic skill extraction
     this._skills = new SkillsManager(logger);
@@ -269,8 +263,7 @@ class Learner {
 
   /**
    * Extract and learn from a conversation exchange. Fire-and-forget safe.
-   * Uses token batching: accumulates exchanges until the token threshold is
-   * reached, then processes them together in a single extraction call.
+   * Runs extraction immediately after every conversation turn.
    */
   async extractAndLearn(userMessage, assistantResponse, opts = {}) {
     this._refreshSharedGraphWriters();
@@ -278,68 +271,30 @@ class Learner {
     const exchange = this._buildExchange(userMessage, assistantResponse, opts, observedAt);
     if (exchange.length < 20) return;
 
-    const estimatedTokens = Math.ceil(exchange.length / 3.5);
-
-    // Store episode immediately (episodes are cheap and shouldn't be delayed)
     let episodeId = null;
     try {
       episodeId = this.storeEpisode(userMessage, assistantResponse, {
         sessionId: opts.channelName || opts.userId || 'conversation',
         observedAt,
-        turnIdx: this.stats.runs + this._batchBuffer.length,
+        turnIdx: this.stats.runs,
       });
     } catch {}
 
-    this._batchBuffer.push({ userMessage, assistantResponse, opts, exchange, observedAt, episodeId });
-    this._batchTokens += estimatedTokens;
-    this.stats.batched++;
-
-    if (this._batchTokens >= this._batchTokenThreshold) {
-      this._clearBatchTimer();
-      await this._flushBatch();
-    } else {
-      this._scheduleBatchFlush();
-    }
-  }
-
-  _scheduleBatchFlush() {
-    if (this._batchFlushTimer) return;
-    this._batchFlushTimer = setTimeout(() => {
-      this._batchFlushTimer = null;
-      this._flushBatch().catch(e => this.log.error('[learner] Batch flush timer error:', e.message));
-    }, this._batchMaxWaitMs);
-  }
-
-  _clearBatchTimer() {
-    if (this._batchFlushTimer) {
-      clearTimeout(this._batchFlushTimer);
-      this._batchFlushTimer = null;
-    }
-  }
-
-  async _flushBatch() {
-    if (this._batchBuffer.length === 0) return;
+    const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId };
 
     if (this._running) {
       if (this._queue.length >= this._maxQueue) {
-        this.stats.skipped += this._batchBuffer.length;
-        this._batchBuffer = [];
-        this._batchTokens = 0;
+        this.stats.skipped++;
         return;
       }
-      const buffered = { batch: [...this._batchBuffer] };
-      this._queue.push(buffered);
+      this._queue.push({ batch: [entry] });
       this.stats.queued++;
-      this._batchBuffer = [];
-      this._batchTokens = 0;
       return;
     }
 
-    const batch = [...this._batchBuffer];
-    this._batchBuffer = [];
-    this._batchTokens = 0;
-    await this._processBatchExtraction(batch);
+    await this._processBatchExtraction([entry]);
   }
+
 
   async _processBatchExtraction(batch) {
     this._running = true;
@@ -1635,10 +1590,6 @@ ${structuredTemplate}`;
   }
 
   close() {
-    this._clearBatchTimer();
-    if (this._batchBuffer.length > 0) {
-      this._flushBatch().catch(() => {});
-    }
     for (const [slug, sdb] of Object.entries(this._sharedDbs)) {
       try { sdb.close(); } catch {}
     }
