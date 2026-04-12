@@ -1,0 +1,61 @@
+# Fly.io deployment for Anima agent
+# Copy this file, set your app name, and run: fly launch --copy-config
+#
+# Before deploying:
+#   fly secrets set ANTHROPIC_API_KEY=sk-ant-... DISCORD_TOKEN=... MANAGER_SERVICE_KEY=...
+#   fly volumes create anima_data --size 1 --region iad
+
+app = "anima-agent"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../src/Dockerfile"
+  [build.args]
+
+[env]
+  AGENT_ID = "anima"
+  ANIMA_DISPLAY_NAME = "Anima"
+  ANIMA_HEALTH_PORT = "18790"
+  HEALTH_BIND_ADDR = "0.0.0.0"
+  GRAPH_DB_PATH = "/data/graph.db"
+  SESSION_DB_PATH = "/data/sessions.db"
+  ANIMA_WORKSPACE_PATH = "/workspace"
+  ANIMA_MODEL = "claude-sonnet-4-6"
+  ANIMA_LEARNER_MODEL = "claude-haiku-4-5"
+
+[http_service]
+  internal_port = 18790
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 18790
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+
+[[mounts]]
+  source = "anima_data"
+  destination = "/data"
+
+[[mounts]]
+  source = "anima_workspace"
+  destination = "/workspace"
+
+[checks]
+  [checks.health]
+    type = "http"
+    port = 18790
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"

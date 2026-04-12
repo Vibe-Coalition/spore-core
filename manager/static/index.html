@@ -1,0 +1,3800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manager</title>
+<script>
+(function() {
+  var p = location.pathname;
+  var base = '/';
+  var idx = p.indexOf('/manager');
+  if (idx !== -1) base = p.substring(0, idx) + '/manager/';
+  var b = document.createElement('base');
+  b.href = base;
+  document.head.appendChild(b);
+})();
+</script>
+<script id="brand-loader">
+// Brand config is loaded from brand.js. If it fails (path issues behind proxy),
+// initBrand() gracefully falls back to generic defaults.
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@300;400;500;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0a;--surface:#121212;--surface2:#171717;--border:#262626;--border2:#333;
+  --accent:#3b82f6;--accent2:#8b5cf6;--accent3:#f59e0b;--warn:#f59e0b;--danger:#ef4444;
+  --text:#ededed;--muted:#737373;--dim:#404040;
+  --input-bg:#171717;--input-text:var(--text);
+  --font:'Geist',system-ui,-apple-system,sans-serif;--mono:'Geist Mono',monospace;
+  --radius:8px;
+  --glow:none;
+  --glow-accent:none;
+}
+html{font-size:14px}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;position:relative;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none;transition:color .2s}
+a:hover{color:var(--accent2)}
+input,select,textarea{
+  background:var(--input-bg);color:var(--input-text);border:1px solid var(--border);
+  border-radius:var(--radius);padding:9px 14px;font-family:var(--mono);font-size:.82rem;
+  width:100%;outline:none;transition:border-color .15s;
+}
+input:focus,select:focus,textarea:focus{border-color:var(--border2);box-shadow:0 0 0 1px var(--border2)}
+textarea{resize:vertical;min-height:60px}
+button{
+  background:transparent;color:var(--text);border:1px solid var(--border);
+  border-radius:var(--radius);padding:9px 18px;font-family:var(--font);font-size:.82rem;
+  cursor:pointer;transition:all .15s;letter-spacing:.02em;
+}
+button:hover{border-color:var(--border2);color:var(--text);background:var(--surface2)}
+button.primary{background:#fafafa;color:#0a0a0a;border:none;font-weight:600}
+button.primary:hover{background:#e4e4e7}
+button.danger{border-color:var(--danger);color:var(--danger)}
+button.danger:hover{background:var(--danger);color:#fff}
+
+/* ── Topbar ──────────────────────────────── */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 20px;height:46px;border-bottom:1px solid var(--border);
+  background:var(--bg);
+  position:sticky;top:0;z-index:100;gap:16px;
+}
+.topbar-brand{display:flex;align-items:center;gap:12px;position:relative;cursor:pointer;flex-shrink:0}
+.topbar-brand svg{display:block}
+.topbar h1{font-size:.9rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;font-family:var(--font)}
+.topbar h1 .t-anima{color:var(--text);font-weight:700}
+.topbar-nav{display:flex;align-items:center;gap:1px;flex:1;min-width:0}
+.topbar-nav a,.topbar-nav button{
+  display:inline-flex;align-items:center;padding:5px 12px;font-size:.74rem;
+  border-radius:5px;color:var(--muted);text-decoration:none;border:none;background:none;
+  cursor:pointer;transition:all .15s;font-family:var(--font);letter-spacing:.01em;white-space:nowrap;
+}
+.topbar-nav a:hover,.topbar-nav button:hover{color:var(--text);background:var(--surface2)}
+.topbar-nav .sep{width:1px;height:14px;background:var(--border);margin:0 4px;flex-shrink:0}
+.topbar .actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
+.topbar .actions button{padding:5px 10px;font-size:.72rem}
+.topbar .actions .topbar-user{font-size:.72rem;color:var(--dim);padding-right:8px;border-right:1px solid var(--border);margin-right:2px}
+
+/* ── Dashboard Header ────────────────────── */
+.dash-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+
+.container{max-width:1100px;margin:0 auto;padding:24px;position:relative;z-index:1}
+
+/* ── Login ────────────────────────────────── */
+#login-view{display:flex;align-items:center;justify-content:center;min-height:90vh;position:relative;z-index:1}
+.login-card{
+  width:380px;background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:2.5rem 2rem;position:relative;overflow:hidden;
+}
+.login-logo{text-align:center;margin-bottom:1.2rem}
+.login-logo svg{display:inline-block}
+.login-card h2{font-size:1.3rem;margin-bottom:.4rem;font-weight:600;text-align:center}
+.login-card .login-sub{font-size:.78rem;color:var(--muted);margin-bottom:1.5rem;text-align:center}
+
+/* ── Particle Canvas ─────────────────────── */
+#particle-canvas{position:fixed;inset:0;z-index:0;pointer-events:none}
+body{cursor:default}
+.login-card .field{margin-bottom:1rem}
+.login-card label{display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono)}
+.login-card .error{color:var(--danger);font-size:.8rem;margin-bottom:1rem;display:none}
+.login-card button{width:100%;margin-top:.5rem}
+.login-divider{display:flex;align-items:center;gap:12px;margin:1.2rem 0;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;font-family:var(--mono)}
+.login-divider::before,.login-divider::after{content:'';flex:1;border-top:1px solid var(--border)}
+.google-btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:10px 16px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:8px;color:var(--fg);font-size:.88rem;cursor:pointer;transition:all .2s;font-family:var(--font);margin-top:0}
+.google-btn:hover{background:rgba(255,255,255,.1);border-color:var(--accent)}
+.google-btn svg{flex-shrink:0}
+.auth-provider-badge{font-size:.62rem;padding:2px 6px;border-radius:3px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em;vertical-align:middle;margin-left:6px}
+.auth-provider-badge.google{background:rgba(66,133,244,.15);color:#4285f4;border:1px solid rgba(66,133,244,.3)}
+.auth-provider-badge.password{background:rgba(255,255,255,.05);color:var(--muted);border:1px solid var(--border)}
+
+/* ── Dashboard Grid ───────────────────────── */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin-top:16px}
+.card{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:20px;cursor:pointer;transition:all .15s;position:relative;overflow:hidden;
+}
+.card:hover{border-color:var(--border2);}
+.card .name{font-size:1.05rem;font-weight:600;margin-bottom:6px;letter-spacing:.02em}
+.card .id{font-family:var(--mono);font-size:.72rem;color:var(--muted)}
+.card .badges{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+.badge{
+  font-size:.62rem;padding:3px 8px;border-radius:4px;font-family:var(--mono);
+  text-transform:uppercase;letter-spacing:.05em;border:1px solid;
+}
+.badge.discord{color:#7c8af2;border-color:#5865f233;background:rgba(88,101,242,.06)}
+.badge.telegram{color:#4db8ee;border-color:#2aabee33;background:rgba(42,171,238,.06)}
+.badge.slack{color:#36c5f0;border-color:#36c5f033;background:rgba(54,197,240,.06)}
+.badge.voice{color:#22d3ee;border-color:rgba(34,211,238,.2);background:rgba(34,211,238,.04)}
+.badge.web{color:var(--warn);border-color:rgba(232,164,74,.2);background:rgba(232,164,74,.04)}
+.card-links{display:flex;align-items:center;gap:8px;margin-top:10px}
+.card-links-sep{width:1px;height:12px;background:var(--border)}
+.card-link{font-size:.72rem;color:var(--accent);text-decoration:none;font-weight:500;transition:color .2s}
+.card-link:hover{color:var(--accent2);text-decoration:underline}
+.status-dot{
+  width:8px;height:8px;border-radius:50%;position:absolute;top:20px;right:20px;
+  background:var(--dim);transition:all .3s;
+}
+.status-dot.up{background:#22c55e}
+.status-dot.down{background:var(--danger)}
+.status-dot.stopped{background:var(--dim);box-shadow:none}
+.card-stopped{opacity:.65;border-style:dashed}
+.card-stopped:hover{opacity:.85}
+.badge-stopped{font-size:.6rem;color:var(--dim);font-weight:400;letter-spacing:.03em}
+.badge-building{font-size:.6rem;color:#f59e0b;font-weight:500;letter-spacing:.03em;margin-left:6px;animation:blink-build 1.2s ease-in-out infinite}
+.badge-error{font-size:.6rem;color:#ef4444;font-weight:500;letter-spacing:.03em;margin-left:6px;cursor:help}
+@keyframes blink-build{0%,100%{opacity:1}50%{opacity:.4}}
+.theme-option{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:.74rem;color:var(--text);transition:background .15s}
+.theme-option:hover{background:var(--surface2)}
+.theme-option.active{background:var(--accent);color:#fff}
+.theme-swatch{width:14px;height:14px;border-radius:3px;border:1px solid rgba(255,255,255,.1);flex-shrink:0}
+.card-action-btn{border:1px solid var(--border);background:transparent;color:var(--text);
+  padding:4px 14px;border-radius:6px;cursor:pointer;font-size:.72rem;font-weight:500;transition:all .2s}
+.card-action-btn:hover{border-color:var(--accent);color:var(--accent)}
+.start-btn{border-color:#4ade80;color:#4ade80}
+.start-btn:hover{background:rgba(74,222,128,.1)}
+.stop-btn{border-color:#f87171;color:#f87171}
+.stop-btn:hover{background:rgba(248,113,113,.1)}
+
+/* ── Detail View ──────────────────────────── */
+#detail-view{display:none}
+.back-btn{font-size:.82rem;color:var(--muted);cursor:pointer;margin-bottom:16px;display:inline-flex;align-items:center;gap:4px;transition:color .2s}
+.back-btn:hover{color:var(--accent)}
+.detail-header{display:flex;align-items:center;gap:16px;margin-bottom:24px}
+.detail-header h2{font-size:1.4rem;font-weight:700;letter-spacing:.02em}
+.detail-header .id{font-family:var(--mono);color:var(--muted);font-size:.82rem}
+
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:20px;overflow-x:auto}
+.tab{
+  padding:10px 18px;font-size:.82rem;color:var(--muted);cursor:pointer;
+  border-bottom:2px solid transparent;transition:all .2s;font-weight:500;white-space:nowrap;
+}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-color:var(--accent)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+#advanced-toggle:hover{color:var(--accent)}
+#advanced-toggle:hover #advanced-chevron{color:var(--accent)}
+#advanced-section h3{font-size:.92rem;color:var(--text);font-weight:600;letter-spacing:.02em}
+
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em;font-family:var(--mono)}
+.form-group .hint{font-size:.68rem;color:var(--dim);margin-top:3px}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-actions{display:flex;gap:8px;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+
+.toast{
+  position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:var(--radius);
+  background:var(--surface);border:1px solid var(--border);color:var(--text);
+  font-size:.82rem;z-index:200;opacity:0;transition:opacity .3s;pointer-events:none;
+}
+.toast.show{opacity:1}
+.toast.error{border-color:var(--danger);color:var(--danger)}
+
+/* ── Settings View ──────────────────────────── */
+#settings-view{display:none}
+.settings-section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+.settings-section h3{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:16px;font-family:var(--mono)}
+
+/* Token dashboard */
+.token-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.token-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px}
+.token-card .tc-label{font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;font-family:var(--mono)}
+.token-card .tc-total{font-size:1.1rem;font-weight:600;color:var(--text);margin-bottom:4px;font-family:var(--mono)}
+.token-card .tc-cost{font-size:.72rem;color:var(--warn);font-family:var(--mono)}
+.token-card .tc-sub{font-size:.68rem;color:var(--muted);margin-top:2px}
+.chart-wrap{margin-bottom:16px}
+.chart-bars{display:flex;align-items:flex-end;gap:2px;height:72px;padding:4px 0}
+.chart-bar{flex:1;background:var(--accent);border-radius:2px 2px 0 0;opacity:.6;cursor:default;transition:opacity .15s;min-height:2px}
+.chart-bar:hover{opacity:1}
+.chart-labels{display:flex;justify-content:space-between;font-size:.58rem;color:var(--muted);font-family:var(--mono);margin-top:3px}
+.dim-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
+.dim-table{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px}
+.dim-table h4{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:8px;font-family:var(--mono)}
+.dim-table table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:.7rem}
+.dim-table th{color:var(--muted);font-size:.6rem;text-align:right;padding:2px 0;font-weight:400}
+.dim-table th:first-child{text-align:left}
+.dim-table td{padding:4px 0;border-top:1px solid var(--border);text-align:right;color:var(--muted)}
+.dim-table td:first-child{text-align:left;color:var(--text)}
+.dim-table .td-in{color:#3b82f6}
+.dim-table .td-out{color:#8b5cf6}
+.dim-table .td-cost{color:var(--warn)}
+.tokens-refresh{font-size:.72rem;float:right}
+
+/* ── Create Wizard ───────────────────────── */
+#wizard-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.6);align-items:center;justify-content:center;overflow-y:auto;padding:24px}
+.wizard{width:560px;max-width:100%;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:0;position:relative;overflow:hidden;margin:auto}
+.wizard-header{padding:24px 28px 0}
+.wizard-header h2{font-size:1.2rem;font-weight:600;margin-bottom:4px}
+.wizard-header .wizard-sub{font-size:.78rem;color:var(--muted)}
+.wizard-progress{display:flex;gap:4px;padding:16px 28px;align-items:center}
+.wizard-progress .wp-step{flex:1;height:3px;border-radius:2px;background:var(--border2);transition:background .3s}
+.wizard-progress .wp-step.done{background:var(--accent)}
+.wizard-progress .wp-step.active{background:var(--accent2)}
+.wizard-step{display:none;padding:0 28px 8px}
+.wizard-step.active{display:block}
+.wizard-step h3{font-size:.82rem;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);margin-bottom:4px;font-family:var(--mono)}
+.wizard-step .step-hint{font-size:.76rem;color:var(--muted);margin-bottom:16px;line-height:1.5}
+.wizard-step .form-group{margin-bottom:14px}
+.wizard-step .form-group label{display:block;font-size:.7rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:.05em;font-family:var(--mono)}
+.wizard-step .form-group .hint{font-size:.66rem;color:var(--dim);margin-top:2px}
+.wizard-step .form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wizard-step .warn{color:var(--warn);font-size:.7rem;margin-top:2px}
+.wizard-footer{display:flex;gap:8px;padding:16px 28px 24px;justify-content:space-between}
+.wizard-footer button{min-width:100px}
+.wizard .error{color:var(--danger);font-size:.78rem;padding:0 28px 8px;display:none}
+
+/* ── Owner groups (super dashboard) */
+.owner-group{margin-bottom:28px}
+.owner-label{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-bottom:10px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+
+/* ── User list rows */
+.user-row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--surface);border-radius:6px;margin-bottom:6px;border:1px solid var(--border)}
+.user-row .user-info{display:flex;align-items:center;gap:10px}
+.user-row .user-name{font-weight:600;font-size:.9rem}
+.user-row .user-role{font-size:.7rem;padding:2px 8px;border-radius:20px;background:var(--accent);color:#fff}
+.user-row .user-role.super{background:#5a3e28}
+.user-row .user-actions{display:flex;gap:6px}
+
+/* ── Star field canvas (behind everything) */
+#starfield{position:fixed;inset:0;z-index:0;pointer-events:none}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<script>
+new MutationObserver(m => m.forEach(r => r.addedNodes.forEach(n => {
+  if (n.nodeType !== 1) return;
+  if (n.tagName === 'INPUT') n.setAttribute('data-1p-ignore', '');
+  if (n.querySelectorAll) n.querySelectorAll('input').forEach(i => i.setAttribute('data-1p-ignore', ''));
+}))).observe(document.documentElement, { childList: true, subtree: true });
+</script>
+
+<canvas id="starfield"></canvas>
+
+<div class="topbar" id="topbar" style="display:none">
+  <div class="topbar-brand" id="topbar-logo" onclick="showDashboard()"></div>
+  <nav class="topbar-nav" id="topbar-nav">
+    <a href="chatroom.html" id="chatroom-link">Chat Room</a>
+    <a href="projects.html" id="projects-link" style="display:none">Projects</a>
+    <a href="providers.html" id="providers-link" style="display:none">Providers</a>
+    <a href="vault.html" id="vault-link" style="display:none">Vault</a>
+    <div class="sep"></div>
+    <button onclick="showSettings()" id="settings-btn">Defaults</button>
+    <button class="super-only" onclick="showUsersPanel()" style="display:none">Users</button>
+  </nav>
+  <div class="actions">
+    <span class="topbar-user" id="topbar-user"></span>
+    <div style="position:relative;display:inline-block" id="theme-picker-wrap">
+      <button onclick="toggleThemePicker()" title="Theme">&#9788;</button>
+      <div id="theme-picker" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:6px;z-index:999;min-width:140px;box-shadow:0 8px 24px rgba(0,0,0,.4)">
+      </div>
+    </div>
+    <button onclick="logout()">Logout</button>
+  </div>
+</div>
+
+<!-- Login -->
+<canvas id="particle-canvas"></canvas>
+<div id="login-view">
+  <div class="login-card">
+    <div class="login-logo" id="login-logo"></div>
+    <h2 id="login-title"></h2>
+    <div class="login-sub" id="login-tagline"></div>
+    <div class="error" id="login-error"></div>
+    <div class="field">
+      <label>Username</label>
+      <input type="text" id="login-user" autocomplete="username" data-1p-ignore>
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" data-1p-ignore id="login-pass" autocomplete="current-password">
+    </div>
+    <button class="primary" onclick="login()">Sign in</button>
+    <div id="google-login-section" style="display:none">
+      <div class="login-divider">or</div>
+      <button type="button" class="google-btn" onclick="googleLogin()">
+        <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59a14.5 14.5 0 010-9.18l-7.98-6.19a24.01 24.01 0 000 21.56l7.98-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+        Sign in with Google
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard-view" style="display:none">
+  <div class="container">
+    <div class="dash-header">
+      <div style="display:flex;align-items:baseline;gap:12px">
+        <h2 style="font-size:1.15rem;font-weight:600" id="dash-title"></h2>
+        <span style="color:var(--dim);font-size:.75rem" id="anima-count"></span>
+        <button onclick="loadDashboard()" style="font-size:.68rem;padding:3px 8px;color:var(--dim);border-color:transparent;background:none" title="Refresh">&#8635;</button>
+      </div>
+      <button class="primary" onclick="showCreateModal()" style="font-size:.78rem;padding:8px 18px" id="btn-new-agent"></button>
+    </div>
+    <div class="grid" id="anima-grid"></div>
+  </div>
+</div>
+
+<!-- Provider Quick Setup -->
+<div id="provider-setup-overlay" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.6);align-items:center;justify-content:center" onclick="if(event.target===this)closeProviderSetup()">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:2rem;width:600px;max-width:92vw;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.2rem">
+      <h2 style="font-size:1.1rem;font-weight:600">Set Up AI Provider</h2>
+      <button onclick="closeProviderSetup()" style="border:none;background:none;color:var(--muted);font-size:1.2rem;cursor:pointer;padding:4px">&times;</button>
+    </div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:1.2rem;line-height:1.5">
+      Pick a provider and enter your API key. This will be saved as the default for all new agents.
+    </p>
+    <div id="provider-presets" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:1.2rem"></div>
+    <div id="provider-form" style="display:none">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+        <button onclick="showProviderPresets()" style="border:none;background:none;color:var(--muted);font-size:.82rem;cursor:pointer;padding:0">&larr; Back</button>
+        <span style="font-weight:600;font-size:.92rem" id="psetup-title"></span>
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono)">API Key</label>
+        <input type="password" id="psetup-key" style="font-size:.85rem">
+        <div style="font-size:.72rem;color:var(--dim);margin-top:4px" id="psetup-key-hint"></div>
+      </div>
+      <div id="psetup-url-row" style="margin-bottom:12px;display:none">
+        <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono)">Base URL</label>
+        <input type="text" id="psetup-url" style="font-size:.85rem">
+      </div>
+      <div id="psetup-auth-row" style="margin-bottom:12px;display:none">
+        <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono)">Auth Header</label>
+        <input type="text" id="psetup-auth" list="psetup-auth-presets" value="bearer" style="font-size:.85rem">
+        <datalist id="psetup-auth-presets">
+          <option value="bearer">Authorization: Bearer (default)</option>
+          <option value="x-api-key">x-api-key</option>
+          <option value="api-key">api-key (Azure)</option>
+          <option value="x-key">x-key</option>
+        </datalist>
+        <div style="font-size:.72rem;color:var(--dim);margin-top:4px">bearer, x-api-key, api-key (Azure), etc.</div>
+      </div>
+      <div id="psetup-model-row" style="margin-bottom:16px;display:none">
+        <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono)">Default Model (optional)</label>
+        <input type="text" id="psetup-model" style="font-size:.85rem">
+        <div style="font-size:.72rem;color:var(--dim);margin-top:4px" id="psetup-model-hint"></div>
+      </div>
+      <div id="psetup-status" style="margin-bottom:12px;font-size:.82rem;display:none"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button onclick="testProviderSetup()" style="font-size:.82rem">Test Connection</button>
+        <button class="primary" onclick="saveProviderSetup()" style="font-size:.82rem">Save &amp; Continue</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Wizard -->
+<div id="wizard-overlay">
+  <div class="wizard">
+    <div class="wizard-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div>
+        <h2 id="wiz-title"></h2>
+        <div class="wizard-sub">Step <span id="wiz-step-num">1</span> of <span id="wiz-step-total">4</span></div>
+      </div>
+      <button onclick="wizClose()" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer;padding:0 4px;line-height:1;transition:color .2s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'" title="Cancel">&times;</button>
+    </div>
+    <div class="wizard-progress" id="wiz-progress"></div>
+    <div class="error" id="wiz-error"></div>
+
+    <!-- Step 1: Identity -->
+    <div class="wizard-step active" data-step="1">
+      <h3>Identity</h3>
+      <div class="step-hint">Who is this agent? The display name is how they appear in chat.</div>
+      <div class="form-group">
+        <label>Display Name *</label>
+        <input type="text" id="wiz-name" placeholder='e.g. "Harry The Alien"'>
+      </div>
+      <div class="form-group">
+        <label>Nicknames</label>
+        <input type="text" id="wiz-nicknames" placeholder="harry, h (comma-separated triggers for group chat)">
+        <div class="hint">Auto-filled from first word of display name if left blank</div>
+      </div>
+    </div>
+
+    <!-- Step 2: Personality -->
+    <div class="wizard-step" data-step="2">
+      <h3>Personality</h3>
+      <div class="step-hint">These seed the knowledge graph. Be descriptive &mdash; this is who they are.</div>
+      <div class="form-group">
+        <label>Core Vibe</label>
+        <input type="text" id="wiz-vibe" placeholder='e.g. "curious alien fascinated by human culture"'>
+      </div>
+      <div class="form-group">
+        <label>Communication Style</label>
+        <input type="text" id="wiz-comm" placeholder='e.g. "warm and direct, asks real questions"'>
+      </div>
+      <div class="form-group">
+        <label>Quirks / Traits</label>
+        <input type="text" id="wiz-quirks" placeholder="optional — notable personality traits">
+      </div>
+      <div class="form-group">
+        <label>Interests / Expertise</label>
+        <input type="text" id="wiz-interests" placeholder="comma-separated, optional">
+      </div>
+    </div>
+
+    <!-- Step 3: Defaults or Advanced -->
+    <div class="wizard-step" data-step="3">
+      <h3>Setup Mode</h3>
+      <div class="step-hint">Identity and personality are set. Would you like to configure advanced settings or use sensible defaults?</div>
+      <div style="display:flex;flex-direction:column;gap:12px;margin-top:20px">
+        <button id="wiz-use-defaults" onclick="wizSkipToEnd()" style="padding:14px 20px;background:var(--accent);color:#fff;border:none;border-radius:10px;cursor:pointer;font-size:.88rem;font-weight:600;text-align:left;transition:opacity .15s;display:flex;align-items:center;gap:12px" onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
+          <span><strong>Use Defaults</strong><br><span style="font-size:.74rem;font-weight:400;opacity:.8">Tokens, web access, voice, and permissions will use shared defaults. You can change everything later in Settings.</span></span>
+        </button>
+        <button id="wiz-go-advanced" onclick="wizGoAdvanced()" style="padding:14px 20px;background:var(--surface2);color:var(--text);border:1px solid var(--border2);border-radius:10px;cursor:pointer;font-size:.88rem;font-weight:600;text-align:left;transition:border-color .15s;display:flex;align-items:center;gap:12px" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border2)'">
+          <span><strong>Advanced Configuration</strong><br><span style="font-size:.74rem;font-weight:400;opacity:.7">Configure tokens, web access, capabilities, permissions, and voice before creating.</span></span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Step 4: Access / Tokens -->
+    <div class="wizard-step" data-step="4">
+      <h3>Access &amp; Tokens</h3>
+      <div class="step-hint">Platform tokens and access control. Blank API keys inherit from <a href="#" onclick="event.preventDefault();wizClose();showSettings()" style="color:var(--accent2)">shared defaults</a>.</div>
+      <div class="form-group">
+        <label>Discord Token</label>
+        <input type="password" data-1p-ignore id="wiz-discord" placeholder="(optional)" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Telegram Bot Token</label>
+        <input type="password" data-1p-ignore id="wiz-telegram" placeholder="(optional)" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Slack Bot Token</label>
+        <input type="password" data-1p-ignore id="wiz-slack-bot-token" placeholder="xoxb-… (optional)" autocomplete="off">
+        <div class="hint">From Slack App → OAuth &amp; Permissions</div>
+      </div>
+      <div class="form-group">
+        <label>Slack App Token <span style="font-size:.75rem;opacity:.6">(Socket Mode)</span></label>
+        <input type="password" data-1p-ignore id="wiz-slack-app-token" placeholder="xapp-… (optional)" autocomplete="off">
+        <div class="hint">From Slack App → Socket Mode settings</div>
+      </div>
+      <div class="form-group">
+        <label>Anthropic API Key</label>
+        <input type="password" data-1p-ignore id="wiz-anthropic" placeholder="leave blank to use shared default" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>DM Policy</label>
+        <select id="wiz-dm-policy">
+          <option value="pairing">Pairing &mdash; stranger gets a code, you approve (recommended)</option>
+          <option value="open">Open &mdash; anyone can DM</option>
+          <option value="allowlist">Allowlist &mdash; only approved IDs</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Learner Model</label>
+          <input type="text" id="wiz-learner-model" placeholder="claude-haiku-4-5 (blank = default)">
+          <div class="hint">Prefixes: gemini/, local/, openrouter/</div>
+        </div>
+        <div class="form-group">
+          <label>Learning Mode</label>
+          <select id="wiz-learning-mode">
+            <option value="always">Always (recommended)</option>
+            <option value="flush_only">Flush Only (cheaper)</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 5: Capabilities -->
+    <div class="wizard-step" data-step="5">
+      <h3>Capabilities</h3>
+      <div class="step-hint">Web hosting, ingress, and orchestration.</div>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="wiz-super-agent">
+          <span id="lbl-super-agent"></span>
+        </label>
+        <div class="hint" id="hint-super-agent"></div>
+      </div>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="wiz-proactive">
+          <span>Proactive Outreach</span>
+        </label>
+        <div class="hint">Agent can occasionally share interesting things it learned during maintenance. Very selective — most cycles produce no message. Configurable cooldown and daily cap.</div>
+      </div>
+      <div class="form-group">
+        <label>Web Hosting</label>
+        <select id="wiz-web-enabled" onchange="wizUpdateWeb()">
+          <option value="true">Enabled (agent can serve websites)</option>
+          <option value="false">Disabled</option>
+        </select>
+      </div>
+      <div id="wiz-web-fields">
+        <p style="font-size:.72rem;color:var(--dim);margin:4px 0 10px;line-height:1.5">
+          <strong>Viewer auth</strong> &mdash; optional fallback credentials for the graph viewer when manager SSO is unavailable. Normally your Manager login handles this automatically.<br>
+          <strong>Webapp users</strong> &mdash; if your Anima hosts web applications (via web_serve), they are <em>public by default</em>. You can add webapp users later in Settings to restrict access.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Viewer Username</label>
+            <input type="text" id="wiz-web-user" placeholder="(optional)">
+          </div>
+          <div class="form-group">
+            <label>Viewer Password</label>
+            <input type="password" data-1p-ignore id="wiz-web-pass" placeholder="(optional)" autocomplete="off">
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px;padding:12px;background:var(--bg);border-radius:var(--radius);font-size:.82rem">
+          Ingress is managed centrally via Traefik. This agent will be available at <code>/animas/&lt;id&gt;/</code>.
+          Configure domain and HTTPS in <a href="#" onclick="event.preventDefault();wizClose();showSettings()" style="color:var(--accent2)">Settings &rarr; Ingress</a>.
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 6: Permissions -->
+    <div class="wizard-step" data-step="6">
+      <h3>Permissions</h3>
+      <div class="step-hint">Control what the agent can modify about itself.</div>
+      <div class="form-group">
+        <label>Personality Editable</label>
+        <select id="wiz-personality-editable">
+          <option value="true">Editable &mdash; agent can change its own identity, voice, and rules</option>
+          <option value="false">Locked &mdash; keep personality you configured above</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Source Editable</label>
+        <select id="wiz-src-editable">
+          <option value="false">Locked (secure)</option>
+          <option value="true">Editable &mdash; agent can modify its own code</option>
+        </select>
+        <div class="warn">Warning: This lets the agent permanently alter its own behavior.</div>
+      </div>
+    </div>
+
+    <!-- Step 7: Voice -->
+    <div class="wizard-step" data-step="7">
+      <h3>Voice Pipeline</h3>
+      <div class="step-hint">Speech-to-text and text-to-speech for Discord voice channels and Telegram voice notes.</div>
+      <div class="form-group">
+        <label>Voice Enabled</label>
+        <select id="wiz-voice-enabled" onchange="wizUpdateVoice()">
+          <option value="true">Enabled (uses shared default keys)</option>
+          <option value="false">Disabled</option>
+        </select>
+      </div>
+      <div id="wiz-voice-fields">
+        <div class="form-group">
+          <label>TTS Provider</label>
+          <select id="wiz-tts-provider" onchange="wizUpdateTTS()">
+            <option value="">Auto (ElevenLabs > OpenAI > Edge free)</option>
+            <option value="edge">Edge TTS (free, no key needed)</option>
+            <option value="elevenlabs">ElevenLabs (paid, best quality)</option>
+            <option value="openai">OpenAI TTS (paid)</option>
+          </select>
+        </div>
+        <div id="wiz-tts-elevenlabs" class="form-group">
+          <label>ElevenLabs Voice ID</label>
+          <input type="text" id="wiz-tts-voice" placeholder="JBFqnCBsd6RMkjVDRZzb (George)">
+          <div class="hint">Leave blank to use default. Keys inherited from shared defaults.</div>
+        </div>
+        <div id="wiz-tts-edge" class="form-group" style="display:none">
+          <label>Edge Voice Name</label>
+          <input type="text" id="wiz-tts-edge-voice" placeholder="en-US-AriaNeural">
+          <div class="hint">Popular: en-US-AriaNeural, en-US-GuyNeural, en-GB-SoniaNeural</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 8: Starting Point -->
+    <div class="wizard-step" data-step="8">
+      <h3>Starting Point</h3>
+      <div class="step-hint" id="hint-clone"></div>
+      <div class="form-group">
+        <label>Source Code</label>
+        <select id="wiz-clone-from" onchange="wizUpdateClone()">
+          <option value="">Fresh start &mdash; base source code</option>
+        </select>
+      </div>
+      <div id="wiz-clone-fields" style="display:none">
+        <div class="form-group">
+          <label>Copy Knowledge Graph?</label>
+          <select id="wiz-copy-graph">
+            <option value="false">No &mdash; start with empty graph</option>
+            <option value="true">Yes &mdash; copy all memories and relationships</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="wizard-footer">
+      <button id="wiz-back" onclick="wizBack()">Cancel</button>
+      <button id="wiz-next" class="primary" onclick="wizNext()">Next</button>
+    </div>
+  </div>
+</div>
+
+<!-- Users Panel (super only) -->
+<div id="users-view" style="display:none">
+  <div class="container">
+    <div class="back-btn" onclick="showDashboard()">&#8592; Back to Dashboard</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <h2 style="font-size:1.3rem;font-weight:600">User Management</h2>
+      <button class="primary" onclick="showAddUserForm()" style="font-size:.8rem">+ Add User</button>
+    </div>
+
+    <div id="add-user-form" style="display:none;background:var(--surface);border-radius:8px;padding:18px;margin-bottom:18px;border:1px solid var(--border)">
+      <h3 style="margin-bottom:14px;font-size:1rem">New User</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="new-username" autocomplete="off" placeholder="lowercase, a-z 0-9">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" data-1p-ignore id="new-password" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Role</label>
+        <select id="new-role">
+          <option value="user" id="opt-role-user"></option>
+          <option value="super" id="opt-role-super"></option>
+        </select>
+      </div>
+      <div class="error" id="add-user-error" style="margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="primary" onclick="addUser()" style="font-size:.82rem">Create</button>
+        <button onclick="document.getElementById('add-user-form').style.display='none'" style="font-size:.82rem">Cancel</button>
+      </div>
+    </div>
+
+    <div id="users-list"></div>
+  </div>
+</div>
+
+<!-- Settings / Defaults -->
+<div id="settings-view" style="display:none">
+  <div class="container">
+    <div class="back-btn" onclick="showDashboard()">&#8592; Back to Dashboard</div>
+    <h2 style="font-size:1.3rem;font-weight:600;margin-bottom:4px">Default API Keys</h2>
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:20px">
+      <span id="settings-hint"></span>
+    </p>
+
+    <div class="settings-section">
+      <h3>AI Providers</h3>
+      <div class="form-group">
+        <label>Anthropic API Key</label>
+        <input type="password" data-1p-ignore id="def-ANTHROPIC_API_KEY" autocomplete="off" placeholder="sk-ant-…">
+        <div class="hint">Primary AI model — used by all animas</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Default Model</label>
+          <input type="text" id="def-ANIMA_MODEL" placeholder="claude-sonnet-4-6">
+          <div class="hint">Primary model — used as fallback for all tiers</div>
+        </div>
+        <div class="form-group">
+          <label>Casual Model</label>
+          <input type="text" id="def-ANIMA_CASUAL_MODEL" placeholder="(inherits default)">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Normal Model</label>
+          <input type="text" id="def-ANIMA_NORMAL_MODEL" placeholder="(inherits default)">
+        </div>
+        <div class="form-group">
+          <label>Planner Model</label>
+          <input type="text" id="def-ANIMA_PLANNER_MODEL" placeholder="(inherits default)">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Learner Model</label>
+          <input type="text" id="def-ANIMA_LEARNER_MODEL" placeholder="claude-haiku-4-5">
+        </div>
+        <div class="form-group">
+          <label>Subagent Model</label>
+          <input type="text" id="def-ANIMA_SUBAGENT_MODEL" placeholder="(inherits default)">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Vision Fallback Model</label>
+        <input type="text" id="def-ANIMA_VISION_MODEL" placeholder="(optional — for vision tasks)">
+      </div>
+      <div class="form-group">
+        <label>OpenAI API Key</label>
+        <input type="password" data-1p-ignore id="def-OPENAI_API_KEY" autocomplete="off" placeholder="sk-…">
+        <div class="hint">Optional — for Whisper STT or OpenAI TTS</div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Search &amp; Tools</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Brave API Key</label>
+          <input type="password" data-1p-ignore id="def-BRAVE_API_KEY" autocomplete="off" placeholder="BSA…">
+          <div class="hint">Web search tool</div>
+        </div>
+        <div class="form-group">
+          <label>Gemini API Key</label>
+          <input type="password" data-1p-ignore id="def-GEMINI_API_KEY" autocomplete="off" placeholder="AIza…">
+          <div class="hint">Semantic embeddings</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Replicate API Key</label>
+        <input type="password" data-1p-ignore id="def-REPLICATE_API_TOKEN" autocomplete="off" placeholder="">
+        <div class="hint">Image generation (FLUX, Stable Diffusion, etc.)</div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Context &amp; Learning</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Learning Mode</label>
+          <select id="def-ANIMA_LEARNING_MODE">
+            <option value="always">Always</option>
+            <option value="flush_only">Flush Only</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Context Window</label>
+          <input type="number" id="def-ANIMA_CONTEXT_WINDOW" placeholder="200000">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Compaction Threshold</label>
+          <input type="number" id="def-ANIMA_COMPACT_THRESHOLD" placeholder="80000">
+        </div>
+        <div class="form-group">
+          <label>Compaction Keep Tail</label>
+          <input type="number" id="def-ANIMA_COMPACT_KEEP_TAIL" placeholder="20">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Maintainer Idle Only</label>
+          <select id="def-ANIMA_MAINTAINER_IDLE_ONLY">
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Local Model Base URL</label>
+          <input type="text" id="def-LOCAL_MODEL_BASE_URL" placeholder="http://host.docker.internal:11434/v1">
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Voice Pipeline</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Deepgram API Key (STT)</label>
+          <input type="password" data-1p-ignore id="def-DEEPGRAM_API_KEY" autocomplete="off">
+          <div class="hint">Free: 45hrs/month at console.deepgram.com</div>
+        </div>
+        <div class="form-group">
+          <label>ElevenLabs API Key (TTS)</label>
+          <input type="password" data-1p-ignore id="def-XI_API_KEY" autocomplete="off">
+          <div class="hint">Best quality. Free tier available.</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Default TTS Provider</label>
+          <select id="def-ANIMA_TTS_PROVIDER">
+            <option value="">Auto (ElevenLabs &gt; OpenAI &gt; Edge free)</option>
+            <option value="edge">Edge TTS (free, no key needed)</option>
+            <option value="elevenlabs">ElevenLabs</option>
+            <option value="openai">OpenAI TTS</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Default Edge Voice</label>
+          <input type="text" id="def-ANIMA_TTS_EDGE_VOICE" placeholder="en-US-AriaNeural">
+          <div class="hint">Used when Edge TTS is selected</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="primary" onclick="saveDefaults()">Save Defaults</button>
+      <button onclick="showDashboard()">Cancel</button>
+    </div>
+
+    <div class="settings-section" style="margin-top:32px;border-top:1px solid var(--border);padding-top:24px">
+      <h3>Ingress (Traefik)</h3>
+      <p style="color:var(--muted);font-size:.82rem;margin-bottom:16px">
+        All agents are routed through Traefik. Add a domain for public HTTPS access.
+      </p>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        <div id="ingress-status" style="font-size:.82rem;color:var(--muted)">Loading...</div>
+      </div>
+      <div class="form-group">
+        <label>Domain</label>
+        <input type="text" id="ingress-domain" placeholder="Leave blank for localhost">
+        <div class="hint">Your domain (e.g. example.com). Leave blank for local access via localhost.</div>
+        <div id="tailscale-hint" style="display:none;margin-top:6px;padding:8px 12px;background:var(--bg-secondary, #1a1a2e);border:1px solid var(--border);border-radius:6px;font-size:.82rem">
+          <span style="color:var(--success)">&#9679;</span> Tailscale detected: <strong id="tailscale-hostname"></strong>
+          <button class="link-btn" style="margin-left:8px;font-size:.82rem;color:var(--accent);background:none;border:none;cursor:pointer;text-decoration:underline" onclick="document.getElementById('ingress-domain').value=document.getElementById('tailscale-hostname').textContent">Use as domain</button>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="ingress-https" style="width:auto;margin:0">
+            HTTPS (Let's Encrypt)
+          </label>
+        </div>
+        <div class="form-group">
+          <label>Email (for Let's Encrypt)</label>
+          <input type="text" id="ingress-email" placeholder="admin@example.com">
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="ingress-external-access" style="width:auto;margin:0" onchange="toggleExternalWarning()">
+          Allow external access
+        </label>
+        <div class="hint">Bind to all network interfaces instead of localhost only.</div>
+      </div>
+      <div id="ingress-external-warning" style="display:none;background:var(--warning-bg, #332b00);border:1px solid var(--warning-border, #665500);border-radius:8px;padding:12px 14px;margin:8px 0 12px;font-size:.82rem;color:var(--warning-text, #ffcc00)">
+        &#9888; Your manager and all agents will be accessible to anyone on your network (or the internet if on a VPS). Session auth protects the Manager, but agent web UIs use basic HTTP auth. Consider enabling HTTPS via a domain or using Cloudflare Tunnel below.
+      </div>
+      <div id="ingress-save-status" style="font-size:.82rem;margin-bottom:12px;display:none"></div>
+      <button class="primary" onclick="saveIngress()" id="ingress-save-btn">Save &amp; Apply</button>
+      <div class="hint" style="margin-top:8px">This will reconfigure Traefik, the manager, and all agents. Takes a moment.</div>
+
+      <div style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+        <h4 style="margin:0 0 8px">Cloudflare Quick Tunnel</h4>
+        <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px">
+          Instantly expose your setup to the internet with a free <code>*.trycloudflare.com</code> URL. No account, DNS, or domain required. HTTPS included.
+        </p>
+        <div id="tunnel-status" style="font-size:.82rem;color:var(--muted);margin-bottom:12px">Checking...</div>
+        <div id="tunnel-url-display" style="display:none;background:var(--bg-secondary, #1a1a2e);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:.85rem;word-break:break-all">
+          <span style="color:var(--muted)">Public URL:</span> <a id="tunnel-url-link" href="#" target="_blank" style="color:var(--accent)"></a>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="primary" id="tunnel-start-btn" onclick="startTunnel()" disabled>Start Tunnel</button>
+          <button class="secondary" id="tunnel-stop-btn" onclick="stopTunnel()" style="display:none">Stop Tunnel</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section" style="margin-top:32px;border-top:1px solid var(--border);padding-top:24px">
+      <h3>Ollama (Local Models)</h3>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        <div id="ollama-status" style="font-size:.82rem;color:var(--muted)">Checking...</div>
+      </div>
+      <div id="ollama-not-running" style="display:none">
+        <div class="hint">To install or start Ollama, run on the host:</div>
+        <div style="font-family:var(--mono);font-size:.75rem;background:var(--card);padding:8px 12px;border-radius:4px;margin-top:6px;color:var(--fg)">
+          curl -fsSL https://ollama.com/install.sh | sh<br>
+          sudo systemctl enable --now ollama
+        </div>
+      </div>
+      <div id="ollama-running" style="display:none">
+        <div style="margin-bottom:16px">
+          <div style="font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-family:var(--mono)">Installed Models</div>
+          <div id="ollama-models-list" style="font-size:.82rem;color:var(--fg)">Loading...</div>
+        </div>
+        <div class="form-row" style="align-items:end">
+          <div class="form-group" style="flex:1">
+            <label>Pull Model</label>
+            <input type="text" id="ollama-pull-model" placeholder="e.g. qwen3.5:9b, llama3.2:8b, gemma3:4b">
+            <div class="hint">Model will be downloaded in the background</div>
+          </div>
+          <button class="primary" onclick="ollamaPull()" style="height:36px;white-space:nowrap" id="ollama-pull-btn">Pull</button>
+        </div>
+        <div id="ollama-pull-status" style="font-size:.78rem;color:var(--accent);margin-top:8px;display:none"></div>
+      </div>
+    </div>
+
+    <div class="settings-section super-only" style="margin-top:32px;border-top:1px solid var(--border);padding-top:24px">
+      <h3>Authentication</h3>
+      <p style="color:var(--muted);font-size:.82rem;margin-bottom:16px">
+        Configure Google OAuth2 for single sign-on. Users can sign in with their Google accounts.
+      </p>
+
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        <label style="font-size:.82rem;color:var(--fg);cursor:pointer;display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="gauth-enabled" style="width:auto;margin:0">
+          Enable Google Sign-In
+        </label>
+      </div>
+
+      <div id="gauth-fields">
+        <div class="form-group">
+          <label>Google Client ID</label>
+          <input type="text" id="gauth-client-id" autocomplete="off" placeholder="xxxx.apps.googleusercontent.com">
+          <div class="hint">From Google Cloud Console &gt; APIs &amp; Services &gt; Credentials</div>
+        </div>
+        <div class="form-group">
+          <label>Google Client Secret</label>
+          <input type="password" data-1p-ignore id="gauth-client-secret" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label>Redirect URI</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" id="gauth-redirect-uri" readonly style="flex:1;opacity:.8;cursor:text;font-family:var(--mono);font-size:.78rem">
+            <button onclick="navigator.clipboard.writeText(document.getElementById('gauth-redirect-uri').value);toast('Copied!')" style="font-size:.72rem;white-space:nowrap;padding:6px 10px">Copy</button>
+          </div>
+          <div class="hint">Add this as an authorized redirect URI in your Google Cloud Console project</div>
+        </div>
+        <div class="form-group">
+          <label>Allowed Domain</label>
+          <input type="text" id="gauth-domain" autocomplete="off" placeholder="yourcompany.com">
+          <div class="hint">Any Google Workspace user on this domain can sign in (leave empty to allow all domains)</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+          <label style="font-size:.82rem;color:var(--fg);cursor:pointer;display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="gauth-auto-create" style="width:auto;margin:0">
+            Auto-create user accounts on first Google sign-in
+          </label>
+        </div>
+
+        <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <label style="font-size:.82rem;font-weight:600">Allowed Email Addresses</label>
+          </div>
+          <p style="color:var(--muted);font-size:.78rem;margin-bottom:12px">
+            Explicitly allow individual Google accounts (in addition to the domain allowlist above).
+          </p>
+          <div id="gauth-emails-list" style="margin-bottom:12px"></div>
+          <div style="display:flex;gap:8px;align-items:end">
+            <div class="form-group" style="flex:1;margin-bottom:0">
+              <input type="email" id="gauth-new-email" placeholder="user@gmail.com" autocomplete="off">
+            </div>
+            <button onclick="addAllowedEmail()" style="height:36px;white-space:nowrap;font-size:.78rem">+ Add</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-actions" style="margin-top:16px">
+        <button class="primary" onclick="saveAuthConfig()">Save Authentication</button>
+        <div id="gauth-save-status" style="font-size:.78rem;color:var(--accent);display:inline-block;margin-left:12px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Detail -->
+<div id="detail-view" style="display:none">
+  <div class="container">
+    <div class="back-btn" onclick="showDashboard()">&#8592; Back</div>
+    <div class="detail-header">
+      <div style="flex:1">
+        <h2 id="detail-name"></h2>
+        <div class="id" id="detail-id"></div>
+        <div id="detail-build-status" style="display:none;margin-top:6px;font-size:.78rem"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div id="detail-status" class="status-dot" style="position:static"></div>
+        <button id="btn-stop-anima" class="card-action-btn" onclick="stopAnima()" style="font-size:.78rem" title="Spin down container">&#9724; Stop</button>
+        <button id="btn-start-anima" class="card-action-btn start-btn" onclick="startAnima()" style="font-size:.78rem;display:none" title="Spin up container">&#9654; Start</button>
+        <button id="btn-restart-anima" class="card-action-btn" onclick="restartAnima()" style="font-size:.78rem" title="Rebuild and restart container">&#8635; Restart</button>
+        <button class="danger" onclick="deleteAnima()" style="font-size:.8rem">Delete</button>
+      </div>
+    </div>
+
+    <!-- Identity (always visible) -->
+    <div id="identity-section" style="margin-bottom:20px">
+      <div class="form-group">
+        <label>Display Name</label>
+        <input type="text" id="env-ANIMA_DISPLAY_NAME">
+      </div>
+      <div class="form-group">
+        <label>Nicknames (comma-separated)</label>
+        <input type="text" id="env-ANIMA_NICKNAMES" placeholder="harry, h">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Casual Model</label>
+          <input type="text" id="env-ANIMA_CASUAL_MODEL" placeholder="claude-haiku-4-5">
+          <div class="hint">Simple chat, no tools</div>
+        </div>
+        <div class="form-group">
+          <label>Normal Model</label>
+          <input type="text" id="env-ANIMA_NORMAL_MODEL" placeholder="claude-sonnet-4-6">
+          <div class="hint">Tool use, standard tasks</div>
+        </div>
+        <div class="form-group">
+          <label>Planner Model</label>
+          <input type="text" id="env-ANIMA_PLANNER_MODEL" placeholder="claude-opus-4-6">
+          <div class="hint">Complex reasoning, escalation ceiling</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Learner Model</label>
+          <input type="text" id="env-ANIMA_LEARNER_MODEL" placeholder="claude-haiku-4-5">
+        </div>
+        <div class="form-group">
+          <label>Subagent Model</label>
+          <input type="text" id="env-ANIMA_SUBAGENT_MODEL" placeholder="(uses normal model)">
+        </div>
+      </div>
+      <div style="margin-top:20px;padding:16px;border:1px solid var(--border);border-radius:8px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="cfg-superAgent" onchange="toggleSuperAgent(this.checked)">
+          <strong>Super Agent</strong>
+        </label>
+        <div class="hint" style="margin-top:6px" id="hint-detail-super"></div>
+      </div>
+      <div class="form-actions">
+        <button class="primary" onclick="saveEnv()">Save Identity</button>
+      </div>
+    </div>
+
+    <!-- Advanced toggle -->
+    <!-- Token Usage (top-level) -->
+    <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:8px">
+      <div onclick="toggleTokens()" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:0 0 10px;color:var(--text-bright);font-size:.88rem;font-weight:600;user-select:none">
+        <span id="tokens-chevron" style="font-size:.7rem;transition:transform .2s;display:inline-block">&#9654;</span>
+        Token Usage
+      </div>
+      <div id="tokens-section" style="display:none">
+        <div id="tokens-body">
+          <div style="color:var(--muted);font-size:.85rem">Loading token usage…</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="advanced-toggle" onclick="toggleAdvanced()" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 0;color:var(--muted);font-size:.82rem;font-weight:500;user-select:none;transition:color .2s;border-top:1px solid var(--border)">
+      <span id="advanced-chevron" style="font-size:.7rem;transition:transform .2s;display:inline-block">&#9654;</span>
+      Advanced settings
+    </div>
+
+    <!-- Advanced section (progressive disclosure) -->
+    <div id="advanced-section" style="display:none">
+
+    <div class="tabs" id="tabs">
+      <div class="tab active" data-tab="agent">Agent</div>
+      <div class="tab" data-tab="behavior">Behavior</div>
+      <div class="tab" data-tab="channels">Channels</div>
+      <div class="tab" data-tab="keys">API Keys</div>
+      <div class="tab" data-tab="voice">Voice</div>
+      <div class="tab" data-tab="web">Web / Ingress</div>
+      <div class="tab" data-tab="system">System</div>
+      <div class="tab super-only" data-tab="plugins" id="tab-plugins-btn" style="display:none">Plugins</div>
+    </div>
+
+    <!-- API Keys Tab -->
+    <div class="tab-content" id="tab-keys">
+      <div class="form-group">
+        <label>Discord Token</label>
+        <input type="password" data-1p-ignore id="env-DISCORD_TOKEN" autocomplete="off">
+        <div class="hint">Required for Discord gateway</div>
+      </div>
+      <div class="form-group">
+        <label>Anthropic API Key</label>
+        <input type="password" data-1p-ignore id="env-ANTHROPIC_API_KEY" autocomplete="off">
+        <div class="hint">Required for Claude</div>
+      </div>
+      <div class="form-group">
+        <label>Telegram Bot Token</label>
+        <input type="password" data-1p-ignore id="env-TELEGRAM_BOT_TOKEN" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Slack Bot Token</label>
+        <input type="password" data-1p-ignore id="env-SLACK_BOT_TOKEN" autocomplete="off" placeholder="xoxb-…">
+        <div class="hint">Bot User OAuth Token from Slack App</div>
+      </div>
+      <div class="form-group">
+        <label>Slack App Token <span style="font-size:.75rem;opacity:.6">(Socket Mode)</span></label>
+        <input type="password" data-1p-ignore id="env-SLACK_APP_TOKEN" autocomplete="off" placeholder="xapp-…">
+        <div class="hint">App-Level Token — required for Socket Mode</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Brave API Key</label>
+          <input type="password" data-1p-ignore id="env-BRAVE_API_KEY" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label>Gemini API Key</label>
+          <input type="password" data-1p-ignore id="env-GEMINI_API_KEY" autocomplete="off">
+        </div>
+      </div>
+      <h4 style="margin-top:16px;margin-bottom:8px;color:var(--text-bright);font-size:.82rem">Custom API Keys</h4>
+      <div class="hint" style="margin-bottom:8px">Add any custom keys your anima needs (e.g. REPLICATE_API_TOKEN, FAL_API_KEY). Key names must end in _API_KEY, _API_TOKEN, _SECRET, or _TOKEN, or start with CUSTOM_.</div>
+      <div id="custom-keys-list"></div>
+      <button style="font-size:.7rem;margin-top:4px;padding:4px 10px;background:var(--surface);border:1px solid var(--border);color:var(--text-dim);border-radius:4px;cursor:pointer" onclick="addCustomKeyRow()">+ Add Key</button>
+      <div class="form-actions">
+        <button class="primary" onclick="saveEnv()">Save Keys</button>
+      </div>
+    </div>
+
+    <!-- Voice Tab -->
+    <div class="tab-content" id="tab-voice">
+      <div class="form-group">
+        <label>Voice Enabled</label>
+        <select id="env-ANIMA_VOICE_ENABLED">
+          <option value="">Auto (enabled if STT key set)</option>
+          <option value="true">Enabled</option>
+          <option value="false">Disabled</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Deepgram API Key (STT)</label>
+        <input type="password" data-1p-ignore id="env-DEEPGRAM_API_KEY" autocomplete="off">
+        <div class="hint">Free tier: 45hrs/month. Get key at console.deepgram.com</div>
+      </div>
+      <div class="form-group">
+        <label>TTS Provider</label>
+        <select id="env-ANIMA_TTS_PROVIDER" onchange="updateTTSFields()">
+          <option value="">Auto (ElevenLabs > OpenAI > Edge free)</option>
+          <option value="edge">Edge TTS (free, no key needed)</option>
+          <option value="elevenlabs">ElevenLabs (paid, best quality)</option>
+          <option value="openai">OpenAI TTS (paid)</option>
+        </select>
+      </div>
+      <div id="tts-elevenlabs-fields">
+        <div class="form-group">
+          <label>ElevenLabs API Key (XI_API_KEY)</label>
+          <input type="password" data-1p-ignore id="env-XI_API_KEY" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label>ElevenLabs Voice ID</label>
+          <input type="text" id="env-ANIMA_TTS_VOICE" placeholder="JBFqnCBsd6RMkjVDRZzb (George)">
+        </div>
+      </div>
+      <div id="tts-openai-fields" style="display:none">
+        <div class="form-group">
+          <label>OpenAI API Key</label>
+          <input type="password" data-1p-ignore id="env-OPENAI_API_KEY" autocomplete="off">
+        </div>
+      </div>
+      <div id="tts-edge-fields" style="display:none">
+        <div class="form-group">
+          <label>Edge Voice Name</label>
+          <input type="text" id="env-ANIMA_TTS_EDGE_VOICE" placeholder="en-US-AriaNeural">
+          <div class="hint">Popular: en-US-AriaNeural, en-US-GuyNeural, en-GB-SoniaNeural</div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="primary" onclick="saveEnv()">Save Voice</button>
+      </div>
+    </div>
+
+    <!-- Agent Tab -->
+    <div class="tab-content active" id="tab-agent">
+      <h3>Context &amp; Memory</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Context Window (tokens)</label>
+          <input type="number" id="env-ANIMA_CONTEXT_WINDOW" placeholder="200000">
+          <div class="hint">Max context size for the main model</div>
+        </div>
+        <div class="form-group">
+          <label>Compaction Threshold (tokens)</label>
+          <input type="number" id="env-ANIMA_COMPACT_THRESHOLD" placeholder="80000">
+          <div class="hint">History size that triggers compaction</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Compaction Keep Tail</label>
+          <input type="number" id="env-ANIMA_COMPACT_KEEP_TAIL" placeholder="20">
+          <div class="hint">Recent messages to keep after compaction</div>
+        </div>
+        <div class="form-group">
+          <label>Max Session Messages</label>
+          <input type="number" id="cfg-maxSessionMessages" placeholder="50">
+          <div class="hint">Maximum messages stored per session</div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:24px">Agent Limits</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Max Iterations per Message</label>
+          <input type="number" id="cfg-dmMaxIterations" placeholder="20">
+          <div class="hint">Tool-use loop ceiling for direct messages</div>
+        </div>
+        <div class="form-group">
+          <label>Max Output Tokens</label>
+          <input type="number" id="cfg-maxTokens" placeholder="8192">
+          <div class="hint">Max tokens the model generates per turn</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Token Budget Pressure</label>
+          <input type="number" id="cfg-tokenBudgetPressure" placeholder="120000">
+          <div class="hint">Token count that triggers budget-pressure mode</div>
+        </div>
+        <div class="form-group">
+          <label>Safety Ceiling (max loops)</label>
+          <input type="number" id="cfg-loopDetection-ceiling" placeholder="50">
+          <div class="hint">Hard stop for runaway loops</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Max Concurrent Operations</label>
+          <input type="number" id="cfg-maxConcurrent" placeholder="6">
+          <div class="hint">Parallel operations limit</div>
+        </div>
+        <div class="form-group">
+          <label>Lull Max Iterations</label>
+          <input type="number" id="cfg-lullMaxIterations" placeholder="4">
+          <div class="hint">Tool-use ceiling for passive lull responses</div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:24px">Subagent Limits</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Max Concurrent Subagents</label>
+          <input type="number" id="cfg-maxSubagentChildren" placeholder="8">
+          <div class="hint">How many subagents can run at once</div>
+        </div>
+        <div class="form-group">
+          <label>Subagent Max Iterations</label>
+          <input type="number" id="cfg-subagentMaxIter" placeholder="25">
+          <div class="hint">Tool-use ceiling per subagent task</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Subagent Timeout (seconds)</label>
+          <input type="number" id="cfg-subagentTimeoutSeconds" placeholder="600">
+          <div class="hint">Max runtime before a subagent is killed</div>
+        </div>
+        <div class="form-group"></div>
+      </div>
+
+      <h3 style="margin-top:24px">Learning</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Learning Mode</label>
+          <select id="env-ANIMA_LEARNING_MODE">
+            <option value="always">Always (learn every message)</option>
+            <option value="flush_only">Flush Only (learn at compaction)</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          <div class="hint">"Always" = best knowledge capture, "Flush Only" = cheaper</div>
+        </div>
+        <div class="form-group">
+          <label>Maintainer Idle Only</label>
+          <select id="env-ANIMA_MAINTAINER_IDLE_ONLY">
+            <option value="true">Yes (maintenance only when idle)</option>
+            <option value="false">No (maintenance runs anytime)</option>
+          </select>
+        </div>
+      </div>
+
+      <h3 style="margin-top:24px">Local Model (Ollama / LM Studio)</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Local Model Base URL</label>
+          <input type="text" id="env-LOCAL_MODEL_BASE_URL" placeholder="http://host.docker.internal:11434/v1">
+          <div class="hint">For local/ prefixed models — OAI-compatible endpoint</div>
+        </div>
+        <div class="form-group">
+          <label>Local Model API Key</label>
+          <input type="text" id="env-LOCAL_MODEL_API_KEY" placeholder="local">
+          <div class="hint">Usually "local" for Ollama</div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="primary" onclick="saveAgentConfig()">Save Agent Settings</button>
+      </div>
+    </div>
+
+    <!-- Behavior Tab -->
+    <div class="tab-content" id="tab-behavior">
+      <h3>Lull Behavior</h3>
+      <p class="hint" style="margin-bottom:12px">Controls how this agent decides to chime into conversations it wasn't directly addressed in. Each line becomes an instruction. Stored in the knowledge graph (lull_behavior aspect) — the agent reads these at runtime.</p>
+      <div id="lull-lines"></div>
+      <button class="secondary" onclick="addLullLine()" style="margin-top:8px">+ Add Line</button>
+      <div class="form-actions" style="margin-top:16px">
+        <button class="primary" onclick="saveLullBehavior()">Save Lull Behavior</button>
+        <button class="secondary" onclick="resetLullDefaults()">Reset to Defaults</button>
+      </div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:24px 0">
+
+      <h3>Proactive Outreach</h3>
+      <p class="hint" style="margin-bottom:12px">When enabled, the agent can occasionally share interesting things it learned during its maintenance cycle. A cheap model decides if something is worth sharing, then the main model writes the message naturally. The agent can still choose silence (NO_REPLY).</p>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="cfg-proactiveEnabled" onchange="saveProactiveConfig()">
+          <span>Enable Proactive Outreach</span>
+        </label>
+      </div>
+      <div id="proactive-settings" style="display:none">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Cooldown (minutes)</label>
+            <input type="number" id="cfg-proactiveCooldown" value="180" min="30" max="1440" style="width:100px">
+            <div class="hint">Minimum time between proactive messages</div>
+          </div>
+          <div class="form-group">
+            <label>Max per day</label>
+            <input type="number" id="cfg-proactiveMaxDay" value="3" min="1" max="20" style="width:80px">
+            <div class="hint">Hard daily cap regardless of cooldown</div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Allowed Channels (optional)</label>
+          <input type="text" id="cfg-proactiveChannels" placeholder="Leave empty for all channels, or comma-separated IDs">
+          <div class="hint">If set, proactive messages can only go to these channel IDs. Empty = any channel with activity.</div>
+        </div>
+        <div class="form-actions" style="margin-top:12px">
+          <button class="primary" onclick="saveProactiveConfig()">Save Proactive Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Web / Ingress Tab -->
+    <div class="tab-content" id="tab-web">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Web Port</label>
+          <input type="text" id="env-ANIMA_WEB_PORT" placeholder="18800">
+        </div>
+        <div class="form-group">
+          <label>Health Port</label>
+          <input type="text" id="env-ANIMA_HEALTH_PORT" placeholder="18790">
+        </div>
+      </div>
+      <div class="hint" style="padding:12px;background:var(--bg);border-radius:var(--radius);font-size:.82rem">
+        Ingress is managed centrally via Traefik. Configure domain/HTTPS in <a href="#" onclick="event.preventDefault();showSettings()" style="color:var(--accent2)">Settings &rarr; Ingress</a>.
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Viewer Username</label>
+          <input type="text" id="env-ANIMA_WEB_AUTH_USER">
+        </div>
+        <div class="form-group">
+          <label>Viewer Password</label>
+          <input type="password" data-1p-ignore id="env-ANIMA_WEB_AUTH_PASS" autocomplete="off">
+        </div>
+      </div>
+      <div class="hint" style="margin-top:-8px;margin-bottom:12px">Fallback credentials for the graph viewer when the manager is unreachable. Normally, the graph uses your <strong>Manager login</strong> (SSO).</div>
+      <div id="web-links" style="display:flex;gap:12px;margin-bottom:12px"></div>
+      <div class="form-actions">
+        <button class="primary" onclick="saveEnv()">Save Web Config</button>
+      </div>
+
+      <h4 style="margin-top:24px;margin-bottom:8px;color:var(--text-bright);font-size:.82rem;border-top:1px solid var(--border);padding-top:16px">Webapp Users</h4>
+      <div class="hint" style="margin-bottom:10px">Manage users who can access this anima's public webapp and chat. These are <em>not</em> manager accounts — they only grant access to the webapp, not the graph viewer.</div>
+      <div id="webapp-users-list" style="margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:8px">
+        <div style="flex:1">
+          <label style="font-size:.68rem;color:var(--text-dim);display:block;margin-bottom:2px">Username</label>
+          <input type="text" id="wu-new-user" placeholder="username" style="padding:6px 10px;font-size:.8rem;width:100%;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-bright)">
+        </div>
+        <div style="flex:1">
+          <label style="font-size:.68rem;color:var(--text-dim);display:block;margin-bottom:2px">Password</label>
+          <input type="password" data-1p-ignore id="wu-new-pass" placeholder="password" autocomplete="new-password" style="padding:6px 10px;font-size:.8rem;width:100%;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-bright)">
+        </div>
+        <button onclick="addWebappUser()" style="padding:6px 14px;font-size:.78rem;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap">Add User</button>
+      </div>
+      <div id="wu-error" style="color:var(--danger);font-size:.75rem;display:none;margin-bottom:8px"></div>
+    </div>
+
+    <!-- System Tab -->
+    <div class="tab-content" id="tab-system">
+      <div class="form-group">
+        <label>Personality Editable</label>
+        <select id="env-ANIMA_PERSONALITY_EDITABLE">
+          <option value="false">Locked (recommended)</option>
+          <option value="true">Editable (agent can change its identity)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Source Editable</label>
+        <select id="env-ANIMA_SRC_EDITABLE">
+          <option value="false">Locked (secure)</option>
+          <option value="true">Editable (agent can modify its own code)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Log Level</label>
+        <select id="env-ANIMA_LOG_LEVEL">
+          <option value="info">info</option>
+          <option value="debug">debug</option>
+          <option value="warn">warn</option>
+          <option value="error">error</option>
+        </select>
+      </div>
+      <div class="form-actions">
+        <button class="primary" onclick="saveEnv()">Save Permissions</button>
+      </div>
+    </div>
+
+
+    <!-- Channels Tab -->
+    <div class="tab-content" id="tab-channels">
+      <div class="form-group">
+        <label>Listen Mode</label>
+        <select id="discord-listen-mode" onchange="updateDiscordMode()">
+          <option value="all">All channels (no filtering)</option>
+          <option value="guilds">Guild / channel allowlist</option>
+        </select>
+        <div class="hint">Controls which Discord servers and channels this agent responds in.</div>
+      </div>
+
+      <div id="discord-guilds-section" style="display:none">
+        <div class="form-group">
+          <label>Guild &amp; Channel Rules</label>
+          <div class="hint" style="margin-bottom:10px">One entry per line. Format: <code style="font-family:var(--mono);font-size:.75rem">guildId</code> to listen to all channels in a guild, or <code style="font-family:var(--mono);font-size:.75rem">guildId:channelId</code> to pin to specific channels. Use channel names or IDs.</div>
+          <textarea id="discord-guilds-input" rows="8" style="font-family:var(--mono);font-size:.78rem;width:100%;box-sizing:border-box;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:8px;resize:vertical" placeholder="1481342723427537019:1484205814565834752
+1481342723427537019:crab-land
+1234567890123456789"></textarea>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="primary" onclick="saveDiscordConfig()">Save Discord Config</button>
+      </div>
+
+      <div id="discord-current" style="margin-top:16px;padding:12px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);font-family:var(--mono);font-size:.72rem;color:var(--muted);white-space:pre-wrap;display:none"></div>
+    </div>
+
+    <!-- Plugins Tab (super only) -->
+    <div class="tab-content" id="tab-plugins">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <div>
+          <h3 style="margin:0;font-size:1rem;">Plugin Manager</h3>
+          <div class="hint">Install, configure, and remove plugins. Supports Anima-native and OpenClaw-compatible plugins.</div>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:16px">
+        <h4 style="margin:0 0 12px;font-size:.9rem;color:var(--accent)">Install Plugin</h4>
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <input type="text" id="plugin-install-pkg" placeholder="npm package name or git URL (e.g. @mem0/openclaw-mem0)">
+          </div>
+          <div class="form-group" style="flex:0 0 auto">
+            <select id="plugin-install-source" style="width:auto">
+              <option value="npm">npm</option>
+              <option value="git">git</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:0 0 auto">
+            <button class="primary" onclick="installPlugin()">Install</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="plugins-list">
+        <div style="color:var(--muted);font-size:.85rem;padding:20px;text-align:center">Loading plugins...</div>
+      </div>
+
+      <!-- Plugin Config Modal -->
+      <div id="plugin-config-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);padding:24px;max-width:500px;width:90%">
+          <h4 style="margin:0 0 12px" id="plugin-config-title">Plugin Config</h4>
+          <textarea id="plugin-config-editor" rows="10" style="font-family:var(--mono);font-size:.8rem" placeholder="{}"></textarea>
+          <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+            <button onclick="closePluginConfig()">Cancel</button>
+            <button class="primary" onclick="savePluginConfig()">Save & Restart</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    </div><!-- /advanced-section -->
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const B = window.BRAND || {};
+(function initBrand() {
+  document.title = B.manager || 'Manager';
+  const s = (id, t) => { const e = document.getElementById(id); if (e) e.innerHTML = t; };
+  s('topbar-logo', B.topbarLogo || '');
+  s('login-logo', B.loginLogo || B.topbarLogo || '');
+  s('login-title', B.name || '');
+  s('login-tagline', B.tagline || '');
+  s('dash-title', `Your ${B.Agents || 'Agents'}`);
+  s('btn-new-agent', `+ New ${B.Agent || 'Agent'}`);
+  s('wiz-title', `${B.createVerb || 'Create'} New ${B.Agent || 'Agent'}`);
+  s('lbl-super-agent', `Super Agent (can orchestrate other ${B.agents || 'agents'})`);
+  s('hint-super-agent', `Grants tools to list, message, read/write graphs, and manage other ${B.agents || 'agents'}.`);
+  s('hint-clone', `Start fresh or clone source code (and optionally the knowledge graph) from an existing ${B.agent || 'agent'}.`);
+  s('opt-role-user', `User (own ${B.agents || 'agents'} only)`);
+  s('opt-role-super', `Super (all ${B.agents || 'agents'} + admin)`);
+  s('settings-hint', `Shared keys applied automatically when creating a new ${B.agent || 'agent'} with a blank field. These do <em>not</em> override keys already set on individual ${B.agents || 'agents'}.`);
+  s('hint-detail-super', `Enables orchestration tools: list, message, read/write graphs, and manage other ${B.agents || 'agents'}. Requires MANAGER_SERVICE_KEY in env.`);
+})();
+let csrf = null;
+let currentAnima = null;
+
+// Detect base path from Traefik strip-prefix:
+// When served at /animas/, browser URL is /animas/ but server sees /
+// We need to prefix fetches with the real URL prefix so Traefik routes them
+const BASE = window.location.pathname.replace(/\/(api\/.*)?$/, '').replace(/\/+$/, '');
+
+// ── API helpers ─────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (csrf && opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = csrf;
+  const fetchOpts = { ...opts, headers, credentials: 'same-origin' };
+  if (fetchOpts.body && typeof fetchOpts.body === 'object') fetchOpts.body = JSON.stringify(fetchOpts.body);
+  const res = await fetch(BASE + path, fetchOpts);
+  const data = await res.json();
+  if (res.status === 401 && path !== '/api/auth/login') { showLogin(); return null; }
+  return data;
+}
+
+function toast(msg, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (isError ? ' error' : '');
+  setTimeout(() => el.className = 'toast', 3000);
+}
+
+// ── Auth ────────────────────────────────────────────────────
+let currentRole = null;
+let currentUsername = null;
+
+async function checkAuth() {
+  const data = await api('/api/auth/check');
+  if (data?.authenticated) {
+    csrf = data.csrf;
+    currentRole = data.role;
+    currentUsername = data.username;
+    applyRoleUI();
+    const params = new URLSearchParams(window.location.search);
+    const returnTo = params.get('returnTo');
+    if (returnTo && /^https:\/\//.test(returnTo) && new URL(returnTo).hostname === window.location.hostname) {
+      const rkey = '_rt_count';
+      const prev = JSON.parse(sessionStorage.getItem(rkey) || '{}');
+      const now = Date.now();
+      const count = (prev.url === returnTo && now - (prev.t || 0) < 30000) ? (prev.n || 0) + 1 : 1;
+      sessionStorage.setItem(rkey, JSON.stringify({ url: returnTo, t: now, n: count }));
+      if (count <= 2) {
+        window.location.href = returnTo;
+        return;
+      }
+      sessionStorage.removeItem(rkey);
+    }
+    showDashboard();
+  } else {
+    showLogin();
+  }
+}
+
+function applyRoleUI() {
+  const isSuper = currentRole === 'super';
+  document.querySelectorAll('.super-only').forEach(el => {
+    el.style.display = isSuper ? '' : 'none';
+  });
+  const vaultLink = document.getElementById('vault-link');
+  if (vaultLink) vaultLink.style.display = isSuper ? '' : 'none';
+  const projLink = document.getElementById('projects-link');
+  if (projLink) projLink.style.display = isSuper ? '' : 'none';
+  const provLink = document.getElementById('providers-link');
+  if (provLink) provLink.style.display = isSuper ? '' : 'none';
+  const userLabel = document.getElementById('topbar-user');
+  if (userLabel) userLabel.textContent = currentUsername || '';
+}
+
+function showLogin() {
+  csrf = null;
+  document.getElementById('login-view').style.display = 'flex';
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('settings-view').style.display = 'none';
+  document.getElementById('users-view').style.display = 'none';
+  document.getElementById('topbar').style.display = 'none';
+  checkGoogleAuthStatus();
+  showOAuthErrors();
+}
+
+async function checkGoogleAuthStatus() {
+  try {
+    const data = await api('/api/auth/google/status');
+    const section = document.getElementById('google-login-section');
+    if (section) section.style.display = data?.enabled ? 'block' : 'none';
+  } catch {}
+}
+
+function googleLogin() {
+  const params = new URLSearchParams(window.location.search);
+  const returnTo = params.get('returnTo');
+  const url = BASE + '/api/auth/google' + (returnTo ? '?returnTo=' + encodeURIComponent(returnTo) : '');
+  window.location.href = url;
+}
+
+function showOAuthErrors() {
+  const params = new URLSearchParams(window.location.search);
+  const error = params.get('error');
+  if (!error) return;
+  const messages = {
+    google_not_configured: 'Google sign-in is not configured.',
+    invalid_state: 'Invalid OAuth state. Please try again.',
+    no_code: 'No authorization code received.',
+    token_exchange_failed: 'Failed to authenticate with Google.',
+    userinfo_failed: 'Could not retrieve your Google profile.',
+    access_denied: 'Your Google account is not authorized to access this system.',
+    no_account: 'No account exists for your email and auto-creation is disabled.',
+    oauth_error: 'An error occurred during Google sign-in.',
+  };
+  const err = document.getElementById('login-error');
+  if (err) {
+    err.textContent = messages[error] || `Sign-in error: ${error}`;
+    err.style.display = 'block';
+  }
+  window.history.replaceState({}, '', window.location.pathname);
+}
+
+async function login() {
+  const user = document.getElementById('login-user').value;
+  const pass = document.getElementById('login-pass').value;
+  const err = document.getElementById('login-error');
+  err.style.display = 'none';
+
+  const data = await api('/api/auth/login', {
+    method: 'POST', body: JSON.stringify({ username: user, password: pass }),
+  });
+  if (data?.ok) {
+    csrf = data.csrf;
+    currentRole = data.role;
+    currentUsername = data.username || user;
+    applyRoleUI();
+    showDashboard();
+  } else {
+    err.textContent = data?.error || 'Login failed';
+    err.style.display = 'block';
+  }
+}
+
+async function logout() {
+  await api('/api/auth/logout', { method: 'POST' });
+  csrf = null;
+  currentRole = null;
+  currentUsername = null;
+  showLogin();
+}
+
+document.getElementById('login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+// ── Users Panel ─────────────────────────────────────────────
+function showUsersPanel() {
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('settings-view').style.display = 'none';
+  document.getElementById('users-view').style.display = 'block';
+  document.getElementById('topbar').style.display = 'flex';
+  loadUsers();
+}
+
+async function loadUsers() {
+  const data = await api('/api/users');
+  if (!data) return;
+  const list = document.getElementById('users-list');
+  list.innerHTML = (data.users || []).map(u => {
+    const isGoogle = u.authProvider === 'google';
+    const providerBadge = isGoogle
+      ? '<span class="auth-provider-badge google">Google</span>'
+      : '<span class="auth-provider-badge password">Password</span>';
+    const displayName = u.googleName ? `${esc(u.googleName)}` : '';
+    return `
+    <div class="user-row">
+      <div class="user-info">
+        <span class="user-name">${esc(u.username)}</span>
+        ${providerBadge}
+        <span class="user-role ${u.role === 'super' ? 'super' : ''}">${esc(u.role)}</span>
+        ${displayName ? `<span style="font-size:.72rem;color:var(--dim)">${displayName}</span>` : ''}
+        ${u.createdAt ? `<span style="font-size:.72rem;color:var(--dim)">${new Date(u.createdAt).toLocaleDateString()}</span>` : ''}
+      </div>
+      <div class="user-actions">
+        <button onclick="changeUserRole('${esc(u.username)}','${u.role === 'super' ? 'user' : 'super'}')" style="font-size:.75rem">
+          Make ${u.role === 'super' ? 'User' : 'Super'}
+        </button>
+        ${isGoogle ? '' : `<button onclick="resetUserPassword('${esc(u.username)}')" style="font-size:.75rem">Reset Pass</button>`}
+        <button onclick="deleteUser('${esc(u.username)}')" style="font-size:.75rem;color:var(--danger)">Delete</button>
+      </div>
+    </div>`;
+  }).join('') || '<p style="color:var(--dim)">No users found.</p>';
+}
+
+function showAddUserForm() {
+  document.getElementById('add-user-form').style.display = 'block';
+  document.getElementById('add-user-error').style.display = 'none';
+}
+
+async function addUser() {
+  const username = document.getElementById('new-username').value.trim();
+  const password = document.getElementById('new-password').value;
+  const role = document.getElementById('new-role').value;
+  const err = document.getElementById('add-user-error');
+  err.style.display = 'none';
+  const data = await api('/api/users', { method: 'POST', body: JSON.stringify({ username, password, role }) });
+  if (data?.ok) {
+    document.getElementById('add-user-form').style.display = 'none';
+    document.getElementById('new-username').value = '';
+    document.getElementById('new-password').value = '';
+    loadUsers();
+  } else {
+    err.textContent = data?.error || 'Failed to create user';
+    err.style.display = 'block';
+  }
+}
+
+async function changeUserRole(username, newRole) {
+  await api(`/api/users/${encodeURIComponent(username)}`, { method: 'PUT', body: JSON.stringify({ role: newRole }) });
+  loadUsers();
+}
+
+async function resetUserPassword(username) {
+  const pw = prompt(`New password for "${username}":`);
+  if (!pw) return;
+  const data = await api(`/api/users/${encodeURIComponent(username)}`, { method: 'PUT', body: JSON.stringify({ password: pw }) });
+  if (data?.ok) toast('Password updated');
+  else toast(data?.error || 'Failed', true);
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Delete user "${username}"? Their agents will become unowned.`)) return;
+  const data = await api(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+  if (data?.ok) loadUsers();
+  else toast(data?.error || 'Failed', true);
+}
+
+// ── Dashboard ───────────────────────────────────────────────
+async function showDashboard() {
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('dashboard-view').style.display = 'block';
+  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('settings-view').style.display = 'none';
+  document.getElementById('users-view').style.display = 'none';
+  loadThemePreference();
+  document.getElementById('topbar').style.display = 'flex';
+  await loadDashboard();
+}
+
+let allAnimas = [];
+let _dashPollTimer = null;
+let _dashPollCount = 0;
+
+async function loadDashboard() {
+  const data = await api('/api/animas');
+  if (!data) return;
+  const trees = data.animas || [];
+  allAnimas = trees;
+  const grid = document.getElementById('anima-grid');
+  document.getElementById('anima-count').textContent = `${trees.length} ${trees.length !== 1 ? B.agents : B.agent}`;
+
+  if (trees.length === 0) {
+    grid.innerHTML = `
+      <div style="max-width:560px;margin:40px auto;text-align:center">
+        <h2 style="font-size:1.3rem;font-weight:600;margin-bottom:8px">Welcome to ${esc(B.name || 'Anima')}</h2>
+        <p style="color:var(--muted);font-size:.85rem;margin-bottom:28px;line-height:1.6">
+          Set up an AI provider so your ${esc(B.agents || 'agents')} know which models to use, then create your first ${esc(B.agent || 'agent')}.
+        </p>
+        <div style="display:flex;flex-direction:column;gap:12px;align-items:center">
+          <button onclick="showProviderSetup()" style="padding:14px 28px;background:var(--accent);color:#fff;border:none;border-radius:10px;cursor:pointer;font-size:.88rem;font-weight:600;width:300px;transition:opacity .15s" onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
+            Set Up Provider
+          </button>
+          <button onclick="showCreateModal()" style="padding:12px 28px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:.85rem;width:300px;transition:all .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+            Skip &mdash; Create ${esc(B.agent || 'Agent')} Now
+          </button>
+        </div>
+        <p style="color:var(--dim);font-size:.72rem;margin-top:20px;line-height:1.5">
+          You can always change providers and models later.
+        </p>
+      </div>`;
+    return;
+  }
+
+  // Group agents by owner when super user
+  const isSuper = currentRole === 'super';
+  let html = '';
+  if (isSuper) {
+    const groups = {};
+    for (const a of trees) {
+      const owner = a.owner || '(unowned)';
+      if (!groups[owner]) groups[owner] = [];
+      groups[owner].push(a);
+    }
+    for (const [owner, group] of Object.entries(groups)) {
+      html += `<div class="owner-group"><div class="owner-label">${esc(owner)}</div>`;
+      html += group.map(a => animaCard(a)).join('');
+      html += `</div>`;
+    }
+  } else {
+    html = trees.map(a => animaCard(a)).join('');
+  }
+  grid.innerHTML = html;
+
+  for (const a of trees) {
+    api(`/api/animas/${a.id}/health`).then(h => {
+      const dot = document.getElementById(`status-${a.id}`);
+      if (dot) dot.classList.add(h?.status === 'down' || h?.status === 'timeout' ? 'down' : 'up');
+    });
+  }
+
+  // Auto-poll when any card is in a transitional state (building/queued)
+  const hasTransitional = trees.some(a =>
+    a.buildStatus && (a.buildStatus.state === 'building' || a.buildStatus.state === 'queued')
+  );
+  if (hasTransitional || _dashPollCount > 0) {
+    if (!_dashPollTimer) {
+      _dashPollTimer = setInterval(async () => {
+        _dashPollCount = Math.max(0, _dashPollCount - 1);
+        await loadDashboard();
+        const still = allAnimas.some(a =>
+          a.buildStatus && (a.buildStatus.state === 'building' || a.buildStatus.state === 'queued')
+        );
+        if (!still && _dashPollCount <= 0) {
+          clearInterval(_dashPollTimer);
+          _dashPollTimer = null;
+        }
+      }, 5000);
+    }
+  }
+}
+
+function nudgeDashPoll(cycles) {
+  _dashPollCount = Math.max(_dashPollCount, cycles || 5);
+  if (!_dashPollTimer) loadDashboard();
+}
+
+function buildStatusBadge(bs) {
+  if (!bs) return '';
+  if (bs.state === 'queued' || bs.state === 'building') {
+    return '<span class="badge badge-building">Building…</span>';
+  }
+  if (bs.state === 'error') {
+    const shortErr = (bs.error || 'unknown').split('\n').pop().slice(0, 60);
+    return `<span class="badge badge-error" title="${esc(bs.error || '')}">Build Error</span>`;
+  }
+  return '';
+}
+
+function animaCard(a) {
+  const webUrl = a.webPort ? `/animas/${a.id}` : null;
+  const stoppedClass = a.stopped ? ' card-stopped' : '';
+  const bsBadge = buildStatusBadge(a.buildStatus);
+  const isBuilding = a.buildStatus && (a.buildStatus.state === 'building' || a.buildStatus.state === 'queued');
+  const isLive = !a.stopped && !isBuilding;
+  const cardClick = isLive && webUrl
+    ? `window.open('${webUrl}/graph','_blank')`
+    : `cardStatusPopup('${esc(a.id)}','${esc(a.displayName)}',${!!a.stopped},${!!isBuilding})`;
+  return `
+    <div class="card${stoppedClass}" onclick="${cardClick}">
+      <div class="status-dot${a.stopped ? ' stopped' : ''}" id="status-${esc(a.id)}"></div>
+      <div class="name">${esc(a.displayName)}${a.stopped ? ' <span class="badge-stopped">Stopped</span>' : ''}${bsBadge}</div>
+      <div class="id">${esc(a.id)}</div>
+      <div class="badges">
+        ${a.discord ? '<span class="badge discord">Discord</span>' : ''}
+        ${a.telegram ? '<span class="badge telegram">Telegram</span>' : ''}
+        ${a.slack ? '<span class="badge slack">Slack</span>' : ''}
+        ${a.voiceEnabled ? '<span class="badge voice">Voice</span>' : ''}
+        ${a.webPort ? '<span class="badge web">Web :' + a.webPort + '</span>' : ''}
+      </div>
+      <div class="card-links">
+        ${a.stopped ? `<button class="card-action-btn start-btn" onclick="event.stopPropagation(); quickStart('${esc(a.id)}')">&#9654; Start</button>` : ''}
+        ${isBuilding ? '' : (!a.stopped ? `<button class="card-action-btn stop-btn" onclick="event.stopPropagation(); quickStop('${esc(a.id)}')">&#9724; Stop</button>` : '')}
+        <a href="#" onclick="event.stopPropagation(); event.preventDefault(); openAnima('${esc(a.id)}')" class="card-link" title="Configuration, environment, restart">Settings</a>
+      </div>
+    </div>
+  `;
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Detail View ─────────────────────────────────────────────
+async function openAnima(id) {
+  const data = await api(`/api/animas/${id}`);
+  if (!data) return;
+  currentAnima = { id, env: data.env, config: data.config };
+  tokensLoaded = false;
+  const tokSec = document.getElementById('tokens-section');
+  if (tokSec) tokSec.style.display = 'none';
+  const tokChev = document.getElementById('tokens-chevron');
+  if (tokChev) tokChev.style.transform = '';
+  populateDiscordTab(data.config);
+
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = 'block';
+  document.getElementById('detail-name').textContent = data.config.displayName || data.env.ANIMA_DISPLAY_NAME || id;
+  document.getElementById('detail-id').textContent = id;
+
+  // Fill all env fields
+  document.querySelectorAll('[id^="env-"]').forEach(el => {
+    const key = el.id.replace('env-', '');
+    const val = data.env[key] || '';
+    if (el.tagName === 'SELECT') {
+      el.value = val;
+    } else {
+      el.value = val;
+    }
+  });
+
+  // Super Agent checkbox
+  const saCheckbox = document.getElementById('cfg-superAgent');
+  if (saCheckbox) saCheckbox.checked = !!data.config.superAgent;
+
+  // Load custom keys
+  loadCustomKeys(data.env);
+
+  // Update TTS field visibility
+  updateTTSFields();
+
+  // Build web links — always use Traefik path
+  const wl = document.getElementById('web-links');
+  const webLink = `/animas/${id}/graph`;
+  if (data.env.ANIMA_WEB_PORT) {
+    wl.innerHTML = `<a href="${webLink}" target="_blank" style="font-size:.78rem">Open Graph Viewer</a>`;
+  } else {
+    wl.innerHTML = '';
+  }
+
+  loadWebappUsers();
+
+  // Show build status if relevant
+  const bsEl = document.getElementById('detail-build-status');
+  if (bsEl) {
+    const bs = await api(`/api/animas/${id}/build-status`).catch(() => null);
+    if (bs && bs.state === 'error') {
+      bsEl.style.display = 'block';
+      bsEl.innerHTML = `<strong style="color:#ef4444">Build Error</strong><pre style="white-space:pre-wrap;font-size:.72rem;color:#fca5a5;margin:4px 0;max-height:120px;overflow:auto">${esc(bs.error || bs.output || 'Unknown error')}</pre>`;
+    } else if (bs && (bs.state === 'building' || bs.state === 'queued')) {
+      bsEl.style.display = 'block';
+      bsEl.innerHTML = `<span style="color:#f59e0b">⏳ ${bs.state === 'queued' ? 'Queued for build…' : 'Building container…'}</span>`;
+    } else {
+      bsEl.style.display = 'none';
+    }
+  }
+
+  // Check stopped state and health
+  if (data.stopped) {
+    updateStartStopButtons(true);
+  } else {
+    updateStartStopButtons(false);
+    const health = await api(`/api/animas/${id}/health`);
+    const dot = document.getElementById('detail-status');
+    dot.className = 'status-dot ' + (health?.status === 'down' || health?.status === 'timeout' ? 'down' : 'up');
+  }
+
+  // Populate agent config fields
+  loadAgentConfig();
+
+  // Restore advanced panel state
+  const advOpen = localStorage.getItem('anima-advanced-open') === '1';
+  const advSection = document.getElementById('advanced-section');
+  const advChevron = document.getElementById('advanced-chevron');
+  advSection.style.display = advOpen ? 'block' : 'none';
+  advChevron.style.transform = advOpen ? 'rotate(90deg)' : '';
+  if (advOpen) switchTab('agent');
+}
+
+// ── Token Usage Toggle ──────────────────────────────────────
+function toggleTokens() {
+  const section = document.getElementById('tokens-section');
+  const chevron = document.getElementById('tokens-chevron');
+  const isOpen = section.style.display !== 'none';
+  section.style.display = isOpen ? 'none' : 'block';
+  chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
+  if (!isOpen && currentAnima && !tokensLoaded) loadTokens();
+}
+
+// ── Tabs ────────────────────────────────────────────────────
+document.getElementById('tabs').addEventListener('click', e => {
+  if (e.target.classList.contains('tab')) switchTab(e.target.dataset.tab);
+});
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${name}`));
+  if (name === 'channels' && currentAnima) populateDiscordTab(currentAnima.config);
+  if (name === 'behavior' && currentAnima) { loadLullBehavior(); loadProactiveConfig(); }
+  if (name === 'plugins' && currentAnima) loadPlugins(currentAnima.id);
+}
+
+function updateTTSFields() {
+  const provider = document.getElementById('env-ANIMA_TTS_PROVIDER').value;
+  document.getElementById('tts-elevenlabs-fields').style.display = (!provider || provider === 'elevenlabs') ? 'block' : 'none';
+  document.getElementById('tts-openai-fields').style.display = provider === 'openai' ? 'block' : 'none';
+  document.getElementById('tts-edge-fields').style.display = provider === 'edge' ? 'block' : 'none';
+}
+
+// ── Custom Keys ─────────────────────────────────────────────
+const KNOWN_ENV_KEYS = new Set([
+  'DISCORD_TOKEN','ANTHROPIC_API_KEY','AGENT_ID','ANIMA_DISPLAY_NAME','ANIMA_MODEL',
+  'ANIMA_CASUAL_MODEL','ANIMA_NORMAL_MODEL','ANIMA_PLANNER_MODEL',
+  'ANIMA_HEALTH_PORT','ANIMA_LOG_LEVEL','BRAVE_API_KEY','GEMINI_API_KEY','REPLICATE_API_TOKEN',
+  'XI_API_KEY','TELEGRAM_BOT_TOKEN','ANIMA_WEB_PORT','ANIMA_WEB_AUTH_USER','ANIMA_WEB_AUTH_PASS',
+  'ANIMA_PERSONALITY_EDITABLE','ANIMA_SRC_EDITABLE','ANIMA_NICKNAMES','DEEPGRAM_API_KEY','OPENAI_API_KEY',
+  'ANIMA_VOICE_ENABLED','ANIMA_STT_PROVIDER','ANIMA_TTS_PROVIDER','ANIMA_TTS_VOICE','ANIMA_TTS_MODEL',
+  'ANIMA_TTS_SPEED','ANIMA_TTS_EDGE_VOICE','ANIMA_LEARNER_MODEL','ANIMA_SUBAGENT_MODEL',
+  'ANIMA_HEARTBEAT_MINUTES','ANIMA_DEBOUNCE_MS','ANIMA_WORKSPACE_PATH','ANIMA_LEARNING_MODE',
+  'ANIMA_CONTEXT_WINDOW','ANIMA_COMPACT_THRESHOLD','ANIMA_COMPACT_KEEP_TAIL',
+  'ANIMA_MAINTAINER_IDLE_ONLY','LOCAL_MODEL_BASE_URL','LOCAL_MODEL_API_KEY',
+  'ANIMA_PROACTIVE_ENABLED','ANIMA_PROACTIVE_COOLDOWN','ANIMA_PROACTIVE_MAX_DAY',
+  'ANIMA_PROACTIVE_CHANNELS','SLACK_BOT_TOKEN','SLACK_APP_TOKEN','ANIMA_OWNER',
+  'MANAGER_URL','MANAGER_SERVICE_KEY','OPENROUTER_API_KEY','OPENROUTER_BASE_URL','OPENROUTER_REFERER',
+  'ANIMA_SUPER_AGENT','GRAPH_DB_PATH','SESSION_DB_PATH',
+]);
+
+function loadCustomKeys(envData) {
+  const container = document.getElementById('custom-keys-list');
+  container.innerHTML = '';
+  for (const [key, val] of Object.entries(envData || {})) {
+    if (!KNOWN_ENV_KEYS.has(key)) {
+      addCustomKeyRow(key, val);
+    }
+  }
+}
+
+function addCustomKeyRow(keyName, keyValue) {
+  const container = document.getElementById('custom-keys-list');
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px;margin-bottom:4px;align-items:center';
+  row.innerHTML = `<input type="text" class="custom-key-name" value="${keyName || ''}" placeholder="KEY_NAME" style="width:40%;font-size:.75rem;text-transform:uppercase"><input type="password" data-1p-ignore class="custom-key-value" value="${keyValue || ''}" placeholder="value" style="width:50%;font-size:.75rem"><button onclick="this.parentElement.remove()" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:1rem">&times;</button>`;
+  container.appendChild(row);
+}
+
+// ── Webapp Users ─────────────────────────────────────────────
+async function loadWebappUsers() {
+  if (!currentAnima) return;
+  const list = document.getElementById('webapp-users-list');
+  if (!list) return;
+  list.innerHTML = '<span style="color:var(--text-dim);font-size:.75rem">Loading...</span>';
+  const data = await api(`/api/animas/${currentAnima.id}/webapp-users`);
+  if (!data || !data.users) { list.innerHTML = ''; return; }
+  if (data.users.length === 0) {
+    list.innerHTML = '<span style="color:var(--text-dim);font-size:.75rem">No webapp users yet. The public site will be open to anyone.</span>';
+    return;
+  }
+  list.innerHTML = data.users.map(u => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-bottom:4px">
+      <span style="font-size:.8rem;color:var(--text-bright);font-family:'Geist Mono',monospace">${esc(u.username)}</span>
+      <button onclick="deleteWebappUser('${esc(u.username)}')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:.85rem" title="Remove user">&times;</button>
+    </div>
+  `).join('');
+}
+
+async function addWebappUser() {
+  if (!currentAnima) return;
+  const errEl = document.getElementById('wu-error');
+  errEl.style.display = 'none';
+  const username = document.getElementById('wu-new-user').value.trim();
+  const password = document.getElementById('wu-new-pass').value;
+  if (!username || !password) { errEl.textContent = 'Username and password required'; errEl.style.display = 'block'; return; }
+  const data = await api(`/api/animas/${currentAnima.id}/webapp-users`, {
+    method: 'POST', body: JSON.stringify({ username, password }),
+  });
+  if (data?.ok) {
+    document.getElementById('wu-new-user').value = '';
+    document.getElementById('wu-new-pass').value = '';
+    loadWebappUsers();
+  } else {
+    errEl.textContent = data?.error || 'Failed to add user';
+    errEl.style.display = 'block';
+  }
+}
+
+async function deleteWebappUser(username) {
+  if (!currentAnima || !confirm(`Remove webapp user "${username}"?`)) return;
+  await api(`/api/animas/${currentAnima.id}/webapp-users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+  loadWebappUsers();
+}
+
+// ── Save ────────────────────────────────────────────────────
+async function saveEnv() {
+  if (!currentAnima) return;
+  const env = {};
+  document.querySelectorAll('[id^="env-"]').forEach(el => {
+    const key = el.id.replace('env-', '');
+    const val = el.tagName === 'SELECT' ? el.value : el.value;
+    if (val || currentAnima.env[key]) {
+      env[key] = val;
+    }
+  });
+  document.querySelectorAll('#custom-keys-list > div').forEach(row => {
+    const nameEl = row.querySelector('.custom-key-name');
+    const valEl = row.querySelector('.custom-key-value');
+    if (nameEl && valEl && nameEl.value.trim()) {
+      env[nameEl.value.trim().toUpperCase()] = valEl.value;
+    }
+  });
+
+  const data = await api(`/api/animas/${currentAnima.id}/env`, {
+    method: 'PUT', body: JSON.stringify({ env }),
+  });
+  if (data?.ok) {
+    toast('Saved. Recreating container to apply changes...');
+    const fresh = await api(`/api/animas/${currentAnima.id}`);
+    if (fresh) currentAnima.env = fresh.env;
+    const r = await api(`/api/animas/${currentAnima.id}/restart`, { method: 'POST', body: JSON.stringify({ mode: 'recreate' }) });
+    if (r?.ok) toast('Saved & container recreated with new settings.');
+    else toast('Saved but restart failed — restart manually.', true);
+  } else {
+    toast(data?.error || 'Save failed', true);
+  }
+}
+
+// ── Advanced Toggle ──────────────────────────────────────────
+function toggleAdvanced() {
+  const section = document.getElementById('advanced-section');
+  const chevron = document.getElementById('advanced-chevron');
+  const isOpen = section.style.display !== 'none';
+  section.style.display = isOpen ? 'none' : 'block';
+  chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
+  localStorage.setItem('anima-advanced-open', isOpen ? '0' : '1');
+  if (!isOpen) switchTab('agent');
+}
+
+// ── Agent Config Load/Save ───────────────────────────────────
+const AGENT_CFG_KEYS = [
+  'dmMaxIterations', 'maxSubagentChildren', 'subagentMaxIter',
+  'subagentTimeoutSeconds', 'maxTokens', 'tokenBudgetPressure',
+  'lullMaxIterations', 'maxConcurrent', 'maxSessionMessages',
+];
+
+function loadAgentConfig() {
+  if (!currentAnima?.config) return;
+  const c = currentAnima.config;
+  for (const key of AGENT_CFG_KEYS) {
+    const el = document.getElementById(`cfg-${key}`);
+    if (el && c[key] !== undefined && c[key] !== null) el.value = c[key];
+    else if (el) el.value = '';
+  }
+  const ceil = document.getElementById('cfg-loopDetection-ceiling');
+  if (ceil) ceil.value = (c.loopDetection && c.loopDetection.ceiling) || '';
+}
+
+async function saveAgentConfig() {
+  if (!currentAnima) return;
+  const num = id => {
+    const v = document.getElementById(id)?.value;
+    return v !== '' && v !== undefined ? Number(v) : null;
+  };
+  const config = {};
+  for (const key of AGENT_CFG_KEYS) {
+    const v = num(`cfg-${key}`);
+    if (v !== null) config[key] = v;
+  }
+  const ceil = num('cfg-loopDetection-ceiling');
+  if (ceil !== null) config.loopDetection = { ceiling: ceil };
+
+  const cfgRes = await api(`/api/animas/${currentAnima.id}/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config }),
+  });
+  if (!cfgRes?.ok) {
+    toast(cfgRes?.error || 'Config save failed', true);
+    return;
+  }
+
+  await saveEnv();
+}
+
+async function restartAnima() {
+  if (!currentAnima) return;
+  if (!confirm(`Restart ${currentAnima.id}? This will rebuild and restart the container.`)) return;
+
+  toast('Restarting...');
+  const data = await api(`/api/animas/${currentAnima.id}/restart`, { method: 'POST' });
+  if (data?.ok) {
+    toast('Restart triggered. Container rebuilding...');
+    updateStartStopButtons(false);
+    nudgeDashPoll(15);
+  } else {
+    toast(data?.error || 'Restart failed', true);
+  }
+}
+
+async function stopAnima() {
+  if (!currentAnima) return;
+  if (!confirm(`Stop ${currentAnima.id}? The container will spin down but data is preserved. You can start it again later.`)) return;
+
+  toast('Stopping...');
+  const data = await api(`/api/animas/${currentAnima.id}/stop`, { method: 'POST' });
+  if (data?.ok) {
+    toast('Stop queued — container spinning down...');
+    updateStartStopButtons(true);
+    nudgeDashPoll(8);
+  } else {
+    toast(data?.error || 'Stop failed', true);
+  }
+}
+
+async function startAnima() {
+  if (!currentAnima) return;
+  toast('Starting...');
+  const data = await api(`/api/animas/${currentAnima.id}/start`, { method: 'POST' });
+  if (data?.ok) {
+    toast('Start queued — container spinning up...');
+    updateStartStopButtons(false);
+    nudgeDashPoll(12);
+  } else {
+    toast(data?.error || 'Start failed', true);
+  }
+}
+
+async function quickStart(id) {
+  toast('Starting ' + id + '...');
+  const data = await api(`/api/animas/${id}/start`, { method: 'POST' });
+  if (data?.ok) {
+    toast(id + ' start queued — spinning up...');
+    nudgeDashPoll(12);
+  } else {
+    toast(data?.error || 'Start failed', true);
+  }
+}
+
+async function quickStop(id) {
+  toast('Stopping ' + id + '...');
+  const data = await api(`/api/animas/${id}/stop`, { method: 'POST' });
+  if (data?.ok) {
+    toast(id + ' stopping...');
+    nudgeDashPoll(8);
+  } else {
+    toast(data?.error || 'Stop failed', true);
+  }
+}
+
+function cardStatusPopup(id, name, isStopped, isBuilding) {
+  const status = isStopped ? 'Stopped' : isBuilding ? 'Building' : 'Unavailable';
+  const msg = isStopped
+    ? 'This Anima is stopped. Start it to access the web interface.'
+    : isBuilding
+    ? 'This Anima is still building its container. It will be available once it\'s live.'
+    : 'The web interface is not available right now. Check the Anima\'s configuration.';
+  const actions = isStopped
+    ? `<button onclick="this.disabled=true;this.textContent='Starting…';quickStart('${id}');setTimeout(()=>{this.closest('div').parentElement.remove()},1000)" style="padding:8px 20px;background:#4ade80;color:#000;border:none;border-radius:8px;cursor:pointer;font-size:.82rem;font-weight:600;margin-right:8px">Start</button>`
+    : '';
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;animation:fadeIn .2s';
+  overlay.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px 36px;max-width:380px;text-align:center;box-shadow:0 16px 48px rgba(0,0,0,.4)">
+    <h3 style="margin:0 0 4px;font-size:1rem;color:var(--text-bright)">${esc(name)}</h3>
+    <div style="font-size:.78rem;color:${isStopped ? 'var(--dim)' : '#f59e0b'};margin-bottom:14px;font-weight:500">${status}</div>
+    <p style="font-size:.8rem;color:var(--dim);margin:0 0 18px;line-height:1.5">${msg}</p>
+    ${actions}
+    <button onclick="openAnima('${id}');this.closest('div').parentElement.remove()" style="padding:6px 16px;background:transparent;border:1px solid var(--border);color:var(--text);border-radius:8px;cursor:pointer;font-size:.78rem;margin-right:8px">Settings</button>
+    <button onclick="this.closest('div').parentElement.remove()" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:.75rem;padding:6px 8px">Close</button>
+  </div>`;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+function updateStartStopButtons(isStopped) {
+  const stopBtn = document.getElementById('btn-stop-anima');
+  const startBtn = document.getElementById('btn-start-anima');
+  const restartBtn = document.getElementById('btn-restart-anima');
+  const dot = document.getElementById('detail-status');
+  if (isStopped) {
+    stopBtn.style.display = 'none';
+    startBtn.style.display = '';
+    if (restartBtn) restartBtn.disabled = true;
+    dot.className = 'status-dot stopped';
+  } else {
+    stopBtn.style.display = '';
+    startBtn.style.display = 'none';
+    if (restartBtn) restartBtn.disabled = false;
+    dot.className = 'status-dot';
+  }
+}
+
+// ── Create Wizard ────────────────────────────────────────────
+const WIZ_STEPS = 8;
+let wizStep = 1;
+let wizAdvanced = false;
+
+function wizVisibleSteps() {
+  if (wizAdvanced) return [1, 2, 3, 4, 5, 6, 7, 8];
+  return [1, 2, 3];
+}
+
+function wizRender() {
+  const visible = wizVisibleSteps();
+  const displayIdx = visible.indexOf(wizStep) + 1;
+  const displayTotal = visible.length;
+  document.getElementById('wiz-step-num').textContent = displayIdx;
+  document.getElementById('wiz-step-total').textContent = displayTotal;
+
+  document.querySelectorAll('.wizard-step').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.step) === wizStep);
+  });
+  const prog = document.getElementById('wiz-progress');
+  prog.innerHTML = '';
+  for (let i = 0; i < displayTotal; i++) {
+    const d = document.createElement('div');
+    d.className = 'wp-step' + (i < displayIdx - 1 ? ' done' : '') + (i === displayIdx - 1 ? ' active' : '');
+    prog.appendChild(d);
+  }
+
+  const isForkStep = wizStep === 3;
+  const footer = document.querySelector('.wizard-footer');
+  footer.style.display = isForkStep ? 'none' : 'flex';
+
+  document.getElementById('wiz-back').textContent = wizStep === 1 ? 'Cancel' : 'Back';
+  const nextBtn = document.getElementById('wiz-next');
+  nextBtn.textContent = wizStep === WIZ_STEPS ? 'Create' : 'Next';
+  nextBtn.disabled = false;
+  document.getElementById('wiz-error').style.display = 'none';
+}
+
+async function showCreateModal() {
+  wizStep = 1;
+  wizAdvanced = false;
+  document.getElementById('wiz-name').value = '';
+  document.getElementById('wiz-nicknames').value = '';
+  document.getElementById('wiz-vibe').value = '';
+  document.getElementById('wiz-comm').value = '';
+  document.getElementById('wiz-quirks').value = '';
+  document.getElementById('wiz-interests').value = '';
+  document.getElementById('wiz-discord').value = '';
+  document.getElementById('wiz-telegram').value = '';
+  document.getElementById('wiz-slack-bot-token').value = '';
+  document.getElementById('wiz-slack-app-token').value = '';
+  document.getElementById('wiz-anthropic').value = '';
+  document.getElementById('wiz-dm-policy').value = 'pairing';
+  document.getElementById('wiz-web-enabled').value = 'true';
+  document.getElementById('wiz-personality-editable').value = 'true';
+  document.getElementById('wiz-src-editable').value = 'false';
+  document.getElementById('wiz-voice-enabled').value = 'true';
+  document.getElementById('wiz-tts-provider').value = '';
+  document.getElementById('wiz-tts-voice').value = '';
+  document.getElementById('wiz-tts-edge-voice').value = '';
+  document.getElementById('wiz-clone-from').value = '';
+  document.getElementById('wiz-copy-graph').value = 'false';
+  document.getElementById('wiz-web-user').value = '';
+  document.getElementById('wiz-web-pass').value = '';
+  document.getElementById('wiz-learner-model').value = '';
+  document.getElementById('wiz-learning-mode').value = 'always';
+
+  // Pre-fill domain from current host, then override with shared defaults
+  const defs = await api('/api/defaults');
+  if (defs?.defaults) {
+    const d = defs.defaults;
+    if (d.ANIMA_WEB_AUTH_PASS) document.getElementById('wiz-web-pass').value = d.ANIMA_WEB_AUTH_PASS;
+  }
+
+  // Populate clone picker
+  const animasData = await api('/api/animas');
+  const sel = document.getElementById('wiz-clone-from');
+  sel.innerHTML = '<option value="">Fresh start — base source code</option>';
+  if (animasData?.animas) {
+    for (const a of animasData.animas) {
+      const opt = document.createElement('option');
+      opt.value = a.id;
+      opt.textContent = `Clone from ${a.displayName} (${a.id})`;
+      sel.appendChild(opt);
+    }
+  }
+
+  wizUpdateWeb();
+  wizUpdateIngress();
+  wizUpdateVoice();
+  wizUpdateTTS();
+  wizUpdateClone();
+  wizRender();
+  document.getElementById('wizard-overlay').style.display = 'flex';
+  document.getElementById('wiz-name').focus();
+}
+
+function wizClose() {
+  document.getElementById('wizard-overlay').style.display = 'none';
+}
+
+async function wizSkipToEnd() {
+  const name = document.getElementById('wiz-name').value.trim();
+  const agentId = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (!document.getElementById('wiz-nicknames').value.trim()) {
+    document.getElementById('wiz-nicknames').value = name.split(/\s+/)[0].toLowerCase();
+  }
+  if (!document.getElementById('wiz-web-user').value.trim()) {
+    document.getElementById('wiz-web-user').value = agentId;
+  }
+  document.getElementById('wiz-clone-from').value = '';
+  document.getElementById('wiz-copy-graph').value = 'false';
+  await wizNext_submit();
+}
+
+function wizGoAdvanced() {
+  wizAdvanced = true;
+  wizStep = 4;
+  wizRender();
+}
+
+function wizBack() {
+  if (wizStep <= 1) { wizClose(); return; }
+  if (wizStep === WIZ_STEPS && !wizAdvanced) { wizStep = 3; }
+  else if (wizStep === 4) { wizStep = 3; }
+  else { wizStep--; }
+  wizRender();
+}
+
+async function wizNext() {
+  const err = document.getElementById('wiz-error');
+  err.style.display = 'none';
+
+  if (wizStep === 1) {
+    const name = document.getElementById('wiz-name').value.trim();
+    if (!name) { err.textContent = 'Display name is required'; err.style.display = 'block'; return; }
+    if (!document.getElementById('wiz-nicknames').value.trim()) {
+      document.getElementById('wiz-nicknames').value = name.split(/\s+/)[0].toLowerCase();
+    }
+    const agentId = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (!document.getElementById('wiz-web-user').value.trim()) {
+      document.getElementById('wiz-web-user').value = agentId;
+    }
+  }
+
+  if (wizStep < WIZ_STEPS) {
+    wizStep++;
+    wizRender();
+    return;
+  }
+
+  await wizNext_submit();
+}
+
+async function wizNext_submit() {
+  const err = document.getElementById('wiz-error');
+  err.style.display = 'none';
+
+  const nextBtn = document.getElementById('wiz-next');
+  nextBtn.disabled = true;
+  nextBtn.textContent = 'Creating...';
+
+  const payload = {
+    displayName: document.getElementById('wiz-name').value.trim(),
+    nicknames: document.getElementById('wiz-nicknames').value.trim(),
+    vibe: document.getElementById('wiz-vibe').value.trim(),
+    commStyle: document.getElementById('wiz-comm').value.trim(),
+    quirks: document.getElementById('wiz-quirks').value.trim(),
+    interests: document.getElementById('wiz-interests').value.trim(),
+    discordToken: document.getElementById('wiz-discord').value.trim(),
+    telegramToken: document.getElementById('wiz-telegram').value.trim(),
+    slackBotToken: document.getElementById('wiz-slack-bot-token').value.trim(),
+    slackAppToken: document.getElementById('wiz-slack-app-token').value.trim(),
+    anthropicKey: document.getElementById('wiz-anthropic').value.trim(),
+    dmPolicy: document.getElementById('wiz-dm-policy').value,
+    webEnabled: document.getElementById('wiz-web-enabled').value === 'true',
+    webAuthUser: document.getElementById('wiz-web-user').value.trim(),
+    webAuthPass: document.getElementById('wiz-web-pass').value.trim(),
+    personalityEditable: document.getElementById('wiz-personality-editable').value === 'true',
+    srcEditable: document.getElementById('wiz-src-editable').value === 'true',
+    voiceEnabled: document.getElementById('wiz-voice-enabled').value === 'true',
+    ttsProvider: document.getElementById('wiz-tts-provider').value,
+    ttsVoice: document.getElementById('wiz-tts-voice').value.trim(),
+    ttsEdgeVoice: document.getElementById('wiz-tts-edge-voice').value.trim(),
+    cloneFrom: document.getElementById('wiz-clone-from').value,
+    copyGraph: document.getElementById('wiz-copy-graph').value === 'true',
+    learnerModel: document.getElementById('wiz-learner-model').value.trim(),
+    learningMode: document.getElementById('wiz-learning-mode').value,
+    superAgent: document.getElementById('wiz-super-agent').checked,
+    proactiveEnabled: document.getElementById('wiz-proactive').checked,
+  };
+
+  const data = await api('/api/animas', { method: 'POST', body: JSON.stringify(payload) });
+  if (data?.ok) {
+    wizClose();
+    toast(`Created ${payload.displayName}. Building container…`);
+    await loadDashboard();
+    const newId = data.id;
+    let pollCount = 0;
+    let buildDone = false;
+    const creationPoll = setInterval(async () => {
+      pollCount++;
+      if (pollCount > 60) { clearInterval(creationPoll); return; }
+      if (!buildDone) {
+        const bs = await api(`/api/animas/${newId}/build-status`).catch(() => null);
+        if (bs && bs.state === 'error') {
+          clearInterval(creationPoll);
+          await loadDashboard();
+          toast('Build failed — click the card for details', true);
+          return;
+        }
+        if (bs && bs.state === 'running') buildDone = true;
+      }
+      if (buildDone) {
+        const h = await api(`/api/animas/${newId}/health`).catch(() => null);
+        const dot = document.getElementById(`status-${newId}`);
+        if (h?.status === 'ok' || h?.status === 'up') {
+          if (dot) { dot.className = 'status-dot up'; }
+          clearInterval(creationPoll);
+          await loadDashboard();
+          showReadyPopup(payload.displayName, newId);
+          return;
+        }
+      }
+      await loadDashboard();
+    }, 4000);
+  } else {
+    err.textContent = data?.error || 'Create failed';
+    err.style.display = 'block';
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'Create';
+  }
+}
+
+function showReadyPopup(name, id) {
+  const cpUrl = `/animas/${id}/graph`;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;animation:fadeIn .3s';
+  overlay.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:32px 40px;max-width:420px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+    <h3 style="margin:0 0 8px;font-size:1.1rem;color:var(--text-bright)">${esc(name)} is live.</h3>
+    <p style="font-size:.82rem;color:var(--dim);margin:0 0 20px;line-height:1.5">Your Anima is running and ready. Click its card on the dashboard to chat, explore the knowledge graph, and use the terminal.</p>
+    ${cpUrl ? `<a href="${cpUrl}" target="_blank" style="display:inline-block;padding:10px 24px;background:var(--accent);color:#fff;border-radius:8px;text-decoration:none;font-size:.85rem;font-weight:600;margin-bottom:10px;transition:opacity .15s" onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">Open Now &rarr;</a><br>` : ''}
+    <button onclick="this.closest('div').parentElement.remove()" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:.78rem;padding:6px 12px;margin-top:4px">Close</button>
+  </div>`;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+function wizUpdateWeb() {
+  document.getElementById('wiz-web-fields').style.display = document.getElementById('wiz-web-enabled').value === 'true' ? 'block' : 'none';
+}
+function wizUpdateIngress() {}
+function wizUpdateVoice() {
+  document.getElementById('wiz-voice-fields').style.display = document.getElementById('wiz-voice-enabled').value === 'true' ? 'block' : 'none';
+}
+function wizUpdateTTS() {
+  const p = document.getElementById('wiz-tts-provider').value;
+  document.getElementById('wiz-tts-elevenlabs').style.display = (!p || p === 'elevenlabs') ? 'block' : 'none';
+  document.getElementById('wiz-tts-edge').style.display = p === 'edge' ? 'block' : 'none';
+}
+function wizUpdateClone() {
+  document.getElementById('wiz-clone-fields').style.display = document.getElementById('wiz-clone-from').value ? 'block' : 'none';
+}
+
+// Wizard can only be closed via the X button — not by clicking outside
+
+// ── Delete ──────────────────────────────────────────────────
+async function deleteAnima() {
+  if (!currentAnima) return;
+  const name = document.getElementById('detail-name').textContent;
+  if (!confirm(`Delete ${name} (${currentAnima.id})?\n\nThis will remove all files and data permanently.`)) return;
+  if (!confirm(`Are you absolutely sure? This cannot be undone.`)) return;
+
+  const id = currentAnima.id;
+  const data = await api(`/api/animas/${id}`, { method: 'DELETE' });
+  if (data?.ok) {
+    toast(`${name} queued for removal…`);
+    showDashboard();
+    const poll = setInterval(async () => {
+      const list = await api('/api/animas');
+      if (!list?.animas?.some(t => t.id === id)) {
+        clearInterval(poll);
+        toast(`${name} deleted`);
+        loadDashboard();
+      }
+    }, 2000);
+    setTimeout(() => clearInterval(poll), 30000);
+  } else {
+    toast(data?.error || 'Delete failed', true);
+  }
+}
+
+// ── Token Usage ─────────────────────────────────────────────
+let tokensLoaded = false;
+
+async function loadTokens() {
+  const body = document.getElementById('tokens-body');
+  body.innerHTML = '<div style="color:var(--muted);font-size:.85rem;padding:8px 0">Loading token usage…</div>';
+  tokensLoaded = false;
+
+  const data = await api(`/api/animas/${currentAnima.id}/tokens`);
+  if (!data || data.error) {
+    body.innerHTML = `<div style="color:var(--muted);font-size:.85rem;padding:8px 0">${data?.error || 'No token data available. The web server may not be enabled for this agent.'}</div>`;
+    return;
+  }
+
+  tokensLoaded = true;
+  renderTokenDashboard(body, data);
+}
+
+function renderTokenDashboard(body, data) {
+  const fmtN = n => (n||0).toLocaleString();
+  const fmtK = n => { n = n||0; return n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n); };
+  const fmtCost = c => c == null ? '—' : `$${parseFloat(c).toFixed(4)}`;
+  const rates = data.costRates || {};
+
+  function summaryCard(label, d, accent) {
+    const total = (d?.input||0) + (d?.output||0);
+    return `<div class="token-card">
+      <div class="tc-label">${label}</div>
+      <div class="tc-total" style="color:${accent||'var(--text)'}">${fmtK(total)}</div>
+      <div class="tc-cost">${fmtCost(d?.totalCost)}</div>
+      <div class="tc-sub">${fmtN(d?.calls||0)} calls · ${fmtK(d?.iters||0)} iters</div>
+    </div>`;
+  }
+
+  // 30-day bar chart
+  const chartDays = (data.daily || []).slice(0, 30).reverse();
+  const maxTotal = Math.max(...chartDays.map(d => (d.input||0)+(d.output||0)), 1);
+  const bars = chartDays.map(d => {
+    const tot = (d.input||0)+(d.output||0);
+    const h = Math.max(2, Math.round((tot/maxTotal)*66));
+    const tipText = `${d.date}: ${fmtN(tot)} tokens · ${d.calls} calls · ${fmtCost(d.totalCost)}`;
+    return `<div class="chart-bar" style="height:${h}px" title="${tipText}"></div>`;
+  }).join('');
+  const firstDate = chartDays[0]?.date?.slice(5) || '';
+  const lastDate  = chartDays[chartDays.length-1]?.date?.slice(5) || '';
+
+  // Dimension table builder
+  function dimTable(title, dimData, keyLabel) {
+    const entries = Object.entries(dimData || {})
+      .sort((a,b) => ((b[1].in||0)+(b[1].out||0)) - ((a[1].in||0)+(a[1].out||0)));
+    if (!entries.length) return `<div class="dim-table"><h4>${title}</h4><div style="color:var(--muted);font-size:.75rem">No data</div></div>`;
+    const rows = entries.map(([key, s]) => {
+      const tot = (s.in||0)+(s.out||0);
+      const cost = fmtCost((((s.in||0)/1e6)*( rates.inputPerM||3)) + (((s.out||0)/1e6)*(rates.outputPerM||15)));
+      return `<tr>
+        <td title="${key}">${key.length > 18 ? key.slice(0,16)+'…' : key}</td>
+        <td class="td-in">${fmtK(s.in||0)}</td>
+        <td class="td-out">${fmtK(s.out||0)}</td>
+        <td class="td-cost">${cost}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="dim-table"><h4>${title}</h4>
+      <table><thead><tr>
+        <th>${keyLabel}</th><th>in</th><th>out</th><th>cost</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  // Trigger label display names
+  function triggerLabel(key) {
+    const labels = { mention: '@mention', reply: 'reply', dm: 'DM', name: 'name', lull: 'lull', voice: 'voice', heartbeat: 'heartbeat', unknown: 'other' };
+    return labels[key] || key;
+  }
+  const triggerDim = {};
+  for (const [k,v] of Object.entries(data.byTrigger || {})) triggerDim[triggerLabel(k)] = v;
+
+  body.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="font-size:.7rem;color:var(--muted);font-family:var(--mono)">
+        est. @ $${rates.inputPerM||3}/M in · $${rates.outputPerM||15}/M out
+      </div>
+      <button class="tokens-refresh" onclick="tokensLoaded=false;loadTokens()">Refresh</button>
+    </div>
+
+    <div class="token-summary-row">
+      ${summaryCard('Today',    data.today,              '#4fd1c5')}
+      ${summaryCard('7 Days',   data.windows?.['7d'],    '#7fff7f')}
+      ${summaryCard('30 Days',  data.windows?.['30d'],   '#a78bfa')}
+      ${summaryCard('All Time', data.windows?.allTime,   '#f5a623')}
+    </div>
+
+    <div class="chart-wrap">
+      <div style="font-size:.7rem;color:var(--muted);font-family:var(--mono);margin-bottom:6px">
+        Daily token volume (last 30 days) — hover for details
+      </div>
+      <div class="chart-bars">${bars || '<div style="color:var(--muted);font-size:.8rem">No data yet</div>'}</div>
+      <div class="chart-labels"><span>${firstDate}</span><span>${lastDate}</span></div>
+    </div>
+
+    <div class="dim-grid">
+      ${dimTable('By Channel',  data.byChannel,  'channel')}
+      ${dimTable('By Trigger',  triggerDim,      'trigger')}
+      ${dimTable('By Platform', data.byPlatform, 'platform')}
+    </div>
+  `;
+}
+
+// ── Provider Quick Setup ────────────────────────────────────
+
+const PROVIDER_PRESETS = [
+  { id: 'anthropic', name: 'Anthropic', desc: 'Claude models', envKey: 'ANTHROPIC_API_KEY', keyHint: 'sk-ant-...', model: 'claude-sonnet-4-20250514', modelHint: 'claude-sonnet-4-20250514, claude-opus-4-20250514' },
+  { id: 'openai', name: 'OpenAI', desc: 'GPT & o-series models', envKey: 'OPENAI_API_KEY', keyHint: 'sk-...', model: 'gpt-4.1', modelHint: 'gpt-4.1, o3, o4-mini' },
+  { id: 'google', name: 'Google Gemini', desc: 'Gemini models', envKey: 'GEMINI_API_KEY', keyHint: 'AIza...', model: 'gemini-2.5-pro', modelHint: 'gemini-2.5-pro, gemini-2.5-flash' },
+  { id: 'openrouter', name: 'OpenRouter', desc: 'Multi-provider gateway', envKey: 'OPENROUTER_API_KEY', keyHint: 'sk-or-...', customProvider: true, url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4', modelHint: 'anthropic/claude-sonnet-4, openai/gpt-4.1' },
+  { id: 'together', name: 'Together AI', desc: 'Open-source models', customProvider: true, url: 'https://api.together.xyz/v1', keyHint: 'your-api-key', model: 'together/meta-llama/Llama-4-Scout-17B-16E', modelHint: 'together/meta-llama/Llama-4-Scout-17B-16E' },
+  { id: 'ollama', name: 'Ollama (Local)', desc: 'Run models locally', customProvider: true, url: 'http://localhost:11434/v1', noKey: true, model: 'ollama/llama3', modelHint: 'ollama/llama3, ollama/mistral' },
+  { id: 'custom', name: 'Custom Provider', desc: 'Any OpenAI-compatible API', customProvider: true, showUrl: true, keyHint: 'your-api-key' },
+];
+
+let _activePreset = null;
+
+function showProviderSetup() {
+  const overlay = document.getElementById('provider-setup-overlay');
+  overlay.style.display = 'flex';
+  showProviderPresets();
+}
+
+function closeProviderSetup() {
+  document.getElementById('provider-setup-overlay').style.display = 'none';
+}
+
+function showProviderPresets() {
+  document.getElementById('provider-form').style.display = 'none';
+  const grid = document.getElementById('provider-presets');
+  grid.style.display = 'grid';
+  grid.innerHTML = PROVIDER_PRESETS.map(p => `
+    <div onclick="selectProviderPreset('${p.id}')" style="padding:14px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+      <div style="font-weight:600;font-size:.88rem;margin-bottom:2px">${esc(p.name)}</div>
+      <div style="font-size:.74rem;color:var(--muted)">${esc(p.desc)}</div>
+    </div>
+  `).join('');
+}
+
+function selectProviderPreset(id) {
+  _activePreset = PROVIDER_PRESETS.find(p => p.id === id);
+  if (!_activePreset) return;
+  document.getElementById('provider-presets').style.display = 'none';
+  document.getElementById('provider-form').style.display = 'block';
+  document.getElementById('psetup-title').textContent = _activePreset.name;
+  document.getElementById('psetup-key').value = '';
+  document.getElementById('psetup-key').placeholder = _activePreset.keyHint || '';
+  document.getElementById('psetup-key-hint').textContent = _activePreset.envKey ? `Saved as ${_activePreset.envKey} in defaults` : '';
+
+  const urlRow = document.getElementById('psetup-url-row');
+  if (_activePreset.showUrl || (_activePreset.customProvider && !_activePreset.url)) {
+    urlRow.style.display = 'block';
+    document.getElementById('psetup-url').value = _activePreset.url || '';
+    document.getElementById('psetup-url').placeholder = 'https://api.example.com/v1';
+  } else {
+    urlRow.style.display = 'none';
+    document.getElementById('psetup-url').value = _activePreset.url || '';
+  }
+
+  const authRow = document.getElementById('psetup-auth-row');
+  authRow.style.display = _activePreset.customProvider ? 'block' : 'none';
+  document.getElementById('psetup-auth').value = _activePreset.authHeader || 'bearer';
+
+  const modelRow = document.getElementById('psetup-model-row');
+  modelRow.style.display = 'block';
+  document.getElementById('psetup-model').value = _activePreset.model || '';
+  document.getElementById('psetup-model').placeholder = _activePreset.modelHint || '';
+  document.getElementById('psetup-model-hint').textContent = _activePreset.modelHint ? `e.g. ${_activePreset.modelHint}` : '';
+  document.getElementById('psetup-status').style.display = 'none';
+
+  if (_activePreset.noKey) {
+    document.getElementById('psetup-key').placeholder = 'Not required';
+    document.getElementById('psetup-key-hint').textContent = 'Ollama does not require an API key';
+  }
+}
+
+async function testProviderSetup() {
+  const status = document.getElementById('psetup-status');
+  status.style.display = 'block';
+  status.style.color = 'var(--muted)';
+  status.textContent = 'Testing connection...';
+  try {
+    const url = document.getElementById('psetup-url').value.trim();
+    const key = document.getElementById('psetup-key').value.trim();
+    if (_activePreset.customProvider && url) {
+      const authHeader = document.getElementById('psetup-auth').value.trim() || 'bearer';
+      const data = await api('/api/providers/test', { method: 'POST', body: { url, key: key || undefined, authHeader } });
+      if (data?.ok) { status.style.color = 'var(--success)'; status.textContent = '✓ ' + (data.message || 'Connection successful'); }
+      else { status.style.color = 'var(--danger)'; status.textContent = '✗ ' + (data?.message || 'Connection failed'); }
+    } else {
+      status.style.color = 'var(--muted)';
+      status.textContent = 'Direct test not available for built-in providers. Save and create an agent to test.';
+    }
+  } catch (e) { status.style.color = 'var(--danger)'; status.textContent = '✗ ' + e.message; }
+}
+
+async function saveProviderSetup() {
+  const key = document.getElementById('psetup-key').value.trim();
+  const model = document.getElementById('psetup-model').value.trim();
+  const url = document.getElementById('psetup-url').value.trim();
+
+  if (!_activePreset.noKey && !key && !_activePreset.customProvider) {
+    const status = document.getElementById('psetup-status');
+    status.style.display = 'block';
+    status.style.color = 'var(--danger)';
+    status.textContent = 'API key is required';
+    return;
+  }
+
+  const updates = {};
+
+  const status = document.getElementById('psetup-status');
+
+  if (_activePreset.customProvider) {
+    const provName = _activePreset.id === 'custom' ? (url ? new URL(url).hostname.split('.')[0] : 'custom') : _activePreset.id;
+    const authHeader = document.getElementById('psetup-auth').value.trim() || 'bearer';
+    try {
+      const provResult = await api('/api/providers', { method: 'POST', body: { name: provName, url: url || _activePreset.url, key: key || undefined, authHeader, scope: 'global', description: _activePreset.desc || '' } });
+      if (provResult?.error) {
+        status.style.display = 'block'; status.style.color = 'var(--danger)';
+        status.textContent = 'Failed to save provider: ' + provResult.error;
+        return;
+      }
+    } catch (e) {
+      status.style.display = 'block'; status.style.color = 'var(--danger)';
+      status.textContent = 'Failed to save provider: ' + e.message;
+      return;
+    }
+    if (model) {
+      const prefixed = model.includes('/') ? model : `${provName}/${model}`;
+      updates['ANIMA_MODEL'] = prefixed;
+    }
+  } else {
+    if (_activePreset.envKey && key) {
+      updates[_activePreset.envKey] = key;
+    }
+    if (model) updates['ANIMA_MODEL'] = model;
+  }
+
+  if (Object.keys(updates).length) {
+    try {
+      const defResult = await api('/api/defaults', { method: 'PUT', body: updates });
+      if (defResult?.error) {
+        status.style.display = 'block'; status.style.color = 'var(--danger)';
+        status.textContent = 'Failed to save defaults: ' + defResult.error;
+        return;
+      }
+    } catch (e) {
+      status.style.display = 'block'; status.style.color = 'var(--danger)';
+      status.textContent = 'Failed to save defaults: ' + e.message;
+      return;
+    }
+  }
+
+  closeProviderSetup();
+  showCreateModal();
+}
+
+// ── Settings (shared defaults) ──────────────────────────────
+async function showSettings() {
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('users-view').style.display = 'none';
+  document.getElementById('settings-view').style.display = 'block';
+  document.getElementById('topbar').style.display = 'flex';
+  await loadDefaults();
+  loadIngress();
+  loadTunnelStatus();
+  ollamaRefresh();
+  loadAuthConfig();
+}
+
+function toggleExternalWarning() {
+  const checked = document.getElementById('ingress-external-access').checked;
+  document.getElementById('ingress-external-warning').style.display = checked ? 'block' : 'none';
+}
+
+async function loadIngress() {
+  const status = document.getElementById('ingress-status');
+  try {
+    const data = await api('/api/ingress');
+    if (!data) return;
+    document.getElementById('ingress-domain').value = data.domain || '';
+    document.getElementById('ingress-https').checked = data.https === true;
+    document.getElementById('ingress-email').value = data.email || '';
+    document.getElementById('ingress-external-access').checked = data.externalAccess === true;
+    toggleExternalWarning();
+    if (data.tailscale && data.tailscale.hostname) {
+      document.getElementById('tailscale-hostname').textContent = data.tailscale.hostname;
+      document.getElementById('tailscale-hint').style.display = 'block';
+    } else {
+      document.getElementById('tailscale-hint').style.display = 'none';
+    }
+    const running = data.traefikRunning;
+    const port = data.httpPort || 18000;
+    if (data.domain) {
+      const proto = data.https ? 'https' : 'http';
+      status.innerHTML = `<span style="color:${running ? 'var(--success)' : 'var(--danger)'}">&#9679;</span> Traefik ${running ? 'running' : 'stopped'} &mdash; <strong>${proto}://${esc(data.domain)}/</strong>`;
+    } else {
+      const portSuffix = port == 80 ? '' : ':' + port;
+      status.innerHTML = `<span style="color:${running ? 'var(--success)' : 'var(--danger)'}">&#9679;</span> Traefik ${running ? 'running' : 'stopped'} &mdash; <strong>http://localhost${portSuffix}/</strong>`;
+    }
+  } catch (e) { status.textContent = 'Failed to load ingress config'; }
+}
+
+async function saveIngress() {
+  const btn = document.getElementById('ingress-save-btn');
+  const status = document.getElementById('ingress-save-status');
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+  status.style.display = 'block';
+  status.style.color = 'var(--muted)';
+  status.textContent = 'Reconfiguring Traefik, manager, and all agents...';
+  try {
+    const data = await api('/api/ingress', { method: 'PUT', body: {
+      domain: document.getElementById('ingress-domain').value.trim(),
+      https: document.getElementById('ingress-https').checked,
+      email: document.getElementById('ingress-email').value.trim(),
+      externalAccess: document.getElementById('ingress-external-access').checked
+    }});
+    if (data?.ok) {
+      status.style.color = 'var(--success)';
+      const steps = data.steps || [];
+      status.textContent = 'Done! ' + steps.join(', ');
+      loadIngress();
+    } else {
+      status.style.color = 'var(--danger)';
+      status.textContent = data?.error || 'Failed';
+    }
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save & Apply';
+}
+
+async function loadTunnelStatus() {
+  const status = document.getElementById('tunnel-status');
+  const urlDisplay = document.getElementById('tunnel-url-display');
+  const startBtn = document.getElementById('tunnel-start-btn');
+  const stopBtn = document.getElementById('tunnel-stop-btn');
+  const urlLink = document.getElementById('tunnel-url-link');
+  try {
+    const data = await api('/api/tunnel/status');
+    if (!data) return;
+    if (data.running && data.url) {
+      status.innerHTML = '<span style="color:var(--success)">&#9679;</span> Tunnel active';
+      urlLink.href = data.url;
+      urlLink.textContent = data.url;
+      urlDisplay.style.display = 'block';
+      startBtn.style.display = 'none';
+      stopBtn.style.display = 'inline-flex';
+    } else if (data.running) {
+      status.innerHTML = '<span style="color:var(--warning, orange)">&#9679;</span> Tunnel starting...';
+      urlDisplay.style.display = 'none';
+      startBtn.disabled = true;
+      startBtn.style.display = 'inline-flex';
+      stopBtn.style.display = 'inline-flex';
+    } else {
+      const available = data.cloudflaredAvailable !== false;
+      status.textContent = available ? 'Tunnel stopped' : 'cloudflared not found — install it or pull the Docker image to enable';
+      urlDisplay.style.display = 'none';
+      startBtn.disabled = !available;
+      startBtn.style.display = 'inline-flex';
+      stopBtn.style.display = 'none';
+      if (data.error) status.textContent += ' (' + data.error + ')';
+    }
+  } catch { status.textContent = 'Failed to check tunnel status'; }
+}
+
+async function startTunnel() {
+  const btn = document.getElementById('tunnel-start-btn');
+  const status = document.getElementById('tunnel-status');
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  status.textContent = 'Launching cloudflared tunnel...';
+  try {
+    const data = await api('/api/tunnel/start', { method: 'POST', body: {} });
+    if (data?.url) {
+      status.innerHTML = '<span style="color:var(--success)">&#9679;</span> Tunnel active';
+      document.getElementById('tunnel-url-link').href = data.url;
+      document.getElementById('tunnel-url-link').textContent = data.url;
+      document.getElementById('tunnel-url-display').style.display = 'block';
+      btn.style.display = 'none';
+      document.getElementById('tunnel-stop-btn').style.display = 'inline-flex';
+    } else {
+      status.textContent = data?.message || 'Started — URL pending, refresh in a moment';
+    }
+  } catch (e) {
+    status.textContent = 'Failed: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Start Tunnel';
+}
+
+async function stopTunnel() {
+  const btn = document.getElementById('tunnel-stop-btn');
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  try {
+    await api('/api/tunnel/stop', { method: 'POST', body: {} });
+  } catch {}
+  await loadTunnelStatus();
+  btn.disabled = false;
+  btn.textContent = 'Stop Tunnel';
+}
+
+async function loadDefaults() {
+  const data = await api('/api/defaults');
+  if (!data) return;
+  const d = data.defaults || {};
+  document.querySelectorAll('[id^="def-"]').forEach(el => {
+    const key = el.id.replace('def-', '');
+    el.value = d[key] || '';
+  });
+}
+
+async function saveDefaults() {
+  const updates = {};
+  document.querySelectorAll('[id^="def-"]').forEach(el => {
+    const key = el.id.replace('def-', '');
+    updates[key] = el.tagName === 'SELECT' ? el.value : el.value;
+  });
+  const data = await api('/api/defaults', {
+    method: 'PUT', body: JSON.stringify(updates),
+  });
+  if (data?.ok) {
+    toast('Default keys saved. New animas will inherit these.');
+    await loadDefaults();
+  } else {
+    toast(data?.error || 'Save failed', true);
+  }
+}
+
+// ── Auth Config (Google OAuth) ───────────────────────────────
+
+async function loadAuthConfig() {
+  if (currentRole !== 'super') return;
+  try {
+    const data = await api('/api/auth/config');
+    if (!data) return;
+    const g = data.google || {};
+    document.getElementById('gauth-enabled').checked = !!g.enabled;
+    document.getElementById('gauth-client-id').value = g.clientId || '';
+    document.getElementById('gauth-client-secret').value = g.clientSecret || '';
+    document.getElementById('gauth-domain').value = g.allowedDomain || '';
+    document.getElementById('gauth-auto-create').checked = g.autoCreateUsers !== false;
+    document.getElementById('gauth-redirect-uri').value = data.redirectUri || '';
+    renderAllowedEmails(g.allowedEmails || []);
+  } catch {}
+}
+
+function renderAllowedEmails(emails) {
+  const list = document.getElementById('gauth-emails-list');
+  if (!list) return;
+  if (!emails.length) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:.78rem;padding:4px 0">No emails added yet.</div>';
+    return;
+  }
+  list.innerHTML = emails.map(e => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--card);border:1px solid var(--border);border-radius:6px;margin-bottom:4px">
+      <span style="font-family:var(--mono);font-size:.78rem">${esc(e)}</span>
+      <button onclick="removeAllowedEmail('${esc(e)}')" style="font-size:.68rem;color:var(--danger);padding:2px 8px">&times;</button>
+    </div>
+  `).join('');
+}
+
+async function addAllowedEmail() {
+  const input = document.getElementById('gauth-new-email');
+  const email = input.value.trim();
+  if (!email || !email.includes('@')) { toast('Enter a valid email', true); return; }
+  const data = await api('/api/auth/allowed-emails', {
+    method: 'POST', body: JSON.stringify({ email }),
+  });
+  if (data?.ok) {
+    input.value = '';
+    renderAllowedEmails(data.emails || []);
+    toast('Email added');
+  } else {
+    toast(data?.error || 'Failed', true);
+  }
+}
+
+async function removeAllowedEmail(email) {
+  const data = await api(`/api/auth/allowed-emails/${encodeURIComponent(email)}`, { method: 'DELETE' });
+  if (data?.ok) {
+    renderAllowedEmails(data.emails || []);
+    toast('Email removed');
+  } else {
+    toast(data?.error || 'Failed', true);
+  }
+}
+
+async function saveAuthConfig() {
+  const status = document.getElementById('gauth-save-status');
+  const config = {
+    google: {
+      enabled: document.getElementById('gauth-enabled').checked,
+      clientId: document.getElementById('gauth-client-id').value.trim(),
+      clientSecret: document.getElementById('gauth-client-secret').value,
+      allowedDomain: document.getElementById('gauth-domain').value.trim(),
+      autoCreateUsers: document.getElementById('gauth-auto-create').checked,
+    }
+  };
+  const data = await api('/api/auth/config', {
+    method: 'PUT', body: JSON.stringify(config),
+  });
+  if (data?.ok) {
+    toast('Authentication settings saved');
+    if (status) { status.textContent = 'Saved'; setTimeout(() => { status.textContent = ''; }, 2000); }
+  } else {
+    toast(data?.error || 'Save failed', true);
+  }
+}
+
+// ── Ollama Management ────────────────────────────────────────
+
+let _ollamaPollTimer = null;
+
+async function ollamaRefresh() {
+  const statusEl = document.getElementById('ollama-status');
+  const runningEl = document.getElementById('ollama-running');
+  const notRunningEl = document.getElementById('ollama-not-running');
+
+  const data = await api('/api/ollama/status');
+  if (data?.running) {
+    statusEl.innerHTML = '<span style="color:var(--ok)">&#9679;</span> Ollama running';
+    runningEl.style.display = 'block';
+    notRunningEl.style.display = 'none';
+    ollamaRenderModels(data.models || []);
+  } else {
+    statusEl.innerHTML = '<span style="color:var(--err)">&#9679;</span> Ollama not detected';
+    runningEl.style.display = 'none';
+    notRunningEl.style.display = 'block';
+  }
+}
+
+function ollamaRenderModels(models) {
+  const listEl = document.getElementById('ollama-models-list');
+  if (!models.length) {
+    listEl.innerHTML = '<span style="color:var(--muted)">No models installed. Pull one below.</span>';
+    return;
+  }
+  const rows = models.map(m => {
+    const sizeGB = (m.size / 1e9).toFixed(1);
+    return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span style="font-family:var(--mono)">${m.name}</span><span style="color:var(--muted)">${sizeGB} GB</span></div>`;
+  });
+  listEl.innerHTML = rows.join('');
+}
+
+async function ollamaPull() {
+  const input = document.getElementById('ollama-pull-model');
+  const model = input.value.trim();
+  if (!model) { toast('Enter a model name', true); return; }
+
+  const btn = document.getElementById('ollama-pull-btn');
+  const statusEl = document.getElementById('ollama-pull-status');
+  btn.disabled = true;
+  btn.textContent = 'Pulling...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = `Pulling ${model}...`;
+
+  await api('/api/ollama/pull', { method: 'POST', body: JSON.stringify({ model }) });
+  ollamaPollResult('pull', () => {
+    btn.disabled = false;
+    btn.textContent = 'Pull';
+    ollamaLoadModels();
+  });
+}
+
+function ollamaPollResult(action, onDone) {
+  if (_ollamaPollTimer) clearInterval(_ollamaPollTimer);
+  let checks = 0;
+  _ollamaPollTimer = setInterval(async () => {
+    checks++;
+    const data = await api('/api/ollama/result');
+    if (!data || data.status === 'no_result') {
+      if (checks > 120) { clearInterval(_ollamaPollTimer); onDone(); }
+      return;
+    }
+    if (data.action === action && data.ts && (data.ok !== undefined || data.status === 'pulling')) {
+      if (data.status === 'pulling') return;
+      clearInterval(_ollamaPollTimer);
+      const statusEl = document.getElementById('ollama-pull-status');
+      if (data.ok) {
+        toast(`${action} completed successfully.`);
+        if (statusEl) { statusEl.textContent = data.output || 'Done!'; setTimeout(() => statusEl.style.display = 'none', 5000); }
+      } else {
+        toast(`${action} failed: ${data.output || 'unknown error'}`, true);
+        if (statusEl) { statusEl.textContent = data.output || 'Failed'; statusEl.style.color = 'var(--err)'; }
+      }
+      onDone();
+    }
+  }, 3000);
+}
+
+// ── Fireflies Background ────────────────────────────────────
+(function initFireflies() {
+  const c = document.getElementById('starfield');
+  const ctx = c.getContext('2d');
+  let w, h, flies;
+  function resize() {
+    w = c.width = window.innerWidth;
+    h = c.height = window.innerHeight;
+    flies = Array.from({length: 80}, () => ({
+      x: Math.random() * w, y: Math.random() * h,
+      r: Math.random() * 2 + .8,
+      vx: (Math.random() - .5) * .3,
+      vy: (Math.random() - .5) * .25 - .05,
+      a: Math.random(),
+      phase: Math.random() * Math.PI * 2,
+      hue: 90 + Math.random() * 40,   // yellow-green range
+      glowSize: Math.random() * 6 + 3,
+    }));
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  let t = 0;
+  function frame() {
+    ctx.clearRect(0, 0, w, h);
+    t += .018;
+    for (const f of flies) {
+      f.x += f.vx + Math.sin(t * .4 + f.phase) * .18;
+      f.y += f.vy + Math.cos(t * .3 + f.phase * 1.3) * .12;
+      if (f.x < -10) f.x = w + 10;
+      if (f.x > w + 10) f.x = -10;
+      if (f.y < -10) f.y = h + 10;
+      if (f.y > h + 10) f.y = -10;
+      const pulse = .3 + Math.abs(Math.sin(t * 1.2 + f.phase)) * .7;
+      const alpha = pulse * .55;
+      ctx.save();
+      ctx.shadowBlur = f.glowSize;
+      ctx.shadowColor = `hsla(${f.hue},90%,65%,${alpha})`;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${f.hue},90%,75%,${alpha})`;
+      ctx.fill();
+      ctx.restore();
+    }
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+
+
+// ── Init ────────────────────────────────────────────────────
+checkAuth();
+
+// ── Plugin Management ───────────────────────────────────────
+let _pluginConfigId = null;
+
+async function loadPlugins(animaId) {
+  const el = document.getElementById('plugins-list');
+  el.innerHTML = '<div style="color:var(--muted);font-size:.85rem;padding:20px;text-align:center">Loading...</div>';
+  try {
+    const data = await api(`/api/animas/${animaId}/plugins`);
+    if (!data.plugins || data.plugins.length === 0) {
+      el.innerHTML = '<div style="color:var(--muted);font-size:.85rem;padding:20px;text-align:center;border:1px dashed var(--border);border-radius:var(--radius)">No plugins installed. Use the form above to add one.</div>';
+      return;
+    }
+    const rows = data.plugins.map(p => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px;background:var(--surface2)">
+        <div style="display:flex;align-items:center;gap:12px">
+          <span style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">${p.openclawCompat ? 'OC' : 'PLG'}</span>
+          <div>
+            <div style="font-weight:600;color:var(--text)">${p.name || p.id}</div>
+            <div style="font-size:.75rem;color:var(--muted)">${p.kind} &middot; v${p.version}${p.openclawCompat ? ' &middot; OpenClaw' : ''}</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button onclick="openPluginConfig('${p.id}')" style="font-size:.75rem;padding:5px 10px">Config</button>
+          <button class="danger" onclick="removePlugin('${p.id}')" style="font-size:.75rem;padding:5px 10px">Remove</button>
+        </div>
+      </div>
+    `).join('');
+    el.innerHTML = rows;
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);font-size:.85rem;padding:12px">${e.message}</div>`;
+  }
+}
+
+async function installPlugin() {
+  const pkg = document.getElementById('plugin-install-pkg').value.trim();
+  const source = document.getElementById('plugin-install-source').value;
+  if (!pkg) return toast('Enter a package name or URL', 'warn');
+  try {
+    toast('Installing plugin...', 'info');
+    const res = await api(`/api/animas/${currentAnima.id}/plugins`, { method: 'POST', body: JSON.stringify({ source, package: pkg }) });
+    toast(res.message || 'Plugin installed', 'ok');
+    document.getElementById('plugin-install-pkg').value = '';
+    loadPlugins(currentAnima.id);
+  } catch (e) {
+    toast(`Install failed: ${e.message}`, 'error');
+  }
+}
+
+async function removePlugin(pluginId) {
+  if (!confirm(`Remove plugin "${pluginId}"? The agent will restart.`)) return;
+  try {
+    const res = await api(`/api/animas/${currentAnima.id}/plugins/${pluginId}`, { method: 'DELETE' });
+    toast(res.message || 'Plugin removed', 'ok');
+    loadPlugins(currentAnima.id);
+  } catch (e) {
+    toast(`Remove failed: ${e.message}`, 'error');
+  }
+}
+
+async function openPluginConfig(pluginId) {
+  _pluginConfigId = pluginId;
+  document.getElementById('plugin-config-title').textContent = `Config: ${pluginId}`;
+  try {
+    const data = await api(`/api/animas/${currentAnima.id}/plugins/${pluginId}/config`);
+    document.getElementById('plugin-config-editor').value = JSON.stringify(data.config || {}, null, 2);
+  } catch {
+    document.getElementById('plugin-config-editor').value = '{}';
+  }
+  document.getElementById('plugin-config-modal').style.display = 'flex';
+}
+
+function closePluginConfig() {
+  document.getElementById('plugin-config-modal').style.display = 'none';
+  _pluginConfigId = null;
+}
+
+async function savePluginConfig() {
+  if (!_pluginConfigId) return;
+  try {
+    const raw = document.getElementById('plugin-config-editor').value;
+    const config = JSON.parse(raw);
+    const res = await api(`/api/animas/${currentAnima.id}/plugins/${_pluginConfigId}/config`, { method: 'PUT', body: JSON.stringify({ config }) });
+    toast(res.message || 'Config saved', 'ok');
+    closePluginConfig();
+  } catch (e) {
+    toast(`Save failed: ${e.message}`, 'error');
+  }
+}
+
+// ── Discord Config ──────────────────────────────────────────
+function populateDiscordTab(config) {
+  const guildsConfig = config?.guilds;
+  const listenChannels = config?.listenChannels;
+
+  if (guildsConfig && typeof guildsConfig === 'object' && Object.keys(guildsConfig).length > 0) {
+    document.getElementById('discord-listen-mode').value = 'guilds';
+    // Build textarea content: guildId or guildId:channelId per line
+    const lines = [];
+    for (const [gId, gConf] of Object.entries(guildsConfig)) {
+      if (!gConf.channels || gConf.channels.length === 0) {
+        lines.push(gId);
+      } else {
+        gConf.channels.forEach(ch => lines.push(gId + ':' + ch));
+      }
+    }
+    document.getElementById('discord-guilds-input').value = lines.join('\n');
+    document.getElementById('discord-guilds-section').style.display = 'block';
+  } else if (Array.isArray(listenChannels) && listenChannels.length > 0) {
+    document.getElementById('discord-listen-mode').value = 'guilds';
+    document.getElementById('discord-guilds-input').value = listenChannels.join('\n');
+    document.getElementById('discord-guilds-section').style.display = 'block';
+  } else {
+    document.getElementById('discord-listen-mode').value = 'all';
+    document.getElementById('discord-guilds-input').value = '';
+    document.getElementById('discord-guilds-section').style.display = 'none';
+  }
+
+  // Show current raw config
+  const el = document.getElementById('discord-current');
+  const raw = JSON.stringify({ guilds: guildsConfig, listenChannels }, null, 2);
+  if (guildsConfig || listenChannels) {
+    el.textContent = 'Current anima.json discord config:\n' + raw;
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+function updateDiscordMode() {
+  const mode = document.getElementById('discord-listen-mode').value;
+  document.getElementById('discord-guilds-section').style.display = mode === 'guilds' ? 'block' : 'none';
+}
+
+async function saveDiscordConfig() {
+  if (!currentAnima) return;
+  const mode = document.getElementById('discord-listen-mode').value;
+
+  let configPatch = {};
+
+  if (mode === 'all') {
+    // Remove any gating — set both to null to clear
+    configPatch = { guilds: null, listenChannels: null };
+  } else {
+    // Parse textarea: each line is guildId or guildId:channelId
+    const raw = document.getElementById('discord-guilds-input').value.trim();
+    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+
+    const guilds = {};
+    for (const line of lines) {
+      const parts = line.split(':');
+      const gId = parts[0].trim();
+      const chId = parts.slice(1).join(':').trim();
+      if (!gId) continue;
+      if (!guilds[gId]) guilds[gId] = { channels: [] };
+      if (chId) guilds[gId].channels.push(chId);
+    }
+
+    configPatch = { guilds, listenChannels: null };
+  }
+
+  const data = await api('/api/animas/' + currentAnima.id + '/config', {
+    method: 'PUT',
+    body: JSON.stringify({ config: configPatch }),
+  });
+
+  if (data?.ok) {
+    toast('Discord config saved. Changes take effect immediately (no restart needed).');
+    // Refresh currentAnima.config
+    const fresh = await api('/api/animas/' + currentAnima.id);
+    if (fresh) {
+      currentAnima.config = fresh.config;
+      populateDiscordTab(fresh.config);
+    }
+  } else {
+    toast(data?.error || 'Save failed', true);
+  }
+}
+
+// ── Lull Behavior ──────────────────────────────────────────
+const LULL_DEFAULTS = [
+  { content: 'The conversation has paused. You were NOT addressed directly.', importance: 10 },
+  { content: 'Only jump in if you can add genuine value — a fact, insight, joke, or perspective that moves the conversation forward.', importance: 9 },
+  { content: 'Do NOT respond just to clarify who you are, announce your presence, or correct someone for talking to someone else.', importance: 9 },
+  { content: 'If the conversation doesn\'t concern you or you have nothing meaningful to add, stay silent.', importance: 8 },
+];
+
+async function loadLullBehavior() {
+  if (!currentAnima) return;
+  const data = await api(`/api/animas/${currentAnima.id}/lull`);
+  const lines = data?.lines?.length ? data.lines : LULL_DEFAULTS;
+  renderLullLines(lines);
+}
+
+function renderLullLines(lines) {
+  const container = document.getElementById('lull-lines');
+  container.innerHTML = '';
+  lines.forEach((line, i) => {
+    const row = document.createElement('div');
+    row.className = 'form-row';
+    row.style.alignItems = 'flex-start';
+    row.innerHTML = `
+      <div class="form-group" style="flex:5">
+        <textarea class="lull-content" rows="2" style="width:100%;font-size:.85rem;resize:vertical">${escHtml(line.content || '')}</textarea>
+      </div>
+      <div class="form-group" style="flex:1;min-width:60px">
+        <input type="number" class="lull-importance" value="${line.importance || 8}" min="1" max="10" style="width:100%">
+      </div>
+      <button class="secondary" onclick="this.closest('.form-row').remove()" style="margin-top:2px;padding:4px 8px;font-size:.8rem" title="Remove">✕</button>
+    `;
+    container.appendChild(row);
+  });
+}
+
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function addLullLine() {
+  const container = document.getElementById('lull-lines');
+  const row = document.createElement('div');
+  row.className = 'form-row';
+  row.style.alignItems = 'flex-start';
+  row.innerHTML = `
+    <div class="form-group" style="flex:5">
+      <textarea class="lull-content" rows="2" style="width:100%;font-size:.85rem;resize:vertical" placeholder="New instruction..."></textarea>
+    </div>
+    <div class="form-group" style="flex:1;min-width:60px">
+      <input type="number" class="lull-importance" value="8" min="1" max="10" style="width:100%">
+    </div>
+    <button class="secondary" onclick="this.closest('.form-row').remove()" style="margin-top:2px;padding:4px 8px;font-size:.8rem" title="Remove">✕</button>
+  `;
+  container.appendChild(row);
+}
+
+async function saveLullBehavior() {
+  if (!currentAnima) return;
+  const lines = [];
+  document.querySelectorAll('#lull-lines .form-row').forEach(row => {
+    const content = row.querySelector('.lull-content')?.value?.trim();
+    const importance = parseInt(row.querySelector('.lull-importance')?.value) || 8;
+    if (content) lines.push({ content, importance });
+  });
+  if (!lines.length) { toast('Add at least one line', true); return; }
+  const data = await api(`/api/animas/${currentAnima.id}/lull`, { method: 'PUT', body: JSON.stringify({ lines }) });
+  if (data?.ok) {
+    toast('Lull behavior saved to graph. Takes effect on next lull (no restart needed).');
+  } else {
+    toast(data?.error || 'Save failed', true);
+  }
+}
+
+function resetLullDefaults() {
+  renderLullLines(LULL_DEFAULTS);
+  toast('Defaults loaded — click Save to apply.');
+}
+
+// ── Super Agent ────────────────────────────────────────────
+async function toggleSuperAgent(enabled) {
+  if (!currentAnima) return;
+  const data = await api(`/api/animas/${currentAnima.id}/config`, {
+    method: 'PUT',
+    body: JSON.stringify({ config: { superAgent: enabled } }),
+  });
+  if (data?.ok) {
+    currentAnima.config.superAgent = enabled;
+    toast(enabled ? 'Super Agent enabled. Restart to activate orchestrator tools.' : 'Super Agent disabled. Restart to remove orchestrator tools.');
+  } else {
+    toast(data?.error || 'Failed to update', true);
+    document.getElementById('cfg-superAgent').checked = !enabled;
+  }
+}
+
+// ── Proactive Outreach ────────────────────────────────────
+function loadProactiveConfig() {
+  if (!currentAnima) return;
+  const env = currentAnima.env || {};
+  const enabled = env.ANIMA_PROACTIVE_ENABLED === 'true';
+  document.getElementById('cfg-proactiveEnabled').checked = enabled;
+  document.getElementById('cfg-proactiveCooldown').value = env.ANIMA_PROACTIVE_COOLDOWN || 180;
+  document.getElementById('cfg-proactiveMaxDay').value = env.ANIMA_PROACTIVE_MAX_DAY || 3;
+  document.getElementById('cfg-proactiveChannels').value = env.ANIMA_PROACTIVE_CHANNELS || '';
+  document.getElementById('proactive-settings').style.display = enabled ? 'block' : 'none';
+
+  document.getElementById('cfg-proactiveEnabled').onchange = function() {
+    document.getElementById('proactive-settings').style.display = this.checked ? 'block' : 'none';
+  };
+}
+
+async function saveProactiveConfig() {
+  if (!currentAnima) return;
+  const enabled = document.getElementById('cfg-proactiveEnabled').checked;
+  const cooldown = parseInt(document.getElementById('cfg-proactiveCooldown').value) || 180;
+  const maxDay = parseInt(document.getElementById('cfg-proactiveMaxDay').value) || 3;
+  const channels = document.getElementById('cfg-proactiveChannels').value.trim();
+
+  document.getElementById('proactive-settings').style.display = enabled ? 'block' : 'none';
+
+  const data = await api(`/api/animas/${currentAnima.id}/config`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      config: {
+        proactiveEnabled: enabled,
+        proactiveCooldown: cooldown,
+        proactiveMaxDay: maxDay,
+        proactiveChannels: channels,
+      }
+    }),
+  });
+  if (data?.ok) {
+    Object.assign(currentAnima.config, {
+      proactiveEnabled: enabled, proactiveCooldown: cooldown,
+      proactiveMaxDay: maxDay, proactiveChannels: channels,
+    });
+    toast(enabled ? 'Proactive outreach enabled. Restart to activate.' : 'Proactive outreach disabled.');
+  } else {
+    toast(data?.error || 'Save failed', true);
+  }
+}
+
+// ── Theme Definitions ────────────────────────────────────────
+const THEMES = {
+  midnight: {
+    label: 'Zinc', swatch: '#0a0a0a',
+    vars: {},
+    particles: { count: 80, speed: 0.4, colors: ['59,130,246','139,92,246'], lineColor: '59,130,246', maxDist: 140, mouseRadius: 180, mouseForce: 0.02, glow: true, damping: 0.99 },
+  },
+  dark: {
+    label: 'Dark', swatch: '#18181b',
+    vars: {
+      '--bg':'#09090b','--surface':'#18181b','--surface2':'#27272a','--border':'#27272a','--border2':'#3f3f46',
+      '--accent':'#3b82f6','--accent2':'#8b5cf6','--accent3':'#f59e0b','--warn':'#f59e0b','--danger':'#ef4444',
+      '--text':'#d4d4d8','--muted':'#71717a','--dim':'#3f3f46',
+      '--input-bg':'#18181b','--glow':'none','--glow-accent':'none',
+    },
+    particles: null,
+  },
+  paper: {
+    label: 'Paper', swatch: '#f5f3ef',
+    vars: {
+      '--bg':'#f5f3ef','--surface':'#ffffff','--surface2':'#ece8e0','--border':'#c8c0b4','--border2':'#b0a898',
+      '--accent':'#2563eb','--accent2':'#7c3aed','--accent3':'#b45309','--warn':'#b45309','--danger':'#dc2626',
+      '--text':'#1a1a1a','--muted':'#6b6560','--dim':'#d4cec4',
+      '--input-bg':'#ffffff','--input-text':'#1a1a1a',
+      '--glow':'0 0 12px rgba(37,99,235,.08)','--glow-accent':'0 0 10px rgba(124,58,237,.06)',
+    },
+    particles: null,
+  },
+  terminal: {
+    label: 'Terminal', swatch: '#000000',
+    vars: {
+      '--bg':'#000000','--surface':'#0a0a0a','--surface2':'#111111','--border':'#1a3a1a','--border2':'#1f4a1f',
+      '--accent':'#33ff33','--accent2':'#00cc00','--accent3':'#ffcc00','--warn':'#ffcc00','--danger':'#ff3333',
+      '--text':'#33ff33','--muted':'#1a6b1a','--dim':'#0d2e0d',
+      '--input-bg':'#0a0a0a',
+      '--glow':'0 0 20px rgba(51,255,51,.08)','--glow-accent':'0 0 14px rgba(0,204,0,.1)',
+    },
+    particles: null,
+  },
+  ember: {
+    label: 'Ember', swatch: '#1a1210',
+    vars: {
+      '--bg':'#12100e','--surface':'#1a1614','--surface2':'#211c18','--border':'#3a2e24','--border2':'#4a3b2e',
+      '--accent':'#f59e0b','--accent2':'#ef4444','--accent3':'#f97316','--warn':'#f97316','--danger':'#ef4444',
+      '--text':'#e8d5c0','--muted':'#7a6a58','--dim':'#3a2e24',
+      '--input-bg':'#1a1614',
+      '--glow':'0 0 20px rgba(245,158,11,.08)','--glow-accent':'0 0 14px rgba(239,68,68,.1)',
+    },
+    particles: { count: 45, speed: 0.15, colors: ['245,158,11','239,68,68'], lineColor: '245,158,11', maxDist: 0, mouseRadius: 100, mouseForce: 0.005, glow: true, damping: 0.995, drift: -0.03 },
+  },
+  arctic: {
+    label: 'Arctic', swatch: '#e8edf4',
+    vars: {
+      '--bg':'#e8edf4','--surface':'#f0f4f9','--surface2':'#d8e0ec','--border':'#b0bad0','--border2':'#98a6c0',
+      '--accent':'#2563eb','--accent2':'#4f46e5','--accent3':'#0369a1','--warn':'#d97706','--danger':'#dc2626',
+      '--text':'#0f172a','--muted':'#5a6a80','--dim':'#c0cada',
+      '--input-bg':'#f0f4f9','--input-text':'#0f172a',
+      '--glow':'0 0 12px rgba(37,99,235,.08)','--glow-accent':'0 0 10px rgba(79,70,229,.06)',
+    },
+    particles: { count: 35, speed: 0.1, colors: ['37,99,235','79,70,229','3,105,161'], lineColor: '37,99,235', maxDist: 0, mouseRadius: 0, mouseForce: 0, glow: false, damping: 0.998, drift: 0.02 },
+  },
+  neon: {
+    label: 'Neon', swatch: '#0d0520',
+    vars: {
+      '--bg':'#0a0318','--surface':'#0d0520','--surface2':'#150830','--border':'#2a1050','--border2':'#3a1870',
+      '--accent':'#ff2d95','--accent2':'#00f0ff','--accent3':'#bf5af2','--warn':'#fbbf24','--danger':'#ff2d55',
+      '--text':'#e0d0f0','--muted':'#6040a0','--dim':'#2a1050',
+      '--input-bg':'#0d0520',
+      '--glow':'0 0 20px rgba(255,45,149,.1)','--glow-accent':'0 0 14px rgba(0,240,255,.12)',
+    },
+    particles: { count: 100, speed: 0.6, colors: ['255,45,149','0,240,255','191,90,242'], lineColor: '255,45,149', maxDist: 120, mouseRadius: 200, mouseForce: 0.03, glow: true, damping: 0.985 },
+  },
+  forest: {
+    label: 'Forest', swatch: '#0a1a0a',
+    vars: {
+      '--bg':'#080e08','--surface':'#0e1a0e','--surface2':'#142214','--border':'#1e3a1e','--border2':'#2a4a2a',
+      '--accent':'#4ade80','--accent2':'#a3e635','--accent3':'#84cc16','--warn':'#eab308','--danger':'#ef4444',
+      '--text':'#c0dcc0','--muted':'#4a7a4a','--dim':'#1e3a1e',
+      '--input-bg':'#0e1a0e',
+      '--glow':'0 0 20px rgba(74,222,128,.06)','--glow-accent':'0 0 14px rgba(163,230,53,.08)',
+    },
+    particles: { count: 40, speed: 0.2, colors: ['74,222,128','163,230,53','132,204,22'], lineColor: '74,222,128', maxDist: 100, mouseRadius: 150, mouseForce: 0.008, glow: true, damping: 0.997 },
+  },
+};
+
+// ── Theme Application ────────────────────────────────────────
+let _currentTheme = 'midnight';
+let _particleRaf = null;
+
+function applyTheme(name) {
+  const theme = THEMES[name] || THEMES.midnight;
+  _currentTheme = name;
+  const root = document.documentElement.style;
+  // Clear all overrides first
+  const allVars = new Set();
+  Object.values(THEMES).forEach(t => Object.keys(t.vars).forEach(k => allVars.add(k)));
+  allVars.forEach(k => root.removeProperty(k));
+  // Apply new vars
+  Object.entries(theme.vars).forEach(([k, v]) => root.setProperty(k, v));
+  // Update body::before gradient based on accent colors
+  localStorage.setItem('anima-theme', name);
+  // Restart particles
+  startParticles(theme.particles);
+  // Update picker active state
+  document.querySelectorAll('.theme-option').forEach(el => {
+    el.classList.toggle('active', el.dataset.theme === name);
+  });
+}
+
+function renderThemePicker() {
+  const picker = document.getElementById('theme-picker');
+  picker.innerHTML = Object.entries(THEMES).map(([key, t]) =>
+    `<div class="theme-option${key === _currentTheme ? ' active' : ''}" data-theme="${key}" onclick="selectTheme('${key}')">
+      <div class="theme-swatch" style="background:${t.swatch}"></div>${t.label}</div>`
+  ).join('');
+}
+
+function toggleThemePicker() {
+  const p = document.getElementById('theme-picker');
+  p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
+document.addEventListener('click', e => {
+  const wrap = document.getElementById('theme-picker-wrap');
+  if (wrap && !wrap.contains(e.target)) {
+    document.getElementById('theme-picker').style.display = 'none';
+  }
+});
+
+async function selectTheme(name) {
+  applyTheme(name);
+  document.getElementById('theme-picker').style.display = 'none';
+  await api('/api/preferences', { method: 'PUT', body: JSON.stringify({ theme: name }) });
+}
+
+async function loadThemePreference() {
+  const cached = localStorage.getItem('anima-theme');
+  if (cached && THEMES[cached]) applyTheme(cached);
+  try {
+    const data = await api('/api/preferences');
+    if (data?.theme && THEMES[data.theme]) applyTheme(data.theme);
+  } catch {}
+}
+
+renderThemePicker();
+
+// ── Particle System (parameterized) ─────────────────────────
+function startParticles(cfg) {
+  const canvas = document.getElementById('particle-canvas');
+  if (!canvas) return;
+  if (_particleRaf) { cancelAnimationFrame(_particleRaf); _particleRaf = null; }
+  if (!cfg) { canvas.style.display = 'none'; return; }
+  canvas.style.display = 'block';
+  const ctx = canvas.getContext('2d');
+  let W, H, particles = [], mouse = { x: -1000, y: -1000 };
+  const { count, speed, colors, lineColor, maxDist, mouseRadius, mouseForce, glow, damping, drift } = cfg;
+
+  function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+  window.addEventListener('resize', resize);
+  resize();
+
+  particles = [];
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x: Math.random() * W, y: Math.random() * H,
+      vx: (Math.random() - 0.5) * speed, vy: (Math.random() - 0.5) * speed + (drift || 0),
+      r: Math.random() * 1.5 + 0.5,
+      color: colors[Math.floor(Math.random() * colors.length)],
+    });
+  }
+
+  document.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  document.addEventListener('mouseleave', () => { mouse.x = -1000; mouse.y = -1000; });
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0) p.x = W; if (p.x > W) p.x = 0;
+      if (p.y < 0) p.y = H; if (p.y > H) p.y = 0;
+
+      if (mouseRadius > 0) {
+        const dx = mouse.x - p.x, dy = mouse.y - p.y;
+        const dm = Math.sqrt(dx * dx + dy * dy);
+        if (dm < mouseRadius) {
+          const force = (mouseRadius - dm) / mouseRadius * mouseForce;
+          p.vx -= dx * force; p.vy -= dy * force;
+        }
+      }
+      p.vx *= damping; p.vy *= damping;
+      if (drift) p.vy += drift * 0.01;
+
+      const dx2 = mouse.x - p.x, dy2 = mouse.y - p.y;
+      const dm2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+      const alpha = glow && mouseRadius > 0 && dm2 < mouseRadius ? 0.3 + (1 - dm2 / mouseRadius) * 0.5 : 0.35;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${p.color},${alpha})`;
+      ctx.fill();
+
+      if (maxDist > 0) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const q = particles[j];
+          const ex = p.x - q.x, ey = p.y - q.y;
+          const dist = Math.sqrt(ex * ex + ey * ey);
+          if (dist < maxDist) {
+            const la = (1 - dist / maxDist) * 0.12;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
+            ctx.strokeStyle = `rgba(${lineColor},${la})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+          }
+        }
+      }
+    }
+    _particleRaf = requestAnimationFrame(draw);
+  }
+  draw();
+}
+
+// Boot with default (or cached) theme
+startParticles(THEMES[localStorage.getItem('anima-theme') || 'midnight']?.particles ?? THEMES.midnight.particles);
+</script>
+</body>
+</html>

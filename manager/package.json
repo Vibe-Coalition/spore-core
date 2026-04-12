@@ -1,0 +1,17 @@
+{
+  "name": "anima-manager",
+  "version": "1.0.0",
+  "description": "Secure web-based management UI for all Anima instances",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.20.0"
+  }
+}

@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    {{- include "anima.labels" . | nindent 4 }}
+data:
+  ANIMA_MODEL: {{ .Values.agent.model | quote }}
+  AGENT_ID: {{ .Values.agent.agentId | quote }}
+  ANIMA_DISPLAY_NAME: {{ .Values.agent.displayName | quote }}
+  ANIMA_HEALTH_PORT: {{ .Values.agent.healthPort | quote }}
+  HEALTH_BIND_ADDR: {{ .Values.agent.healthBindAddr | quote }}
+  ANIMA_LEARNER_MODEL: {{ .Values.agent.learnerModel | quote }}
+  ANIMA_LEARNING_MODE: {{ .Values.agent.learningMode | quote }}
+  ANIMA_MAX_TOKENS: {{ .Values.agent.maxTokens | quote }}
+  ANIMA_CONTEXT_WINDOW: {{ .Values.agent.contextWindow | quote }}
+  GRAPH_DB_PATH: /data/graph.db
+  SESSION_DB_PATH: /data/sessions.db
+  ANIMA_WORKSPACE_PATH: /workspace
+  ANIMA_PLUGINS_DIR: {{ .Values.agent.pluginsDir | quote }}
+  MANAGER_URL: "http://{{ include "anima.managerFullname" . }}:{{ .Values.manager.port }}"
+  {{- if .Values.agent.web.enabled }}
+  ANIMA_WEB_PORT: {{ .Values.agent.web.port | quote }}
+  {{- if .Values.agent.web.authUser }}
+  ANIMA_WEB_AUTH_USER: {{ .Values.agent.web.authUser | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.agent.voice.enabled }}
+  ANIMA_VOICE_ENABLED: "true"
+  {{- end }}

@@ -1,0 +1,105 @@
+# Default values for Anima Helm chart
+
+image:
+  repository: ghcr.io/Klace/anima
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+managerImage:
+  repository: ghcr.io/Klace/anima-manager
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# --- Manager ---
+manager:
+  enabled: true
+  replicas: 1
+  port: 18900
+  credentials:
+    user: admin
+    # password: set via --set or secrets
+  serviceKey: ""  # MANAGER_SERVICE_KEY — shared between manager and agents
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# --- Agent ---
+agent:
+  model: claude-sonnet-4-6
+  agentId: anima
+  displayName: Anima
+  healthPort: 18790
+  healthBindAddr: "0.0.0.0"  # Must be 0.0.0.0 for K8s probes
+  maxTokens: 8192
+  contextWindow: 200000
+  learnerModel: claude-haiku-4-5
+  learningMode: always
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  persistence:
+    enabled: true
+    storageClass: ""  # Use cluster default
+    dataSize: 1Gi     # graph.db + sessions.db
+    workspaceSize: 5Gi
+
+  # Discord gateway
+  discord:
+    enabled: false
+    # token: set via --set or secrets
+
+  # Telegram gateway
+  telegram:
+    enabled: false
+    # botToken: set via --set or secrets
+
+  # Web panel
+  web:
+    enabled: false
+    port: 3000
+    authUser: ""
+    authPass: ""
+
+  # Voice
+  voice:
+    enabled: false
+
+  # Plugins directory (relative to workspace)
+  pluginsDir: /workspace/plugins
+
+# --- Multi-agent ---
+# Define additional agents as a list. Each inherits defaults from agent.* above.
+agents: []
+  # - agentId: sophia
+  #   displayName: Sophia
+  #   discord:
+  #     enabled: true
+  #     token: ""
+
+# --- Ingress ---
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: anima.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- Network Policy ---
+networkPolicy:
+  enabled: false

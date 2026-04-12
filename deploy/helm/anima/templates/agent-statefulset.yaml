@@ -1,0 +1,157 @@
+{{- $root := . -}}
+{{- $defaultAgent := .Values.agent -}}
+{{- $allAgents := list (dict "agentId" $defaultAgent.agentId "displayName" $defaultAgent.displayName "discord" $defaultAgent.discord "telegram" $defaultAgent.telegram "web" $defaultAgent.web "voice" $defaultAgent.voice "resources" $defaultAgent.resources) -}}
+{{- range .Values.agents }}
+{{- $allAgents = append $allAgents . }}
+{{- end }}
+
+{{- range $agent := $allAgents }}
+{{- $agentId := $agent.agentId | default $defaultAgent.agentId }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $root.Release.Name }}-agent-{{ $agentId }}
+  labels:
+    {{- include "anima.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: agent
+    anima.io/agent-id: {{ $agentId }}
+spec:
+  serviceName: {{ $root.Release.Name }}-agent-{{ $agentId }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "anima.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: agent
+      anima.io/agent-id: {{ $agentId }}
+  template:
+    metadata:
+      labels:
+        {{- include "anima.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: agent
+        anima.io/agent-id: {{ $agentId }}
+    spec:
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: {{ $defaultAgent.healthPort }}
+              protocol: TCP
+            {{- if ($agent.web).enabled | default false }}
+            - name: web
+              containerPort: {{ ($agent.web).port | default $defaultAgent.web.port }}
+              protocol: TCP
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ $root.Release.Name }}-config
+          env:
+            - name: AGENT_ID
+              value: {{ $agentId | quote }}
+            - name: ANIMA_DISPLAY_NAME
+              value: {{ $agent.displayName | default $defaultAgent.displayName | quote }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-secrets
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: MANAGER_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-secrets
+                  key: MANAGER_SERVICE_KEY
+                  optional: true
+            {{- if ($agent.discord).enabled | default false }}
+            - name: DISCORD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-secrets
+                  key: DISCORD_TOKEN
+                  optional: true
+            {{- end }}
+            {{- if ($agent.telegram).enabled | default false }}
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-secrets
+                  key: TELEGRAM_BOT_TOKEN
+                  optional: true
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: workspace
+              mountPath: /workspace
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml ($agent.resources | default $defaultAgent.resources) | nindent 12 }}
+  volumeClaimTemplates:
+    {{- if $defaultAgent.persistence.enabled }}
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if $defaultAgent.persistence.storageClass }}
+        storageClassName: {{ $defaultAgent.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $defaultAgent.persistence.dataSize }}
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if $defaultAgent.persistence.storageClass }}
+        storageClassName: {{ $defaultAgent.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $defaultAgent.persistence.workspaceSize }}
+    {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-agent-{{ $agentId }}
+  labels:
+    {{- include "anima.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: agent
+    anima.io/agent-id: {{ $agentId }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $defaultAgent.healthPort }}
+      targetPort: health
+      protocol: TCP
+      name: health
+    {{- if ($agent.web).enabled | default false }}
+    - port: {{ ($agent.web).port | default $defaultAgent.web.port }}
+      targetPort: web
+      protocol: TCP
+      name: web
+    {{- end }}
+  selector:
+    {{- include "anima.selectorLabels" $root | nindent 4 }}
+    app.kubernetes.io/component: agent
+    anima.io/agent-id: {{ $agentId }}
+{{- end }}

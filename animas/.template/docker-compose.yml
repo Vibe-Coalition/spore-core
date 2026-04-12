@@ -1,0 +1,84 @@
+services:
+  anima:
+    build:
+      context: ./src
+      dockerfile: Dockerfile
+    image: anima-${AGENT_ID:-anima}:latest
+    container_name: ${AGENT_ID:-anima}
+    restart: unless-stopped
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    security_opt:
+      - no-new-privileges:true
+
+    env_file:
+      - .env
+
+    environment:
+      - GRAPH_DB_PATH=/data/graph.db
+      - SESSION_DB_PATH=/data/sessions.db
+      - ANIMA_WORKSPACE_PATH=/workspace
+      - ANIMA_LOG_LEVEL=${ANIMA_LOG_LEVEL:-info}
+      - ANIMA_HEALTH_PORT=${ANIMA_HEALTH_PORT:-18790}
+
+    volumes:
+      - ./data:/data
+      - ./.env:/data/.env:ro
+      - ./anima.json:/app/anima.json:ro
+      - ./workspace:/workspace
+      - ssh-sidecar-sock:/run/ssh-sidecar:ro
+      # Host read access (uncomment and set ANIMA_HOST_READ_PATHS if using):
+      # - /home/ubuntu:/host/home/ubuntu:ro
+
+    ports:
+      - "127.0.0.1:${ANIMA_HEALTH_PORT:-18790}:${ANIMA_HEALTH_PORT:-18790}"
+      - "127.0.0.1:${ANIMA_WEB_PORT:-18800}:${ANIMA_WEB_PORT:-18800}"
+
+    networks:
+      - default
+      - anima-web
+
+    depends_on:
+      ssh-sidecar:
+        condition: service_started
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    stop_grace_period: 10s
+
+  ssh-sidecar:
+    image: anima-ssh-sidecar:latest
+    container_name: ${AGENT_ID:-anima}-ssh-sidecar
+    restart: unless-stopped
+    network_mode: "none"
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - SIDECAR_PASSPHRASE=${ANIMA_WEB_AUTH_PASS:?Set ANIMA_WEB_AUTH_PASS in .env before starting}
+      - SIDECAR_SOCKET=/run/ssh-sidecar/sidecar.sock
+      - SIDECAR_STORE=/data/ssh-hosts.json
+    volumes:
+      - ssh-sidecar-sock:/run/ssh-sidecar
+      - ./data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+volumes:
+  ssh-sidecar-sock:
+
+networks:
+  anima-web:
+    external: true

@@ -1,0 +1,74 @@
+{
+  "agentId": "anima",
+  "casualModel": "claude-haiku-4-5",
+  "normalModel": "claude-sonnet-4-6",
+  "plannerModel": "claude-opus-4-6",
+  "subagentModel": "claude-sonnet-4-6",
+  "learnerModel": "claude-haiku-4-5",
+  "maxTokens": 8192,
+  "contextWindow": 200000,
+  "graphDbPath": "./data/graph.db",
+  "maxSessionMessages": 50,
+  "compactTokenThreshold": 80000,
+  "compactKeepTail": 20,
+  "sessionIdleTimeoutMinutes": 60,
+  "sessionDailyResetHour": 4,
+  "maxMessageLength": 2000,
+  "typingInterval": 5000,
+  "maxQueuePerChannel": 3,
+  "messageDebounceMs": 400,
+  "heartbeatIntervalMinutes": 120,
+  "agentTimeoutMs": 600000,
+  "healthPort": 18790,
+  "logLevel": "info",
+  "guilds": {},
+  "privacy": {
+    "default": {
+      "private": false,
+      "learn": true,
+      "shareToFeed": true,
+      "respond": true
+    },
+    "platforms": {},
+    "sources": {}
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "dmPolicy": "pairing",
+      "groupPolicy": "open",
+      "allowFrom": [],
+      "groupAllowFrom": [],
+      "requireMention": true,
+      "streaming": "partial",
+      "textChunkLimit": 4000,
+      "chunkMode": "length",
+      "reactions": false,
+      "webhookPath": "/webhooks/telegram"
+    },
+    "slack": {
+      "enabled": false,
+      "requireMention": true,
+      "textChunkLimit": 3000,
+      "dmPolicy": "open"
+    }
+  },
+  "maxConcurrent": 6,
+  "maxSubagentChildren": 8,
+  "dmMaxIterations": 20,
+  "subagentMaxIter": 50,
+  "subagentTimeoutSeconds": 1200,
+  "maintainerIdleOnly": true,
+  "stallSoftMs": 8000,
+  "stallHardMs": 25000,
+  "allowBots": false,
+  "flushMessageThreshold": 30,
+  "lullMaxIterations": 4,
+  "loopDetection": {
+    "warn": 5,
+    "critical": 10,
+    "pingPong": 8,
+    "ceiling": 50,
+    "budgetPressure": 15
+  }
+}

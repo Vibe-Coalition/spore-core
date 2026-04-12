@@ -1,0 +1,15 @@
+{
+  "name": "anima-ssh-sidecar",
+  "version": "1.0.0",
+  "description": "Credential isolation sidecar for SSH key management",
+  "main": "ssh-sidecar.js",
+  "scripts": {
+    "start": "node ssh-sidecar.js"
+  },
+  "dependencies": {
+    "ssh2": "^1.16.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

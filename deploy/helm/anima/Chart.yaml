@@ -1,0 +1,15 @@
+apiVersion: v2
+name: anima
+description: Anima — visual agentic system with persistent knowledge graph memory
+type: application
+version: 0.3.0
+appVersion: "0.3.0"
+keywords:
+  - ai
+  - agent
+  - knowledge-graph
+  - discord
+  - telegram
+home: https://github.com/Klace/anima
+maintainers:
+  - name: anima-maintainers

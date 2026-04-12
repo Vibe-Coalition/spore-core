@@ -1,0 +1,21 @@
+Anima has been deployed!
+
+{{- if .Values.manager.enabled }}
+Manager: {{ include "anima.managerFullname" . }}:{{ .Values.manager.port }}
+{{- end }}
+
+Agent: {{ .Release.Name }}-agent-{{ .Values.agent.agentId }}
+
+To check agent health:
+  kubectl port-forward svc/{{ .Release.Name }}-agent-{{ .Values.agent.agentId }} {{ .Values.agent.healthPort }}:{{ .Values.agent.healthPort }}
+  curl http://localhost:{{ .Values.agent.healthPort }}/health
+
+{{- if .Values.ingress.enabled }}
+Ingress: {{ range .Values.ingress.hosts }}{{ .host }}{{ end }}
+{{- end }}
+
+IMPORTANT: Set API keys via secrets:
+  kubectl create secret generic {{ .Release.Name }}-secrets \
+    --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+    --from-literal=DISCORD_TOKEN=... \
+    --from-literal=MANAGER_SERVICE_KEY=...

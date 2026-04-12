@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Providers</title>
+<script>
+(function() {
+  var p = location.pathname;
+  var base = '/';
+  var idx = p.indexOf('/manager');
+  if (idx !== -1) base = p.substring(0, idx) + '/manager/';
+  var b = document.createElement('base');
+  b.href = base;
+  document.head.appendChild(b);
+})();
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@300;400;500;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0a;--surface:#121212;--surface2:#171717;--border:#262626;--border2:#333;
+  --accent:#3b82f6;--accent2:#8b5cf6;--accent3:#f59e0b;--warn:#f59e0b;--danger:#ef4444;
+  --text:#ededed;--muted:#737373;--dim:#404040;
+  --input-bg:#171717;--input-text:var(--text);
+  --font:'Geist',system-ui,-apple-system,sans-serif;--mono:'Geist Mono',monospace;
+  --radius:8px;--success:#22c55e;
+}
+html{font-size:14px}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent2)}
+input,select,textarea{
+  background:var(--input-bg);color:var(--input-text);border:1px solid var(--border);
+  border-radius:var(--radius);padding:9px 14px;font-family:var(--mono);font-size:.82rem;
+  width:100%;outline:none;transition:border-color .15s;
+}
+input:focus,select:focus{border-color:var(--border2);box-shadow:0 0 0 1px var(--border2)}
+button{
+  background:transparent;color:var(--text);border:1px solid var(--border);
+  border-radius:var(--radius);padding:9px 18px;font-family:var(--font);font-size:.82rem;
+  cursor:pointer;transition:all .15s;letter-spacing:.02em;
+}
+button:hover{border-color:var(--border2);background:var(--surface2)}
+button.primary{background:#fafafa;color:#0a0a0a;border:none;font-weight:600}
+button.primary:hover{background:#e4e4e7}
+button.danger{border-color:var(--danger);color:var(--danger)}
+button.danger:hover{background:var(--danger);color:#fff}
+button.sm{padding:5px 12px;font-size:.75rem}
+
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 24px;height:52px;border-bottom:1px solid var(--border);
+  background:var(--bg);position:sticky;top:0;z-index:100;
+}
+.topbar h1{font-size:.9rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
+.topbar .actions{display:flex;gap:8px;align-items:center}
+
+.container{max-width:960px;margin:0 auto;padding:24px}
+
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1rem}
+.card h2{font-size:1rem;font-weight:600;margin-bottom:1rem;display:flex;align-items:center;gap:8px}
+.card h2 .count{font-size:.75rem;color:var(--muted);font-weight:400}
+
+.form-row{display:flex;gap:12px;margin-bottom:12px;align-items:flex-end}
+.form-row .field{flex:1}
+.form-row .field label{display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono)}
+
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono);padding:8px 12px;border-bottom:1px solid var(--border)}
+td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:.85rem;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--surface2)}
+.prov-name{font-family:var(--mono);font-weight:500;color:var(--accent)}
+.prov-url{font-family:var(--mono);color:var(--muted);font-size:.78rem;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scope-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.72rem;font-family:var(--mono);background:var(--surface2);border:1px solid var(--border)}
+.scope-badge.global{color:var(--success);border-color:rgba(34,197,94,0.3)}
+.scope-badge.scoped{color:var(--accent3);border-color:rgba(245,158,11,0.3)}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.72rem;font-family:var(--mono);background:var(--surface2);border:1px solid var(--border)}
+.badge.yes{color:var(--success);border-color:rgba(34,197,94,0.3)}
+.badge.no{color:var(--muted);border-color:var(--border)}
+.actions-cell{display:flex;gap:6px;justify-content:flex-end}
+button.test{border-color:var(--accent2);color:var(--accent2)}
+button.test:hover{background:var(--accent2);color:#fff}
+.test-result{margin-top:8px;padding:8px 12px;border-radius:var(--radius);font-size:.82rem;font-family:var(--mono);display:none}
+.test-result.ok{display:block;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);color:var(--success)}
+.test-result.fail{display:block;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:var(--danger)}
+.test-result.loading{display:block;background:var(--surface2);border:1px solid var(--border);color:var(--muted)}
+.empty{text-align:center;padding:2rem;color:var(--muted);font-size:.85rem}
+.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:var(--radius);font-size:.85rem;z-index:200;transition:all .3s;opacity:0;transform:translateY(10px)}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.ok{background:var(--success);color:#000}
+.toast.err{background:var(--danger);color:#fff}
+.desc{font-size:.78rem;color:var(--muted)}
+
+.help{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:1rem;font-size:.82rem;color:var(--muted);line-height:1.6}
+.help code{font-family:var(--mono);color:var(--accent);font-size:.78rem;background:var(--bg);padding:1px 5px;border-radius:3px}
+
+#edit-modal{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.6)}
+#edit-modal.show{display:flex}
+#edit-modal .modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;width:520px;max-width:90vw}
+#edit-modal .modal h3{font-size:1rem;margin-bottom:1rem}
+#edit-modal .modal .field{margin-bottom:12px}
+#edit-modal .modal .field label{display:block;font-size:.72rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono)}
+#edit-modal .modal .btn-row{display:flex;gap:8px;justify-content:flex-end;margin-top:1rem}
+.inline-row{display:flex;gap:12px}
+.inline-row .field{flex:1}
+.model-list{margin-top:8px;font-size:.82rem}
+.model-list table{margin-top:4px}
+.model-list td{padding:5px 10px;font-size:.78rem}
+.model-list th{padding:5px 10px;font-size:.7rem}
+.cap-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.68rem;font-family:var(--mono);margin:0 2px}
+.cap-badge.on{background:rgba(34,197,94,0.15);color:var(--success);border:1px solid rgba(34,197,94,0.3)}
+.cap-badge.off{background:var(--surface2);color:var(--dim);border:1px solid var(--border)}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-dot.online{background:var(--success)}
+.status-dot.offline{background:var(--danger)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>LLM Providers</h1>
+  <div class="actions">
+    <a href="./">&#8592; Manager</a>
+  </div>
+</div>
+
+<div class="container">
+  <div class="help">
+    Define custom OpenAI-compatible LLM endpoints. Use the provider name as a model prefix
+    (e.g. <code>together/llama-4</code>, <code>groq/llama-4-scout</code>).
+    Animas pull this config at boot — no <code>.env</code> changes needed.
+    Providers can also be set per-anima via <code>ANIMA_PROVIDER_*</code> env vars (env takes precedence).
+  </div>
+
+  <div class="card">
+    <h2>Add Provider</h2>
+    <form id="add-form">
+      <div class="form-row">
+        <div class="field" style="flex:1"><label>Provider Name</label><input id="add-name" placeholder="together" required pattern="[a-zA-Z][a-zA-Z0-9_]*"></div>
+        <div class="field" style="flex:3"><label>Base URL <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(without /chat/completions)</span></label><input id="add-url" placeholder="https://api.example.com/v1" required></div>
+      </div>
+      <div class="form-row">
+        <div class="field" style="flex:2"><label>API Key</label><input id="add-key" type="password" placeholder="sk-... (encrypted at rest)"></div>
+        <div class="field" style="flex:1">
+          <label>Auth Header</label>
+          <input id="add-auth" list="auth-presets" placeholder="bearer" value="bearer">
+          <datalist id="auth-presets">
+            <option value="bearer">Authorization: Bearer (default)</option>
+            <option value="x-api-key">x-api-key</option>
+            <option value="x-key">x-key</option>
+            <option value="api-key">api-key (Azure)</option>
+          </datalist>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Scope</label><input id="add-scope" placeholder="global (or comma-separated anima names)" value="global"></div>
+        <div class="field"><label>Description</label><input id="add-desc" placeholder="Optional description"></div>
+        <div style="flex-shrink:0;display:flex;gap:8px;align-items:flex-end">
+          <div><label>&nbsp;</label><button type="button" class="test sm" onclick="testFromForm()">Test &amp; Discover</button></div>
+          <div><label>&nbsp;</label><button type="submit" class="primary">Add Provider</button></div>
+        </div>
+      </div>
+      <div class="test-result" id="add-test-result"></div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Configured Providers <span class="count" id="prov-count"></span></h2>
+    <div id="prov-table"></div>
+  </div>
+</div>
+
+<div id="edit-modal">
+  <div class="modal">
+    <h3 id="edit-title">Edit Provider</h3>
+    <div class="field"><label>Provider Name</label><input id="edit-name" readonly></div>
+    <div class="field"><label>Base URL</label><input id="edit-url" placeholder="https://api.example.com/v1"></div>
+    <div class="field"><label>API Key (leave blank to keep current)</label><input id="edit-key" type="password" placeholder="Leave blank to keep current"></div>
+    <div class="field">
+      <label>Auth Header</label>
+      <input id="edit-auth" list="auth-presets" placeholder="bearer" value="bearer">
+    </div>
+    <div class="inline-row">
+      <div class="field"><label>Scope</label><input id="edit-scope" placeholder="global"></div>
+      <div class="field"><label>Description</label><input id="edit-desc"></div>
+    </div>
+    <div class="test-result" id="edit-test-result"></div>
+    <div class="btn-row">
+      <button onclick="closeEdit()">Cancel</button>
+      <button class="test" onclick="testFromEdit()">Test &amp; Discover</button>
+      <button class="primary" onclick="saveEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const BASE = (() => {
+  const p = location.pathname.replace(/\/providers\.html.*$/, '');
+  return p || '';
+})();
+
+let CSRF = '';
+
+async function init() {
+  try {
+    const r = await fetch(BASE + '/api/auth/check', { credentials: 'include' });
+    const d = await r.json();
+    if (!d.authenticated || d.role !== 'super') { location.href = BASE + '/'; return; }
+    CSRF = d.csrf || '';
+    load();
+  } catch { location.href = BASE + '/'; }
+}
+
+function toast(msg, ok = true) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + (ok ? 'ok' : 'err');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.className = 'toast', 3000);
+}
+
+async function api(path, opts = {}) {
+  const fetchOpts = { method: opts.method || 'GET', credentials: 'include', headers: {} };
+  if (CSRF) fetchOpts.headers['X-CSRF-Token'] = CSRF;
+  if (opts.body && typeof opts.body === 'object') {
+    fetchOpts.headers['Content-Type'] = 'application/json';
+    fetchOpts.body = JSON.stringify(opts.body);
+  }
+  const r = await fetch(BASE + path, fetchOpts);
+  if (r.status === 401) { location.href = BASE + '/'; return null; }
+  return r.json();
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+async function load() {
+  const data = await api('/api/providers');
+  if (!data) return;
+  const el = document.getElementById('prov-table');
+  document.getElementById('prov-count').textContent = `(${data.providers.length})`;
+  if (!data.providers.length) { el.innerHTML = '<div class="empty">No providers configured yet. Add one above.</div>'; return; }
+  el.innerHTML = `<table><thead><tr><th>Name</th><th>URL</th><th>Auth</th><th>Scope</th><th>Key</th><th></th></tr></thead><tbody>${
+    data.providers.map(p => `<tr>
+      <td class="prov-name">${esc(p.name)}</td>
+      <td class="prov-url" title="${esc(p.url)}">${esc(p.url)}</td>
+      <td><span class="badge">${esc(p.authHeader || 'bearer')}</span></td>
+      <td><span class="scope-badge ${p.scope === 'global' ? 'global' : 'scoped'}">${esc(p.scope)}</span></td>
+      <td><span class="badge ${p.hasKey ? 'yes' : 'no'}">${p.hasKey ? '●●●' : 'none'}</span></td>
+      <td><div class="actions-cell">
+        <button class="sm test" onclick="testSaved('${esc(p.name)}', this)">Discover</button>
+        <button class="sm" onclick="editProv(${esc(JSON.stringify(p))})">Edit</button>
+        <button class="sm danger" onclick="deleteProv('${esc(p.name)}')">Delete</button>
+      </div></td>
+    </tr>`).join('')
+  }</tbody></table>`;
+}
+
+function cleanBaseUrl(raw) {
+  return raw.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '');
+}
+
+document.getElementById('add-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('add-name').value.trim().toLowerCase();
+  const url = cleanBaseUrl(document.getElementById('add-url').value.trim());
+  const key = document.getElementById('add-key').value;
+  const authHeader = document.getElementById('add-auth').value;
+  const scope = document.getElementById('add-scope').value.trim() || 'global';
+  const description = document.getElementById('add-desc').value.trim();
+  if (!name || !url) return;
+  const data = await api('/api/providers', {
+    method: 'POST', body: { name, url, key: key || undefined, authHeader, scope, description },
+  });
+  if (data?.ok) {
+    toast(`Provider "${name}" saved`);
+    document.getElementById('add-form').reset();
+    document.getElementById('add-scope').value = 'global';
+    load();
+  } else toast(data?.error || 'Failed', false);
+});
+
+async function deleteProv(name) {
+  if (!confirm(`Delete provider "${name}"? Animas using ${name}/ models will fail.`)) return;
+  const data = await api(`/api/providers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (data?.ok) { toast(`Provider "${name}" deleted`); load(); }
+  else toast(data?.error || 'Failed', false);
+}
+
+let _editOrig = null;
+function editProv(p) {
+  _editOrig = p;
+  document.getElementById('edit-name').value = p.name;
+  document.getElementById('edit-url').value = p.url || '';
+  document.getElementById('edit-key').value = '';
+  document.getElementById('edit-auth').value = p.authHeader || 'bearer';
+  document.getElementById('edit-scope').value = p.scope || 'global';
+  document.getElementById('edit-desc').value = p.description || '';
+  document.getElementById('edit-title').textContent = `Edit: ${p.name}`;
+  document.getElementById('edit-test-result').className = 'test-result';
+  document.getElementById('edit-modal').classList.add('show');
+}
+function closeEdit() { document.getElementById('edit-modal').classList.remove('show'); }
+async function saveEdit() {
+  const name = document.getElementById('edit-name').value;
+  const url = cleanBaseUrl(document.getElementById('edit-url').value.trim());
+  const key = document.getElementById('edit-key').value;
+  const authHeader = document.getElementById('edit-auth').value;
+  const scope = document.getElementById('edit-scope').value.trim() || 'global';
+  const description = document.getElementById('edit-desc').value.trim();
+  if (!url) { toast('URL is required', false); return; }
+  const body = { name, url, authHeader, scope, description };
+  if (key) body.key = key;
+  const data = await api('/api/providers', { method: 'POST', body });
+  if (data?.ok) { toast(`Provider "${name}" updated`); closeEdit(); load(); }
+  else toast(data?.error || 'Failed', false);
+}
+
+document.getElementById('edit-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('edit-modal')) closeEdit();
+});
+
+function showTestResult(elId, state, msg, models) {
+  const el = document.getElementById(elId);
+  el.className = 'test-result ' + state;
+  if (!models || !models.length) {
+    el.innerHTML = esc(msg);
+    return;
+  }
+  const capBadge = (name, on) => `<span class="cap-badge ${on ? 'on' : 'off'}">${name}</span>`;
+  const rows = models.map(m => {
+    const dot = `<span class="status-dot ${m.status}"></span>`;
+    const statusText = m.status === 'online' ? 'online' : (m.detail || 'offline');
+    const caps = [
+      capBadge('tools', m.caps?.tools),
+      capBadge('vision', m.caps?.vision),
+      capBadge('audio', m.caps?.audio),
+      capBadge('video', m.caps?.video),
+    ].join('');
+    return `<tr><td style="font-family:var(--mono);font-weight:500">${dot}${esc(m.id)}</td><td>${caps}</td><td style="color:var(--muted)">${esc(statusText)}</td></tr>`;
+  }).join('');
+  el.innerHTML = `${esc(msg)}<div class="model-list"><table><thead><tr><th>Model</th><th>Capabilities (inferred)</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+async function runTest(params, resultElId) {
+  showTestResult(resultElId, 'loading', 'Discovering models...');
+  try {
+    const data = await api('/api/providers/test', { method: 'POST', body: params });
+    if (!data) return;
+    showTestResult(resultElId, data.ok ? 'ok' : 'fail', data.message || (data.ok ? 'Success' : 'Failed'), data.models);
+  } catch (e) { showTestResult(resultElId, 'fail', e.message); }
+}
+
+function testFromForm() {
+  const url = cleanBaseUrl(document.getElementById('add-url').value.trim());
+  const key = document.getElementById('add-key').value;
+  const authHeader = document.getElementById('add-auth').value;
+  if (!url) { showTestResult('add-test-result', 'fail', 'Enter a URL first'); return; }
+  runTest({ url, key, authHeader }, 'add-test-result');
+}
+
+function testFromEdit() {
+  const name = document.getElementById('edit-name').value;
+  const url = cleanBaseUrl(document.getElementById('edit-url').value.trim());
+  const key = document.getElementById('edit-key').value;
+  const authHeader = document.getElementById('edit-auth').value;
+  if (!url) { showTestResult('edit-test-result', 'fail', 'Enter a URL first'); return; }
+  runTest({ name, url, key: key || undefined, authHeader }, 'edit-test-result');
+}
+
+async function testSaved(name, btn) {
+  const origText = btn.textContent;
+  btn.textContent = '...';
+  btn.disabled = true;
+  try {
+    const data = await api('/api/providers/test', { method: 'POST', body: { name } });
+    if (!data) return;
+    // Find or create a result row below the provider row
+    const row = btn.closest('tr');
+    let resultRow = row.nextElementSibling;
+    if (!resultRow || !resultRow.classList.contains('discover-row')) {
+      resultRow = document.createElement('tr');
+      resultRow.className = 'discover-row';
+      resultRow.innerHTML = '<td colspan="6"><div class="test-result" id="discover-' + esc(name) + '"></div></td>';
+      row.after(resultRow);
+    }
+    const elId = 'discover-' + name;
+    showTestResult(elId, data.ok ? 'ok' : 'fail', data.message || 'Failed', data.models);
+    if (data.ok) toast(`${name}: ${data.message}`);
+    else toast(`${name}: ${data.message}`, false);
+  } catch (e) { toast(e.message, false); }
+  finally { btn.textContent = origText; btn.disabled = false; }
+}
+
+init();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

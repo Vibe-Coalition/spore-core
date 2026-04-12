@@ -1,0 +1,31 @@
+{
+  "name": "anima",
+  "version": "0.3.0",
+  "description": "Visual agentic system — autonomous AI agents with persistent knowledge graph memory",
+  "main": "app.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node app.js",
+    "test": "node test.js",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker logs -f ${AGENT_ID:-anima}"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@discordjs/voice": "^0.18.0",
+    "@discordjs/opus": "^0.9.0",
+    "libsodium-wrappers": "^0.7.15",
+    "prism-media": "^1.3.5",
+    "ws": "^8.18.0",
+    "@slack/bolt": "^4.4.0",
+    "node-pty": "^1.0.0",
+    "ssh2": "^1.16.0",
+    "playwright-core": "^1.50.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT"
+}

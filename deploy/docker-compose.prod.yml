@@ -1,0 +1,103 @@
+# Production Docker Compose — hardened deployment
+# Usage: docker compose -f deploy/docker-compose.prod.yml up -d
+#
+# Prerequisites:
+#   1. Build images: docker compose -f docker-compose.yml --profile build build
+#   2. Create .env.prod with your secrets (see .env.prod.example)
+#   3. Create Docker secrets: echo "your-key" | docker secret create anthropic_api_key -
+
+version: "3.8"
+
+networks:
+  anima-internal:
+    driver: bridge
+    internal: true
+  anima-web:
+    driver: bridge
+
+services:
+  manager:
+    image: anima-manager:latest
+    container_name: anima-manager
+    restart: unless-stopped
+    networks:
+      - anima-internal
+      - anima-web
+    ports:
+      - "127.0.0.1:18900:18900"
+    environment:
+      MANAGER_PORT: "18900"
+      MANAGER_USER: "${MANAGER_USER:-admin}"
+      MANAGER_PASS: "${MANAGER_PASS}"
+      MANAGER_SERVICE_KEY: "${MANAGER_SERVICE_KEY}"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18900/api/auth/check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  agent:
+    image: anima:latest
+    container_name: anima-agent
+    restart: unless-stopped
+    depends_on:
+      manager:
+        condition: service_healthy
+    networks:
+      - anima-internal
+      - anima-web
+    ports:
+      - "127.0.0.1:18790:18790"
+    environment:
+      AGENT_ID: "${AGENT_ID:-anima}"
+      ANIMA_DISPLAY_NAME: "${ANIMA_DISPLAY_NAME:-Anima}"
+      ANIMA_MODEL: "${ANIMA_MODEL:-claude-sonnet-4-6}"
+      ANIMA_LEARNER_MODEL: "${ANIMA_LEARNER_MODEL:-claude-haiku-4-5}"
+      ANIMA_HEALTH_PORT: "18790"
+      HEALTH_BIND_ADDR: "127.0.0.1"
+      GRAPH_DB_PATH: "/data/graph.db"
+      SESSION_DB_PATH: "/data/sessions.db"
+      ANIMA_WORKSPACE_PATH: "/workspace"
+      MANAGER_URL: "http://anima-manager:18900"
+      MANAGER_SERVICE_KEY: "${MANAGER_SERVICE_KEY}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      DISCORD_TOKEN: "${DISCORD_TOKEN:-}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      ANIMA_DISCORD_ADMINS: "${ANIMA_DISCORD_ADMINS:-}"
+      ANIMA_PLUGINS_DIR: "/workspace/plugins"
+    volumes:
+      - agent-data:/data
+      - agent-workspace:/workspace
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18790/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  agent-data:
+    driver: local
+  agent-workspace:
+    driver: local

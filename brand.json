@@ -1,0 +1,12 @@
+{
+  "name": "Anima",
+  "tagline": "Into The New",
+  "manager": "Anima Manager",
+  "agent": "anima",
+  "agents": "animas",
+  "Agent": "Anima",
+  "Agents": "Animas",
+  "createVerb": "Create",
+  "createdVerb": "created",
+  "company": "Anima"
+}

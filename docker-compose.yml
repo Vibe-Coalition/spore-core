@@ -1,0 +1,16 @@
+# Builds the shared anima:latest base image from src/.
+# Individual agents live in animas/<name>/docker-compose.yml
+#
+# Build:   docker compose build
+# Or:      docker build -t anima:latest src/
+#
+# Then create an agent:
+#   ./new-agent.sh
+
+services:
+  anima-build:
+    build: ./src
+    image: anima:latest
+    profiles:
+      - build
+    command: echo "Image built as anima:latest"
