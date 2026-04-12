@@ -454,6 +454,15 @@ class AgentLoop {
 
             this.log.info(`Tool call: ${toolBlock.name}(${JSON.stringify(toolBlock.input).substring(0, 100)})`);
 
+            if (toolBlock.input?._parse_error) {
+              this.log.warn(`[agent] Tool ${toolBlock.name}: argument JSON was malformed`);
+              return {
+                type: 'tool_result',
+                tool_use_id: toolBlock.id,
+                content: JSON.stringify({ error: toolBlock.input._parse_error }),
+              };
+            }
+
             const callHash = this._hashToolCall(toolBlock.name, toolBlock.input);
             const loopCheck = this._checkToolLoop(loopTracker, callHash, toolBlock.name);
 

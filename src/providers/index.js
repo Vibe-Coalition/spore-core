@@ -301,7 +301,9 @@ function fromOAIResponse(oaiResp) {
     if (text) content.push({ type: 'text', text });
     for (const tc of msg.tool_calls) {
       let input = {};
-      try { input = JSON.parse(tc.function.arguments || '{}'); } catch {}
+      try { input = JSON.parse(tc.function.arguments || '{}'); } catch (parseErr) {
+        input = { _parse_error: `Tool arguments were malformed JSON and could not be parsed. Raw args (first 500 chars): ${(tc.function.arguments || '').substring(0, 500)}` };
+      }
       content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
     }
   } else {
@@ -638,7 +640,9 @@ class OAICompatClient {
           if (fullText) content.push({ type: 'text', text: fullText });
           for (const tc of serverToolCalls) {
             let input = {};
-            try { input = JSON.parse(tc.args || '{}'); } catch {}
+            try { input = JSON.parse(tc.args || '{}'); } catch (parseErr) {
+              input = { _parse_error: `Tool arguments were malformed JSON and could not be parsed. Raw args (first 500 chars): ${(tc.args || '').substring(0, 500)}` };
+            }
             content.push({ type: 'tool_use', id: tc.id, name: tc.name, input });
           }
         } else {
