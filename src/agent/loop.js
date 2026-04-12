@@ -482,7 +482,15 @@ class AgentLoop {
             graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
             if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { } }
             const toolExecStart = Date.now();
-            const result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+            let result;
+            if (opts.onToolExecute) {
+              result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
+              if (result === null || result === undefined) {
+                result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+              }
+            } else {
+              result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+            }
             let resultContent = JSON.stringify(result);
 
             const toolExecMs = Date.now() - toolExecStart;

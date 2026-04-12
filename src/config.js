@@ -294,6 +294,9 @@ function loadConfigFresh() {
   if (process.env.ANIMA_WEB_AUTH_USER) config.webAuthUser = process.env.ANIMA_WEB_AUTH_USER;
   if (process.env.ANIMA_WEB_AUTH_PASS) config.webAuthPass = process.env.ANIMA_WEB_AUTH_PASS;
 
+  // Acorn CLI team key
+  if (process.env.ANIMA_ACORN_KEY) config.acornKey = process.env.ANIMA_ACORN_KEY;
+
   // Public URL (set by manager during creation, or derived from legacy ingress vars)
   if (process.env.ANIMA_PUBLIC_URL) {
     config.publicUrl = process.env.ANIMA_PUBLIC_URL.replace(/\/+$/, '');
