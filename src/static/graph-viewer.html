@@ -6830,14 +6830,15 @@ async function fpViewFile(filePath, name) {
     : `${API}/files/${encodeURIComponent(filePath)}`;
 
   if (isImageFile(name)) {
+    const bustUrl = fileUrl + (fileUrl.includes('?') ? '&' : '?') + '_t=' + Date.now();
     if (remote) {
       try {
-        const r = await fetch(fileUrl, { headers: authHeaders() });
+        const r = await fetch(bustUrl, { headers: authHeaders() });
         const blob = await r.blob();
         fpViewerContent.innerHTML = `<img src="${URL.createObjectURL(blob)}" alt="${esc(name)}">`;
       } catch { fpViewerContent.innerHTML = '<div style="padding:14px;color:var(--danger)">Failed to load image</div>'; }
     } else {
-      fpViewerContent.innerHTML = `<img src="${fileUrl}" alt="${esc(name)}">`;
+      fpViewerContent.innerHTML = `<img src="${bustUrl}" alt="${esc(name)}">`;
     }
     return;
   }

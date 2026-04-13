@@ -1125,7 +1125,12 @@ class WebGateway {
           const data = fs.readFileSync(filePath);
           const ext = path.extname(filePath).toLowerCase();
           const params = new URL(req.url, 'http://x').searchParams;
-          const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+          const stat = fs.statSync(filePath);
+          const headers = {
+            'Content-Type': MIME[ext] || 'application/octet-stream',
+            'Cache-Control': 'no-cache',
+            'ETag': `"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`,
+          };
           if (params.get('download') === '1') {
             headers['Content-Disposition'] = `attachment; filename="${path.basename(filePath)}"`;
           }
