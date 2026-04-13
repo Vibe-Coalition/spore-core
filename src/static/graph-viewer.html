@@ -4133,8 +4133,9 @@ function resolveAnimaMediaUrl(url) {
       const rel = parsed.pathname.slice(filesIdx + '/files/'.length);
       return `${API}/files/${rel}${parsed.search}`;
     }
+    // Bare http://localhost:PORT/foo.png → web_serve static root (/workspace/web/)
     const rel = parsed.pathname.replace(/^\/+/, '');
-    if (rel) return `${API}/files/${rel}${parsed.search}`;
+    if (rel) return `${API}/files/web/${rel}${parsed.search}`;
   }
 
   // 4. External URL (CDN, YouTube, etc.) — leave alone
