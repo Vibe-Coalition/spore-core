@@ -2053,18 +2053,26 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               isDm: !isAcorn,
               images,
               onTextDelta: (delta) => {
-                this.broadcast({ type: 'chat:delta', text: delta });
+                try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
+                // Also broadcast to web panel clients (non-Acorn) for shared visibility
+                if (isAcorn) {
+                  for (const client of (this._wss?.clients || [])) {
+                    if (client !== ws && client.readyState === 1 && client._role !== 'acorn') {
+                      try { client.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
+                    }
+                  }
+                }
               },
               onToolUse: (toolName) => {
-                this.broadcast({ type: 'chat:tool', tool: toolName });
+                try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch { }
               },
               onStatus: (evt) => {
                 try {
                   if (evt.type?.startsWith('code:')) {
-                    this.broadcast(evt);
+                    ws.send(JSON.stringify(evt));
                   } else {
                     const { type: statusType, ...rest } = evt;
-                    this.broadcast({ type: 'chat:status', status: statusType, ...rest });
+                    ws.send(JSON.stringify({ type: 'chat:status', status: statusType, ...rest }));
                   }
                 } catch { }
               },
@@ -2080,13 +2088,13 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
                 });
               } : undefined,
             });
-            this.broadcast({
+            ws.send(JSON.stringify({
               type: 'chat:done',
               text: result.text,
               usage: result.usage,
               iterations: result.iterations,
               toolUsage: result.toolUsage,
-            });
+            }));
             try {
               const feed = require('../graph/feed');
               feed.log({
@@ -2104,7 +2112,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               : e.status === 500 || e.error?.type === 'api_error' ? 'API server error — try again shortly'
                 : e.status === 429 ? 'Rate limited — too many requests, wait a moment'
                   : (e.error?.error?.message || e.message || 'Unknown error').substring(0, 200);
-            this.broadcast({ type: 'chat:error', error: friendly });
+            ws.send(JSON.stringify({ type: 'chat:error', error: friendly }));
           }
         } else if (msg.type === 'voice-chat') {
           if (!this.tools._agent) {
