@@ -707,7 +707,12 @@
   }
   #chat-actions-row button:hover { border-color: var(--accent2); color: var(--accent2); }
   #btn-attach { font-size: 0.95rem; }
-  #btn-mic { font-size: 0.95rem; }
+  #btn-mic {
+    font-size: 0.95rem;
+    user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+  }
   #btn-mic.recording { background: #ff4444; border-color: #ff4444; color: #fff; animation: micPulse 1s infinite; }
   #btn-mic.muted { background: #ff4444; border-color: #ff4444; color: #fff; opacity: 0.85; }
   @keyframes micPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
@@ -2107,6 +2112,7 @@ const WhisperSTT = (() => {
         }, 2000);
       } else if (d.type === 'result') {
         console.log('[whisper] Result:', JSON.stringify({ text: d.text, error: d.error }));
+        onStatus && onStatus('Whisper ready', 'ready');
         if (pendingResolve) { pendingResolve(d.text || ''); pendingResolve = null; }
       }
     };
@@ -2847,7 +2853,7 @@ function handleWsMessage(msg) {
     _chatToolCount++;
     if (streamingMsgEl && _streamDelta.trim()) {
       streamingMsgEl.classList.remove('streaming');
-      streamingMsgEl.innerHTML = renderMarkdown(_streamDelta);
+      streamingMsgEl.innerHTML = rewriteMediaUrlsInHtml(renderMarkdown(_streamDelta));
       streamingMsgEl = null;
     } else {
       finalizeStreamingMsg();
@@ -2944,7 +2950,7 @@ function handleWsMessage(msg) {
         const el = document.createElement('div');
         el.className = 'chat-msg ' + (m.role === 'assistant' ? 'assistant' : 'user');
         if (m.role === 'assistant') {
-          let html = renderMarkdown(m.text);
+          let html = rewriteMediaUrlsInHtml(renderMarkdown(m.text));
           const media = detectMediaInText(m.text);
           if (media.length) html += '<div class="media-grid">' + renderMediaHtml(media) + '</div>';
           el.innerHTML = html;
@@ -4041,26 +4047,88 @@ const MEDIA_EXTS = {
   audio: ['mp3','wav','ogg','flac','m4a','aac'],
 };
 
+// Normalize any media URL string to a same-origin URL the current UI can load.
+// This makes media rendering robust across topologies (localhost, reverse proxy,
+// tunnels, subpath mounts): the agent can emit absolute or relative URLs and the
+// UI rewrites them to resolve against whichever origin served the chat.
+function resolveAnimaMediaUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('#')) return url;
+
+  let parsed;
+  try { parsed = new URL(url, window.location.href); } catch { return url; }
+
+  // 1. Any /workspace/<rest> path (regardless of origin) → same-origin /files/<rest>
+  const wsIdx = parsed.pathname.indexOf('/workspace/');
+  if (wsIdx !== -1) {
+    const rel = parsed.pathname.slice(wsIdx + '/workspace/'.length);
+    return `${API}/files/${rel}${parsed.search}`;
+  }
+
+  // 2. Already same-origin → trust it
+  if (parsed.origin === window.location.origin) return url;
+
+  // 3. Cross-origin but points at a "local" hostname → rewrite path after /files/
+  const host = parsed.hostname;
+  const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  if (isLocalHost) {
+    const filesIdx = parsed.pathname.lastIndexOf('/files/');
+    if (filesIdx !== -1) {
+      const rel = parsed.pathname.slice(filesIdx + '/files/'.length);
+      return `${API}/files/${rel}${parsed.search}`;
+    }
+  }
+
+  // 4. External URL (CDN, YouTube, etc.) — leave alone
+  return url;
+}
+
 function detectMediaInText(text) {
-  const regex = /[`']?(\/workspace\/[^\s"'<>`]+\.(\w+))[`']?/gi;
+  // Match /workspace/... paths (internal) and absolute URLs ending in a known media ext.
+  const patterns = [
+    /[`'("<]?(\/workspace\/[^\s"'<>`)]+\.(\w+))[`'")>]?/gi,
+    /[`'("<]?(https?:\/\/[^\s"'<>`)]+\.(\w+))[`'")>]?/gi,
+  ];
   const found = [];
   const seen = new Set();
-  let m;
-  while ((m = regex.exec(text)) !== null) {
-    const fullPath = m[1];
-    const ext = m[2].toLowerCase();
-    if (seen.has(fullPath)) continue;
-    seen.add(fullPath);
-    let type = null;
-    if (MEDIA_EXTS.image.includes(ext)) type = 'image';
-    else if (MEDIA_EXTS.video.includes(ext)) type = 'video';
-    else if (MEDIA_EXTS.audio.includes(ext)) type = 'audio';
-    if (type) {
-      const url = API + '/files/' + fullPath.slice(11);
-      found.push({ url, type, raw: fullPath });
+  for (const regex of patterns) {
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+      const raw = m[1];
+      const ext = m[2].toLowerCase();
+      if (seen.has(raw)) continue;
+      let type = null;
+      if (MEDIA_EXTS.image.includes(ext)) type = 'image';
+      else if (MEDIA_EXTS.video.includes(ext)) type = 'video';
+      else if (MEDIA_EXTS.audio.includes(ext)) type = 'audio';
+      if (!type) continue;
+      const resolved = resolveAnimaMediaUrl(raw);
+      seen.add(raw);
+      found.push({ url: resolved, type, raw });
     }
   }
   return found;
+}
+
+// Walk an HTML string and rewrite media src attributes through resolveAnimaMediaUrl.
+// Heals markdown-rendered <img>/<video>/<audio> that contain baked-in absolute URLs.
+function rewriteMediaUrlsInHtml(html) {
+  if (!html || typeof html !== 'string') return html;
+  const tmpl = document.createElement('template');
+  tmpl.innerHTML = html;
+  tmpl.content.querySelectorAll('img, video, audio, source').forEach(el => {
+    const src = el.getAttribute('src');
+    if (src) {
+      const fixed = resolveAnimaMediaUrl(src);
+      if (fixed !== src) el.setAttribute('src', fixed);
+    }
+    const poster = el.getAttribute('poster');
+    if (poster) {
+      const fixed = resolveAnimaMediaUrl(poster);
+      if (fixed !== poster) el.setAttribute('poster', fixed);
+    }
+  });
+  return tmpl.innerHTML;
 }
 
 function renderMediaHtml(media) {
@@ -4143,7 +4211,7 @@ function _formatUsageTag(usage, iterations) {
 }
 
 function formatAssistantMsg(text, meta) {
-  let html = renderMarkdown(text);
+  let html = rewriteMediaUrlsInHtml(renderMarkdown(text));
   const media = detectMediaInText(text);
   if (media.length) {
     html += '<div class="media-grid">' + renderMediaHtml(media) + '</div>';
@@ -4397,26 +4465,13 @@ function updateMicButton() {
   }
 }
 
-btnMic.addEventListener('click', async () => {
-  // During a voice call: toggle mute
-  if (voiceCallActive) {
-    callMuted = !callMuted;
-    if (voiceCallStream) {
-      voiceCallStream.getAudioTracks().forEach(t => { t.enabled = !callMuted; });
-    }
-    updateMicButton();
-    voiceStatusText.textContent = callMuted ? 'muted' : 'listening...';
-    return;
-  }
+// ── Push-to-talk (hold mic button to record, release to send) ──
+let micPressStart = 0;
+let micPressId = null;
+const MIC_MIN_MS = 300; // ignore accidental brief taps
 
-  // Outside a call: push-to-talk (record → transcribe)
-  if (micRecorder && micRecorder.state === 'recording') {
-    micRecorder.stop();
-    return;
-  }
-
+async function startMicRecording() {
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     micChunks = [];
@@ -4431,35 +4486,35 @@ btnMic.addEventListener('click', async () => {
       if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
       btnMic.classList.remove('recording');
       btnMic.innerHTML = 'mic';
-      if (!micChunks.length) return;
+      if (!micChunks.length || window._micDiscard) { micChunks = []; window._micDiscard = false; return; }
       const blobType = micRecorder.mimeType || 'audio/webm';
       const blob = new Blob(micChunks, { type: blobType });
       micChunks = [];
       console.log('[mic] Recorded blob:', blob.size, 'bytes,', blobType);
 
       if (window._sttEnabled) {
-        // Deepgram (server STT) — send raw audio
+        // Deepgram (server STT) — transcription comes back via voice:transcription
+        window._micAutoSend = true;
         const reader = new FileReader();
         reader.onload = () => {
           const base64 = reader.result.split(',')[1];
-          addChatMessage('system', 'Transcribing (Deepgram)...');
           ws.send(JSON.stringify({ type: 'voice', audio: base64, mimeType: blobType, mode: 'transcribe' }));
         };
         reader.readAsDataURL(blob);
       } else if (WhisperSTT.isReady()) {
-        // Local WebGPU/WASM Whisper fallback
-        addChatMessage('system', 'Transcribing locally...');
-        const text = await WhisperSTT.transcribe(blob);
+        let text = '';
+        try {
+          text = await Promise.race([
+            WhisperSTT.transcribe(blob),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
+          ]);
+        } catch (err) {
+          console.error('[mic] whisper failed:', err);
+        }
         if (text && text.trim()) {
           const input = document.getElementById('chat-input');
           input.value = text.trim();
-          input.style.height = 'auto';
-          input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-          const lastSys = document.querySelector('#chat-messages .chat-msg.system:last-child');
-          if (lastSys && lastSys.textContent.includes('Transcribing')) lastSys.remove();
-          addChatMessage('system', 'Transcribed: "' + text.trim() + '" — edit or press send');
-        } else {
-          addChatMessage('system', 'No speech detected. Check browser console for diagnostics.');
+          sendChat();
         }
       } else {
         addChatMessage('system', 'No STT available (no Deepgram key and local model not ready).');
@@ -4467,11 +4522,53 @@ btnMic.addEventListener('click', async () => {
     };
     micRecorder.start(250);
     btnMic.classList.add('recording');
-    btnMic.innerHTML = 'stop';
+    btnMic.innerHTML = 'rec';
   } catch (e) {
     addChatMessage('system', 'Mic access denied: ' + e.message);
   }
+}
+
+function stopMicRecording(discard) {
+  if (discard) window._micDiscard = true;
+  if (micRecorder && micRecorder.state === 'recording') {
+    try { micRecorder.stop(); } catch (_) {}
+  }
+}
+
+btnMic.addEventListener('pointerdown', async (e) => {
+  e.preventDefault();
+  // During a voice call: single-tap mutes (no hold behavior)
+  if (voiceCallActive) {
+    callMuted = !callMuted;
+    if (voiceCallStream) {
+      voiceCallStream.getAudioTracks().forEach(t => { t.enabled = !callMuted; });
+    }
+    updateMicButton();
+    voiceStatusText.textContent = callMuted ? 'muted' : 'listening...';
+    return;
+  }
+  micPressId = e.pointerId;
+  micPressStart = Date.now();
+  try { btnMic.setPointerCapture(micPressId); } catch (_) {}
+  await startMicRecording();
 });
+
+function endMicPress(e) {
+  if (e.pointerId !== micPressId) return;
+  if (voiceCallActive) return;
+  const held = Date.now() - micPressStart;
+  try { btnMic.releasePointerCapture(micPressId); } catch (_) {}
+  micPressId = null;
+  if (held < MIC_MIN_MS) {
+    stopMicRecording(true); // discard short taps
+  } else {
+    stopMicRecording(false);
+  }
+}
+
+btnMic.addEventListener('pointerup', endMicPress);
+btnMic.addEventListener('pointercancel', endMicPress);
+btnMic.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // ── Voice Call ──
 let voiceCallActive = false;
@@ -4843,12 +4940,19 @@ function levenshtein(a, b) {
 function handleVoiceMessage(msg) {
   if (msg.type === 'voice:transcription') {
     const input = document.getElementById('chat-input');
-    input.value = msg.text || '';
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-    const lastSys = document.querySelector('#chat-messages .chat-msg.system:last-child');
-    if (lastSys && lastSys.textContent.includes('Transcribing')) lastSys.remove();
-    addChatMessage('system', 'Transcribed: "' + (msg.text || '') + '" — edit or press send');
+    const text = (msg.text || '').trim();
+    if (window._micAutoSend) {
+      window._micAutoSend = false;
+      if (text) {
+        input.value = text;
+        sendChat();
+      }
+    } else {
+      input.value = text;
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+      addChatMessage('system', 'Transcribed: "' + text + '" — edit or press send');
+    }
   } else if (msg.type === 'voice:transcribing') {
     voiceStatusText.textContent = 'transcribing...';
   } else if (msg.type === 'voice:interrupt-result') {
@@ -4909,6 +5013,7 @@ function handleVoiceMessage(msg) {
     const url = URL.createObjectURL(audioBlob);
     new Audio(url).play().catch(() => {});
   } else if (msg.type === 'voice:error') {
+    window._micAutoSend = false;
     addChatMessage('system', 'Voice error: ' + msg.error);
     voiceStatusText.textContent = 'error';
     if (voiceCallActive) setTimeout(voiceCallListen, 2000);
