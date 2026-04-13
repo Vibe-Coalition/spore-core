@@ -38,6 +38,8 @@ class WebGateway {
     this._sshManager = null;
     this._voicePipeline = null;
     this._webSessions = new Map();
+    // Session client registry: sessionId -> Set<{ws, role:'origin'|'observer'}>
+    this._sessionClients = new Map();
   }
 
   // ── Public API ──────────────────────────────────────────────────────
@@ -63,6 +65,56 @@ class WebGateway {
       if (creatorOnly && client._role !== 'admin') continue;
       try { client.send(data); } catch { }
     }
+  }
+
+  // ── Session client registry (for observer mode) ─────────────────────
+
+  _registerSessionClient(sessionId, ws, role = 'origin') {
+    if (!this._sessionClients.has(sessionId)) {
+      this._sessionClients.set(sessionId, new Set());
+    }
+    // Remove any existing entry for this ws in this session (avoids duplicates)
+    const set = this._sessionClients.get(sessionId);
+    for (const entry of set) {
+      if (entry.ws === ws) { set.delete(entry); break; }
+    }
+    set.add({ ws, role });
+  }
+
+  _unregisterSessionClient(sessionId, ws) {
+    const set = this._sessionClients.get(sessionId);
+    if (!set) return;
+    for (const entry of set) {
+      if (entry.ws === ws) { set.delete(entry); break; }
+    }
+    if (set.size === 0) this._sessionClients.delete(sessionId);
+  }
+
+  _removeClientFromAllSessions(ws) {
+    for (const [sessionId, set] of this._sessionClients) {
+      for (const entry of set) {
+        if (entry.ws === ws) { set.delete(entry); break; }
+      }
+      if (set.size === 0) this._sessionClients.delete(sessionId);
+    }
+  }
+
+  _sendToSession(sessionId, payload) {
+    const clients = this._sessionClients.get(sessionId);
+    if (!clients || clients.size === 0) return;
+    const data = JSON.stringify(payload);
+    for (const { ws: c } of clients) {
+      try { if (c.readyState === 1) c.send(data); } catch {}
+    }
+  }
+
+  _getOriginClient(sessionId) {
+    const clients = this._sessionClients.get(sessionId);
+    if (!clients) return null;
+    for (const entry of clients) {
+      if (entry.role === 'origin') return entry.ws;
+    }
+    return null;
   }
 
   broadcastBinary(buffer) {
@@ -933,6 +985,50 @@ class WebGateway {
             res.end(JSON.stringify({ error: 'Invalid request body' }));
           }
         });
+        return;
+      }
+
+      // ── Acorn: list sessions for authenticated user ──
+      if (urlPath === '/api/acorn/sessions' && req.method === 'GET') {
+        // Authenticate via Bearer token
+        const authHeader = req.headers['authorization'] || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+        const session = token ? this._webSessions.get(token) : null;
+        if (!session || session.type !== 'acorn') {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid or missing token' }));
+          return;
+        }
+        const user = session.user;
+        const prefix = `channel:cli:${user}@`;
+        try {
+          const allSessions = this.tools._sessions.listSessions();
+          const agent = this.tools._agent;
+          const activeKeys = agent ? new Set(agent.activeRuns) : new Set();
+          const sessions = allSessions
+            .filter(s => s.key.startsWith(prefix))
+            .map(s => {
+              // Parse project name from key: channel:cli:user@project-hash-ts
+              const afterAt = s.key.slice(prefix.length);
+              const parts = afterAt.split('-');
+              const project = parts.length >= 3 ? parts.slice(0, parts.length - 2).join('-') : afterAt;
+              const hasConnectedClient = this._sessionClients.has(s.key.replace('channel:', ''));
+              return {
+                key: s.key.replace('channel:', ''),
+                project,
+                created: s.created,
+                updated: s.updated,
+                messageCount: s.message_count,
+                active: activeKeys.has(s.key) || hasConnectedClient,
+              };
+            });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ sessions }));
+        } catch (e) {
+          this.log.warn(`[acorn] Sessions list failed: ${e.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to list sessions' }));
+        }
         return;
       }
 
@@ -2024,6 +2120,29 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           return;
         }
 
+        // ── Acorn: observe/unobserve session (companion app) ──
+        if (msg.type === 'session:observe' && msg.sessionId) {
+          const reqUser = ws._user || '';
+          // Validate user owns this session
+          if (!msg.sessionId.startsWith(`cli:${reqUser}@`)) {
+            ws.send(JSON.stringify({ type: 'session:observe:error', error: 'Access denied' }));
+            return;
+          }
+          this._registerSessionClient(msg.sessionId, ws, 'observer');
+          const agent = this.tools._agent;
+          const sessionKey = this.tools._sessions.constructor.buildKey(msg.sessionId, false, reqUser);
+          const active = agent ? agent.activeRuns.has(sessionKey) : false;
+          ws.send(JSON.stringify({ type: 'session:observe:ok', sessionId: msg.sessionId, active }));
+          this.log.info(`[ws] ${reqUser} observing session ${msg.sessionId}`);
+          return;
+        }
+
+        if (msg.type === 'session:unobserve' && msg.sessionId) {
+          this._unregisterSessionClient(msg.sessionId, ws);
+          this.log.info(`[ws] ${ws._user || '?'} stopped observing ${msg.sessionId}`);
+          return;
+        }
+
         // ── Acorn: tool result from CLI client ──
         if (msg.type === 'tool:result') {
           const pending = ws._pendingTools?.get(msg.id);
@@ -2073,11 +2192,19 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           }
           const sessionId = msg.sessionId || 'web:control-panel';
           const isAcorn = ws._role === 'acorn';
+
+          // Register this client as origin for the session (if not already an observer)
+          if (isAcorn) {
+            this._registerSessionClient(sessionId, ws, 'origin');
+          }
+
           try {
             // Only broadcast chat:start to web panel for non-Acorn sessions.
             // Acorn sessions are isolated — leaking events locks up the web panel.
             if (!isAcorn) {
               this.broadcast({ type: 'chat:start', sessionId });
+            } else {
+              this._sendToSession(sessionId, { type: 'chat:start', sessionId });
             }
             const images = Array.isArray(msg.images) ? msg.images.map(img => ({
               type: 'image',
@@ -2100,6 +2227,11 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               }
               if (savedFiles.length) fileNote = `\n[Attached files saved to disk: ${savedFiles.join(', ')}]`;
             }
+
+            // For Acorn: find the origin CLI client for tool execution.
+            // If an observer (mobile app) sends a message, tools still go to the CLI.
+            const originWs = isAcorn ? (this._getOriginClient(sessionId) || ws) : null;
+
             const result = await this.tools._agent.processMessage({
               content: msg.content + fileNote,
               channelId: sessionId,
@@ -2111,43 +2243,59 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               isDm: !isAcorn,
               images,
               onTextDelta: (delta) => {
-                try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
+                if (isAcorn) {
+                  this._sendToSession(sessionId, { type: 'chat:delta', text: delta });
+                } else {
+                  try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
+                }
               },
               onThinkingDelta: (delta) => {
                 try { ws.send(JSON.stringify({ type: 'chat:thinking', text: delta })); } catch { }
               },
               onToolUse: (toolName) => {
-                try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch { }
+                if (isAcorn) {
+                  this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName });
+                } else {
+                  try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch { }
+                }
               },
               onStatus: (evt) => {
                 try {
-                  if (evt.type?.startsWith('code:')) {
-                    ws.send(JSON.stringify(evt));
+                  const payload = evt.type?.startsWith('code:') ? evt
+                    : { type: 'chat:status', status: evt.type, ...Object.fromEntries(Object.entries(evt).filter(([k]) => k !== 'type')) };
+                  if (isAcorn) {
+                    this._sendToSession(sessionId, payload);
                   } else {
-                    const { type: statusType, ...rest } = evt;
-                    ws.send(JSON.stringify({ type: 'chat:status', status: statusType, ...rest }));
+                    ws.send(JSON.stringify(payload));
                   }
                 } catch { }
               },
-              // Acorn: forward tool calls to CLI client for local execution
+              // Acorn: forward tool calls to the origin CLI client for local execution.
+              // tool:request must NOT go to observers — only the origin client has a filesystem.
               onToolExecute: isAcorn ? async (toolName, toolInput, toolId) => {
-                ws.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
+                originWs.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
                 return new Promise((resolve, reject) => {
                   const timeout = setTimeout(() => {
-                    ws._pendingTools.delete(toolId);
+                    originWs._pendingTools.delete(toolId);
                     reject(new Error(`Tool ${toolName} timed out (5min)`));
                   }, 300000);
-                  ws._pendingTools.set(toolId, { resolve, reject, timeout });
+                  originWs._pendingTools.set(toolId, { resolve, reject, timeout });
                 });
               } : undefined,
             });
-            ws.send(JSON.stringify({
+            // Send chat:done to all session clients (CLI + observers)
+            const donePayload = {
               type: 'chat:done',
               text: result.text,
               usage: result.usage,
               iterations: result.iterations,
               toolUsage: result.toolUsage,
-            }));
+            };
+            if (isAcorn) {
+              this._sendToSession(sessionId, donePayload);
+            } else {
+              ws.send(JSON.stringify(donePayload));
+            }
             try {
               const feed = require('../graph/feed');
               feed.log({
@@ -2165,7 +2313,11 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               : e.status === 500 || e.error?.type === 'api_error' ? 'API server error — try again shortly'
                 : e.status === 429 ? 'Rate limited — too many requests, wait a moment'
                   : (e.error?.error?.message || e.message || 'Unknown error').substring(0, 200);
-            ws.send(JSON.stringify({ type: 'chat:error', error: friendly }));
+            if (isAcorn) {
+              this._sendToSession(sessionId, { type: 'chat:error', error: friendly });
+            } else {
+              ws.send(JSON.stringify({ type: 'chat:error', error: friendly }));
+            }
           }
         } else if (msg.type === 'voice-chat') {
           if (!this.tools._agent) {
@@ -2356,6 +2508,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       });
 
       ws.on('close', () => {
+        this._removeClientFromAllSessions(ws);
         if (onGraphEvent) graphEvents.off('change', onGraphEvent);
         if (ws._terminals) {
           for (const [, sess] of ws._terminals) {
