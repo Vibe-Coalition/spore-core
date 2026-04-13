@@ -64,8 +64,6 @@ class ToolSystem {
       /\bnftables\b/,            // firewall manipulation
       /\bnsenter\b/,             // namespace escape
       /\bunshare\b/,             // namespace manipulation
-      /\bmount\b/,               // filesystem mount
-      /\bumount\b/,              // filesystem unmount
       /\bchroot\b/,              // change root
       /\bchattr\b.*\+i/,         // make files immutable
     ];
@@ -366,7 +364,7 @@ class ToolSystem {
       },
       {
         name: 'read_file',
-        description: `Read a file. PREFERRED over exec+grep/cat/sed for all file reading. Returns full text content. Supports offset/limit for large files. Always use this instead of exec to inspect code or configs.${this.config.hostReadPaths?.length ? ' Host filesystem is mounted read-only at /host/ — e.g. /host/home/ubuntu/myfile.txt reads from the host.' : ''}`,
+        description: `Read a file. PREFERRED over exec+grep/cat/sed for all file reading. Returns full text content. Supports offset/limit for large files. Always use this instead of exec to inspect code or configs.${this.config.hostReadPaths?.length ? ' Host filesystem is mounted read-only at /host/ — e.g. /host/home/ubuntu/myfile.txt reads from the host.' : ''}${this.config.extraPaths?.length ? ` Additional accessible paths: ${this.config.extraPaths.join(', ')}` : ''}`,
         input_schema: {
           type: 'object',
           properties: {
@@ -3010,8 +3008,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     // Allowlist: only these directories are accessible
     const workspace = this.config.workspacePath || process.cwd();
     const hostPaths = (this.config.hostReadPaths || []).map(hp => `/host${hp}`);
-    const allowedRead = [workspace, '/app', '/tmp', '/data', ...hostPaths];
-    const allowedWrite = [workspace, '/tmp', '/app/static'];
+    const extraPaths = this.config.extraPaths || [];
+    const allowedRead = [workspace, '/app', '/tmp', '/data', ...hostPaths, ...extraPaths];
+    const allowedWrite = [workspace, '/tmp', '/app/static', ...extraPaths];
 
     const targets = isWrite ? allowedWrite : allowedRead;
     const allowed = targets.some(prefix => realResolved.startsWith(prefix));

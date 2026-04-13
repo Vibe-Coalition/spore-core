@@ -42,6 +42,7 @@ const DEFAULTS = {
   // Optional capabilities
   webPort: null,            // ANIMA_WEB_PORT — expose an HTTP server on this port
   hostReadPaths: [],        // ANIMA_HOST_READ_PATHS — host paths mounted at /host/<path>
+  extraPaths: [],           // ANIMA_EXTRA_PATHS — additional read+write paths (comma-separated)
   personalityEditable: false, // ANIMA_PERSONALITY_EDITABLE — agent can modify its own identity/voice/rules
   srcEditable: false,       // ANIMA_SRC_EDITABLE — src bind-mounted rw; agent can self-modify and changes persist
   enhancedRecall: false,    // LLM-at-search-time query decomposition for better temporal recall
@@ -289,6 +290,11 @@ function loadConfigFresh() {
   // Host filesystem read access: comma-separated host paths mounted at /host/<path>
   if (process.env.ANIMA_HOST_READ_PATHS) {
     config.hostReadPaths = process.env.ANIMA_HOST_READ_PATHS.split(',').map(p => p.trim()).filter(Boolean);
+  }
+
+  // Extra read+write paths: comma-separated directories the agent can freely access
+  if (process.env.ANIMA_EXTRA_PATHS) {
+    config.extraPaths = process.env.ANIMA_EXTRA_PATHS.split(',').map(p => p.trim()).filter(Boolean);
   }
 
   // Web basic auth
