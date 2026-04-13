@@ -2818,7 +2818,15 @@ function handleWsMessage(msg) {
     if (msg.type === 'chat:delta' || msg.type === 'chat:tool'
         || msg.type === 'chat:status' || msg.type === 'chat:chunk') return;
   }
-  if (msg.type === 'chat:start') {
+  if (msg.type === 'chat:busy') {
+    setChatBusy(true);
+    setActivity('thinking...');
+    streamChunks = [];
+    _streamDelta = '';
+    finalizeStreamingMsg();
+    streamingMsgEl = addChatMessage('assistant', '');
+    streamingMsgEl.classList.add('streaming');
+  } else if (msg.type === 'chat:start') {
     setChatBusy(true);
     _chatToolCount = 0;
     streamChunks = [];

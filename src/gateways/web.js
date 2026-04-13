@@ -1839,6 +1839,19 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         }
       } catch (e) { this.log.warn('[ws] Failed to send chat history:', e.message); }
 
+      // Tell reconnecting clients if the agent is mid-turn so they restore busy state
+      try {
+        const agent = this.tools._agent;
+        if (agent) {
+          const sessionId = 'web:control-panel';
+          const userId = ws._user || 'operator';
+          const sessionKey = agent.sessions.constructor.buildKey(sessionId, true, userId);
+          if (agent.activeRuns.has(sessionKey)) {
+            ws.send(JSON.stringify({ type: 'chat:busy' }));
+          }
+        }
+      } catch {}
+
       const onGraphEvent = (evt) => {
         try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch { }
       };
@@ -1909,7 +1922,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           }
           const sessionId = msg.sessionId || 'web:control-panel';
           try {
-            ws.send(JSON.stringify({ type: 'chat:start', sessionId }));
+            this.broadcast({ type: 'chat:start', sessionId });
             const images = Array.isArray(msg.images) ? msg.images.map(img => ({
               type: 'image',
               source: { type: 'base64', media_type: img.mediaType || 'image/png', data: img.data },
@@ -1942,29 +1955,29 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               isDm: true,
               images,
               onTextDelta: (delta) => {
-                try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
+                this.broadcast({ type: 'chat:delta', text: delta });
               },
               onToolUse: (toolName) => {
-                try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch { }
+                this.broadcast({ type: 'chat:tool', tool: toolName });
               },
               onStatus: (evt) => {
                 try {
                   if (evt.type?.startsWith('code:')) {
-                    ws.send(JSON.stringify(evt));
+                    this.broadcast(evt);
                   } else {
                     const { type: statusType, ...rest } = evt;
-                    ws.send(JSON.stringify({ type: 'chat:status', status: statusType, ...rest }));
+                    this.broadcast({ type: 'chat:status', status: statusType, ...rest });
                   }
                 } catch { }
               },
             });
-            ws.send(JSON.stringify({
+            this.broadcast({
               type: 'chat:done',
               text: result.text,
               usage: result.usage,
               iterations: result.iterations,
               toolUsage: result.toolUsage,
-            }));
+            });
             try {
               const feed = require('../graph/feed');
               feed.log({
@@ -1982,7 +1995,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               : e.status === 500 || e.error?.type === 'api_error' ? 'API server error — try again shortly'
                 : e.status === 429 ? 'Rate limited — too many requests, wait a moment'
                   : (e.error?.error?.message || e.message || 'Unknown error').substring(0, 200);
-            ws.send(JSON.stringify({ type: 'chat:error', error: friendly }));
+            this.broadcast({ type: 'chat:error', error: friendly });
           }
         } else if (msg.type === 'voice-chat') {
           if (!this.tools._agent) {
