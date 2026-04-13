@@ -1941,8 +1941,9 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               const isAcorn = ws._role === 'acorn';
               const reqSessionId = msg.sessionId;
               const userId = ws._user || 'operator';
+              // Use legacy buildKey format to match how processMessage stores messages
               const historyKey = isAcorn
-                ? this.tools._sessions.constructor.buildKey({ platform: 'cli', channelId: reqSessionId, isDm: false })
+                ? this.tools._sessions.constructor.buildKey(reqSessionId, false, userId)
                 : this.tools._sessions.constructor.buildKey(reqSessionId, true, userId);
               const rows = this.tools._sessions.db.prepare(
                 `SELECT role, content, created FROM messages WHERE session_key = ? ORDER BY id DESC LIMIT 60`
@@ -2002,7 +2003,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             const isAcorn = ws._role === 'acorn';
             const clearSessionId = msg.sessionId || 'web:control-panel';
             const clearKey = isAcorn
-              ? this.tools._sessions.constructor.buildKey({ platform: 'cli', channelId: clearSessionId, isDm: false })
+              ? this.tools._sessions.constructor.buildKey(clearSessionId, false, userId)
               : this.tools._sessions.constructor.buildKey('web:control-panel', true, userId);
             this.tools._sessions.clearSession(clearKey);
             ws.send(JSON.stringify({ type: 'chat:cleared' }));
