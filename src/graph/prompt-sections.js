@@ -485,20 +485,20 @@ function applyPromptSectionsMixin(GraphContext) {
       lines.push('You are connected to **Telegram**. Use `target: "telegram:<chatId>"` with message_send.');
     }
     if (this.config.webPort) {
-      const d = this.config.ingressDomain;
-      const iP = (this.config.ingressPath || '').replace(/\/$/, '');
-      const pr = this.config.ingressHttps ? 'https' : 'http';
-      const pubUrl = d ? `${pr}://${d}${iP}` : null;
+      let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
+      if (!pubUrl && this.config.ingressDomain) {
+        const iP = (this.config.ingressPath || '').replace(/\/$/, '');
+        const pr = this.config.ingressHttps ? 'https' : 'http';
+        pubUrl = `${pr}://${this.config.ingressDomain}${iP}`;
+      }
       lines.push(`You have a **Web Control Panel**${pubUrl ? ` at **${pubUrl}/**` : ' at your web port'}. When the current platform is "web":`);
       if (pubUrl) {
         lines.push(`- Your public webapp: ${pubUrl}/`);
         lines.push(`- Your graph editor: ${pubUrl}/graph`);
-        lines.push(`- Files in /workspace/ are at ${pubUrl}/files/<filename>`);
-      } else {
-        lines.push('- Files you create in `/workspace/` are accessible to the user at the `/files/` URL path.');
       }
       lines.push('- The user is chatting from a browser.');
-      lines.push('- To share an image/video/audio, create it in `/workspace/` and tell the user the path. The chat UI auto-renders media files inline.');
+      lines.push('- To share an image/video/audio inline, reference files in `/workspace/` by their path (e.g. `/workspace/chart.png`). The chat UI rewrites these to load from the current origin automatically, so the same path works regardless of how the user is accessing the UI.');
+      lines.push('- Prefer `/workspace/<filename>` over absolute URLs. Only use an absolute URL if sharing a link meant to be opened outside the current chat.');
       lines.push('- Do NOT use message_send for web chat — your response text is sent back automatically. Just mention the file path.');
       lines.push('- The user can send you images which you can see (multimodal vision).');
     }

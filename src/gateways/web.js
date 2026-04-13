@@ -194,10 +194,12 @@ class WebGateway {
 
   _status() {
     const webPort = this.config.webPort;
-    const d = this.config.ingressDomain;
-    const iP = (this.config.ingressPath || '').replace(/\/$/, '');
-    const pr = this.config.ingressHttps ? 'https' : 'http';
-    const pub = d ? `${pr}://${d}${iP}` : null;
+    let pub = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
+    if (!pub && this.config.ingressDomain) {
+      const iP = (this.config.ingressPath || '').replace(/\/$/, '');
+      const pr = this.config.ingressHttps ? 'https' : 'http';
+      pub = `${pr}://${this.config.ingressDomain}${iP}`;
+    }
     if (this._server) {
       const result = { running: true, port: webPort, dir: this._serverDir, url: pub ? `${pub}/` : `http://localhost:${webPort}/`, graphEditor: pub ? `${pub}/graph` : `http://localhost:${webPort}/graph`, publicUrl: pub || null };
       if (this._backendChild) {
@@ -364,10 +366,12 @@ class WebGateway {
       }));
     } catch {}
 
-    const domain = this.config.ingressDomain;
-    const iPath = (this.config.ingressPath || '').replace(/\/$/, '');
-    const proto = this.config.ingressHttps ? 'https' : 'http';
-    const pubUrl = domain ? `${proto}://${domain}${iPath}` : null;
+    let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
+    if (!pubUrl && this.config.ingressDomain) {
+      const iPath = (this.config.ingressPath || '').replace(/\/$/, '');
+      const proto = this.config.ingressHttps ? 'https' : 'http';
+      pubUrl = `${proto}://${this.config.ingressDomain}${iPath}`;
+    }
     const displayUrl = pubUrl || `http://localhost:${this.config.webPort}`;
 
     this.log.info(`[backend] Started (pid=${childPid}, port=${backendPort}), ${vaultKeyNames.length} vault key(s) injected${vaultKeyNames.length ? ': ' + vaultKeyNames.join(', ') : ''}`);
@@ -1675,10 +1679,12 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
 
     this._setupWebSocket(server, authUser, authPass);
 
-    const domain = this.config.ingressDomain;
-    const iPath = (this.config.ingressPath || '').replace(/\/$/, '');
-    const proto = this.config.ingressHttps ? 'https' : 'http';
-    const pubUrl = domain ? `${proto}://${domain}${iPath}` : null;
+    let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
+    if (!pubUrl && this.config.ingressDomain) {
+      const iPath = (this.config.ingressPath || '').replace(/\/$/, '');
+      const proto = this.config.ingressHttps ? 'https' : 'http';
+      pubUrl = `${proto}://${this.config.ingressDomain}${iPath}`;
+    }
     const displayUrl = pubUrl || `http://localhost:${webPort}`;
     return { started: true, port: webPort, dir: serveDir, url: `${displayUrl}/`, graphEditor: `${displayUrl}/graph`, publicUrl: pubUrl || null, note: pubUrl ? `Public URL: ${pubUrl}/ — files written here are served immediately.` : 'Files written to this directory are served immediately — no restart needed. Graph editor at /graph (auth required).' };
   }
