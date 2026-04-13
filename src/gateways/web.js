@@ -1934,6 +1934,41 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           return;
         }
 
+        // ── Acorn: request history for a specific session ──
+        if (msg.type === 'chat:history-request' && msg.sessionId) {
+          try {
+            if (this.tools._sessions) {
+              const isAcorn = ws._role === 'acorn';
+              const reqSessionId = msg.sessionId;
+              const userId = ws._user || 'operator';
+              const historyKey = isAcorn
+                ? this.tools._sessions.constructor.buildKey({ platform: 'cli', channelId: reqSessionId, isDm: false })
+                : this.tools._sessions.constructor.buildKey(reqSessionId, true, userId);
+              const rows = this.tools._sessions.db.prepare(
+                `SELECT role, content, created FROM messages WHERE session_key = ? ORDER BY id DESC LIMIT 60`
+              ).all(historyKey);
+              rows.reverse();
+              const history = [];
+              for (const row of rows) {
+                let text = row.content;
+                try {
+                  const parsed = JSON.parse(text);
+                  if (Array.isArray(parsed)) {
+                    text = parsed.filter(b => b.type === 'text').map(b => b.text).join('\n');
+                    if (!text) continue;
+                  }
+                } catch { }
+                if (!text || !text.trim()) continue;
+                const role = row.role === 'assistant' ? 'assistant' : 'user';
+                history.push({ role, text: text.substring(0, 2000), ts: row.created });
+              }
+              ws.send(JSON.stringify({ type: 'chat:history', messages: history, sessionId: reqSessionId }));
+              this.log.info(`[ws] History sent for ${reqSessionId}: ${history.length} messages`);
+            }
+          } catch (e) { this.log.warn('[ws] History request failed:', e.message); }
+          return;
+        }
+
         // ── Acorn: tool result from CLI client ──
         if (msg.type === 'tool:result') {
           const pending = ws._pendingTools?.get(msg.id);
