@@ -201,14 +201,18 @@ class Learner {
   }
 
   async _callWithRetry(fn, label = 'learner') {
-    const delays = [0, 5000, 15000];
-    for (let attempt = 0; attempt < delays.length; attempt++) {
+    const delays = [5000, 15000, 30000];
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      if (this._llmBusy) {
+        this.log.info(`[${label}] LLM busy, deferring (attempt ${attempt + 1})`);
+        return null;
+      }
       if (attempt > 0) {
+        await new Promise(r => setTimeout(r, delays[attempt - 1]));
         if (this._llmBusy) {
-          this.log.debug?.(`[${label}] LLM busy, deferring retry ${attempt + 1}`);
+          this.log.info(`[${label}] LLM became busy during backoff, deferring`);
           return null;
         }
-        await new Promise(r => setTimeout(r, delays[attempt]));
       }
       try {
         return await fn();
@@ -216,8 +220,8 @@ class Learner {
         const isRetryable = e.message?.includes('aborted') || e.message?.includes('ECONNRESET')
           || e.message?.includes('ETIMEDOUT') || e.message?.includes('socket hang up')
           || e.status === 429 || e.status === 503;
-        if (!isRetryable || attempt === delays.length - 1) throw e;
-        this.log.debug?.(`[${label}] Attempt ${attempt + 1} failed (${e.message}), retrying in ${delays[attempt + 1]}ms`);
+        if (!isRetryable || attempt === delays.length) throw e;
+        this.log.info(`[${label}] Attempt ${attempt + 1} failed (${e.message}), retrying in ${delays[attempt]}ms`);
       }
     }
   }
@@ -332,6 +336,15 @@ class Learner {
     this._running = true;
 
     try {
+      // Grace period: wait briefly so the user can send a follow-up message
+      // (which sets _llmBusy=true) before we occupy the model server.
+      await new Promise(r => setTimeout(r, 3000));
+      if (this._llmBusy) {
+        this._queue.unshift({ batch });
+        this.log.info('[learner] Agent became active during grace period, re-queuing');
+        return;
+      }
+
       const combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
       const lastObservedAt = batch[batch.length - 1].observedAt;
       const mergedOpts = batch[batch.length - 1].opts;
@@ -1355,12 +1368,18 @@ ${structuredTemplate}`;
           ]
         : [{ type: 'text', text: compactSystem, cache_control: { type: 'ephemeral' } }];
 
+      // Compaction is called from within the agent loop (between iterations),
+      // so _llmBusy is true but the model server is actually idle. Temporarily
+      // clear the flag so _callWithRetry doesn't skip this call.
+      const wasBusy = this._llmBusy;
+      this._llmBusy = false;
       const response = await this._callWithRetry(() => this.client.messages.create({
         model: this.config.learnerModel || this.config.casualModel || this.config.model,
         max_tokens: summaryBudget,
         system,
         messages: [{ role: 'user', content: transcript }],
       }), 'learner-compact');
+      this._llmBusy = wasBusy;
 
       if (response) {
         return response.content.find(b => b.type === 'text')?.text || this._fallbackSummary(messages, previousSummary);
