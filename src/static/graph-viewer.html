@@ -4068,7 +4068,10 @@ function resolveAnimaMediaUrl(url) {
   // 2. Already same-origin → trust it
   if (parsed.origin === window.location.origin) return url;
 
-  // 3. Cross-origin but points at a "local" hostname → rewrite path after /files/
+  // 3. Cross-origin but points at a "local" hostname → rewrite to same-origin /files/.
+  // Any path served from a localhost origin is treated as a workspace file: either
+  // after an explicit /files/ segment, or (when the agent served it via its own port
+  // with no prefix) the full pathname as the file key.
   const host = parsed.hostname;
   const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
   if (isLocalHost) {
@@ -4077,6 +4080,8 @@ function resolveAnimaMediaUrl(url) {
       const rel = parsed.pathname.slice(filesIdx + '/files/'.length);
       return `${API}/files/${rel}${parsed.search}`;
     }
+    const rel = parsed.pathname.replace(/^\/+/, '');
+    if (rel) return `${API}/files/${rel}${parsed.search}`;
   }
 
   // 4. External URL (CDN, YouTube, etc.) — leave alone
