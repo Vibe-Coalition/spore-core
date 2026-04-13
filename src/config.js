@@ -203,6 +203,7 @@ function loadConfigFresh() {
   if (process.env.ANIMA_DISPLAY_NAME) config.displayName = process.env.ANIMA_DISPLAY_NAME;
   if (process.env.ANIMA_NICKNAMES) config.nicknames = process.env.ANIMA_NICKNAMES.split(',').map(s => s.trim()).filter(Boolean);
   if (process.env.BRAVE_API_KEY) config.braveApiKey = process.env.BRAVE_API_KEY;
+  if (process.env.SEARXNG_URL) config.searxngUrl = process.env.SEARXNG_URL;
   if (process.env.TELEGRAM_BOT_TOKEN) config.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 
   // Slack
@@ -293,6 +294,9 @@ function loadConfigFresh() {
   // Web basic auth
   if (process.env.ANIMA_WEB_AUTH_USER) config.webAuthUser = process.env.ANIMA_WEB_AUTH_USER;
   if (process.env.ANIMA_WEB_AUTH_PASS) config.webAuthPass = process.env.ANIMA_WEB_AUTH_PASS;
+
+  // Acorn CLI team key
+  if (process.env.ANIMA_ACORN_KEY) config.acornKey = process.env.ANIMA_ACORN_KEY;
 
   // Public URL (set by manager during creation, or derived from legacy ingress vars)
   if (process.env.ANIMA_PUBLIC_URL) {

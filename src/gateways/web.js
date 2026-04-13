@@ -881,6 +881,43 @@ class WebGateway {
         return;
       }
 
+      // ── Acorn CLI auth ──
+      if (urlPath === '/api/acorn/auth' && req.method === 'POST') {
+        let body = '';
+        req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
+        req.on('end', () => {
+          try {
+            const { username, key } = JSON.parse(body);
+            const acornKey = this.config.acornKey;
+            if (!acornKey) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Acorn not configured on this agent' }));
+              return;
+            }
+            if (!username || typeof username !== 'string' || username.length > 32 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Invalid username (alphanumeric, max 32 chars)' }));
+              return;
+            }
+            if (!key || key !== acornKey) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Invalid team key' }));
+              return;
+            }
+            const acornSid = crypto.randomBytes(16).toString('hex');
+            const webSessions = this._webSessions;
+            webSessions.set(acornSid, { user: username.toLowerCase().trim(), type: 'acorn', created: Date.now() });
+            this.log.info(`[acorn] Auth OK for user: ${username}`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, token: acornSid, user: username }));
+          } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid request body' }));
+          }
+        });
+        return;
+      }
+
       if (urlPath === '/api/ws-token') {
         const sid = getSessionFromReq(req);
         if (!sid) {
@@ -1808,63 +1845,68 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
     });
 
     wss.on('connection', (ws) => {
-      this.log.info('[ws] Client connected to control panel');
+      const isAcornClient = ws._role === 'acorn';
+      this.log.info(`[ws] Client connected${isAcornClient ? ` (acorn: ${ws._user})` : ' to control panel'}`);
       ws._missedPongs = 0;
+      ws._pendingTools = new Map();
       ws.on('pong', () => { ws._missedPongs = 0; });
 
-      try {
-        if (this.tools._sessions) {
-          const sessionKey = this.tools._sessions.constructor.buildKey('web:control-panel', true, ws._user || 'operator');
-          const rows = this.tools._sessions.db.prepare(
-            `SELECT role, content, created FROM messages WHERE session_key = ? ORDER BY id DESC LIMIT 60`
-          ).all(sessionKey);
-          rows.reverse();
-          const history = [];
-          for (const row of rows) {
-            let text = row.content;
-            try {
-              const parsed = JSON.parse(text);
-              if (Array.isArray(parsed)) {
-                text = parsed.filter(b => b.type === 'text').map(b => b.text).join('\n');
-                if (!text) {
-                  const toolResults = parsed.filter(b => b.type === 'tool_result');
-                  if (toolResults.length) continue;
-                  const toolUses = parsed.filter(b => b.type === 'tool_use');
-                  if (toolUses.length) { text = toolUses.map(t => '\u2699 ' + t.name).join(', '); }
+      // Acorn clients manage their own session history — don't send web panel history
+      if (!isAcornClient) {
+        try {
+          if (this.tools._sessions) {
+            const sessionKey = this.tools._sessions.constructor.buildKey('web:control-panel', true, ws._user || 'operator');
+            const rows = this.tools._sessions.db.prepare(
+              `SELECT role, content, created FROM messages WHERE session_key = ? ORDER BY id DESC LIMIT 60`
+            ).all(sessionKey);
+            rows.reverse();
+            const history = [];
+            for (const row of rows) {
+              let text = row.content;
+              try {
+                const parsed = JSON.parse(text);
+                if (Array.isArray(parsed)) {
+                  text = parsed.filter(b => b.type === 'text').map(b => b.text).join('\n');
+                  if (!text) {
+                    const toolResults = parsed.filter(b => b.type === 'tool_result');
+                    if (toolResults.length) continue;
+                    const toolUses = parsed.filter(b => b.type === 'tool_use');
+                    if (toolUses.length) { text = toolUses.map(t => '\u2699 ' + t.name).join(', '); }
+                  }
                 }
-              }
-            } catch { }
-            if (!text || !text.trim()) continue;
-            if (text.startsWith('[BACKGROUND TASK')) continue;
-            const role = row.role === 'assistant' ? 'assistant' : row.role === 'notification' ? 'notification' : 'user';
-            history.push({ role, text: text.substring(0, 2000), ts: row.created });
+              } catch { }
+              if (!text || !text.trim()) continue;
+              if (text.startsWith('[BACKGROUND TASK')) continue;
+              const role = row.role === 'assistant' ? 'assistant' : row.role === 'notification' ? 'notification' : 'user';
+              history.push({ role, text: text.substring(0, 2000), ts: row.created });
+            }
+            if (history.length) {
+              ws.send(JSON.stringify({ type: 'chat:history', messages: history }));
+            }
           }
-          if (history.length) {
-            ws.send(JSON.stringify({ type: 'chat:history', messages: history }));
-          }
-        }
-      } catch (e) { this.log.warn('[ws] Failed to send chat history:', e.message); }
+        } catch (e) { this.log.warn('[ws] Failed to send chat history:', e.message); }
 
-      // Tell reconnecting clients if the agent is mid-turn so they restore busy state
-      try {
-        const agent = this.tools._agent;
-        const userId = ws._user || 'operator';
-        const activeKeys = agent ? [...agent.activeRuns] : [];
-        this.log.info(`[ws] Connect: user=${userId}, activeRuns=${activeKeys.length > 0 ? activeKeys.join(',') : 'none'}`);
-        if (agent && activeKeys.length > 0) {
-          // Any active web session means the agent is busy
-          const webBusy = activeKeys.some(k => k.startsWith('dm:'));
-          if (webBusy) {
-            ws.send(JSON.stringify({ type: 'chat:busy' }));
-            this.log.info(`[ws] Sent chat:busy to reconnecting client`);
+        // Tell reconnecting web clients if the agent is mid-turn so they restore busy state
+        try {
+          const agent = this.tools._agent;
+          const userId = ws._user || 'operator';
+          const activeKeys = agent ? [...agent.activeRuns] : [];
+          this.log.info(`[ws] Connect: user=${userId}, activeRuns=${activeKeys.length > 0 ? activeKeys.join(',') : 'none'}`);
+          if (agent && activeKeys.length > 0) {
+            const webBusy = activeKeys.some(k => k.startsWith('dm:'));
+            if (webBusy) {
+              ws.send(JSON.stringify({ type: 'chat:busy' }));
+              this.log.info(`[ws] Sent chat:busy to reconnecting client`);
+            }
           }
-        }
-      } catch (e) { this.log.warn('[ws] Busy check failed:', e.message); }
+        } catch (e) { this.log.warn('[ws] Busy check failed:', e.message); }
+      }
 
-      const onGraphEvent = (evt) => {
+      // Graph events only for web panel clients, not Acorn
+      const onGraphEvent = isAcornClient ? null : (evt) => {
         try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch { }
       };
-      graphEvents.on('change', onGraphEvent);
+      if (onGraphEvent) graphEvents.on('change', onGraphEvent);
 
       ws.on('message', async (raw) => {
         let msg;
@@ -1901,10 +1943,61 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           return;
         }
 
+        // ── Acorn: request history for a specific session ──
+        if (msg.type === 'chat:history-request' && msg.sessionId) {
+          try {
+            if (this.tools._sessions) {
+              const isAcorn = ws._role === 'acorn';
+              const reqSessionId = msg.sessionId;
+              const userId = ws._user || 'operator';
+              // Use legacy buildKey format to match how processMessage stores messages
+              const historyKey = isAcorn
+                ? this.tools._sessions.constructor.buildKey(reqSessionId, false, userId)
+                : this.tools._sessions.constructor.buildKey(reqSessionId, true, userId);
+              const rows = this.tools._sessions.db.prepare(
+                `SELECT role, content, created FROM messages WHERE session_key = ? ORDER BY id DESC LIMIT 60`
+              ).all(historyKey);
+              rows.reverse();
+              const history = [];
+              for (const row of rows) {
+                let text = row.content;
+                try {
+                  const parsed = JSON.parse(text);
+                  if (Array.isArray(parsed)) {
+                    text = parsed.filter(b => b.type === 'text').map(b => b.text).join('\n');
+                    if (!text) continue;
+                  }
+                } catch { }
+                if (!text || !text.trim()) continue;
+                const role = row.role === 'assistant' ? 'assistant' : 'user';
+                history.push({ role, text: text.substring(0, 2000), ts: row.created });
+              }
+              ws.send(JSON.stringify({ type: 'chat:history', messages: history, sessionId: reqSessionId }));
+              this.log.info(`[ws] History sent for ${reqSessionId}: ${history.length} messages`);
+            }
+          } catch (e) { this.log.warn('[ws] History request failed:', e.message); }
+          return;
+        }
+
+        // ── Acorn: tool result from CLI client ──
+        if (msg.type === 'tool:result') {
+          const pending = ws._pendingTools?.get(msg.id);
+          if (pending) {
+            clearTimeout(pending.timeout);
+            ws._pendingTools.delete(msg.id);
+            pending.resolve(msg.result);
+          }
+          return;
+        }
+
         if (msg.type === 'chat:stop') {
           if (this.tools._agent) {
             const userId = ws._user || 'operator';
-            const stopped = this.tools._agent.abortSession('web:control-panel', true, userId);
+            const sessionId = msg.sessionId || 'web:control-panel';
+            const isAcorn = ws._role === 'acorn';
+            const stopped = isAcorn
+              ? this.tools._agent.abortSession(sessionId, false, userId)
+              : this.tools._agent.abortSession('web:control-panel', true, userId);
             this.log.info(`[ws] Stop requested for ${userId} — ${stopped ? 'aborted' : 'no active run'}`);
             if (stopped) {
               try { ws.send(JSON.stringify({ type: 'chat:status', status: 'stopping' })); } catch {}
@@ -1916,10 +2009,14 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         if (msg.type === 'chat:clear') {
           if (this.tools._sessions) {
             const userId = ws._user || 'operator';
-            const clearKey = this.tools._sessions.constructor.buildKey('web:control-panel', true, userId);
+            const isAcorn = ws._role === 'acorn';
+            const clearSessionId = msg.sessionId || 'web:control-panel';
+            const clearKey = isAcorn
+              ? this.tools._sessions.constructor.buildKey(clearSessionId, false, userId)
+              : this.tools._sessions.constructor.buildKey('web:control-panel', true, userId);
             this.tools._sessions.clearSession(clearKey);
             ws.send(JSON.stringify({ type: 'chat:cleared' }));
-            this.log.info(`[ws] Chat history cleared by ${userId}`);
+            this.log.info(`[ws] Chat history cleared by ${userId}${isAcorn ? ` (acorn: ${clearSessionId})` : ''}`);
           }
           return;
         }
@@ -1930,8 +2027,13 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             return;
           }
           const sessionId = msg.sessionId || 'web:control-panel';
+          const isAcorn = ws._role === 'acorn';
           try {
-            this.broadcast({ type: 'chat:start', sessionId });
+            // Only broadcast chat:start to web panel for non-Acorn sessions.
+            // Acorn sessions are isolated — leaking events locks up the web panel.
+            if (!isAcorn) {
+              this.broadcast({ type: 'chat:start', sessionId });
+            }
             const images = Array.isArray(msg.images) ? msg.images.map(img => ({
               type: 'image',
               source: { type: 'base64', media_type: img.mediaType || 'image/png', data: img.data },
@@ -1956,37 +2058,48 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             const result = await this.tools._agent.processMessage({
               content: msg.content + fileNote,
               channelId: sessionId,
-              channelName: 'control-panel',
+              channelName: isAcorn ? `acorn:${ws._user}` : 'control-panel',
               userId: ws._user || 'operator',
               userName: ws._user || msg.userName || 'Operator',
               trigger: 'dm',
-              platform: 'web',
-              isDm: true,
+              platform: isAcorn ? 'cli' : 'web',
+              isDm: !isAcorn,
               images,
               onTextDelta: (delta) => {
-                this.broadcast({ type: 'chat:delta', text: delta });
+                try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
               },
               onToolUse: (toolName) => {
-                this.broadcast({ type: 'chat:tool', tool: toolName });
+                try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch { }
               },
               onStatus: (evt) => {
                 try {
                   if (evt.type?.startsWith('code:')) {
-                    this.broadcast(evt);
+                    ws.send(JSON.stringify(evt));
                   } else {
                     const { type: statusType, ...rest } = evt;
-                    this.broadcast({ type: 'chat:status', status: statusType, ...rest });
+                    ws.send(JSON.stringify({ type: 'chat:status', status: statusType, ...rest }));
                   }
                 } catch { }
               },
+              // Acorn: forward tool calls to CLI client for local execution
+              onToolExecute: isAcorn ? async (toolName, toolInput, toolId) => {
+                ws.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
+                return new Promise((resolve, reject) => {
+                  const timeout = setTimeout(() => {
+                    ws._pendingTools.delete(toolId);
+                    reject(new Error(`Tool ${toolName} timed out (5min)`));
+                  }, 300000);
+                  ws._pendingTools.set(toolId, { resolve, reject, timeout });
+                });
+              } : undefined,
             });
-            this.broadcast({
+            ws.send(JSON.stringify({
               type: 'chat:done',
               text: result.text,
               usage: result.usage,
               iterations: result.iterations,
               toolUsage: result.toolUsage,
-            });
+            }));
             try {
               const feed = require('../graph/feed');
               feed.log({
@@ -2004,7 +2117,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               : e.status === 500 || e.error?.type === 'api_error' ? 'API server error — try again shortly'
                 : e.status === 429 ? 'Rate limited — too many requests, wait a moment'
                   : (e.error?.error?.message || e.message || 'Unknown error').substring(0, 200);
-            this.broadcast({ type: 'chat:error', error: friendly });
+            ws.send(JSON.stringify({ type: 'chat:error', error: friendly }));
           }
         } else if (msg.type === 'voice-chat') {
           if (!this.tools._agent) {
@@ -2195,7 +2308,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       });
 
       ws.on('close', () => {
-        graphEvents.off('change', onGraphEvent);
+        if (onGraphEvent) graphEvents.off('change', onGraphEvent);
         if (ws._terminals) {
           for (const [, sess] of ws._terminals) {
             if (sess.pty) { try { sess.pty.kill(); } catch { } }

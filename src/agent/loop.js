@@ -106,6 +106,8 @@ class AgentLoop {
       this.activeRuns.delete(sessionKey);
       this._activeAbortControllers.delete(sessionKey);
       this.tools._abortSignal = null;
+      // Clean up per-session tool context
+      if (this.tools._sessionContexts) this.tools._sessionContexts.delete(sessionKey);
     }
   }
 
@@ -124,7 +126,21 @@ class AgentLoop {
    * The main agent loop — handles multi-turn tool use
    */
   async _runLoop(sessionKey, opts) {
-    // Pass context to tool system so tools know the calling channel
+    // Store per-session tool context so concurrent sessions (e.g. Acorn + main chat)
+    // don't corrupt each other. Tools read from _sessionContexts[sessionKey] when available.
+    if (!this.tools._sessionContexts) this.tools._sessionContexts = new Map();
+    this.tools._sessionContexts.set(sessionKey, {
+      trigger: opts.trigger || null,
+      channelId: opts.channelId || null,
+      platform: opts.platform || 'discord',
+      userMessage: opts.content || null,
+      userName: opts.userName || null,
+      userId: opts.userId || null,
+      abortSignal: opts._abortSignal || null,
+    });
+
+    // Also set the legacy globals (for tools that haven't been updated to use _sessionContexts).
+    // These are best-effort when multiple sessions run concurrently.
     this.tools._currentTrigger = opts.trigger || null;
     this.tools._currentChannelId = opts.channelId || null;
     this.tools._currentPlatform = opts.platform || 'discord';
@@ -482,7 +498,15 @@ class AgentLoop {
             graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
             if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { } }
             const toolExecStart = Date.now();
-            const result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+            let result;
+            if (opts.onToolExecute) {
+              result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
+              if (result === null || result === undefined) {
+                result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+              }
+            } else {
+              result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+            }
             let resultContent = JSON.stringify(result);
 
             const toolExecMs = Date.now() - toolExecStart;
