@@ -203,6 +203,7 @@ function loadConfigFresh() {
   if (process.env.ANIMA_DISPLAY_NAME) config.displayName = process.env.ANIMA_DISPLAY_NAME;
   if (process.env.ANIMA_NICKNAMES) config.nicknames = process.env.ANIMA_NICKNAMES.split(',').map(s => s.trim()).filter(Boolean);
   if (process.env.BRAVE_API_KEY) config.braveApiKey = process.env.BRAVE_API_KEY;
+  if (process.env.SEARXNG_URL) config.searxngUrl = process.env.SEARXNG_URL;
   if (process.env.TELEGRAM_BOT_TOKEN) config.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 
   // Slack

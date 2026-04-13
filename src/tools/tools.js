@@ -2549,13 +2549,66 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
   }
 
-  // ── Web Search (Brave) ────────────────────────────────────────────────
+  // ── Web Search (SearXNG → Brave fallback) ────────────────────────────
 
   async _webSearchTool(input) {
     const { query, count = 5 } = input;
-    const apiKey = this.config.braveApiKey;
-    if (!apiKey) return { error: 'Brave API key not configured. Set BRAVE_API_KEY env var.' };
 
+    // Try SearXNG first (self-hosted, no API key needed)
+    const searxngUrl = this.config.searxngUrl || process.env.SEARXNG_URL;
+    if (searxngUrl) {
+      try {
+        const result = await this._searxngSearch(query, count, searxngUrl);
+        if (result.results && result.results.length > 0) return result;
+        // Fall through to Brave if SearXNG returned nothing
+      } catch (e) {
+        this.log.warn(`[search] SearXNG failed: ${e.message}, trying Brave fallback`);
+      }
+    }
+
+    // Brave fallback
+    const apiKey = this.config.braveApiKey;
+    if (!apiKey && !searxngUrl) return { error: 'No search provider configured. Set SEARXNG_URL or BRAVE_API_KEY.' };
+    if (!apiKey) return { results: [], query, note: 'SearXNG returned no results and no Brave API key configured' };
+    return this._braveSearch(query, count, apiKey);
+  }
+
+  async _searxngSearch(query, count, baseUrl) {
+    const url = baseUrl.replace(/\/$/, '');
+    const params = new URLSearchParams({
+      q: query,
+      format: 'json',
+      categories: 'general',
+    });
+
+    return new Promise((resolve, reject) => {
+      const fullUrl = `${url}/search?${params}`;
+      const mod = fullUrl.startsWith('https') ? https : http;
+
+      const req = mod.get(fullUrl, { timeout: 15000 }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            const results = (json.results || []).slice(0, count).map(r => ({
+              title: r.title || '',
+              url: r.url || '',
+              description: r.content || r.description || '',
+            }));
+            resolve({ results, query, total: (json.results || []).length, provider: 'searxng' });
+          } catch (e) {
+            reject(new Error(`SearXNG parse error: ${e.message}`));
+          }
+        });
+      });
+
+      req.on('error', (e) => reject(new Error(`SearXNG request failed: ${e.message}`)));
+      req.on('timeout', () => { req.destroy(); reject(new Error('SearXNG timed out')); });
+    });
+  }
+
+  _braveSearch(query, count, apiKey) {
     return new Promise((resolve) => {
       const params = new URLSearchParams({
         q: query,
@@ -2586,7 +2639,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                 url: r.url,
                 description: r.description || '',
               }));
-              resolve({ results, query, total: json.web.results.length });
+              resolve({ results, query, total: json.web.results.length, provider: 'brave' });
             } else {
               resolve({ results: [], query, note: 'No results found' });
             }
