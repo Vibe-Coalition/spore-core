@@ -485,10 +485,12 @@ function applyPromptSectionsMixin(GraphContext) {
       lines.push('You are connected to **Telegram**. Use `target: "telegram:<chatId>"` with message_send.');
     }
     if (this.config.webPort) {
-      const d = this.config.ingressDomain;
-      const iP = (this.config.ingressPath || '').replace(/\/$/, '');
-      const pr = this.config.ingressHttps ? 'https' : 'http';
-      const pubUrl = d ? `${pr}://${d}${iP}` : null;
+      let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
+      if (!pubUrl && this.config.ingressDomain) {
+        const iP = (this.config.ingressPath || '').replace(/\/$/, '');
+        const pr = this.config.ingressHttps ? 'https' : 'http';
+        pubUrl = `${pr}://${this.config.ingressDomain}${iP}`;
+      }
       lines.push(`You have a **Web Control Panel**${pubUrl ? ` at **${pubUrl}/**` : ' at your web port'}. When the current platform is "web":`);
       if (pubUrl) {
         lines.push(`- Your public webapp: ${pubUrl}/`);
