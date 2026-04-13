@@ -32,12 +32,14 @@ Current graph context (what is already known):
 ## Extraction philosophy — BE THOROUGH
 Extract every durable fact, preference, plan, relationship, opinion, or event. One conversation can yield many attributes across multiple entities. Ask: "Would this fact be useful to recall in a month?" If yes, extract it. Only return empty arrays for truly content-free exchanges (pure greetings, "ok thanks", etc.).
 
-**Worth extracting:** who someone is, what they care about, opinions, skills, projects, relationships, personality traits, preferences, biographical facts, communication style, product/item details (brand, model, specs, price), event details (date, location, participants), plans and deadlines, quantities and measurements.
-**Also extract from assistant responses:** specific recommendations (restaurants, books, products, tools), creative content details (story characters, names, colors, plot points, physical descriptions, visual details), factual answers given (schedules, assignments, calculations, explanations), and any information the user might want to recall later ("what did you recommend?", "what was that character's name?", "what color was X?").
-**CREATIVE & VISUAL CONTENT:** When the assistant writes stories, descriptions, or generates image prompts, extract the key visual and narrative details as attributes — character names, colors, physical descriptions, locations, plot points. E.g. "Plesiosaur has a blue scaly body" from a children's book, or "dragon has red scales and golden eyes" from a story. These are high-importance facts that users specifically ask about later.
+**Worth extracting:** who someone is, what they care about, opinions, skills, projects, relationships, personality traits, preferences, biographical facts, communication style, product/item details (brand, model, specs, price), event details (date, location, participants), plans and deadlines, quantities and measurements, research findings, technical facts, code patterns, configuration details, and anything the user shared or discussed at length.
+**Also extract from assistant responses:** specific recommendations (restaurants, books, products, tools), creative content details (story characters, names, colors, plot points, physical descriptions, visual details), factual answers given (schedules, assignments, calculations, explanations), research results, technical explanations, and any information the user might want to recall later ("what did you recommend?", "what was that character's name?", "what color was X?", "what did we discuss about X?").
+**SHARED CONTENT & DOCUMENTS:** When the user shares text, articles, stories, code, research, or any substantial content — extract its key details as entities and attributes. Create a dedicated entity for the content (type: document, concept, or project as appropriate) with attributes capturing: title/name, author, key themes, important details, conclusions, and why the user shared it. The user expects the agent to remember what was shared. E.g. if a user pastes a short story, create an entity for the story with attributes for characters, plot summary, setting, themes, and notable quotes.
+**CREATIVE & VISUAL CONTENT:** When the assistant writes stories, descriptions, or generates image prompts, extract the key visual and narrative details as attributes — character names, colors, physical descriptions, locations, plot points, dialogue, themes, and tone. E.g. "Plesiosaur has a blue scaly body" from a children's book, or "dragon has red scales and golden eyes" from a story. These are high-importance facts that users specifically ask about later.
+**TECHNICAL CONTENT:** When the conversation covers technical topics — code, APIs, configurations, architectures, debugging, commands — extract the specific technical facts. E.g. "vLLM server runs on port 8000 with --tensor-parallel-size 4", "GLM-5.1 uses fp8 quantization", "the bug was caused by firstContactTimeoutMs defaulting to 10s". Technical details the user worked through are high-value recall targets.
 **TRANSACTION DETAILS:** When the user mentions a specific purchase, redemption, or transaction, ALWAYS extract the store/location, item, amount, and context. E.g. "Redeemed $5 coupon on coffee creamer at Target" — not just "organizing coupons." If the store is mentioned anywhere in the conversation context (e.g. user mentions using a Target app), associate the transaction with that store.
 **TABLES & STRUCTURED DATA:** When the assistant produces a table, schedule, roster, or structured list, decompose it into individual fact attributes — one per row/assignment/entry. Do NOT summarize a table as a single high-level description. For example, a 7-person shift schedule should yield 7+ attributes like "Admon: Sunday 8am-4pm (Day Shift)", "Magdy: Sunday 12pm-8pm", etc. — not one attribute saying "7-agent rotation covering 4 shifts".
-**NOT worth extracting:** what the agent did this turn, tool usage, task delegation, operational descriptions, greetings, small talk, anything already in the graph (even rephrased).
+**NOT worth extracting:** greetings, small talk, filler ("ok", "thanks", "got it"), anything already in the graph (even rephrased). Note: DO extract the *outcomes* and *knowledge gained* from tool usage even though the tool mechanics themselves aren't worth storing.
 
 ## Rules
 - Create a person entity for new users. Use username as ID (lowercase-hyphenated). Even casual exchanges justify remembering the person.
@@ -46,7 +48,7 @@ Extract every durable fact, preference, plan, relationship, opinion, or event. O
 - Entity IDs: lowercase-hyphenated, no special characters. Do NOT create entities for filenames, task IDs, URLs, or temporary artifacts.
 - Aspect names: lowercase_underscored (e.g. "preferences", "background", "communication_style").
 - **REUSE existing aspect names** from the graph context when they fit. Check the node's current aspects before inventing a new name. Only create a new aspect if no existing one is appropriate. This prevents fragmentation (e.g. "food_prefs" vs "culinary_interests" vs "cooking" on the same node).
-- Importance 7-10 only. If a fact isn't at least importance 7, it's not worth storing.
+- Importance 5-10. Extract liberally — if in doubt, extract it. Only skip truly trivial facts (importance < 5).
 - Descriptions under 80 chars. Attributes should be concise, durable facts — include specific details (numbers, names, dates, brands).
 - **DATES IN TEXT:** When a fact has a specific date, ALWAYS include the ISO date in the attribute text itself (e.g. "Purchased Samsung Galaxy S22 on 2023-01-15" not just "Purchased Samsung Galaxy S22"). This ensures dates are searchable and visible in all contexts. The eventDate field is still required, but the date must also appear in the attribute string.
 - **EVENT DATES vs CONVERSATION DATES:** The eventDate must be when the event actually occurred, NOT when the user talked about it. If the user discusses a past event (e.g. "Holi was amazing" on March 26, but Holi was March 8), use the actual event date. For named holidays and festivals, use their real calendar date. If the actual date isn't stated or inferrable from context, set eventDate to null rather than defaulting to the wall clock. Only use the wall clock as eventDate when the user explicitly indicates something happened "today", "just now", or "right now".
@@ -64,10 +66,10 @@ Extract every durable fact, preference, plan, relationship, opinion, or event. O
 Return ONLY valid JSON:
 {
   "entities": [
-    { "id": "entity-id", "label": "Human Name", "type": "person|concept|project|system|channel|event|skill|product|place|organization", "description": "Brief description" }
+    { "id": "entity-id", "label": "Human Name", "type": "person|concept|project|system|channel|event|skill|product|place|organization|document", "description": "Brief description" }
   ],
   "aspects": [
-    { "nodeId": "existing-or-new-entity-id", "name": "aspect_name", "attributes": ["fact 1", "fact 2"], "importance": 7, "eventDate": "YYYY-MM-DD or null" }
+    { "nodeId": "existing-or-new-entity-id", "name": "aspect_name", "attributes": ["fact 1", "fact 2"], "importance": 5, "eventDate": "YYYY-MM-DD or null" }
   ],
   "updates": [
     { "nodeId": "entity-id", "aspectName": "aspect_name", "old": "exact text of the existing attribute to replace", "new": "the updated fact", "eventDate": "YYYY-MM-DD or null" }
@@ -151,7 +153,7 @@ const CANONICAL_ASPECTS = [
 ];
 const MAX_ATTRS_PER_ASPECT = 30;
 const MAX_ATTR_LENGTH = 300;
-const MIN_IMPORTANCE = 7;
+const MIN_IMPORTANCE = 5;
 
 class Learner {
   constructor(config, logger, anthropicClient) {
@@ -336,15 +338,6 @@ class Learner {
     this._running = true;
 
     try {
-      // Grace period: wait briefly so the user can send a follow-up message
-      // (which sets _llmBusy=true) before we occupy the model server.
-      await new Promise(r => setTimeout(r, 3000));
-      if (this._llmBusy) {
-        this._queue.unshift({ batch });
-        this.log.info('[learner] Agent became active during grace period, re-queuing');
-        return;
-      }
-
       const combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
       const lastObservedAt = batch[batch.length - 1].observedAt;
       const mergedOpts = batch[batch.length - 1].opts;
@@ -630,17 +623,17 @@ The JSON schema for updates becomes:
     const parts = [];
     if (observedAtIso) parts.push(`Observation time (UTC): ${observedAtIso}`);
     if (opts.userName) parts.push(`[${opts.userName} in #${opts.channelName || 'dm'}]`);
-    const cappedUser = typeof userMsg === 'string' && userMsg.length > 4000 ? userMsg.substring(0, 4000) + '...[truncated]' : userMsg;
+    const cappedUser = typeof userMsg === 'string' && userMsg.length > 12000 ? userMsg.substring(0, 12000) + '...[truncated]' : userMsg;
     parts.push(`User: ${cappedUser}`);
     if (opts.toolCalls && opts.toolCalls.length > 0) {
       const toolSummary = opts.toolCalls.map(t => {
         const raw = t.resultPreview || t.result;
-        const result = typeof raw === 'string' ? raw.substring(0, 200) : (raw != null ? JSON.stringify(raw).substring(0, 200) : '(no result)');
-        return `  ${t.tool}(${(t.input || '').substring(0, 100)}) → ${result}`;
+        const result = typeof raw === 'string' ? raw.substring(0, 1000) : (raw != null ? JSON.stringify(raw).substring(0, 1000) : '(no result)');
+        return `  ${t.tool}(${(t.input || '').substring(0, 300)}) → ${result}`;
       }).join('\n');
       parts.push(`Tools used:\n${toolSummary}`);
     }
-    const cappedAssistant = typeof assistantMsg === 'string' && assistantMsg.length > 6000 ? assistantMsg.substring(0, 6000) + '...[truncated]' : assistantMsg;
+    const cappedAssistant = typeof assistantMsg === 'string' && assistantMsg.length > 12000 ? assistantMsg.substring(0, 12000) + '...[truncated]' : assistantMsg;
     if (cappedAssistant) parts.push(`Assistant: ${cappedAssistant}`);
     return parts.join('\n');
   }
@@ -972,7 +965,7 @@ The JSON schema for updates becomes:
               existingAttrs.push({ id: newAttrId, content: trimmed, event_date: eventDate });
               wrote.aspects++;
               this.stats.aspects++;
-              if (!isShared && (eventDate || (asp.importance || 5) >= 8)) {
+              if (!isShared && (eventDate || (asp.importance || 5) >= 6)) {
                 const nodeRow = this.db.prepare('SELECT label FROM nodes WHERE id = ?').get(nodeId);
                 if (nodeRow) this._generateAndStoreHints(newAttrId, nodeId, nodeRow.label, asp.name, trimmed, eventDate);
               }
@@ -1431,8 +1424,8 @@ ${structuredTemplate}`;
       if (!hasTbl) return null;
 
       const content = [
-        userMsg ? `User: ${(typeof userMsg === 'string' ? userMsg : '').substring(0, 2400)}` : '',
-        assistantMsg ? `Assistant: ${(typeof assistantMsg === 'string' ? assistantMsg : '').substring(0, 1600)}` : '',
+        userMsg ? `User: ${(typeof userMsg === 'string' ? userMsg : '').substring(0, 8000)}` : '',
+        assistantMsg ? `Assistant: ${(typeof assistantMsg === 'string' ? assistantMsg : '').substring(0, 8000)}` : '',
       ].filter(Boolean).join('\n');
 
       if (content.length < 20) return null;

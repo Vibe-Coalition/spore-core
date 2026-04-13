@@ -33,26 +33,26 @@ class GraphContext {
   }
 
   static SECTION_BUDGETS = {
-    persona: 300,
-    identity: 800,
+    persona: 400,
+    identity: 1000,
     voice: 400,
-    rules: 600,
-    selfknowledge: 400,
+    rules: 800,
+    selfknowledge: 600,
     channel: 400,
-    person: 300,
-    relevant: 500,
+    person: 600,
+    relevant: 4000,
     anti: 200,
-    feed: 400,
+    feed: 600,
     tooling: 800,
     behavior: 400,
     runtime: 500,
-    reflections: 300,
-    derived: 600,
-    gaps: 200,
+    reflections: 500,
+    derived: 800,
+    gaps: 300,
     plugin: 2000,
-    episodes: 2000,
+    episodes: 8000,
   };
-  static TOTAL_BUDGET = 12000;
+  static TOTAL_BUDGET = 40000;
   static DROP_ORDER = ['gaps', 'anti', 'selfknowledge', 'plugin', 'feed', 'tooling', 'runtime', 'reflections', 'derived', 'episodes'];
 
   static PROMPT_MODES = {
