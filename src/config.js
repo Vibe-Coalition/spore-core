@@ -31,7 +31,7 @@ const DEFAULTS = {
   agentBornDate: null,
   displayName: null,      // e.g. "Harry The Alien" — how the agent introduces itself
   nicknames: [],          // e.g. ["harry", "h"] — group chat trigger words
-  maxTokens: 8192,
+  maxTokens: 16384,
   contextWindow: 200000,
 
   // Learner
@@ -54,7 +54,7 @@ const DEFAULTS = {
 
   // Session + Compaction
   maxSessionMessages: 200,
-  compactTokenThreshold: 80000,
+  compactTokenThreshold: 120000,
   compactKeepTail: 20,
   sessionIdleTimeoutMinutes: 60,
   sessionDailyResetHour: 4,
@@ -109,21 +109,21 @@ const DEFAULTS = {
   },
 
   // Agent
-  agentTimeoutMs: 600000,
+  agentTimeoutMs: 1800000,
   intermediateTextThrottleSeconds: 30,
-  dmMaxIterations: 20,
+  dmMaxIterations: 75,
   tokenBudgetPressure: 120000,
   maxConcurrent: 6,
   maxSubagentChildren: 8,
-  subagentMaxIter: 50,
-  subagentTimeoutSeconds: 1200,
+  subagentMaxIter: 100,
+  subagentTimeoutSeconds: 3600,
   lullMaxIterations: 4,
   loopDetection: {
-    warn: 5,
-    critical: 10,
+    warn: 8,
+    critical: 15,
     pingPong: 8,
-    ceiling: 50,
-    budgetPressure: 15,
+    ceiling: 200,
+    budgetPressure: 60,
   },
 
   // Proactive outreach (heartbeat-triggered, personality-gated)

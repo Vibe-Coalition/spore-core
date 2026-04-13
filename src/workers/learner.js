@@ -165,8 +165,8 @@ class Learner {
     this.stats = { runs: 0, entities: 0, aspects: 0, updates: 0, edges: 0, errors: 0, skipped: 0, queued: 0, skillsCreated: 0, skillsUpdated: 0 };
     this._running = false;
     this._queue = [];
-    this._maxQueue = 10;
-
+    this._maxQueue = 20;
+    this._llmBusy = false;
 
     // Automatic skill extraction
     this._skills = new SkillsManager(logger);
@@ -187,6 +187,38 @@ class Learner {
     } catch (e) {
       this.log.error('[learner] Failed to open graph for writing:', e.message);
       return false;
+    }
+  }
+
+  setLLMBusy(busy) {
+    this._llmBusy = !!busy;
+    if (!busy) this._drainQueue();
+  }
+
+  flushQueue() {
+    this._llmBusy = false;
+    this._drainQueue();
+  }
+
+  async _callWithRetry(fn, label = 'learner') {
+    const delays = [0, 5000, 15000];
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (attempt > 0) {
+        if (this._llmBusy) {
+          this.log.debug?.(`[${label}] LLM busy, deferring retry ${attempt + 1}`);
+          return null;
+        }
+        await new Promise(r => setTimeout(r, delays[attempt]));
+      }
+      try {
+        return await fn();
+      } catch (e) {
+        const isRetryable = e.message?.includes('aborted') || e.message?.includes('ECONNRESET')
+          || e.message?.includes('ETIMEDOUT') || e.message?.includes('socket hang up')
+          || e.status === 429 || e.status === 503;
+        if (!isRetryable || attempt === delays.length - 1) throw e;
+        this.log.debug?.(`[${label}] Attempt ${attempt + 1} failed (${e.message}), retrying in ${delays[attempt + 1]}ms`);
+      }
     }
   }
 
@@ -282,7 +314,7 @@ class Learner {
 
     const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId };
 
-    if (this._running) {
+    if (this._running || this._llmBusy) {
       if (this._queue.length >= this._maxQueue) {
         this.stats.skipped++;
         return;
@@ -323,12 +355,13 @@ class Learner {
           ]
         : [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }];
 
-      const response = await this.client.messages.create({
+      const response = await this._callWithRetry(() => this.client.messages.create({
         model: this.config.learnerModel || this.config.casualModel || this.config.model,
         max_tokens: 4096,
         system,
         messages: [{ role: 'user', content: combinedExchange }],
-      });
+      }), 'learner-extract');
+      if (!response) return;
 
       const text = response.content.find(b => b.type === 'text')?.text || '';
       const extraction = this._parseExtraction(text);
@@ -381,7 +414,7 @@ class Learner {
   }
 
   _drainQueue() {
-    if (this._queue.length === 0) return;
+    if (this._queue.length === 0 || this._running || this._llmBusy) return;
     const next = this._queue.shift();
     if (next.batch) {
       this._processBatchExtraction(next.batch)
@@ -451,12 +484,13 @@ Return ONLY valid JSON (same schema as extraction):
         ]
       : [{ type: 'text', text: verifyPrompt, cache_control: { type: 'ephemeral' } }];
 
-    const response = await this.client.messages.create({
+    const response = await this._callWithRetry(() => this.client.messages.create({
       model: this.config.learnerModel || this.config.casualModel || this.config.model,
       max_tokens: 2048,
       system,
       messages: [{ role: 'user', content: exchange }],
-    });
+    }), 'learner-verify');
+    if (!response) return null;
 
     const text = response.content.find(b => b.type === 'text')?.text || '';
     const missed = this._parseExtraction(text);
@@ -1321,18 +1355,50 @@ ${structuredTemplate}`;
           ]
         : [{ type: 'text', text: compactSystem, cache_control: { type: 'ephemeral' } }];
 
-      const response = await this.client.messages.create({
+      const response = await this._callWithRetry(() => this.client.messages.create({
         model: this.config.learnerModel || this.config.casualModel || this.config.model,
         max_tokens: summaryBudget,
         system,
         messages: [{ role: 'user', content: transcript }],
-      });
+      }), 'learner-compact');
 
-      return response.content.find(b => b.type === 'text')?.text || null;
+      if (response) {
+        return response.content.find(b => b.type === 'text')?.text || this._fallbackSummary(messages, previousSummary);
+      }
+      return this._fallbackSummary(messages, previousSummary);
     } catch (e) {
       this.log.error('[learner] Compaction summary failed:', e.message);
-      return null;
+      return this._fallbackSummary(messages, previousSummary);
     }
+  }
+
+  _fallbackSummary(messages, previousSummary) {
+    const userMsgs = messages.filter(m => m.role === 'user' && typeof m.content === 'string');
+    const assistantMsgs = messages.filter(m => m.role === 'assistant' && typeof m.content === 'string');
+    const toolUses = messages.filter(m =>
+      Array.isArray(m.content) && m.content.some(b => b.type === 'tool_use')
+    );
+    const lines = [];
+    if (previousSummary) lines.push(previousSummary, '\n--- Update from recent turns ---\n');
+    if (userMsgs.length) {
+      lines.push('## Recent User Requests');
+      for (const m of userMsgs.slice(-5)) lines.push(`- ${m.content.substring(0, 300)}`);
+    }
+    if (toolUses.length) {
+      const toolNames = [];
+      for (const m of toolUses) {
+        for (const b of m.content) {
+          if (b.type === 'tool_use' && !toolNames.includes(b.name)) toolNames.push(b.name);
+        }
+      }
+      lines.push(`\n## Tools Used (${toolUses.length} calls): ${toolNames.join(', ')}`);
+    }
+    if (assistantMsgs.length) {
+      const last = assistantMsgs[assistantMsgs.length - 1];
+      lines.push(`\n## Last Assistant Response\n${last.content.substring(0, 600)}`);
+    }
+    this.log.info(`[learner] Using fallback template summary (${lines.join('\n').length} chars)`);
+    return lines.join('\n');
   }
 
   /**
@@ -1502,12 +1568,13 @@ ${structuredTemplate}`;
 
     const userContent = `## Conversation exchange\n${combinedExchange.substring(0, 4000)}\n\n## Tool calls (${allToolCalls.length} total)\n${toolSummary}\n\n## Existing skills\n${existingSummary}`;
 
-    const response = await this.client.messages.create({
+    const response = await this._callWithRetry(() => this.client.messages.create({
       model: this.config.learnerModel || this.config.casualModel || this.config.model,
       max_tokens: 2048,
       system,
       messages: [{ role: 'user', content: userContent }],
-    });
+    }), 'learner-skill');
+    if (!response) return;
 
     const text = response.content.find(b => b.type === 'text')?.text || '';
     let result;

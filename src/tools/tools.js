@@ -294,7 +294,7 @@ class ToolSystem {
             context: { type: 'string', description: 'Any context the sub-agent needs' },
             model: { type: 'string', description: 'Model override (defaults to subagentModel or main model)' },
             timeoutSeconds: { type: 'number', description: 'Timeout in seconds (default 1200, max 1800)' },
-            maxIterations: { type: 'number', description: 'Max iterations/tool-call rounds (default 50, max 100). Increase for complex multi-step tasks.' },
+            maxIterations: { type: 'number', description: 'Max iterations/tool-call rounds (default 100, max 200). Increase for complex multi-step tasks.' },
             tools: { type: 'boolean', description: 'Give subagent access to tools (default true)' },
           },
           required: ['task'],
@@ -873,7 +873,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
    */
   async _execTool(input) {
     const { command, workdir, timeout = 30000 } = input;
-    const effectiveTimeout = Math.min(timeout, 120000);
+    const effectiveTimeout = Math.min(timeout, 600000);
 
     // Check for dangerous patterns
     for (const pattern of this.dangerousPatterns) {
@@ -1962,7 +1962,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         let messages = [{ role: 'user', content: taskContent }];
         let totalUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
         let finalText = '';
-        const maxIter = Math.min(input.maxIterations || this.config.subagentMaxIter || 50, 100);
+        const maxIter = Math.min(input.maxIterations || this.config.subagentMaxIter || 100, 200);
         const budgetPressureAt = Math.floor(maxIter * 0.8);
 
         // Progress reporting: send the subagent's natural summary to the channel periodically

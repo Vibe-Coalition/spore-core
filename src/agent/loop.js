@@ -233,8 +233,8 @@ class AgentLoop {
     // Complexity-aware message budget: casual chat gets a tight budget so
     // simple greetings don't drag 30K of history. Complex requests get more
     // room. The hard ceiling stays as a safety cap for multi-iteration loops.
-    const casualBudget = this.config.casualMessageBudget || 8000;
-    const complexBudget = this.config.complexMessageBudget || 16000;
+    const casualBudget = this.config.casualMessageBudget || 30000;
+    const complexBudget = this.config.complexMessageBudget || 80000;
     const softBudget = isCasualChat ? casualBudget : complexBudget;
 
     if (msgTokens > softBudget) {
@@ -286,6 +286,8 @@ class AgentLoop {
       : (this.config.normalModel || this.config.plannerModel);
 
     const abortSignal = opts._abortSignal;
+
+    if (this.learner) this.learner.setLLMBusy(true);
 
     while (iterations < safetyCeiling) {
       iterations++;
@@ -524,8 +526,8 @@ class AgentLoop {
               succeeded: !result.error,
             });
 
-            const defaultCap = this.config.maxToolResultChars || 15000;
-            const toolCaps = { read_file: 80000, web_fetch: 15000, exec: 8000, message_read: 10000, graph_query: 10000 };
+            const defaultCap = this.config.maxToolResultChars || 30000;
+            const toolCaps = { read_file: 120000, web_fetch: 30000, exec: 30000, message_read: 15000, graph_query: 15000 };
             const maxResultChars = toolCaps[toolBlock.name] ?? defaultCap;
             if (resultContent.length > maxResultChars) {
               const truncated = resultContent.length;
@@ -758,6 +760,9 @@ class AgentLoop {
       }
       finalText = null;
     }
+
+    // Signal LLM is idle so learner can process its queue
+    if (this.learner) this.learner.setLLMBusy(false);
 
     // Async learning — fire and forget, never delays response
     const learningMode = this.config.learningMode || 'always';
