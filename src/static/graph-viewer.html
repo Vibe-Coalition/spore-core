@@ -1480,6 +1480,17 @@
   }
   .cv-line-numbers span { display: block; padding-right: 10px; }
   #code-viewer-content.has-lines pre { padding-left: 52px; }
+  .cv-media {
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px; min-height: 100%;
+  }
+  .cv-media img, .cv-media video {
+    max-width: 100%; max-height: calc(100vh - 200px);
+    object-fit: contain; border-radius: 6px;
+    background: #000;
+  }
+  .cv-media img { cursor: zoom-in; }
+  .cv-media audio { width: 100%; max-width: 500px; }
   /* Diff styles */
   .cv-diff-line { display: block; padding: 0 14px; min-height: 1.6em; }
   .cv-diff-add { background: rgba(35, 134, 54, .18); color: #3fb950; }
@@ -3601,6 +3612,48 @@ function _cvRenderTab(tab) {
 
   const toolbar = document.getElementById('code-viewer-toolbar');
   const editBtn = document.getElementById('code-viewer-edit-btn');
+
+  // Media branch: if the tab's path has a known media extension, render an
+  // <img>/<video>/<audio> instead of the code+line-numbers view. No edit UI.
+  const mediaExtMatch = (tab.path || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  const mediaExt = mediaExtMatch ? mediaExtMatch[1] : null;
+  let mediaType = null;
+  if (mediaExt) {
+    if (MEDIA_EXTS.image.includes(mediaExt)) mediaType = 'image';
+    else if (MEDIA_EXTS.video.includes(mediaExt)) mediaType = 'video';
+    else if (MEDIA_EXTS.audio.includes(mediaExt)) mediaType = 'audio';
+  }
+  if (mediaType && tab.mode !== 'diff') {
+    contentEl.classList.remove('has-lines');
+    document.querySelector('#code-viewer .cv-line-numbers').innerHTML = '';
+    const workspacePath = tab.path.startsWith('/workspace/') ? tab.path : `/workspace/${tab.path.replace(/^\/+/, '')}`;
+    const mediaUrl = resolveAnimaMediaUrl(workspacePath);
+    const escUrl = esc(mediaUrl);
+    if (mediaType === 'image') {
+      codeEl.innerHTML = `<div class="cv-media"><img src="${escUrl}" alt="${esc(tab.path)}" loading="lazy" onclick="window.open(this.src,'_blank')"></div>`;
+    } else if (mediaType === 'video') {
+      codeEl.innerHTML = `<div class="cv-media"><video src="${escUrl}" controls preload="metadata"></video></div>`;
+    } else {
+      codeEl.innerHTML = `<div class="cv-media"><audio src="${escUrl}" controls preload="metadata"></audio></div>`;
+    }
+    langEl.textContent = mediaType;
+    infoEl.textContent = mediaExt.toUpperCase();
+    toolbar.classList.remove('active');
+    panel.classList.remove('editing');
+    contentEl.scrollTop = 0;
+    _cvRenderTabBar();
+    if (_cvMode === 'auto' || panel.classList.contains('active')) {
+      panel.classList.add('active');
+      _cvPendingCount = 0;
+      _cvUpdatePendingBadge();
+      if (_cvDocked) { _ctShowTabBar(); _ctSetActiveTab('code'); }
+    } else if (_cvMode === 'on-request') {
+      _cvPendingCount++;
+      _cvUpdatePendingBadge();
+      _ctUpdateCodeBadge();
+    }
+    return;
+  }
 
   if (tab.mode === 'diff') {
     contentEl.classList.remove('has-lines');
