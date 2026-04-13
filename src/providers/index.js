@@ -354,7 +354,7 @@ class OAICompatClient {
     this.authHeader = (opts.authHeader || 'bearer').toLowerCase();
     this.extraHeaders = opts.headers || {};
     this.timeoutMs = opts.timeoutMs || 120000;
-    this.firstContactTimeoutMs = opts.firstContactTimeoutMs || 10000;
+    this.firstContactTimeoutMs = opts.firstContactTimeoutMs || this.timeoutMs;
     this._contactedModels = new Set();
     /** @type {((model:string, cap:string, val:boolean) => void)|null} */
     this.onCapability = opts.onCapability || null;
