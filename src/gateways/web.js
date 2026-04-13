@@ -1842,15 +1842,18 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       // Tell reconnecting clients if the agent is mid-turn so they restore busy state
       try {
         const agent = this.tools._agent;
-        if (agent) {
-          const sessionId = 'web:control-panel';
-          const userId = ws._user || 'operator';
-          const sessionKey = agent.sessions.constructor.buildKey(sessionId, true, userId);
-          if (agent.activeRuns.has(sessionKey)) {
+        const userId = ws._user || 'operator';
+        const activeKeys = agent ? [...agent.activeRuns] : [];
+        this.log.info(`[ws] Connect: user=${userId}, activeRuns=${activeKeys.length > 0 ? activeKeys.join(',') : 'none'}`);
+        if (agent && activeKeys.length > 0) {
+          // Any active web session means the agent is busy
+          const webBusy = activeKeys.some(k => k.startsWith('dm:'));
+          if (webBusy) {
             ws.send(JSON.stringify({ type: 'chat:busy' }));
+            this.log.info(`[ws] Sent chat:busy to reconnecting client`);
           }
         }
-      } catch {}
+      } catch (e) { this.log.warn('[ws] Busy check failed:', e.message); }
 
       const onGraphEvent = (evt) => {
         try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch { }
