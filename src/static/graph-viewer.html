@@ -78,7 +78,7 @@
   #login-box .login-btn:active { transform: scale(.98); }
   #login-box .login-btn:disabled { opacity: .5; cursor: not-allowed; }
 
-  #app { display: flex; height: 100vh; position: relative; z-index: 1; }
+  #app { display: flex; height: 100vh; height: 100dvh; position: relative; z-index: 1; }
   #app.hidden { display: none; }
 
   /* ── Chat Panel (right side) ── */
@@ -135,6 +135,7 @@
     width: 5px; min-width: 5px; cursor: col-resize; background: var(--border);
     position: relative; z-index: 20; flex-shrink: 0;
     transition: background 0.15s;
+    touch-action: none;
   }
   .resize-handle:hover, .resize-handle.dragging { background: var(--accent2); }
   .resize-handle-right {
@@ -142,8 +143,16 @@
     width: 5px; min-width: 5px; cursor: col-resize; background: var(--border);
     position: relative; z-index: 20; flex-shrink: 0;
     transition: background 0.15s;
+    touch-action: none;
   }
   .resize-handle-right:hover, .resize-handle-right.dragging { background: var(--accent2); }
+  /* Expand touch hit area on coarse pointers (tablets/phones) without changing visual width */
+  @media (pointer: coarse) {
+    .resize-handle::before, .resize-handle-right::before {
+      content: ''; position: absolute; top: 0; bottom: 0;
+      left: -10px; right: -10px; z-index: 1;
+    }
+  }
 
   #chat-header {
     padding: 6px 10px; border-bottom: 1px solid var(--border);
@@ -5901,20 +5910,24 @@ function initResize(handleId, targetId, side) {
   const target = document.getElementById(targetId);
   if (!handle || !target) return;
 
-  let startX, startW;
+  let startX, startW, pointerId;
 
-  function onMouseDown(e) {
+  function onPointerDown(e) {
     e.preventDefault();
+    pointerId = e.pointerId;
     startX = e.clientX;
     startW = target.getBoundingClientRect().width;
     handle.classList.add('dragging');
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
+    try { handle.setPointerCapture(pointerId); } catch (_) {}
+    handle.addEventListener('pointermove', onPointerMove);
+    handle.addEventListener('pointerup', onPointerUp);
+    handle.addEventListener('pointercancel', onPointerUp);
   }
 
-  function onMouseMove(e) {
+  function onPointerMove(e) {
+    if (e.pointerId !== pointerId) return;
     const dx = e.clientX - startX;
     const newW = side === 'left' ? startW + dx : startW - dx;
     const clamped = Math.max(220, Math.min(newW, window.innerWidth * 0.5));
@@ -5922,15 +5935,18 @@ function initResize(handleId, targetId, side) {
     target.style.minWidth = clamped + 'px';
   }
 
-  function onMouseUp() {
+  function onPointerUp(e) {
+    if (e && e.pointerId !== pointerId) return;
     handle.classList.remove('dragging');
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
-    document.removeEventListener('mousemove', onMouseMove);
-    document.removeEventListener('mouseup', onMouseUp);
+    try { handle.releasePointerCapture(pointerId); } catch (_) {}
+    handle.removeEventListener('pointermove', onPointerMove);
+    handle.removeEventListener('pointerup', onPointerUp);
+    handle.removeEventListener('pointercancel', onPointerUp);
   }
 
-  handle.addEventListener('mousedown', onMouseDown);
+  handle.addEventListener('pointerdown', onPointerDown);
 }
 
 initResize('resize-left', 'chat-panel', 'right');
