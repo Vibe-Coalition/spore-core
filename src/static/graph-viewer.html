@@ -765,6 +765,9 @@
   #canvas.cv-tab-active #stats,
   #canvas.cv-tab-active #lme-hud { display: none; }
   #canvas.cv-tab-active #terminal-pane { display: none !important; }
+  /* Push controls/search below the tab bar when it's visible */
+  #canvas-tabs.active ~ #controls { top: 46px; }
+  #canvas-tabs.active ~ #search { top: 46px; }
 
   #controls {
     position: absolute; top: 16px; left: 16px; display: flex; gap: 8px; z-index: 10;
