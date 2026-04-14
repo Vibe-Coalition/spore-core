@@ -2335,6 +2335,9 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           const sessionId = msg.sessionId || 'web:control-panel';
           const isAcorn = ws._role === 'acorn';
 
+          // Store the client's working directory (sent by Acorn CLI)
+          if (msg.cwd && isAcorn) ws._cwd = msg.cwd;
+
           // Register this client as origin for the session (if not already an observer)
           if (isAcorn) {
             this._registerSessionClient(sessionId, ws, 'origin');
@@ -2398,6 +2401,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               trigger: 'dm',
               platform: isAcorn ? 'cli' : 'web',
               isDm: !isAcorn,
+              clientCwd: ws._cwd || null,
               images,
               onTextDelta: (delta) => {
                 if (isAcorn) {

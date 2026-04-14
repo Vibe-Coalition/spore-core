@@ -200,6 +200,7 @@ class AgentLoop {
       isThread: opts.isThread,
       parentChannelName: opts.parentChannelName,
       messageId: opts.messageId,
+      clientCwd: opts.clientCwd || null,
     };
 
     // Detect casual chat for lighter prompt mode

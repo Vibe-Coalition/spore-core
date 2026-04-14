@@ -821,6 +821,7 @@ function applyPromptSectionsMixin(GraphContext) {
     if (opts.userId) parts.push(`- User ID: ${opts.userId}`);
     if (opts.trigger) parts.push(`- Trigger: ${opts.trigger}`);
     if (opts.messageId) parts.push(`- Triggering Message ID: ${opts.messageId}`);
+    if (opts.clientCwd) parts.push(`- Client working directory: ${opts.clientCwd}`);
 
     parts.push('', ...this._buildTemporalAnchorSection(now));
 
@@ -828,6 +829,10 @@ function applyPromptSectionsMixin(GraphContext) {
     parts.push(`- Workspace: ${workspace}`);
     parts.push(`- Graph DB: ${this.config.graphDbPath}`);
     parts.push('');
+    if (opts.clientCwd) {
+      parts.push(`**Current project directory: ${opts.clientCwd}** — This is the user's active project. When reading files, searching code, or answering questions about "the codebase" or "this project", scope your work to this directory. Do NOT read or reference files from other projects in the workspace unless the user explicitly asks.`);
+      parts.push('');
+    }
     parts.push('Use `message_send` / `message_read` / `message_edit` / `message_react` with platform targets like `discord:123` or `telegram:456` when needed.');
     parts.push(`Your workspace is ${workspace} — use it for scripts, files, and tools you create. It persists across restarts.`);
 
