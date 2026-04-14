@@ -1902,6 +1902,7 @@ exec "${nodeBin}" index.js
           '      - ../../src/tools:/app/tools:ro',
           '      - ../../src/voice:/app/voice:ro',
           '      - ./static:/app/static',
+          '      - ../../src/static:/app/shared-static:ro',
           '      - ../../src/index.js:/app/index.js:ro',
           '      - ../../src/app.js:/app/app.js:ro',
           '      - ../../src/config.js:/app/config.js:ro',
@@ -1954,6 +1955,7 @@ ${imageLine}
       - GRAPH_DB_PATH=/data/graph.db
       - SESSION_DB_PATH=/data/sessions.db
       - ANIMA_WORKSPACE_PATH=/workspace
+      - ANIMA_SHARED_STATIC=/app/shared-static
       - ANIMA_LOG_LEVEL=\${ANIMA_LOG_LEVEL:-info}
       - ANIMA_HEALTH_PORT=\${ANIMA_HEALTH_PORT:-${healthPort}}
 ${webPortEnv ? webPortEnv + '\n' : ''}\

@@ -607,7 +607,12 @@ class OAICompatClient {
                     toolCalls[idx].name = tc.function.name;
                     emit('event', { type: 'content_block_start', content_block: { type: 'tool_use', id: toolCalls[idx].id, name: tc.function.name } });
                   }
-                  if (tc.function?.arguments) toolCalls[idx].args += tc.function.arguments;
+                  if (tc.function?.arguments) {
+                    toolCalls[idx].args += tc.function.arguments;
+                    if (toolCalls[idx].args.length % 200 < tc.function.arguments.length) {
+                      emit('event', { type: 'tool_use_delta', index: idx, name: toolCalls[idx].name, argsLength: toolCalls[idx].args.length });
+                    }
+                  }
                 }
               }
 

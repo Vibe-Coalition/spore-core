@@ -370,6 +370,11 @@
   .chat-msg.user { white-space: pre-wrap; }
   .chat-msg.streaming { white-space: pre-wrap; opacity: 0.85; }
   .chat-msg.streaming:empty { padding: 6px 14px; min-height: 18px; }
+  .chat-msg.thinking-stream { color: var(--text-dim); font-style: italic; opacity: 0.6; font-size: 0.82em; }
+  .chat-msg.thinking-done { color: var(--text-dim); font-style: italic; opacity: 0.4; font-size: 0.78em; max-height: 3.6em; overflow: hidden; cursor: pointer; padding-bottom: 1.4em; position: relative; }
+  .chat-msg.thinking-done::after { content: '▸ show thinking'; display: block; font-size: 0.7rem; opacity: 0.6; font-style: normal; margin-top: 4px; }
+  .chat-msg.thinking-done.expanded { max-height: none; }
+  .chat-msg.thinking-done.expanded::after { content: '▾ hide thinking'; }
 
   /* ── Code: inline ── */
   .chat-msg code {
@@ -2689,6 +2694,7 @@ let _chatStopped = false;
 let streamingMsgEl = null;
 let streamChunks = [];
 let _streamDelta = '';
+let _thinkingDelta = '';
 
 function setChatBusy(busy) {
   chatBusy = busy;
@@ -2830,7 +2836,10 @@ function chatScrollToBottom() {
 function finalizeStreamingMsg() {
   if (!streamingMsgEl) return;
   streamingMsgEl.classList.remove('streaming');
-  if (!_streamDelta && !streamingMsgEl.textContent.trim()) {
+  if (!_streamDelta && _thinkingDelta) {
+    streamingMsgEl.classList.add('thinking-done');
+    streamingMsgEl.onclick = function() { this.classList.toggle('expanded'); };
+  } else if (!_streamDelta) {
     streamingMsgEl.remove();
   }
   streamingMsgEl = null;
@@ -2841,7 +2850,7 @@ function handleWsMessage(msg) {
   // After user clicks stop, suppress stale server messages until the run finishes
   if (_chatStopped) {
     if (msg.type === 'chat:done') { _chatStopped = false; return; }
-    if (msg.type === 'chat:delta' || msg.type === 'chat:tool'
+    if (msg.type === 'chat:delta' || msg.type === 'chat:thinking' || msg.type === 'chat:tool'
         || msg.type === 'chat:status' || msg.type === 'chat:chunk') return;
   }
   if (msg.type === 'chat:busy') {
@@ -2862,7 +2871,18 @@ function handleWsMessage(msg) {
     streamingMsgEl = addChatMessage('assistant', '');
     streamingMsgEl.classList.add('streaming');
     setActivity('thinking...');
+    _thinkingDelta = '';
+  } else if (msg.type === 'chat:thinking') {
+    _thinkingDelta += msg.text;
+    if (streamingMsgEl && !_streamDelta) {
+      streamingMsgEl.textContent = _thinkingDelta;
+      streamingMsgEl.classList.add('thinking-stream');
+      if (_userWasAtBottom) chatScrollToBottom();
+    }
   } else if (msg.type === 'chat:delta') {
+    if (_thinkingDelta && !_streamDelta) {
+      if (streamingMsgEl) streamingMsgEl.classList.remove('thinking-stream');
+    }
     _streamDelta += msg.text;
     setActivity('responding...');
     if (streamingMsgEl) {
@@ -2889,10 +2909,14 @@ function handleWsMessage(msg) {
     if (s === 'thinking_start') {
       setActivity('thinking deeply...');
     } else if (s === 'thinking') {
-      const snippet = msg.snippet ? ' \u2014 ' + msg.snippet.substring(0, 80) : '';
+      const snippet = msg.snippet ? ' \u2014 ' + msg.snippet.substring(0, 140) : '';
       setActivity('thinking (' + (msg.tokens || 0) + ' tokens)' + snippet);
     } else if (s === 'thinking_done') {
       setActivity('composing response...');
+    } else if (s === 'tool_progress') {
+      const kb = Math.round((msg.bytes || 0) / 1024);
+      const label = kb > 0 ? kb + 'KB' : (msg.bytes || 0) + 'B';
+      setActivity('writing ' + (msg.tool || '') + ' ' + label + '...');
     } else if (s === 'tool_exec_start') {
       const d = msg.detail ? ': ' + msg.detail.substring(0, 60) : '';
       setActivity('running ' + msg.tool + d + '...');
@@ -2919,10 +2943,13 @@ function handleWsMessage(msg) {
   } else if (msg.type === 'chat:done') {
     setActivity(null);
     if (streamingMsgEl) {
-      streamingMsgEl.classList.remove('streaming');
+      streamingMsgEl.classList.remove('streaming', 'thinking-stream');
       const content = _streamDelta || '';
       if (content.trim()) {
         streamingMsgEl.innerHTML = formatAssistantMsg(content, msg);
+      } else if (_thinkingDelta) {
+        streamingMsgEl.classList.add('thinking-done');
+        streamingMsgEl.onclick = function() { this.classList.toggle('expanded'); };
       } else {
         streamingMsgEl.remove();
         // Append tool tags and usage to the last assistant bubble

@@ -338,7 +338,7 @@ class AgentLoop {
         const iterStart = Date.now();
         this.log.info(`[agent] Iter ${iterations} starting — model=${iterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
 
-        const response = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onToolUse: opts.onToolUse, onStatus: opts.onStatus, tools: chatTools, model: activeModel, abortSignal });
+        const response = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta, onToolUse: opts.onToolUse, onStatus: opts.onStatus, tools: chatTools, model: activeModel, abortSignal });
 
         const iterMs = Date.now() - iterStart;
 
@@ -738,7 +738,7 @@ class AgentLoop {
           role: 'user',
           content: '[SYSTEM: Your tool calls were blocked because you appeared to be stuck in a loop. Summarize what you have accomplished so far and respond to the user. Do not call any more tools.]',
         });
-        const finalResponse = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta });
+        const finalResponse = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta });
         if (finalResponse.usage) {
           totalUsage.input_tokens += finalResponse.usage.input_tokens;
           totalUsage.output_tokens += finalResponse.usage.output_tokens;
@@ -1100,8 +1100,9 @@ class AgentLoop {
     let _thinkingText = '';
     let _phase = 'thinking';
     let _currentToolName = '';
+    let _toolArgBytes = 0;
     const _streamStart = Date.now();
-    const heartbeatMs = 15000;
+    const heartbeatMs = 5000;
     const heartbeat = setInterval(() => {
       const elapsed = Math.round((Date.now() - _streamStart) / 1000);
       this.log.info(`[stream] ${model} — ${elapsed}s, phase=${_phase}, ${_streamChars} chars, ${_streamToolCount} tool(s), ${_thinkingTokens} thinking`);
@@ -1120,10 +1121,14 @@ class AgentLoop {
         }
         if (event.type === 'content_block_delta' && event.delta?.type === 'thinking_delta') {
           _thinkingTokens++;
-          _thinkingText += event.delta.thinking || '';
-          if (_thinkingTokens % 20 === 0 && opts.onStatus) {
-            const snippet = _thinkingText.length > 120
-              ? _thinkingText.slice(-120).replace(/^\S*\s/, '')
+          const chunk = event.delta.thinking || '';
+          _thinkingText += chunk;
+          if (chunk && opts.onThinkingDelta) {
+            try { opts.onThinkingDelta(chunk); } catch { }
+          }
+          if (_thinkingTokens % 5 === 0 && opts.onStatus) {
+            const snippet = _thinkingText.length > 200
+              ? _thinkingText.slice(-200).replace(/^\S*\s/, '')
               : _thinkingText;
             opts.onStatus({ type: 'thinking', tokens: _thinkingTokens, snippet });
           }
@@ -1136,7 +1141,17 @@ class AgentLoop {
           _phase = 'tool_call';
           _currentToolName = event.content_block.name || '';
           _streamToolCount++;
+          _toolArgBytes = 0;
           if (opts.onToolUse) opts.onToolUse(event.content_block.name);
+        }
+        if (event.type === 'tool_use_delta' && opts.onStatus) {
+          opts.onStatus({ type: 'tool_progress', tool: event.name || _currentToolName, bytes: event.argsLength });
+        }
+        if (event.type === 'content_block_delta' && event.delta?.type === 'input_json_delta') {
+          _toolArgBytes += (event.delta.partial_json || '').length;
+          if (_toolArgBytes % 200 < 50 && opts.onStatus) {
+            opts.onStatus({ type: 'tool_progress', tool: _currentToolName, bytes: _toolArgBytes });
+          }
         }
         if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
           _phase = 'generating';

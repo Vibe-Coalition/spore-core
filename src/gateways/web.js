@@ -12,6 +12,16 @@ const path = require('path');
 const crypto = require('crypto');
 const graphEvents = require('../graph/events');
 
+/** Pick the newer of two file paths (by mtime). Skips null/missing paths. */
+function _newerFile(a, b) {
+  const aOk = a && fs.existsSync(a);
+  const bOk = b && fs.existsSync(b);
+  if (aOk && bOk) {
+    return fs.statSync(a).mtimeMs >= fs.statSync(b).mtimeMs ? a : b;
+  }
+  return aOk ? a : b;
+}
+
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 class WebGateway {
@@ -118,6 +128,9 @@ class WebGateway {
           isDm: true,
           onTextDelta: (delta) => {
             this.broadcast({ type: 'chat:delta', text: delta });
+          },
+          onThinkingDelta: (delta) => {
+            this.broadcast({ type: 'chat:thinking', text: delta });
           },
           onToolUse: (toolName) => {
             this.broadcast({ type: 'chat:tool', tool: toolName });
@@ -859,7 +872,10 @@ class WebGateway {
       // /graph — serve without auth (HTML has its own login form)
       if (urlPath === '/graph' || urlPath === '/graph/') {
         try {
-          const viewerPath = path.join(__dirname, '..', 'static', 'graph-viewer.html');
+          const localViewer = path.join(__dirname, '..', 'static', 'graph-viewer.html');
+          const sharedStaticDir = process.env.ANIMA_SHARED_STATIC || '/app/shared-static';
+          const sharedViewer = path.join(sharedStaticDir, 'graph-viewer.html');
+          const viewerPath = _newerFile(sharedViewer, localViewer);
           let html = fs.readFileSync(viewerPath, 'utf8');
           const brandPath = path.join(__dirname, '..', 'static', 'brand.js');
           if (fs.existsSync(brandPath)) {
@@ -2072,6 +2088,9 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               images,
               onTextDelta: (delta) => {
                 try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
+              },
+              onThinkingDelta: (delta) => {
+                try { ws.send(JSON.stringify({ type: 'chat:thinking', text: delta })); } catch { }
               },
               onToolUse: (toolName) => {
                 try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch { }
