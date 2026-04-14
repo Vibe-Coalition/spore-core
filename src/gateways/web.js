@@ -2207,6 +2207,21 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           // Register this client as origin for the session (if not already an observer)
           if (isAcorn) {
             this._registerSessionClient(sessionId, ws, 'origin');
+            // Echo user message to all OTHER session clients so observers see it
+            const clients = this._sessionClients.get(sessionId);
+            if (clients) {
+              const echoPayload = JSON.stringify({
+                type: 'chat:user-message',
+                text: (msg.content || '').substring(0, 2000),
+                userName: ws._user || msg.userName || 'user',
+                sessionId,
+              });
+              for (const { ws: c } of clients) {
+                if (c !== ws && c.readyState === 1) {
+                  try { c.send(echoPayload); } catch {}
+                }
+              }
+            }
           }
 
           try {
