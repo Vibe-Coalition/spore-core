@@ -122,8 +122,17 @@ class Maintainer {
 
       const dfCols = this.db.prepare("PRAGMA table_info(derived_facts)").all().map(c => c.name);
       if (!dfCols.includes('reasoning_type')) {
-        this.db.exec("ALTER TABLE derived_facts ADD COLUMN reasoning_type TEXT DEFAULT 'derived'");
-        this.db.exec("ALTER TABLE derived_facts ADD COLUMN premises TEXT");
+        try { this.db.exec("ALTER TABLE derived_facts ADD COLUMN reasoning_type TEXT DEFAULT 'derived'"); } catch {}
+        try { this.db.exec("ALTER TABLE derived_facts ADD COLUMN premises TEXT"); } catch {}
+      }
+
+      // Ensure embedding column exists on nodes
+      const nodeCols = this.db.prepare("PRAGMA table_info(nodes)").all().map(c => c.name);
+      if (!nodeCols.includes('embedding')) {
+        try { this.db.exec("ALTER TABLE nodes ADD COLUMN embedding TEXT"); } catch {}
+      }
+      if (!nodeCols.includes('extracted_at')) {
+        try { this.db.exec("ALTER TABLE nodes ADD COLUMN extracted_at DATETIME"); } catch {}
       }
     } catch (e) {
       this.log.warn('[maintainer] Schema migration:', e.message);
@@ -155,14 +164,17 @@ class Maintainer {
       this.log.info('[maintainer] Starting maintenance cycle...');
       this._lastCreativeRunAt = Date.now();
 
-      await this.detectNewGaps(5);
-      await this.fillGaps(5);
-      await this.reflectOnNodes(3);
-      await this.checkStale(5);
-      await this.connectSparseNodes(4);
-      await this.mergeNodes(5);
-      await this.deriveInferences(3);
-      await this.expireEpisodicAttributes(20);
+      const nodeCount = this.db.prepare('SELECT COUNT(*) as c FROM nodes').get().c;
+      const scale = Math.max(1, Math.min(5, Math.floor(nodeCount / 50)));
+
+      await this.detectNewGaps(scale);
+      await this.fillGaps(scale + 1);
+      await this.reflectOnNodes(Math.min(scale, 2));
+      await this.checkStale(scale + 1);
+      await this.connectSparseNodes(scale);
+      await this.mergeNodes(scale + 2);
+      await this.deriveInferences(scale);
+      await this.expireEpisodicAttributes(10);
       await this.embedUnembeddedNodes(10);
 
       this.stats.cycles++;
@@ -199,8 +211,10 @@ class Maintainer {
     try {
       // Don't generate more gaps if we already have too many open
       const totalOpen = this.db.prepare("SELECT COUNT(*) as c FROM gaps WHERE status = 'open'").get().c;
-      if (totalOpen > 50) {
-        this.log.info(`[maintainer] Skipping gap detection — ${totalOpen} open gaps already (cap: 50)`);
+      const nodeCount = this.db.prepare('SELECT COUNT(*) as c FROM nodes').get().c;
+      const gapCap = Math.max(10, Math.min(50, nodeCount));
+      if (totalOpen > gapCap) {
+        this.log.info(`[maintainer] Skipping gap detection — ${totalOpen} open gaps already (cap: ${gapCap} for ${nodeCount} nodes)`);
         return;
       }
 
@@ -242,9 +256,13 @@ class Maintainer {
 
       const response = await this._callLLM(
         `You identify gaps in a knowledge graph — things that SHOULD be known but aren't.
-For each node, propose 1-3 open questions that would meaningfully deepen understanding.
-Skip trivial questions. Focus on: relationships, context, technical details, motivations, recent changes.
-Return ONLY valid JSON: [{"nodeId":"id","gaps":["question 1","question 2"]}]
+For each node, propose 1-2 questions that a user might naturally answer in conversation.
+Questions must be answerable from real-world conversation, NOT from speculation or web search.
+BAD: "What query language does the platform expose?" (too meta/technical)
+GOOD: "What does the user like about this restaurant?" (answerable from conversation)
+GOOD: "When did the user last visit?" (concrete, time-bound)
+Skip nodes that already have good coverage. Return ONLY valid JSON:
+[{"nodeId":"id","gaps":["question 1"]}]
 If no meaningful gaps exist, return: []`,
         `Nodes to analyze:\n${nodeDescriptions}`
       );
@@ -321,12 +339,13 @@ If no meaningful gaps exist, return: []`,
       }
 
       const response = await this._callLLM(
-        `You are resolving an open question (gap) in a knowledge graph.
-Using the provided context and any web results, answer the question.
-If you can confidently answer, provide the answer.
-If not enough information exists, respond with UNKNOWN.
-Also propose 0-2 follow-up questions that emerge from exploring this gap (generative curiosity).
-Return ONLY JSON: {"answer":"your answer or UNKNOWN","confidence":"high|medium|low","followUps":["question 1"]}`,
+        `You are resolving an open question about an entity in a knowledge graph.
+ONLY answer from the provided context — do NOT make up information or speculate.
+If the answer is clearly stated in the context, provide it with high confidence.
+If the context has partial info, provide what's known with medium confidence.
+If the answer is NOT in the context at all, respond UNKNOWN — do not hallucinate.
+You may propose 0-1 follow-up question, but ONLY if it would naturally come up in conversation.
+Return ONLY JSON: {"answer":"your answer or UNKNOWN","confidence":"high|medium|low","followUps":["question"]}`,
         `Node: ${gap.label} (${gap.type}): ${gap.description || ''}\n` +
         `Gap: ${gap.content}\n\n` +
         `Graph context:\n${context}${webContext}`
@@ -362,16 +381,19 @@ Return ONLY JSON: {"answer":"your answer or UNKNOWN","confidence":"high|medium|l
       }
 
       if (Array.isArray(result.followUps)) {
-        for (const fu of result.followUps) {
-          if (!fu || typeof fu !== 'string' || fu.length < 10) continue;
-          const dup = this.db.prepare(
-            "SELECT id FROM gaps WHERE node_id = ? AND content = ?"
-          ).get(gap.node_id, fu);
-          if (!dup) {
-            this.db.prepare(
-              "INSERT INTO gaps (node_id, content, status, source) VALUES (?, ?, 'open', 'curiosity')"
-            ).run(gap.node_id, fu);
-            this.stats.gapsDetected++;
+        const openGaps = this.db.prepare("SELECT COUNT(*) as c FROM gaps WHERE status = 'open'").get().c;
+        if (openGaps < 30) {
+          for (const fu of result.followUps.slice(0, 1)) {
+            if (!fu || typeof fu !== 'string' || fu.length < 10) continue;
+            const dup = this.db.prepare(
+              "SELECT id FROM gaps WHERE node_id = ? AND content = ?"
+            ).get(gap.node_id, fu);
+            if (!dup) {
+              this.db.prepare(
+                "INSERT INTO gaps (node_id, content, status, source) VALUES (?, ?, 'open', 'curiosity')"
+              ).run(gap.node_id, fu);
+              this.stats.gapsDetected++;
+            }
           }
         }
       }
@@ -418,12 +440,14 @@ Return ONLY JSON: {"answer":"your answer or UNKNOWN","confidence":"high|medium|l
 
     try {
       const unreflected = this.db.prepare(`
-        SELECT n.id, n.label, n.type, n.description, n.importance
+        SELECT n.id, n.label, n.type, n.description, n.importance,
+               (SELECT COUNT(*) FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = n.id) as attr_count
         FROM nodes n
         WHERE n.type NOT IN ('tool')
           AND n.importance >= 5
           AND (n.provenance = 'self' OR n.provenance IS NULL)
           AND n.id NOT IN (SELECT DISTINCT node_id FROM reflections)
+          AND (SELECT COUNT(*) FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = n.id) >= 3
         ORDER BY n.importance DESC, n.updated DESC
         LIMIT ?
       `).all(count);
@@ -469,10 +493,10 @@ Return ONLY JSON: {"answer":"your answer or UNKNOWN","confidence":"high|medium|l
       ).get(node.id);
 
       const response = await this._callLLM(
-        `You are an AI agent. Write a brief first-person reflection (2-4 sentences) about this entity in your knowledge graph.
-What does it mean to you? What patterns or connections do you notice? What's interesting or unresolved?
-Be genuine, not performative. Write as yourself — curious, direct, insightful.
-${existingReflection ? 'A previous reflection exists — build on it or offer a new angle.' : ''}
+        `Write a 1-2 sentence factual summary of what you know about this entity and what's missing.
+Focus on concrete facts, not feelings. No poetry, no metaphors, no creative musing.
+If the node has almost no data, say so briefly — don't pad with speculation.
+${existingReflection ? 'A previous reflection exists — only update if you have genuinely new information.' : ''}
 Return ONLY the reflection text, no JSON wrapping.`,
         `Entity: ${node.label} (${node.type}): ${node.description || ''}\n` +
         `Connections: ${edgeStr || 'none'}\n` +
