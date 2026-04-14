@@ -22,6 +22,8 @@ class AgentLoop {
     this.client = null;
 
     this.activeRuns = new Set();
+    this._pendingInterjections = new Map(); // sessionKey → [content, ...]
+    this._sessionWaiters = new Map();       // sessionKey → [resolve, ...]
   }
 
   /**
@@ -94,6 +96,9 @@ class AgentLoop {
           this.activeRuns.delete(sessionKey);
           this._activeAbortControllers.delete(sessionKey);
           this.tools._abortSignal = null;
+          // Notify any waiters (e.g. gateway retrying after abort)
+          const fw = this._sessionWaiters.get(sessionKey);
+          if (fw) { this._sessionWaiters.delete(sessionKey); for (const r of fw) r(); }
         }
       }, 10_000);
     };
@@ -105,9 +110,13 @@ class AgentLoop {
       if (forceReleaseTimer) clearTimeout(forceReleaseTimer);
       this.activeRuns.delete(sessionKey);
       this._activeAbortControllers.delete(sessionKey);
+      this._pendingInterjections.delete(sessionKey); // discard stale interjections
       this.tools._abortSignal = null;
       // Clean up per-session tool context
       if (this.tools._sessionContexts) this.tools._sessionContexts.delete(sessionKey);
+      // Notify any waiters (e.g. gateway retrying after abort)
+      const waiters = this._sessionWaiters.get(sessionKey);
+      if (waiters) { this._sessionWaiters.delete(sessionKey); for (const r of waiters) r(); }
     }
   }
 
@@ -120,6 +129,35 @@ class AgentLoop {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Inject a user message into an active session's loop.
+   * The message will be picked up before the next _callClaude() iteration.
+   * Returns false if the session isn't running or is already aborting.
+   */
+  interject(sessionKey, content) {
+    if (!this.activeRuns.has(sessionKey)) return false;
+    const ac = this._activeAbortControllers?.get(sessionKey);
+    if (!ac || ac.signal.aborted) return false; // Can't inject into a dying loop
+    const arr = this._pendingInterjections.get(sessionKey) || [];
+    arr.push(content);
+    this._pendingInterjections.set(sessionKey, arr);
+    this.log.info(`[interject] Queued interjection for session ${sessionKey} (${content.length} chars, ${arr.length} pending)`);
+    return true;
+  }
+
+  /**
+   * Returns a promise that resolves when the given session is no longer in activeRuns.
+   * Resolves immediately if the session is not currently active.
+   */
+  waitForSession(sessionKey) {
+    if (!this.activeRuns.has(sessionKey)) return Promise.resolve();
+    return new Promise(resolve => {
+      const waiters = this._sessionWaiters.get(sessionKey) || [];
+      waiters.push(resolve);
+      this._sessionWaiters.set(sessionKey, waiters);
+    });
   }
 
   /**
@@ -335,6 +373,31 @@ class AgentLoop {
           }
         }
 
+        // Check for user interjection before calling Claude.
+        // Instead of merging into tool_result arrays (where it gets ignored),
+        // inject as a clean assistant ack + user message pair so the model
+        // sees the interjection as the most recent thing.
+        const interjections = this._pendingInterjections.get(sessionKey);
+        if (interjections && interjections.length > 0) {
+          this._pendingInterjections.delete(sessionKey);
+          this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
+          // Ensure messages end with an assistant turn so we can add a fresh user message
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg?.role === 'user') {
+            messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Acknowledged — the user has sent follow-up messages while I was working. I will address all of them along with my original task.]' }] });
+          }
+          // Frame the interjections so the model addresses everything
+          const userContent = interjections.length === 1
+            ? interjections[0]
+            : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n') + '\n\nAddress all of the above along with any results you already have from my original request.';
+          messages.push({ role: 'user', content: userContent });
+          // Persist each interjection to session history
+          for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
+          // Give the agent headroom to respond
+          iterations = Math.max(0, iterations - 4);
+          if (opts.onStatus) { try { opts.onStatus({ type: 'interjection' }); } catch { } }
+        }
+
         const iterStart = Date.now();
         this.log.info(`[agent] Iter ${iterations} starting — model=${iterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
 
@@ -384,6 +447,20 @@ class AgentLoop {
           // If the final text was already sent as intermediate, don't re-send it
           if (finalText && finalText === lastSentIntermediate) {
             finalText = null;
+          }
+          // Before breaking: if a user interjection arrived while we were streaming,
+          // don't exit — send the current text as intermediate and continue the loop
+          // so the interjection gets processed on the next iteration.
+          const pendingIj = this._pendingInterjections.get(sessionKey);
+          if (pendingIj && pendingIj.length > 0) {
+            this.log.info(`[interject] Interjection pending at end_turn — continuing loop`);
+            if (finalText && opts.onTextDelta) {
+              // The text was already streamed via deltas, just record it
+              lastSentIntermediate = finalText;
+            }
+            messages.push({ role: 'assistant', content: response.content });
+            finalText = null;
+            continue;
           }
           break;
         }
@@ -558,7 +635,16 @@ class AgentLoop {
           if (allParallel) {
             this.log.info(`[agent] Executing ${toolBlocks.length} tools in parallel: ${toolBlocks.map(t => t.name).join(', ')}`);
             if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: toolBlocks.length, tools: toolBlocks.map(t => t.name) }); } catch { } }
-            const results = await Promise.all(toolBlocks.map(tb => executeOneTool(tb)));
+            // Race each tool against the abort signal so a stuck tool doesn't block the loop
+            const abortRace = abortSignal ? (tb) => Promise.race([
+              executeOneTool(tb),
+              new Promise(resolve => {
+                const onAbort = () => resolve({ type: 'tool_result', tool_use_id: tb.id, content: JSON.stringify({ error: 'Aborted by user.' }) });
+                if (abortSignal.aborted) { onAbort(); return; }
+                abortSignal.addEventListener('abort', onAbort, { once: true });
+              }),
+            ]) : executeOneTool;
+            const results = await Promise.all(toolBlocks.map(tb => abortRace(tb)));
             toolResults.push(...results);
           } else {
             // Mixed batch: run parallel-safe prefix concurrently, then sequential remainder
