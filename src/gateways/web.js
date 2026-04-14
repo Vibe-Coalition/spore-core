@@ -2143,6 +2143,52 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           return;
         }
 
+        // ── Acorn: observer approves/denies a pending tool on behalf of CLI ──
+        if (msg.type === 'tool:approve' && msg.id != null) {
+          // Find the session this observer belongs to, then forward to origin CLI
+          for (const [sid, clients] of this._sessionClients) {
+            let isObserver = false;
+            let originWs = null;
+            for (const entry of clients) {
+              if (entry.ws === ws && entry.role === 'observer') isObserver = true;
+              if (entry.role === 'origin') originWs = entry.ws;
+            }
+            if (isObserver && originWs) {
+              // Tell the CLI to auto-approve this tool
+              try {
+                originWs.send(JSON.stringify({
+                  type: 'tool:remote-approve',
+                  id: msg.id,
+                  allowed: !!msg.allowed,
+                }));
+              } catch {}
+              this.log.info(`[ws] Remote ${msg.allowed ? 'approve' : 'deny'} for tool ${msg.id} from ${ws._user}`);
+              break;
+            }
+          }
+          return;
+        }
+
+        // ── Acorn: observer changes CLI permission mode ──
+        if (msg.type === 'perm:set-mode' && msg.mode) {
+          for (const [sid, clients] of this._sessionClients) {
+            let isObserver = false;
+            let originWs = null;
+            for (const entry of clients) {
+              if (entry.ws === ws && entry.role === 'observer') isObserver = true;
+              if (entry.role === 'origin') originWs = entry.ws;
+            }
+            if (isObserver && originWs) {
+              try {
+                originWs.send(JSON.stringify({ type: 'perm:set-mode', mode: msg.mode }));
+              } catch {}
+              this.log.info(`[ws] Remote perm mode change to ${msg.mode} from ${ws._user}`);
+              break;
+            }
+          }
+          return;
+        }
+
         // ── Acorn: tool result from CLI client ──
         if (msg.type === 'tool:result') {
           const pending = ws._pendingTools?.get(msg.id);
