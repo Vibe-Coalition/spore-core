@@ -2198,6 +2198,24 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           return;
         }
 
+        // ── Acorn: any session client toggles plan mode ──
+        if (msg.type === 'plan:set-mode') {
+          for (const [sid, clients] of this._sessionClients) {
+            let isMember = false;
+            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
+            if (isMember) {
+              for (const entry of clients) {
+                if (entry.ws !== ws) {
+                  try { entry.ws.send(JSON.stringify({ type: 'plan:set-mode', enabled: !!msg.enabled })); } catch {}
+                }
+              }
+              this.log.info(`[ws] Remote plan mode ${msg.enabled ? 'on' : 'off'} from ${ws._user}`);
+              break;
+            }
+          }
+          return;
+        }
+
         // ── Acorn: CLI responds with its current perm mode ──
         if (msg.type === 'perm:current-mode' && msg.mode) {
           // Forward to all other clients in this session (observers)
