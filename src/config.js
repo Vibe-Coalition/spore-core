@@ -37,7 +37,7 @@ const DEFAULTS = {
   // Learner
   learningMode: 'always', // 'always' | 'flush_only' | 'disabled'
   subagentMaxTokens: null, // null = auto based on model (opus 64K, sonnet 32K, haiku 16K)
-  maintainerIdleOnly: true,
+  maintainerIdleOnly: false,
 
   // Optional capabilities
   webPort: null,            // ANIMA_WEB_PORT — expose an HTTP server on this port
@@ -128,14 +128,14 @@ const DEFAULTS = {
 
   // Proactive outreach (heartbeat-triggered, personality-gated)
   proactive: {
-    enabled: false,
-    cooldownMinutes: 180,
-    maxPerDay: 3,
+    enabled: true,
+    cooldownMinutes: 60,
+    maxPerDay: 5,
     channels: [],
   },
 
   // Heartbeat
-  heartbeatIntervalMinutes: 120,
+  heartbeatIntervalMinutes: 45,
 
   // Health check
   healthPort: 18790,

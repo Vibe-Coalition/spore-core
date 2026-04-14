@@ -411,7 +411,7 @@ async function boot() {
     }
   }, 12000);
 
-  const heartbeatMs = (config.heartbeatIntervalMinutes || 120) * 60 * 1000;
+  const heartbeatMs = (config.heartbeatIntervalMinutes || 45) * 60 * 1000;
   const heartbeatTimer = setInterval(async () => {
     log.info('[heartbeat] Running periodic tasks...');
     sessions.cleanupStaleSessions();
@@ -465,7 +465,7 @@ async function boot() {
   }
 
   // First maintenance cycle after a 30-minute grace period (not on every restart)
-  const maintainerDelay = (config.maintainerBootDelayMinutes || 30) * 60_000;
+  const maintainerDelay = (config.maintainerBootDelayMinutes || 5) * 60_000;
   log.info(`[maintainer] First cycle delayed ${Math.round(maintainerDelay / 60000)}m after boot`);
   setTimeout(async () => {
     try {
@@ -478,7 +478,7 @@ async function boot() {
     }
   }, maintainerDelay);
 
-  log.info(`Heartbeat scheduled every ${config.heartbeatIntervalMinutes || 120} minutes`);
+  log.info(`Heartbeat scheduled every ${config.heartbeatIntervalMinutes || 45} minutes`);
 
   const shutdown = async (signal) => {
     log.info(`Received ${signal}, shutting down...`);

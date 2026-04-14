@@ -27,8 +27,9 @@ class ProactiveEngine {
     const proactive = this.config.proactive;
     if (!proactive?.enabled) return null;
 
-    const total = (cycleSummary.gapsFilled || 0) + (cycleSummary.reflections || 0)
-      + (cycleSummary.staleMarked || 0) + (cycleSummary.edgesCreated || 0);
+    const total = (cycleSummary.gapsDetected || 0) + (cycleSummary.gapsFilled || 0)
+      + (cycleSummary.reflections || 0) + (cycleSummary.staleMarked || 0)
+      + (cycleSummary.edgesCreated || 0);
     if (total === 0) return null;
 
     const today = new Date().toISOString().substring(0, 10);
@@ -37,12 +38,12 @@ class ProactiveEngine {
       this._todayCount = 0;
     }
 
-    if (this._todayCount >= (proactive.maxPerDay || 3)) {
+    if (this._todayCount >= (proactive.maxPerDay || 5)) {
       this.log.debug('[proactive] Daily cap reached');
       return null;
     }
 
-    const cooldownMs = (proactive.cooldownMinutes || 180) * 60 * 1000;
+    const cooldownMs = (proactive.cooldownMinutes || 60) * 60 * 1000;
     if (Date.now() - this._lastAt < cooldownMs) {
       this.log.debug('[proactive] Cooldown not elapsed');
       return null;
@@ -95,13 +96,11 @@ class ProactiveEngine {
 You just completed a maintenance cycle on your knowledge graph. Below is what happened.
 Given your personality and the available channels, decide if anything is worth sharing.
 
-CRITICAL RULES — read carefully:
-- Most cycles produce NOTHING worth sharing. Default to NO_ACTION.
-- Only suggest action if you learned something genuinely interesting that others would appreciate, OR you connected ideas in a surprising way relevant to a channel's topic.
-- Never post just to be visible, fill silence, or make small talk.
+RULES:
+- If you learned something interesting, made a surprising connection, or have a thought worth sharing, suggest posting.
 - Never share maintenance details, graph statistics, or meta-information about your own processes.
-- Your personality should inform whether you'd even want to share — some agents are quieter than others.
-- If uncertain, choose NO_ACTION. Err heavily on the side of silence.
+- Your personality should inform how and whether you share.
+- If you genuinely have nothing interesting, choose NO_ACTION.
 
 Return ONLY JSON: {"action":"none"} or {"action":"post","channelId":"...","context":"1-sentence summary of what to share","topic":"the relevant topic"}`,
         `Your personality:\n${selfContext}\n\nCycle results: ${summaryText.join('. ')}${detailText}\n\nAvailable channels:\n${channelList}${minutesSinceLast ? `\n\nYou last posted proactively ${minutesSinceLast} minutes ago.` : '\n\nYou have never posted proactively before.'}`

@@ -138,8 +138,7 @@ class Maintainer {
       return null;
     }
 
-    // Cooldown: don't run if last cycle was less than 30 minutes ago
-    const minIntervalMs = (this.config.maintainerMinIntervalMinutes || 30) * 60_000;
+    const minIntervalMs = (this.config.maintainerMinIntervalMinutes || 15) * 60_000;
     if (this._lastRunAt && (Date.now() - this._lastRunAt) < minIntervalMs) {
       const minsAgo = Math.round((Date.now() - this._lastRunAt) / 60000);
       this.log.info(`[maintainer] Skipping — last ran ${minsAgo}m ago (min interval: ${Math.round(minIntervalMs / 60000)}m)`);
@@ -153,26 +152,18 @@ class Maintainer {
     const before = { ...this.stats };
 
     try {
-      const graphChanged = this._lastGraphChangeAt > this._lastCreativeRunAt;
+      this.log.info('[maintainer] Starting maintenance cycle...');
+      this._lastCreativeRunAt = Date.now();
 
-      if (!graphChanged) {
-        this.log.info('[maintainer] Skipping — no graph changes since last full cycle');
-        await this.expireEpisodicAttributes(10);
-        await this.embedUnembeddedNodes(5);
-      } else {
-        this.log.info('[maintainer] Starting full maintenance cycle...');
-        this._lastCreativeRunAt = Date.now();
-
-        await this.detectNewGaps(2);
-        await this.fillGaps(3);
-        await this.reflectOnNodes(1);
-        await this.checkStale(3);
-        await this.connectSparseNodes(2);
-        await this.mergeNodes(3);
-        await this.deriveInferences(2);
-        await this.expireEpisodicAttributes(10);
-        await this.embedUnembeddedNodes(5);
-      }
+      await this.detectNewGaps(5);
+      await this.fillGaps(5);
+      await this.reflectOnNodes(3);
+      await this.checkStale(5);
+      await this.connectSparseNodes(4);
+      await this.mergeNodes(5);
+      await this.deriveInferences(3);
+      await this.expireEpisodicAttributes(20);
+      await this.embedUnembeddedNodes(10);
 
       this.stats.cycles++;
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
