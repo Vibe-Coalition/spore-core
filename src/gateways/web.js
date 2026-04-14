@@ -2143,6 +2143,26 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           return;
         }
 
+        // ── Acorn: CLI tells us it's waiting for user to approve a tool ──
+        if (msg.type === 'tool:awaiting-approval') {
+          // Forward to all session observers so they can show [allow]/[deny]
+          for (const [sid, clients] of this._sessionClients) {
+            for (const entry of clients) {
+              if (entry.ws === ws && entry.role === 'origin') {
+                this._sendToSession(sid, {
+                  type: 'tool:awaiting-approval',
+                  name: msg.name,
+                  summary: msg.summary,
+                  dangerous: !!msg.dangerous,
+                });
+                this.log.info(`[ws] Tool awaiting approval: ${msg.name} (${msg.summary})`);
+                break;
+              }
+            }
+          }
+          return;
+        }
+
         // ── Acorn: observer approves/denies a pending tool on behalf of CLI ──
         if (msg.type === 'tool:approve' && msg.id != null) {
           // Find the session this observer belongs to, then forward to origin CLI
@@ -2304,7 +2324,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             // If an observer (mobile app) sends a message, tools still go to the CLI.
             const originWs = isAcorn ? (this._getOriginClient(sessionId) || ws) : null;
 
-            const result = await this.tools._agent.processMessage({
+            const agentOpts = {
               content: msg.content + fileNote,
               channelId: sessionId,
               channelName: isAcorn ? `acorn:${ws._user}` : 'control-panel',
@@ -2362,7 +2382,51 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
                   originWs._pendingTools.set(toolId, { resolve, reject, timeout });
                 });
               } : undefined,
-            });
+            };
+
+            let result = await this.tools._agent.processMessage(agentOpts);
+
+            // Handle interjection: session was busy, try to inject into running loop
+            if (result.skipped) {
+              const userId = ws._user || 'operator';
+              const waitKey = this.tools._sessions.constructor.buildKey(
+                isAcorn ? sessionId : 'web:control-panel', !isAcorn, userId
+              );
+
+              const injected = this.tools._agent.interject(waitKey, msg.content + fileNote);
+              if (injected) {
+                // Loop will pick it up on next iteration — notify client and return
+                this.log.info(`[ws] Interjection accepted for ${sessionId}`);
+                const payload = { type: 'chat:status', status: 'interjected' };
+                if (isAcorn) { this._sendToSession(sessionId, payload); }
+                else { try { ws.send(JSON.stringify(payload)); } catch {} }
+                return; // Don't send chat:done — the running loop handles completion
+              }
+
+              // Injection failed (loop is aborting after Ctrl+C) — wait for release + retry
+              this.log.info(`[ws] Interjection failed (aborting?), waiting for session release: ${sessionId}`);
+              const statusPayload = { type: 'chat:status', status: 'waiting' };
+              if (isAcorn) { this._sendToSession(sessionId, statusPayload); }
+              else { try { ws.send(JSON.stringify(statusPayload)); } catch {} }
+
+              try {
+                await Promise.race([
+                  this.tools._agent.waitForSession(waitKey),
+                  new Promise((_, rej) => setTimeout(() => rej(new Error('Interjection wait timed out')), 15000)),
+                ]);
+                // Re-send chat:start for the retry
+                if (isAcorn) { this._sendToSession(sessionId, { type: 'chat:start', sessionId }); }
+                else { this.broadcast({ type: 'chat:start', sessionId }); }
+                result = await this.tools._agent.processMessage(agentOpts);
+              } catch (waitErr) {
+                this.log.error(`[ws] Interjection wait failed: ${waitErr.message}`);
+                const errPayload = { type: 'chat:error', error: 'Session busy — try again in a moment' };
+                if (isAcorn) { this._sendToSession(sessionId, errPayload); }
+                else { try { ws.send(JSON.stringify(errPayload)); } catch {} }
+                return;
+              }
+            }
+
             // Send chat:done to all session clients (CLI + observers)
             const donePayload = {
               type: 'chat:done',
