@@ -1006,7 +1006,7 @@ class WebGateway {
           const agent = this.tools._agent;
           const activeKeys = agent ? new Set(agent.activeRuns) : new Set();
           const sessions = allSessions
-            .filter(s => s.key.startsWith(prefix))
+            .filter(s => s.key.startsWith(prefix) && s.message_count > 0)
             .map(s => {
               // Parse project name from key: channel:cli:user@project-hash-ts
               const afterAt = s.key.slice(prefix.length);
@@ -2150,6 +2150,17 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             clearTimeout(pending.timeout);
             ws._pendingTools.delete(msg.id);
             pending.resolve(msg.result);
+            // Notify observers the tool was resolved
+            const denied = msg.result && msg.result.error && /denied|blocked/i.test(msg.result.error);
+            // Find which session this ws belongs to, notify observers
+            for (const [sid, clients] of this._sessionClients) {
+              for (const entry of clients) {
+                if (entry.ws === ws) {
+                  this._sendToSession(sid, { type: 'tool:resolved', id: msg.id, denied: !!denied });
+                  break;
+                }
+              }
+            }
           }
           return;
         }
@@ -2271,8 +2282,16 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
                 } catch { }
               },
               // Acorn: forward tool calls to the origin CLI client for local execution.
-              // tool:request must NOT go to observers — only the origin client has a filesystem.
+              // tool:request only goes to origin client. Observers get tool:pending notification.
               onToolExecute: isAcorn ? async (toolName, toolInput, toolId) => {
+                // Notify observers that a tool is awaiting approval/execution
+                const summary = toolName === 'exec' ? (toolInput?.command || '').substring(0, 120)
+                  : toolName === 'write_file' || toolName === 'edit_file' || toolName === 'read_file' ? (toolInput?.path || '')
+                  : toolName === 'web_fetch' ? (toolInput?.url || '').substring(0, 100)
+                  : JSON.stringify(toolInput || {}).substring(0, 80);
+                this._sendToSession(sessionId, {
+                  type: 'tool:pending', id: toolId, name: toolName, summary,
+                });
                 originWs.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
                 return new Promise((resolve, reject) => {
                   const timeout = setTimeout(() => {
