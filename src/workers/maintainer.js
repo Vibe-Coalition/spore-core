@@ -681,40 +681,71 @@ If no good connections exist, return: []`,
 
   // ── Duplicate Node Merging ──────────────────────────────────────────────────
 
-  async mergeNodes(batchSize = 3) {
+  async mergeNodes(batchSize = 5) {
     if (!this.db) return;
     try {
-      const nodes = this.db.prepare(
+      // Prioritize recently created nodes — they're most likely to be duplicates
+      const freshNodes = this.db.prepare(
+        "SELECT id, label, type, embedding, extracted_at FROM nodes WHERE embedding IS NOT NULL AND embedding != '' AND extracted_at > datetime('now', '-24 hours') ORDER BY extracted_at DESC LIMIT 50"
+      ).all();
+      const olderNodes = this.db.prepare(
         "SELECT id, label, type, embedding FROM nodes WHERE embedding IS NOT NULL AND embedding != '' ORDER BY importance DESC LIMIT 500"
       ).all();
-      if (nodes.length < 2) return;
 
-      // Find candidate pairs via embedding cosine similarity
+      const freshIds = new Set(freshNodes.map(n => n.id));
+      const allNodes = [...freshNodes, ...olderNodes.filter(n => !freshIds.has(n.id))];
+      if (allNodes.length < 2) return;
+
       const candidates = [];
-      for (let i = 0; i < nodes.length && candidates.length < batchSize * 3; i++) {
-        let emb_i;
-        try { emb_i = JSON.parse(nodes[i].embedding); } catch { continue; }
-        for (let j = i + 1; j < nodes.length && candidates.length < batchSize * 3; j++) {
-          let emb_j;
-          try { emb_j = JSON.parse(nodes[j].embedding); } catch { continue; }
-          let dot = 0, na = 0, nb = 0;
-          for (let k = 0; k < emb_i.length; k++) {
-            dot += emb_i[k] * emb_j[k];
-            na += emb_i[k] * emb_i[k];
-            nb += emb_j[k] * emb_j[k];
+      const targetCandidates = batchSize * 4;
+
+      // Phase 1: compare every fresh node against ALL other nodes (aggressive)
+      for (const fresh of freshNodes) {
+        let emb_f;
+        try { emb_f = JSON.parse(fresh.embedding); } catch { continue; }
+        for (const other of allNodes) {
+          if (other.id === fresh.id) continue;
+          if (candidates.length >= targetCandidates) break;
+          let emb_o;
+          try { emb_o = JSON.parse(other.embedding); } catch { continue; }
+          const sim = this._cosine(emb_f, emb_o);
+          if (sim >= 0.85) {
+            candidates.push({ a: fresh, b: other, sim });
           }
-          const sim = dot / (Math.sqrt(na) * Math.sqrt(nb));
+        }
+      }
+
+      // Phase 2: pairwise scan of remaining nodes at higher threshold
+      for (let i = 0; i < allNodes.length && candidates.length < targetCandidates; i++) {
+        if (freshIds.has(allNodes[i].id)) continue;
+        let emb_i;
+        try { emb_i = JSON.parse(allNodes[i].embedding); } catch { continue; }
+        for (let j = i + 1; j < allNodes.length && candidates.length < targetCandidates; j++) {
+          if (freshIds.has(allNodes[j].id)) continue;
+          let emb_j;
+          try { emb_j = JSON.parse(allNodes[j].embedding); } catch { continue; }
+          const sim = this._cosine(emb_i, emb_j);
           if (sim >= 0.92) {
-            candidates.push({ a: nodes[i], b: nodes[j], sim });
+            candidates.push({ a: allNodes[i], b: allNodes[j], sim });
           }
         }
       }
 
       if (candidates.length === 0) return;
-      candidates.sort((x, y) => y.sim - x.sim);
+
+      // Deduplicate pairs (avoid A-B and B-A)
+      const seen = new Set();
+      const unique = [];
+      for (const c of candidates) {
+        const key = [c.a.id, c.b.id].sort().join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(c);
+      }
+      unique.sort((x, y) => y.sim - x.sim);
 
       let merged = 0;
-      for (const pair of candidates.slice(0, batchSize)) {
+      for (const pair of unique.slice(0, batchSize)) {
         try {
           const ctxA = this._buildNodeContext(pair.a.id);
           const ctxB = this._buildNodeContext(pair.b.id);
@@ -728,17 +759,16 @@ ${ctxB}
 
 Embedding similarity: ${pair.sim.toFixed(3)}
 
-Do these two nodes refer to the SAME real-world entity/concept? Answer ONLY with JSON:
+Do these two nodes refer to the SAME real-world entity/concept? Consider that the same place, person, or thing can have multiple names or partial names. Answer ONLY with JSON:
 {"same": true/false, "reason": "brief explanation"}`;
 
           const response = await this._callLLM(
-            'You are a knowledge graph deduplication judge. Determine if two nodes refer to the same entity. Be conservative — only confirm if clearly the same thing.',
+            'You are a knowledge graph deduplication judge. Determine if two nodes refer to the same entity. Consider aliases, abbreviations, and partial names.',
             prompt
           );
           const result = this._parseJSON(response);
           if (!result || !result.same) continue;
 
-          // Pick canonical: more attributes wins, then higher importance
           const attrsA = this.db.prepare('SELECT COUNT(*) as c FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = ?').get(pair.a.id).c;
           const attrsB = this.db.prepare('SELECT COUNT(*) as c FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = ?').get(pair.b.id).c;
           const [canonical, duplicate] = attrsA >= attrsB ? [pair.a, pair.b] : [pair.b, pair.a];
@@ -759,6 +789,17 @@ Do these two nodes refer to the SAME real-world entity/concept? Answer ONLY with
     } catch (e) {
       this.log.error('[maintainer] mergeNodes error:', e.message);
     }
+  }
+
+  _cosine(a, b) {
+    let dot = 0, na = 0, nb = 0;
+    for (let k = 0; k < a.length; k++) {
+      dot += a[k] * b[k];
+      na += a[k] * a[k];
+      nb += b[k] * b[k];
+    }
+    const denom = Math.sqrt(na) * Math.sqrt(nb);
+    return denom === 0 ? 0 : dot / denom;
   }
 
   _mergeNodeInto(canonicalId, duplicateId) {

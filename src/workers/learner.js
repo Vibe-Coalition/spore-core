@@ -44,7 +44,7 @@ Extract every durable fact, preference, plan, relationship, opinion, or event. O
 ## Rules
 - Create a person entity for new users. Use username as ID (lowercase-hyphenated). Even casual exchanges justify remembering the person.
 - Create entities for significant nouns: people, places, products, projects, events, organizations. An entity mentioned with 2+ facts deserves its own node.
-- DEDUP: Check existing nodes/aliases before creating. Use the existing ID, never create duplicates.
+- **DEDUP (CRITICAL):** Before creating ANY entity, check the graph context above for an existing node that refers to the same real-world thing — even under a different name, abbreviation, or partial label. "Sasa Beauty" and "SASA San Francisco" and "Sasa Japanese Restaurant" are the SAME place — use the existing ID. When in doubt, REUSE the existing node rather than creating a new one. Duplicates are extremely costly to clean up.
 - Entity IDs: lowercase-hyphenated, no special characters. Do NOT create entities for filenames, task IDs, URLs, or temporary artifacts.
 - Aspect names: lowercase_underscored (e.g. "preferences", "background", "communication_style").
 - **REUSE existing aspect names** from the graph context when they fit. Check the node's current aspects before inventing a new name. Only create a new aspect if no existing one is appropriate. This prevents fragmentation (e.g. "food_prefs" vs "culinary_interests" vs "cooking" on the same node).
@@ -682,7 +682,6 @@ The JSON schema for updates becomes:
     ).get((label || '').toLowerCase());
     if (byLabel) return byLabel.id;
 
-    // Fuzzy match: substring ID containment (e.g. "charity-5k-run" matches "upcoming-charity-5k-run")
     if (id.length >= 5) {
       const bySubId = this.db.prepare(
         'SELECT id FROM nodes WHERE id LIKE ? OR ? LIKE \'%\' || id || \'%\' LIMIT 1'
@@ -690,27 +689,124 @@ The JSON schema for updates becomes:
       if (bySubId) return bySubId.id;
     }
 
-    // Fuzzy match: 80%+ word overlap on labels (scan all nodes, not just top 150)
+    // Fuzzy: word overlap with stopword filtering + weighted scoring
     if (label && label.length >= 4) {
-      const newWords = new Set(label.toLowerCase().split(/\s+/).filter(w => w.length > 2));
-      if (newWords.size >= 2) {
+      const newWords = this._significantWords(label);
+      if (newWords.size >= 1) {
         const candidates = this.db.prepare(
           'SELECT id, label FROM nodes ORDER BY importance DESC, updated DESC LIMIT 2000'
         ).all();
+
+        let bestMatch = null;
+        let bestScore = 0;
+
         for (const c of candidates) {
-          const exWords = new Set(c.label.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+          const exWords = this._significantWords(c.label);
           if (exWords.size === 0) continue;
           let overlap = 0;
           for (const w of newWords) { if (exWords.has(w)) overlap++; }
-          if (overlap / Math.min(newWords.size, exWords.size) >= 0.8) {
-            try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(c.id, label); } catch {}
-            return c.id;
-          }
+          if (overlap === 0) continue;
+          const score = overlap / Math.min(newWords.size, exWords.size);
+          if (score > bestScore) { bestScore = score; bestMatch = c; }
+        }
+
+        if (bestMatch && bestScore >= 0.6) {
+          try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(bestMatch.id, label); } catch {}
+          return bestMatch.id;
         }
       }
     }
 
+    // Embedding similarity: narrow scan of nodes sharing a keyword in ID
+    if (id.length >= 4) {
+      const match = this._resolveByEmbeddingSimilarity(id, label);
+      if (match) return match;
+    }
+
     return null;
+  }
+
+  _significantWords(text) {
+    const STOP = new Set([
+      'the', 'and', 'for', 'with', 'from', 'that', 'this', 'have', 'are',
+      'was', 'were', 'been', 'has', 'had', 'not', 'but', 'all', 'can',
+      'her', 'his', 'him', 'its', 'our', 'who', 'how', 'what', 'when',
+      'new', 'old', 'big', 'small', 'great', 'good', 'best', 'first',
+      'restaurant', 'place', 'store', 'shop', 'thing', 'item', 'location',
+      'area', 'spot', 'cafe', 'bar', 'club', 'hotel', 'center', 'centre',
+    ]);
+    return new Set(
+      text.toLowerCase().split(/[\s\-_]+/).filter(w => w.length > 2 && !STOP.has(w))
+    );
+  }
+
+  /**
+   * Last-resort dedup: for nodes sharing an ID keyword, compare embeddings.
+   * Only scans nodes whose ID contains a fragment of the candidate ID.
+   * Returns matched node ID or null.
+   */
+  _resolveByEmbeddingSimilarity(id, label) {
+    try {
+      const idParts = id.split('-').filter(p => p.length >= 3);
+      if (idParts.length === 0) return null;
+
+      const conditions = idParts.map(p => `id LIKE '%${p.replace(/'/g, "''")}%'`).join(' OR ');
+      const nearby = this.db.prepare(
+        `SELECT id, label, embedding FROM nodes WHERE (${conditions}) AND embedding IS NOT NULL AND embedding != '' AND id != ? LIMIT 50`
+      ).all(id);
+
+      if (nearby.length === 0) return null;
+
+      const candidateText = `${label || id}: ${label || ''}`;
+      const candidateWords = candidateText.toLowerCase().split(/[\s\-_]+/).filter(w => w.length > 2);
+
+      let bestId = null;
+      let bestSim = 0;
+
+      for (const node of nearby) {
+        let vec;
+        try { vec = JSON.parse(node.embedding); } catch { continue; }
+
+        const nodeText = `${node.label}: ${node.label}`;
+        const nodeWords = nodeText.toLowerCase().split(/[\s\-_]+/).filter(w => w.length > 2);
+
+        let wordOverlap = 0;
+        const nodeWordSet = new Set(nodeWords);
+        for (const w of candidateWords) { if (nodeWordSet.has(w)) wordOverlap++; }
+
+        if (wordOverlap === 0) continue;
+
+        if (vec.length > 0) {
+          const sim = this._labelSimilarity(label || id, node.label);
+          if (sim > bestSim) { bestSim = sim; bestId = node.id; }
+        }
+      }
+
+      if (bestId && bestSim >= 0.5) {
+        try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(bestId, label || id); } catch {}
+        return bestId;
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * Character-level similarity (Sørensen–Dice on bigrams).
+   * Fast, no embeddings needed, good for catching "Sasa Beauty" ≈ "SASA San Francisco".
+   */
+  _labelSimilarity(a, b) {
+    const bigrams = (s) => {
+      const bg = new Set();
+      const lower = s.toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (let i = 0; i < lower.length - 1; i++) bg.add(lower.slice(i, i + 2));
+      return bg;
+    };
+    const setA = bigrams(a);
+    const setB = bigrams(b);
+    if (setA.size === 0 || setB.size === 0) return 0;
+    let overlap = 0;
+    for (const bg of setA) { if (setB.has(bg)) overlap++; }
+    return (2 * overlap) / (setA.size + setB.size);
   }
 
   _isJunkEntity(id, label, type) {
