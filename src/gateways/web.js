@@ -2133,6 +2133,15 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           const sessionKey = this.tools._sessions.constructor.buildKey(msg.sessionId, false, reqUser);
           const active = agent ? agent.activeRuns.has(sessionKey) : false;
           ws.send(JSON.stringify({ type: 'session:observe:ok', sessionId: msg.sessionId, active }));
+          // Ask the CLI for its current perm mode so the observer can sync
+          const clients = this._sessionClients.get(msg.sessionId);
+          if (clients) {
+            for (const entry of clients) {
+              if (entry.ws !== ws) {
+                try { entry.ws.send(JSON.stringify({ type: 'perm:query', replyTo: msg.sessionId })); } catch {}
+              }
+            }
+          }
           this.log.info(`[ws] ${reqUser} observing session ${msg.sessionId}`);
           return;
         }
@@ -2183,6 +2192,26 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
                 }));
               } catch {}
               this.log.info(`[ws] Remote ${msg.allowed ? 'approve' : 'deny'} for tool from ${ws._user}`);
+              break;
+            }
+          }
+          return;
+        }
+
+        // ── Acorn: CLI responds with its current perm mode ──
+        if (msg.type === 'perm:current-mode' && msg.mode) {
+          // Forward to all other clients in this session (observers)
+          for (const [sid, clients] of this._sessionClients) {
+            let isMember = false;
+            for (const entry of clients) {
+              if (entry.ws === ws) { isMember = true; break; }
+            }
+            if (isMember) {
+              for (const entry of clients) {
+                if (entry.ws !== ws) {
+                  try { entry.ws.send(JSON.stringify({ type: 'perm:current-mode', mode: msg.mode })); } catch {}
+                }
+              }
               break;
             }
           }
