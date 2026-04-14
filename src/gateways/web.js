@@ -2163,45 +2163,46 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           return;
         }
 
-        // ── Acorn: observer approves/denies a pending tool on behalf of CLI ──
-        if (msg.type === 'tool:approve' && msg.id != null) {
-          // Find the session this observer belongs to, then forward to origin CLI
+        // ── Acorn: any session client approves/denies a pending tool ──
+        if (msg.type === 'tool:approve') {
+          // Find a different client in the same session that has _pendingTools (the CLI)
           for (const [sid, clients] of this._sessionClients) {
-            let isObserver = false;
-            let originWs = null;
+            let isMember = false;
+            let cliWs = null;
             for (const entry of clients) {
-              if (entry.ws === ws && entry.role === 'observer') isObserver = true;
-              if (entry.role === 'origin') originWs = entry.ws;
+              if (entry.ws === ws) isMember = true;
+              // The CLI is the one with pending tools (not the sender)
+              if (entry.ws !== ws && entry.ws._pendingTools?.size > 0) cliWs = entry.ws;
             }
-            if (isObserver && originWs) {
-              // Tell the CLI to auto-approve this tool
+            if (isMember && cliWs) {
               try {
-                originWs.send(JSON.stringify({
+                cliWs.send(JSON.stringify({
                   type: 'tool:remote-approve',
                   id: msg.id,
                   allowed: !!msg.allowed,
                 }));
               } catch {}
-              this.log.info(`[ws] Remote ${msg.allowed ? 'approve' : 'deny'} for tool ${msg.id} from ${ws._user}`);
+              this.log.info(`[ws] Remote ${msg.allowed ? 'approve' : 'deny'} for tool from ${ws._user}`);
               break;
             }
           }
           return;
         }
 
-        // ── Acorn: observer changes CLI permission mode ──
+        // ── Acorn: any session client changes CLI permission mode ──
         if (msg.type === 'perm:set-mode' && msg.mode) {
           for (const [sid, clients] of this._sessionClients) {
-            let isObserver = false;
-            let originWs = null;
+            let isMember = false;
             for (const entry of clients) {
-              if (entry.ws === ws && entry.role === 'observer') isObserver = true;
-              if (entry.role === 'origin') originWs = entry.ws;
+              if (entry.ws === ws) isMember = true;
             }
-            if (isObserver && originWs) {
-              try {
-                originWs.send(JSON.stringify({ type: 'perm:set-mode', mode: msg.mode }));
-              } catch {}
+            if (isMember) {
+              // Forward to all OTHER clients in the session
+              for (const entry of clients) {
+                if (entry.ws !== ws) {
+                  try { entry.ws.send(JSON.stringify({ type: 'perm:set-mode', mode: msg.mode })); } catch {}
+                }
+              }
               this.log.info(`[ws] Remote perm mode change to ${msg.mode} from ${ws._user}`);
               break;
             }
