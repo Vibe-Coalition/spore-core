@@ -2132,7 +2132,15 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           const agent = this.tools._agent;
           const sessionKey = this.tools._sessions.constructor.buildKey(msg.sessionId, false, reqUser);
           const active = agent ? agent.activeRuns.has(sessionKey) : false;
-          ws.send(JSON.stringify({ type: 'session:observe:ok', sessionId: msg.sessionId, active }));
+          // Check if the CLI origin client is connected
+          let cliConnected = false;
+          const sessionClients = this._sessionClients.get(msg.sessionId);
+          if (sessionClients) {
+            for (const entry of sessionClients) {
+              if (entry.ws !== ws && entry.ws.readyState === 1) { cliConnected = true; break; }
+            }
+          }
+          ws.send(JSON.stringify({ type: 'session:observe:ok', sessionId: msg.sessionId, active, cliConnected }));
           // Ask the CLI for its current perm mode so the observer can sync
           const clients = this._sessionClients.get(msg.sessionId);
           if (clients) {
