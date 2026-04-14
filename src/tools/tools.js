@@ -2687,10 +2687,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     return new Promise((resolve) => {
       let resolved = false;
+      let onAbort;
       const done = (result) => {
         if (resolved) return;
         resolved = true;
         clearTimeout(hardTimeout);
+        clearTimeout(dataTimeout);
+        if (abortSignal && onAbort) try { abortSignal.removeEventListener('abort', onAbort); } catch {}
         resolve(result);
       };
 
@@ -2698,6 +2701,28 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         done({ error: `Fetch timed out after 20s: ${url}` });
         try { req.destroy(); } catch { }
       }, 20000);
+
+      // Abort signal from agent loop (Ctrl+C)
+      const abortSignal = this._abortSignal;
+      if (abortSignal?.aborted) {
+        resolve({ error: 'Aborted' });
+        return;
+      }
+      onAbort = () => {
+        done({ error: 'Aborted by user' });
+        try { req.destroy(); } catch {}
+      };
+      if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
+
+      // Data timeout — if no data received for 10s after response starts, abort
+      let dataTimeout;
+      const resetDataTimeout = () => {
+        clearTimeout(dataTimeout);
+        dataTimeout = setTimeout(() => {
+          done({ error: `Stalled: no data for 10s from ${url}` });
+          try { req.destroy(); } catch {}
+        }, 10000);
+      };
 
       const fetchHeaders = { 'User-Agent': 'Anima/0.2 (bot)', ...(extraHeaders || {}) };
       const fetchMethod = (method || 'GET').toUpperCase();
@@ -2707,6 +2732,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         method: fetchMethod,
         headers: fetchHeaders,
         agent: url.startsWith('https') ? httpsAgent : httpAgent,
+        timeout: 15000,
       };
 
       const req = proto.request(url, reqOpts, (res) => {
@@ -2735,8 +2761,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         }
 
         let data = '';
+        resetDataTimeout(); // start data timeout on response begin
         res.on('data', chunk => {
           data += chunk;
+          resetDataTimeout(); // reset on each chunk
           if (data.length > maxLength * 3) res.destroy();
         });
         res.on('end', () => {
