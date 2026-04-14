@@ -444,9 +444,11 @@ class WebGateway {
       '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
       '.txt': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8',
       '.woff2': 'font/woff2', '.woff': 'font/woff',
-      '.mp4': 'video/mp4', '.webm': 'video/webm',
-      '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.flac': 'audio/flac',
+      '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska',
+      '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
       '.webp': 'image/webp', '.avif': 'image/avif',
+      '.pdf': 'application/pdf',
+      '.csv': 'text/csv; charset=utf-8', '.tsv': 'text/tab-separated-values; charset=utf-8',
     };
 
     function parseMultipart(buf, boundary, destDir, maxFileSize) {
@@ -1138,20 +1140,42 @@ class WebGateway {
         const filePath = path.join(workspace, relPath);
         if (!filePath.startsWith(workspace)) { res.writeHead(403); res.end('Forbidden'); return; }
         try {
-          const data = fs.readFileSync(filePath);
+          const stat = fs.statSync(filePath);
+          if (!stat.isFile()) { res.writeHead(404); res.end('Not a file'); return; }
           const ext = path.extname(filePath).toLowerCase();
           const params = new URL(req.url, 'http://x').searchParams;
-          const stat = fs.statSync(filePath);
-          const headers = {
-            'Content-Type': MIME[ext] || 'application/octet-stream',
+          const contentType = MIME[ext] || 'application/octet-stream';
+          const baseHeaders = {
+            'Content-Type': contentType,
             'Cache-Control': 'no-cache',
             'ETag': `"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`,
+            'Accept-Ranges': 'bytes',
           };
           if (params.get('download') === '1') {
-            headers['Content-Disposition'] = `attachment; filename="${path.basename(filePath)}"`;
+            baseHeaders['Content-Disposition'] = `attachment; filename="${path.basename(filePath)}"`;
           }
-          res.writeHead(200, headers);
-          res.end(data);
+          const range = req.headers.range;
+          if (range) {
+            const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+            if (m) {
+              let start = m[1] ? parseInt(m[1], 10) : 0;
+              let end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
+              if (isNaN(start) || isNaN(end) || start > end || end >= stat.size) {
+                res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+                res.end();
+                return;
+              }
+              res.writeHead(206, {
+                ...baseHeaders,
+                'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+                'Content-Length': end - start + 1,
+              });
+              fs.createReadStream(filePath, { start, end }).pipe(res);
+              return;
+            }
+          }
+          res.writeHead(200, { ...baseHeaders, 'Content-Length': stat.size });
+          fs.createReadStream(filePath).pipe(res);
         } catch { res.writeHead(404); res.end('File not found'); }
         return;
       }

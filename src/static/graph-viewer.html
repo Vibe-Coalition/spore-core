@@ -6778,11 +6778,45 @@ function fpBuildBreadcrumb(subpath) {
 }
 
 const TEXT_EXTS = new Set(['js','ts','py','json','md','txt','html','css','sh','yaml','yml','env','log','csv','toml','xml','ini','cfg','conf','sql','jsx','tsx','rb','go','rs','java','c','h','cpp','hpp','mjs','cjs','lock','gitignore','dockerignore','Dockerfile','Makefile']);
-const IMG_EXTS = new Set(['png','jpg','jpeg','gif','svg','webp','ico','bmp']);
+const IMG_EXTS = new Set(['png','jpg','jpeg','gif','svg','webp','ico','bmp','avif']);
+const VIDEO_EXTS = new Set(['mp4','webm','mov','avi','mkv']);
+const AUDIO_EXTS = new Set(['mp3','wav','ogg','flac','m4a','aac']);
+const PDF_EXTS = new Set(['pdf']);
+const HTML_EXTS = new Set(['html','htm']);
+const CSV_EXTS = new Set(['csv','tsv']);
+const MD_EXTS = new Set(['md','markdown']);
 
 function getFileExt(name) { const i = name.lastIndexOf('.'); return i > 0 ? name.slice(i + 1).toLowerCase() : ''; }
 function isTextFile(name) { return TEXT_EXTS.has(getFileExt(name)) || TEXT_EXTS.has(name); }
 function isImageFile(name) { return IMG_EXTS.has(getFileExt(name)); }
+function isVideoFile(name) { return VIDEO_EXTS.has(getFileExt(name)); }
+function isAudioFile(name) { return AUDIO_EXTS.has(getFileExt(name)); }
+function isPdfFile(name) { return PDF_EXTS.has(getFileExt(name)); }
+function isHtmlFile(name) { return HTML_EXTS.has(getFileExt(name)); }
+function isCsvFile(name) { return CSV_EXTS.has(getFileExt(name)); }
+function isMarkdownFile(name) { return MD_EXTS.has(getFileExt(name)); }
+
+// Minimal RFC-4180 CSV/TSV parser — handles quoted fields with embedded delims & newlines.
+function parseDelimited(text, delim) {
+  const rows = []; let row = []; let field = ''; let i = 0; let inQ = false;
+  while (i < text.length) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQ = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQ = true; i++; continue; }
+    if (c === delim) { row.push(field); field = ''; i++; continue; }
+    if (c === '\r') { i++; continue; }
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    field += c; i++;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
 
 const PRISM_MAP = {
   js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
@@ -6867,6 +6901,102 @@ async function fpViewFile(filePath, name) {
     } else {
       fpViewerContent.innerHTML = `<img src="${bustUrl}" alt="${esc(name)}">`;
     }
+    return;
+  }
+  if (isVideoFile(name) && !remote) {
+    fpViewerContent.innerHTML = `<video src="${fileUrl}" controls preload="metadata" style="max-width:100%;max-height:calc(100vh - 200px);background:#000;border-radius:6px;"></video>`;
+    return;
+  }
+  if (isAudioFile(name) && !remote) {
+    fpViewerContent.innerHTML = `<div style="padding:24px;text-align:center"><audio src="${fileUrl}" controls preload="metadata" style="width:100%;max-width:500px"></audio></div>`;
+    return;
+  }
+  if (isPdfFile(name) && !remote) {
+    fpViewerContent.innerHTML = `<iframe src="${fileUrl}" style="width:100%;height:calc(100vh - 180px);border:0;border-radius:6px;background:#fff"></iframe>`;
+    return;
+  }
+  if (isHtmlFile(name) && !remote) {
+    // Prefetch source so the Edit button doesn't inherit the previous file's buffer.
+    try { const r = await fetch(fileUrl, { headers: authHeaders() }); fpEditRawText = await r.text(); } catch { fpEditRawText = ''; }
+    // Sandboxed: allow-scripts but no allow-same-origin — agent HTML cannot touch cookies/session.
+    // "View raw" link opens source via the text branch.
+    fpViewerContent.innerHTML = `
+      <div style="display:flex;padding:6px 12px;border-bottom:1px solid var(--border);background:var(--bg-alt);font-size:12px">
+        <a href="#" id="fp-html-raw" style="margin-left:auto;color:var(--accent)">View source</a>
+      </div>
+      <iframe src="${fileUrl}" sandbox="allow-scripts allow-forms allow-popups" style="width:100%;height:calc(100vh - 220px);border:0;background:#fff"></iframe>`;
+    const rawLink = document.getElementById('fp-html-raw');
+    if (rawLink) rawLink.onclick = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await fetch(fileUrl, { headers: authHeaders() });
+        const text = await r.text();
+        const codeEl = document.createElement('code');
+        codeEl.className = 'language-html'; codeEl.textContent = text;
+        const pre = document.createElement('pre'); pre.className = 'line-numbers'; pre.appendChild(codeEl);
+        fpViewerContent.innerHTML = ''; fpViewerContent.appendChild(pre);
+        if (window.Prism) Prism.highlightElement(codeEl);
+      } catch {}
+    };
+    return;
+  }
+  if (isCsvFile(name)) {
+    try {
+      const r = await fetch(fileUrl, { headers: authHeaders() });
+      const text = await r.text();
+      fpEditRawText = text;
+      const delim = getFileExt(name) === 'tsv' ? '\t' : ',';
+      const rows = parseDelimited(text, delim);
+      const MAX = 1000;
+      const shown = rows.slice(0, MAX);
+      const header = shown[0] || [];
+      const body = shown.slice(1);
+      let html = '<div style="padding:12px;overflow:auto;max-height:calc(100vh - 180px)">';
+      if (rows.length > MAX) {
+        html += `<div style="padding:6px 0;color:var(--text-dim);font-size:12px">Showing first ${MAX} of ${rows.length} rows</div>`;
+      }
+      html += '<table style="border-collapse:collapse;font-size:12px;font-family:ui-monospace,monospace"><thead><tr>';
+      for (const h of header) html += `<th style="text-align:left;padding:6px 10px;border-bottom:2px solid var(--border);position:sticky;top:0;background:var(--bg-alt);white-space:nowrap">${esc(h)}</th>`;
+      html += '</tr></thead><tbody>';
+      for (const row of body) {
+        html += '<tr>';
+        for (const cell of row) html += `<td style="padding:4px 10px;border-bottom:1px solid var(--border);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis" title="${esc(cell)}">${esc(cell)}</td>`;
+        html += '</tr>';
+      }
+      html += '</tbody></table></div>';
+      fpViewerContent.innerHTML = html;
+    } catch (e) { fpViewerContent.innerHTML = `<div style="padding:14px;color:var(--danger)">Failed to load ${esc(name)}</div>`; }
+    return;
+  }
+  if (isMarkdownFile(name)) {
+    try {
+      const r = await fetch(fileUrl, { headers: authHeaders() });
+      const text = await r.text();
+      fpEditRawText = text;
+      const rendered = (typeof renderMarkdown === 'function') ? renderMarkdown(text) : esc(text);
+      fpViewerContent.innerHTML = `
+        <div style="display:flex;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);background:var(--bg-alt);font-size:12px">
+          <a href="#" id="fp-md-toggle" style="color:var(--accent);margin-left:auto">View source</a>
+        </div>
+        <div id="fp-md-body" class="markdown-body" style="padding:16px 20px;overflow:auto;max-height:calc(100vh - 220px);line-height:1.6">${rendered}</div>`;
+      const toggle = document.getElementById('fp-md-toggle');
+      let showingSource = false;
+      toggle.onclick = (e) => {
+        e.preventDefault();
+        const body = document.getElementById('fp-md-body');
+        showingSource = !showingSource;
+        if (showingSource) {
+          const codeEl = document.createElement('code'); codeEl.className = 'language-markdown'; codeEl.textContent = text;
+          const pre = document.createElement('pre'); pre.className = 'line-numbers'; pre.appendChild(codeEl);
+          body.innerHTML = ''; body.appendChild(pre);
+          if (window.Prism) Prism.highlightElement(codeEl);
+          toggle.textContent = 'View rendered';
+        } else {
+          body.innerHTML = rendered;
+          toggle.textContent = 'View source';
+        }
+      };
+    } catch (e) { fpViewerContent.innerHTML = `<div style="padding:14px;color:var(--danger)">Failed to load ${esc(name)}</div>`; }
     return;
   }
   if (isTextFile(name)) {
