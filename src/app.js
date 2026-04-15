@@ -484,6 +484,7 @@ async function boot() {
     log.info(`Received ${signal}, shutting down...`);
     try {
       clearInterval(heartbeatTimer);
+      tools._killAllTracked();
       await plugins.shutdownAll();
       await gateways.disconnectAll();
       healthServer.close();

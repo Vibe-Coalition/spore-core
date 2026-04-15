@@ -73,11 +73,18 @@ class WebGateway {
     if (!this._sessionClients.has(sessionId)) {
       this._sessionClients.set(sessionId, new Set());
     }
-    // Remove any existing entry for this ws in this session (avoids duplicates)
     const set = this._sessionClients.get(sessionId);
+    // Remove any existing entry for this ws OR same user+role (handles reconnect
+    // where the old WebSocket hasn't fired 'close' yet — prevents ghost clients
+    // that echo messages back to the reconnected client)
+    const toRemove = [];
     for (const entry of set) {
-      if (entry.ws === ws) { set.delete(entry); break; }
+      if (entry.ws === ws) { toRemove.push(entry); continue; }
+      if (entry.role === role && entry.ws._user && entry.ws._user === ws._user) {
+        toRemove.push(entry);
+      }
     }
+    for (const entry of toRemove) set.delete(entry);
     set.add({ ws, role });
 
     // Re-send orphaned tools from a previous CLI that disconnected mid-execution
@@ -490,6 +497,9 @@ class WebGateway {
     child.unref();
     this._backendChild = child;
     this._backendPort = backendPort;
+
+    // Register with global process tracker if available
+    if (this._tools?._trackedPids) this._tools._trackedPids.add(child.pid);
 
     // Persist backend config so it auto-restores on container restart
     try {

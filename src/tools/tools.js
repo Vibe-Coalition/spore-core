@@ -32,6 +32,10 @@ class ToolSystem {
     this.skills = new SkillsManager(logger, config.sharedSkillsDir);
     this.gateway = null;
 
+    // Global process tracker — caps total child processes to prevent fork bombs
+    this._trackedPids = new Set();
+    this._maxChildProcesses = config.maxChildProcesses || 32;
+
     this.dangerousPatterns = [
       /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?\/(\s|$)/, // rm -rf / (any flag combo with 'r' targeting /)
       /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?\/\*/, // rm -rf /*
@@ -66,7 +70,54 @@ class ToolSystem {
       /\bunshare\b/,             // namespace manipulation
       /\bchroot\b/,              // change root
       /\bchattr\b.*\+i/,         // make files immutable
+      /:\(\)\s*\{.*;\s*\}\s*;/,  // fork bomb :() { :|:& }; :
+      /\bfork\s*\(/,             // fork() calls
+      /while\s+true.*do.*&.*done/, // while true; do cmd & done
+      /for\s+.*;\s*do.*&.*done/, // for loop backgrounding
     ];
+  }
+
+  /**
+   * Reap dead PIDs from the tracker and return the count of still-alive processes.
+   */
+  _reapProcesses() {
+    for (const pid of this._trackedPids) {
+      try {
+        process.kill(pid, 0); // signal 0 = existence check, doesn't kill
+      } catch {
+        this._trackedPids.delete(pid);
+      }
+    }
+    return this._trackedPids.size;
+  }
+
+  /**
+   * Track a child process PID. Returns false if the process cap is exceeded.
+   */
+  _trackProcess(pid) {
+    const alive = this._reapProcesses();
+    if (alive >= this._maxChildProcesses) {
+      this.log.error(`[proc-guard] Process cap reached (${alive}/${this._maxChildProcesses}) — refusing to spawn pid ${pid}`);
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+      return false;
+    }
+    this._trackedPids.add(pid);
+    return true;
+  }
+
+  /**
+   * Kill all tracked child processes (cleanup on shutdown or emergency).
+   */
+  _killAllTracked() {
+    for (const pid of this._trackedPids) {
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+    }
+    setTimeout(() => {
+      for (const pid of this._trackedPids) {
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
+      this._trackedPids.clear();
+    }, 3000);
   }
 
   /**
@@ -998,6 +1049,12 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
 
     const abortSignal = this._abortSignal;
 
+    // Check process cap before spawning
+    const alive = this._reapProcesses();
+    if (alive >= this._maxChildProcesses) {
+      return { error: `Process limit reached (${alive}/${this._maxChildProcesses} alive). Wait for running commands to finish or stop background processes before running more.` };
+    }
+
     try {
       const result = await new Promise((resolve, reject) => {
         const child = execCb(command, {
@@ -1007,13 +1064,17 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
           encoding: 'utf8',
           env: safeEnv,
         }, (err, stdout, stderr) => {
+          this._trackedPids.delete(child.pid);
           if (err) { err.stdout = stdout; err.stderr = stderr; reject(err); }
           else resolve({ stdout, stderr });
         });
 
+        this._trackedPids.add(child.pid);
+
         if (abortSignal) {
           if (abortSignal.aborted) {
             try { child.kill('SIGTERM'); } catch {}
+            this._trackedPids.delete(child.pid);
             reject(new Error('Aborted by user.'));
             return;
           }
@@ -3675,6 +3736,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
       const tasks = loadTasks();
       const existing = tasks.findIndex(t => t.name === name);
+      const maxStartupTasks = this.config.maxStartupTasks || 8;
+      if (existing < 0 && tasks.length >= maxStartupTasks) {
+        return { error: `Startup task limit reached (${tasks.length}/${maxStartupTasks}). Remove an existing task first.` };
+      }
       const task = {
         name,
         command,
@@ -3776,6 +3841,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     child.on('exit', (code, signal) => {
       logStream.write(`\n--- Exited: code=${code} signal=${signal} at ${new Date().toISOString()} ---\n`);
       logStream.end();
+      this._trackedPids.delete(child.pid);
       if (this._startupRunning && this._startupRunning[task.name]?.pid === child.pid) {
         delete this._startupRunning[task.name];
       }
@@ -3785,11 +3851,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     child.on('error', (err) => {
       logStream.write(`\n--- Error: ${err.message} ---\n`);
       logStream.end();
+      this._trackedPids.delete(child.pid);
       this.log.warn(`[startup-tasks] Task "${task.name}" spawn error: ${err.message}`);
     });
 
     child.unref();
     this._startupRunning[task.name] = child;
+    this._trackedPids.add(child.pid);
 
     this.log.info(`[startup-tasks] Started "${task.name}" (pid ${child.pid})`);
     return {
