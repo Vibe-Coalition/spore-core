@@ -2534,24 +2534,15 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
                 }
 
                 return new Promise((resolve, reject) => {
-                  // 5s ack timeout — if CLI doesn't acknowledge, fall back to server
-                  const ackTimeout = setTimeout(() => {
-                    if (!originWs._pendingTools?.get(toolId)?.acked) {
-                      this.log.warn(`[ws] No ack from CLI for ${toolName} after 5s, falling back to server`);
-                      originWs._pendingTools.delete(toolId);
-                      clearTimeout(hardTimeout);
-                      resolve(null); // server fallback
-                    }
-                  }, 5000);
-
                   // Hard timeout for the actual tool execution (3 min)
+                  // No ack-based server fallback — local tools MUST go through CLI.
+                  // The server doesn't have the user's files.
                   const hardTimeout = setTimeout(() => {
                     originWs._pendingTools.delete(toolId);
-                    clearTimeout(ackTimeout);
                     reject(new Error(`Tool ${toolName} timed out (3min)`));
                   }, 180000);
 
-                  originWs._pendingTools.set(toolId, { resolve, reject, timeout: hardTimeout, ackTimeout, acked: false });
+                  originWs._pendingTools.set(toolId, { resolve, reject, timeout: hardTimeout });
                 });
               } : undefined,
             };
