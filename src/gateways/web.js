@@ -2207,6 +2207,20 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         }
 
         // ── Acorn: plan decision (execute/revise/cancel) forwarded to other clients ──
+        // ── Generic interactive state broadcast — forward to all other session clients ──
+        if (msg.type === 'interactive:resolved') {
+          for (const [sid, clients] of this._sessionClients) {
+            let isMember = false;
+            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
+            if (isMember) {
+              const data = JSON.stringify(msg);
+              for (const entry of clients) { if (entry.ws !== ws) try { entry.ws.send(data); } catch {} }
+              break;
+            }
+          }
+          return;
+        }
+
         if (msg.type === 'plan:decision' || msg.type === 'plan:decided') {
           for (const [sid, clients] of this._sessionClients) {
             let isMember = false;
