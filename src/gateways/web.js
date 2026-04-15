@@ -2329,9 +2329,20 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         }
 
         // ── Acorn: tool result from CLI client ──
+        // ── CLI acknowledges it received a tool:request ──
+        if (msg.type === 'tool:ack' && msg.id) {
+          const pending = ws._pendingTools?.get(msg.id);
+          if (pending) {
+            pending.acked = true;
+            if (pending.ackTimeout) clearTimeout(pending.ackTimeout);
+          }
+          return;
+        }
+
         if (msg.type === 'tool:result') {
           const pending = ws._pendingTools?.get(msg.id);
           if (pending) {
+            if (pending.ackTimeout) clearTimeout(pending.ackTimeout);
             clearTimeout(pending.timeout);
             ws._pendingTools.delete(msg.id);
             pending.resolve(msg.result);
@@ -2496,13 +2507,39 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
                 this._sendToSession(sessionId, {
                   type: 'tool:pending', id: toolId, name: toolName, summary,
                 });
-                originWs.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
+
+                // Check if CLI is actually reachable before waiting
+                if (!originWs || originWs.readyState !== 1) {
+                  this.log.warn(`[ws] CLI disconnected, falling back to server for ${toolName}`);
+                  return null; // server fallback
+                }
+
+                try {
+                  originWs.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
+                } catch (e) {
+                  this.log.warn(`[ws] Failed to send tool:request to CLI: ${e.message}`);
+                  return null; // server fallback
+                }
+
                 return new Promise((resolve, reject) => {
-                  const timeout = setTimeout(() => {
+                  // 5s ack timeout — if CLI doesn't acknowledge, fall back to server
+                  const ackTimeout = setTimeout(() => {
+                    if (!originWs._pendingTools?.get(toolId)?.acked) {
+                      this.log.warn(`[ws] No ack from CLI for ${toolName} after 5s, falling back to server`);
+                      originWs._pendingTools.delete(toolId);
+                      clearTimeout(hardTimeout);
+                      resolve(null); // server fallback
+                    }
+                  }, 5000);
+
+                  // Hard timeout for the actual tool execution (3 min)
+                  const hardTimeout = setTimeout(() => {
                     originWs._pendingTools.delete(toolId);
-                    reject(new Error(`Tool ${toolName} timed out (5min)`));
-                  }, 300000);
-                  originWs._pendingTools.set(toolId, { resolve, reject, timeout });
+                    clearTimeout(ackTimeout);
+                    reject(new Error(`Tool ${toolName} timed out (3min)`));
+                  }, 180000);
+
+                  originWs._pendingTools.set(toolId, { resolve, reject, timeout: hardTimeout, ackTimeout, acked: false });
                 });
               } : undefined,
             };
