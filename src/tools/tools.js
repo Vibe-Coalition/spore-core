@@ -501,6 +501,17 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
         },
       },
       {
+        name: 'sleep',
+        description: 'Pause execution for a specified duration. Use when waiting for a background process, after starting a long-running command, or to yield the current turn and show progress to the user before continuing. Returns after the delay.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            seconds: { type: 'number', description: 'Duration to sleep in seconds (1-60, default 5)' },
+            reason: { type: 'string', description: 'Why you are sleeping (shown to user as status)' },
+          },
+        },
+      },
+      {
         name: 'notify_user',
         description: 'Send a notification to YOUR user across all active channels (web panel, Discord, Telegram). Use this when another anima asks you to relay a message, when you have an important update to deliver proactively, or when a background process produces a result the user should see immediately. The message is delivered as-is — write it as you want the user to read it.',
         input_schema: {
@@ -820,6 +831,12 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
           return this._saveToolTool(input);
         case 'list_custom_tools':
           return this._listCustomTools();
+        case 'sleep': {
+          const secs = Math.max(1, Math.min(input.seconds || 5, 60));
+          const reason = input.reason || 'waiting';
+          await new Promise(r => setTimeout(r, secs * 1000));
+          return { slept: secs, reason };
+        }
         case 'notify_user':
           return await this._notifyUserTool(input);
 
