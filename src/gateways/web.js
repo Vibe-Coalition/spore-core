@@ -2221,8 +2221,8 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         // ── Acorn: plan decision (execute/revise/cancel) forwarded to other clients ──
         // ── Generic interactive state broadcast — forward to all other session clients ──
         // ── Forward plan:show-approval and interactive:resolved to other session clients ──
-        if (msg.type === 'state:questions') {
-          // Forward questions state to observers
+        if (msg.type === 'delegate:config' || msg.type === 'state:questions') {
+          // Forward to all other session clients
           for (const [sid, clients] of this._sessionClients) {
             let isMember = false;
             for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
