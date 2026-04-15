@@ -79,6 +79,23 @@ class WebGateway {
       if (entry.ws === ws) { set.delete(entry); break; }
     }
     set.add({ ws, role });
+
+    // Re-send orphaned tools from a previous CLI that disconnected mid-execution
+    if (role === 'origin' && this._orphanedTools?.has(sessionId)) {
+      const orphaned = this._orphanedTools.get(sessionId);
+      this._orphanedTools.delete(sessionId);
+      if (orphaned?.length) {
+        this.log.info(`[ws] Re-sending ${orphaned.length} orphaned tool(s) to reconnected CLI for ${sessionId}`);
+        if (!ws._pendingTools) ws._pendingTools = new Map();
+        for (const tool of orphaned) {
+          // The original tool:request data isn't saved (we only have the Promise),
+          // so we can't re-send the exact request. Instead, reject the pending
+          // promises with a retryable error — the agent loop will retry the tool.
+          clearTimeout(tool.timeout);
+          tool.reject(new Error(`CLI reconnected — tool execution interrupted. Retry.`));
+        }
+      }
+    }
   }
 
   _unregisterSessionClient(sessionId, ws) {
@@ -2815,6 +2832,26 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       });
 
       ws.on('close', () => {
+        // If this CLI had pending tools, save them for re-send on reconnect
+        if (ws._role === 'acorn' && ws._pendingTools?.size > 0) {
+          const pending = [];
+          for (const [toolId, entry] of ws._pendingTools) {
+            pending.push({ toolId, resolve: entry.resolve, reject: entry.reject, timeout: entry.timeout });
+          }
+          // Find which session this ws belongs to
+          for (const [sid, clients] of this._sessionClients) {
+            for (const entry of clients) {
+              if (entry.ws === ws) {
+                if (!this._orphanedTools) this._orphanedTools = new Map();
+                const existing = this._orphanedTools.get(sid) || [];
+                existing.push(...pending);
+                this._orphanedTools.set(sid, existing);
+                this.log.info(`[ws] CLI disconnected with ${pending.length} pending tool(s) for ${sid} — saved for reconnect`);
+                break;
+              }
+            }
+          }
+        }
         this._removeClientFromAllSessions(ws);
         if (onGraphEvent) graphEvents.off('change', onGraphEvent);
         if (ws._terminals) {
