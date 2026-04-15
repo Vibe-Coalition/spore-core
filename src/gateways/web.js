@@ -1902,11 +1902,11 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
     const wss = new WebSocket.Server({ noServer: true });
     this._wss = wss;
 
-    const PING_INTERVAL = 25000;
+    const PING_INTERVAL = 15000;
     const pingTimer = setInterval(() => {
       for (const client of wss.clients) {
-        if (client._missedPongs >= 3) {
-          this.log.debug('[ws] Terminating unresponsive client (3 missed pongs)');
+        if (client._missedPongs >= 2) {
+          this.log.warn('[ws] Terminating unresponsive client (2 missed pongs)');
           client.terminate();
           continue;
         }
