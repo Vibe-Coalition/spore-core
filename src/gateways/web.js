@@ -2208,13 +2208,31 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
 
         // ── Acorn: plan decision (execute/revise/cancel) forwarded to other clients ──
         // ── Generic interactive state broadcast — forward to all other session clients ──
-        if (msg.type === 'interactive:resolved') {
+        // ── Forward plan:show-approval and interactive:resolved to other session clients ──
+        if (msg.type === 'plan:show-approval') {
           for (const [sid, clients] of this._sessionClients) {
             let isMember = false;
             for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
             if (isMember) {
               const data = JSON.stringify(msg);
               for (const entry of clients) { if (entry.ws !== ws) try { entry.ws.send(data); } catch {} }
+              this.log.info(`[ws] plan:show-approval forwarded from ${ws._user}`);
+              break;
+            }
+          }
+          return;
+        }
+
+        if (msg.type === 'interactive:resolved') {
+          this.log.info(`[ws] interactive:resolved kind=${msg.kind} from ${ws._user}`);
+          for (const [sid, clients] of this._sessionClients) {
+            let isMember = false;
+            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
+            if (isMember) {
+              const data = JSON.stringify(msg);
+              let forwarded = 0;
+              for (const entry of clients) { if (entry.ws !== ws) { try { entry.ws.send(data); forwarded++; } catch {} } }
+              this.log.info(`[ws] interactive:resolved forwarded to ${forwarded} client(s)`);
               break;
             }
           }
