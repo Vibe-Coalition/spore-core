@@ -2374,8 +2374,8 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
 
         // ── Acorn: any session client changes CLI permission mode ──
         if (msg.type === 'perm:set-mode' && msg.mode) {
-          this._forwardToSessionPeers(ws, msg);
-          this.log.info(`[ws] Remote perm mode change to ${msg.mode} from ${ws._user}`);
+          const n = this._forwardToSessionPeers(ws, msg);
+          this.log.info(`[ws] Remote perm mode change to ${msg.mode} from ${ws._user}, forwarded to ${n} client(s), sessionId=${msg.sessionId || 'none'}`);
           return;
         }
 
