@@ -289,9 +289,56 @@ function startDockerAnima(animaId, animaDir) {
     }
   } catch (e) {
     const errOutput = (e.stdout || e.stderr || e.message || '').toString().trim();
+    if (errOutput.includes('fully subnetted') || errOutput.includes('predefined address pools')) {
+      log(`${animaId}: network exhaustion detected, pruning stale networks and retrying...`);
+      pruneStaleNetworks();
+      try {
+        const out2 = execSync('docker compose up -d --build 2>&1', {
+          cwd: animaDir, timeout: 300_000, maxBuffer: 4 * 1024 * 1024,
+        });
+        const output2 = out2.toString().trim();
+        log(`${animaId}: started after prune — ${output2.split('\n').pop()}`);
+        writeBuildStatus(animaDir, { state: 'running', cmd: 'up -d --build (retry)', output: output2.split('\n').slice(-10).join('\n') });
+        try { fs.writeFileSync(path.join(animaDir, STARTED_FILE), new Date().toISOString() + '\n'); } catch {}
+        return;
+      } catch (e2) {
+        const err2 = (e2.stdout || e2.stderr || e2.message || '').toString().trim();
+        warn(`${animaId}: retry after prune also failed — ${err2.split('\n').pop()}`);
+        writeBuildStatus(animaDir, { state: 'error', cmd: 'up -d --build', error: err2.split('\n').slice(-15).join('\n') });
+        return;
+      }
+    }
     const lastLines = errOutput.split('\n').slice(-15).join('\n');
     warn(`${animaId}: start failed — ${lastLines.split('\n').pop()}`);
     writeBuildStatus(animaDir, { state: 'error', cmd: 'up -d --build', error: lastLines });
+  }
+}
+
+// ── Docker network cleanup ──────────────────────────────────────────────────
+
+function pruneStaleNetworks() {
+  try {
+    const nets = execSync('docker network ls --format "{{.Name}}" 2>/dev/null', {
+      encoding: 'utf8', timeout: 10000,
+    }).trim().split('\n').filter(n => n.endsWith('_default'));
+
+    const animaDirs = new Set(
+      fs.readdirSync(ANIMAS_DIR).filter(d => !d.startsWith('.') && d !== '.template')
+    );
+
+    let removed = 0;
+    for (const net of nets) {
+      const name = net.replace(/_default$/, '');
+      if (name === 'manager' || animaDirs.has(name)) continue;
+      try {
+        execSync(`docker network rm "${net}" 2>/dev/null`, { timeout: 5000 });
+        removed++;
+        log(`pruned stale network: ${net}`);
+      } catch {}
+    }
+    if (removed > 0) log(`pruned ${removed} stale docker network(s)`);
+  } catch (e) {
+    warn(`network prune failed: ${e.message}`);
   }
 }
 
@@ -496,6 +543,7 @@ process.on('SIGINT', shutdown);
 
 log(`Watching ${ANIMAS_DIR} (poll ${POLL_MS}ms)${FORCE_BARE ? ' [bare mode forced]' : ''}`);
 
+if (!FORCE_BARE) pruneStaleNetworks();
 updateOllamaStatus();
 setInterval(updateOllamaStatus, 15000);
 

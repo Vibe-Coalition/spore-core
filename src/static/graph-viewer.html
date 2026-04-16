@@ -7571,7 +7571,8 @@ function chatScrollToBottom() {
 function finalizeStreamingMsg() {
   if (!streamingMsgEl) return;
   streamingMsgEl.classList.remove('streaming');
-  if (!_streamDelta && _thinkingDelta) {
+  var thinkingUseful = _thinkingDelta && _thinkingDelta.trim().length > 20;
+  if (!_streamDelta && thinkingUseful) {
     streamingMsgEl.classList.add('thinking-done');
     streamingMsgEl.onclick = function() { this.classList.toggle('expanded'); };
   } else if (!_streamDelta) {
