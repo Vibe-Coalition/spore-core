@@ -114,6 +114,43 @@ class WebGateway {
     if (set.size === 0) this._sessionClients.delete(sessionId);
   }
 
+  /**
+   * Forward a message to all OTHER clients in the same session as the sender.
+   * Uses msg.sessionId if present (reliable), falls back to membership search.
+   */
+  _forwardToSessionPeers(ws, msg) {
+    const targetSid = msg.sessionId;
+    if (targetSid) {
+      const clients = this._sessionClients.get(targetSid);
+      if (clients) {
+        const data = JSON.stringify(msg);
+        let count = 0;
+        for (const entry of clients) {
+          if (entry.ws !== ws && entry.ws.readyState === 1) {
+            try { entry.ws.send(data); count++; } catch {}
+          }
+        }
+        return count;
+      }
+    }
+    // Fallback: search all sessions for this ws
+    for (const [sid, clients] of this._sessionClients) {
+      let isMember = false;
+      for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
+      if (isMember) {
+        const data = JSON.stringify(msg);
+        let count = 0;
+        for (const entry of clients) {
+          if (entry.ws !== ws && entry.ws.readyState === 1) {
+            try { entry.ws.send(data); count++; } catch {}
+          }
+        }
+        return count;
+      }
+    }
+    return 0;
+  }
+
   _removeClientFromAllSessions(ws) {
     for (const [sessionId, set] of this._sessionClients) {
       for (const entry of set) {
@@ -2300,121 +2337,45 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         // ── Generic interactive state broadcast — forward to all other session clients ──
         // ── Forward plan:show-approval and interactive:resolved to other session clients ──
         if (msg.type === 'delegate:config' || msg.type === 'state:questions') {
-          // Forward to all other session clients
-          for (const [sid, clients] of this._sessionClients) {
-            let isMember = false;
-            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
-            if (isMember) {
-              const data = JSON.stringify(msg);
-              for (const entry of clients) { if (entry.ws !== ws) try { entry.ws.send(data); } catch {} }
-              break;
-            }
-          }
+          this._forwardToSessionPeers(ws, msg);
           return;
         }
 
         if (msg.type === 'plan:show-approval') {
-          for (const [sid, clients] of this._sessionClients) {
-            let isMember = false;
-            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
-            if (isMember) {
-              const data = JSON.stringify(msg);
-              for (const entry of clients) { if (entry.ws !== ws) try { entry.ws.send(data); } catch {} }
-              this.log.info(`[ws] plan:show-approval forwarded from ${ws._user}`);
-              break;
-            }
-          }
+          const n = this._forwardToSessionPeers(ws, msg);
+          this.log.info(`[ws] plan:show-approval forwarded from ${ws._user} to ${n} client(s)`);
           return;
         }
 
         if (msg.type === 'interactive:resolved') {
-          this.log.info(`[ws] interactive:resolved kind=${msg.kind} from ${ws._user}`);
-          for (const [sid, clients] of this._sessionClients) {
-            let isMember = false;
-            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
-            if (isMember) {
-              const data = JSON.stringify(msg);
-              let forwarded = 0;
-              for (const entry of clients) { if (entry.ws !== ws) { try { entry.ws.send(data); forwarded++; } catch {} } }
-              this.log.info(`[ws] interactive:resolved forwarded to ${forwarded} client(s)`);
-              break;
-            }
-          }
+          const n = this._forwardToSessionPeers(ws, msg);
+          this.log.info(`[ws] interactive:resolved kind=${msg.kind} from ${ws._user} forwarded to ${n} client(s)`);
           return;
         }
 
         if (msg.type === 'plan:decision' || msg.type === 'plan:decided') {
-          for (const [sid, clients] of this._sessionClients) {
-            let isMember = false;
-            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
-            if (isMember) {
-              const data = JSON.stringify(msg);
-              for (const entry of clients) {
-                if (entry.ws !== ws) { try { entry.ws.send(data); } catch {} }
-              }
-              if (msg.type === 'plan:decision') this.log.info(`[ws] Plan ${msg.action} from ${ws._user}`);
-              break;
-            }
-          }
+          this._forwardToSessionPeers(ws, msg);
+          if (msg.type === 'plan:decision') this.log.info(`[ws] Plan ${msg.action} from ${ws._user}`);
           return;
         }
 
         // ── Acorn: any session client toggles plan mode ──
         if (msg.type === 'plan:set-mode') {
-          for (const [sid, clients] of this._sessionClients) {
-            let isMember = false;
-            for (const entry of clients) { if (entry.ws === ws) { isMember = true; break; } }
-            if (isMember) {
-              for (const entry of clients) {
-                if (entry.ws !== ws) {
-                  try { entry.ws.send(JSON.stringify({ type: 'plan:set-mode', enabled: !!msg.enabled })); } catch {}
-                }
-              }
-              this.log.info(`[ws] Remote plan mode ${msg.enabled ? 'on' : 'off'} from ${ws._user}`);
-              break;
-            }
-          }
+          this._forwardToSessionPeers(ws, msg);
+          this.log.info(`[ws] Remote plan mode ${msg.enabled ? 'on' : 'off'} from ${ws._user}`);
           return;
         }
 
         // ── Acorn: CLI responds with its current perm mode ──
         if (msg.type === 'perm:current-mode' && msg.mode) {
-          // Forward to all other clients in this session (observers)
-          for (const [sid, clients] of this._sessionClients) {
-            let isMember = false;
-            for (const entry of clients) {
-              if (entry.ws === ws) { isMember = true; break; }
-            }
-            if (isMember) {
-              for (const entry of clients) {
-                if (entry.ws !== ws) {
-                  try { entry.ws.send(JSON.stringify({ type: 'perm:current-mode', mode: msg.mode })); } catch {}
-                }
-              }
-              break;
-            }
-          }
+          this._forwardToSessionPeers(ws, msg);
           return;
         }
 
         // ── Acorn: any session client changes CLI permission mode ──
         if (msg.type === 'perm:set-mode' && msg.mode) {
-          for (const [sid, clients] of this._sessionClients) {
-            let isMember = false;
-            for (const entry of clients) {
-              if (entry.ws === ws) isMember = true;
-            }
-            if (isMember) {
-              // Forward to all OTHER clients in the session
-              for (const entry of clients) {
-                if (entry.ws !== ws) {
-                  try { entry.ws.send(JSON.stringify({ type: 'perm:set-mode', mode: msg.mode })); } catch {}
-                }
-              }
-              this.log.info(`[ws] Remote perm mode change to ${msg.mode} from ${ws._user}`);
-              break;
-            }
-          }
+          this._forwardToSessionPeers(ws, msg);
+          this.log.info(`[ws] Remote perm mode change to ${msg.mode} from ${ws._user}`);
           return;
         }
 
