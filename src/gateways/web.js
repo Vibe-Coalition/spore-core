@@ -2423,6 +2423,17 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             this.log.info(`[ws] Stop requested for ${userId} — ${stopped ? 'aborted' : 'no active run'}`);
             if (stopped) {
               try { ws.send(JSON.stringify({ type: 'chat:status', status: 'stopping' })); } catch {}
+              // Reject any pending tool Promises on the CLI's WebSocket so the
+              // agent loop breaks out immediately instead of waiting 3 minutes
+              const originWs = isAcorn ? this._getOriginClient(sessionId) : null;
+              if (originWs && originWs._pendingTools?.size > 0) {
+                for (const [toolId, entry] of originWs._pendingTools) {
+                  clearTimeout(entry.timeout);
+                  entry.resolve({ error: 'Aborted by user.' });
+                }
+                originWs._pendingTools.clear();
+                this.log.info(`[ws] Rejected pending tool(s) for abort`);
+              }
             }
           }
           return;

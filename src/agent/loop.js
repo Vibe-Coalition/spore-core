@@ -661,19 +661,20 @@ class AgentLoop {
           // Partition tools into parallel-safe batches and sequential ones.
           // A contiguous run of parallel-safe tools executes concurrently;
           // anything else runs sequentially between batches.
+          // Race each tool against the abort signal so a stuck tool doesn't block the loop
+          const abortRace = abortSignal ? (tb) => Promise.race([
+            executeOneTool(tb),
+            new Promise(resolve => {
+              const onAbort = () => resolve({ type: 'tool_result', tool_use_id: tb.id, content: JSON.stringify({ error: 'Aborted by user.' }) });
+              if (abortSignal.aborted) { onAbort(); return; }
+              abortSignal.addEventListener('abort', onAbort, { once: true });
+            }),
+          ]) : executeOneTool;
+
           const allParallel = toolBlocks.length > 1 && toolBlocks.every(t => PARALLEL_SAFE.has(t.name));
           if (allParallel) {
             this.log.info(`[agent] Executing ${toolBlocks.length} tools in parallel: ${toolBlocks.map(t => t.name).join(', ')}`);
             if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: toolBlocks.length, tools: toolBlocks.map(t => t.name) }); } catch { } }
-            // Race each tool against the abort signal so a stuck tool doesn't block the loop
-            const abortRace = abortSignal ? (tb) => Promise.race([
-              executeOneTool(tb),
-              new Promise(resolve => {
-                const onAbort = () => resolve({ type: 'tool_result', tool_use_id: tb.id, content: JSON.stringify({ error: 'Aborted by user.' }) });
-                if (abortSignal.aborted) { onAbort(); return; }
-                abortSignal.addEventListener('abort', onAbort, { once: true });
-              }),
-            ]) : executeOneTool;
             const results = await Promise.all(toolBlocks.map(tb => abortRace(tb)));
             toolResults.push(...results);
           } else {
@@ -689,15 +690,15 @@ class AgentLoop {
               if (batch.length > 1) {
                 this.log.info(`[agent] Parallel batch: ${batch.length} tools (${batch.map(t => t.name).join(', ')})`);
                 if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: batch.length, tools: batch.map(t => t.name) }); } catch { } }
-                const results = await Promise.all(batch.map(tb => executeOneTool(tb)));
+                const results = await Promise.all(batch.map(tb => abortRace(tb)));
                 toolResults.push(...results);
               } else if (batch.length === 1) {
-                toolResults.push(await executeOneTool(batch[0]));
+                toolResults.push(await abortRace(batch[0]));
               }
               if (abortSignal?.aborted) break;
               // Execute next sequential tool
               if (i < toolBlocks.length) {
-                toolResults.push(await executeOneTool(toolBlocks[i]));
+                toolResults.push(await abortRace(toolBlocks[i]));
                 i++;
               }
             }
