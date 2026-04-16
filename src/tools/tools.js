@@ -377,7 +377,7 @@ class ToolSystem {
       },
       {
         name: 'write_file',
-        description: `Write or overwrite a file. PREFERRED over exec+sed/echo/node for all file writes. Creates parent directories if needed.${this.config.srcEditable ? ' Source editing is enabled: /app/ files are writable and changes persist to the host src/ directory across restarts.' : ' Cannot write to /app/ framework files.'}`,
+        description: `Write a NEW file or FULLY replace a small file. Creates parent directories if needed. WARNING: For modifying existing files, use edit_file instead — it is faster, safer, and preserves unchanged code. Only use write_file when creating a file from scratch or the entire file content needs to change.${this.config.srcEditable ? ' Source editing is enabled: /app/ files are writable and changes persist to the host src/ directory across restarts.' : ' Cannot write to /app/ framework files.'}`,
         input_schema: {
           type: 'object',
           properties: {
@@ -390,7 +390,7 @@ class ToolSystem {
       },
       {
         name: 'edit_file',
-        description: `Find and replace text in a file. PREFERRED way to make targeted edits — replaces exec+sed/node one-liners. Provide enough context in old_text to uniquely match.${this.config.srcEditable ? ' Source editing is enabled: /app/ edits persist to the host.' : ' Cannot edit /app/ framework files.'}`,
+        description: `Find and replace text in an existing file. This is the PREFERRED tool for modifying files — much faster and safer than write_file because it only changes what needs to change. Always use this instead of write_file when updating existing code. Provide enough surrounding context in old_text to uniquely match the target.${this.config.srcEditable ? ' Source editing is enabled: /app/ edits persist to the host.' : ' Cannot edit /app/ framework files.'}`,
         input_schema: {
           type: 'object',
           properties: {
@@ -525,6 +525,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
         },
       },
       ...this._getCustomToolDefinitions(),
+      ...this._getWebappRequestDefinitions(),
 
       ...(this._pluginManager ? this._pluginManager.getToolDefinitions() : []),
 
@@ -669,6 +670,25 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
         },
       },
     ];
+  }
+
+  _getWebappRequestDefinitions() {
+    if (!this.gateway?._server) return [];
+    return [{
+      name: 'webapp_request',
+      description: 'Make an HTTP request to your own hosted webapp. Use this to test endpoints, fetch data, or interact with the backend you launched via web_serve. Requests are authenticated with the active user\'s session cookie so the backend sees the same auth context as if the user made the request in their browser.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method' },
+          path: { type: 'string', description: 'Request path (e.g. "/api/portfolio", "/api/health"). Must start with /' },
+          body: { type: 'object', description: 'JSON request body (for POST/PUT/PATCH)' },
+          headers: { type: 'object', description: 'Additional request headers (optional)' },
+          as_user: { type: 'string', description: 'Username to act as (defaults to the user you are talking to). Must be a currently logged-in user.' },
+        },
+        required: ['method', 'path'],
+      },
+    }];
   }
 
   getChatToolDefinitions() {
@@ -866,6 +886,8 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
           return this._startupTasksTool(input);
         case 'data_poller':
           return await this._dataPollerTool(input);
+        case 'webapp_request':
+          return await this._webappRequestTool(input);
 
         case 'skill_lookup':
           return this._skillLookupTool(input);
@@ -2946,6 +2968,20 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const safe = this._safePath(filePath, true);
     if (safe.error) return safe;
 
+    // Guard: if the file already exists and is non-trivial, reject and
+    // redirect to edit_file. This prevents multi-minute full-file rewrites
+    // when a targeted edit would suffice.
+    if (!append) {
+      try {
+        const existingStat = fs.statSync(safe.path);
+        if (existingStat.size > 500) {
+          return {
+            error: `File "${safe.path}" already exists (${existingStat.size} bytes). Use edit_file to make targeted changes instead of rewriting the entire file. write_file should only be used for NEW files. If you truly need to replace everything, delete the file first with exec("rm path") then write_file.`,
+          };
+        }
+      } catch { /* file doesn't exist, proceed */ }
+    }
+
     try {
       const dir = path.dirname(safe.path);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -3867,6 +3903,71 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
       default:
         return { error: `Unknown action "${action}". Use start, stop, list, or templates.` };
+    }
+  }
+
+  // ── Webapp Request ──────────────────────────────────────────────────
+
+  async _webappRequestTool(input) {
+    const { method, path: reqPath, body, headers: extraHeaders, as_user } = input;
+    if (!reqPath || !reqPath.startsWith('/')) return { error: 'path must start with /' };
+    if (!this.gateway?._server) return { error: 'No webapp is currently hosted. Use web_serve first.' };
+
+    const port = this.config.webPort;
+    if (!port) return { error: 'webPort not configured' };
+
+    // Resolve session cookie for the target user
+    const targetUser = as_user || this._currentUserName || 'operator';
+    let cookieHeader = '';
+    let authenticated = false;
+    if (!as_user && this._currentSessionToken) {
+      cookieHeader = `anima_session=${this._currentSessionToken}`;
+      authenticated = true;
+    } else {
+      const sess = this.gateway.getSessionForUser(targetUser);
+      if (sess) { cookieHeader = `${sess.cookieName}=${sess.sessionId}`; authenticated = true; }
+    }
+
+    const url = `http://127.0.0.1:${port}${reqPath}`;
+    const fetchOpts = {
+      method: method || 'GET',
+      headers: {
+        ...(extraHeaders || {}),
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+    };
+    if (body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+      fetchOpts.body = JSON.stringify(body);
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(url, { ...fetchOpts, signal: controller.signal });
+      clearTimeout(timeout);
+
+      const contentType = res.headers.get('content-type') || '';
+      let responseBody;
+      if (contentType.includes('application/json')) {
+        try { responseBody = await res.json(); } catch { responseBody = await res.text(); }
+      } else {
+        responseBody = await res.text();
+        if (responseBody.length > 8000) responseBody = responseBody.substring(0, 8000) + '\n... (truncated)';
+      }
+
+      return {
+        status: res.status,
+        statusText: res.statusText,
+        headers: Object.fromEntries([...res.headers.entries()].filter(([k]) =>
+          ['content-type', 'content-length', 'x-request-id', 'location', 'set-cookie'].includes(k.toLowerCase())
+        )),
+        body: responseBody,
+        authenticatedAs: authenticated ? targetUser : null,
+      };
+    } catch (e) {
+      if (e.name === 'AbortError') return { error: 'Request timed out (15s)' };
+      return { error: `Request failed: ${e.message}` };
     }
   }
 

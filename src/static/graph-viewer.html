@@ -2699,8 +2699,11 @@ let _thinkingDelta = '';
 function setChatBusy(busy) {
   chatBusy = busy;
   if (busy) _chatStopped = false;
-  document.getElementById('chat-send').style.display = busy ? 'none' : '';
-  document.getElementById('chat-stop').style.display = busy ? '' : 'none';
+  const sendBtn = document.getElementById('chat-send');
+  const stopBtn = document.getElementById('chat-stop');
+  sendBtn.textContent = busy ? 'send ⏎' : 'send';
+  sendBtn.style.display = '';
+  stopBtn.style.display = busy ? '' : 'none';
 }
 let _userWasAtBottom = true;
 
@@ -2849,7 +2852,7 @@ function handleWsMessage(msg) {
   if (window._onWsMessage && window._onWsMessage(msg)) return;
   // After user clicks stop, suppress stale server messages until the run finishes
   if (_chatStopped) {
-    if (msg.type === 'chat:done') { _chatStopped = false; return; }
+    if (msg.type === 'chat:done') { _chatStopped = false; setChatBusy(false); return; }
     if (msg.type === 'chat:delta' || msg.type === 'chat:thinking' || msg.type === 'chat:tool'
         || msg.type === 'chat:status' || msg.type === 'chat:chunk') return;
   }
@@ -4466,8 +4469,18 @@ document.getElementById('file-input').addEventListener('change', (e) => {
 function sendChat() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
-  if ((!text && !pendingFiles.length) || !ws || ws.readyState !== 1 || chatBusy) return;
+  if ((!text && !pendingFiles.length) || !ws || ws.readyState !== 1) return;
 
+  if (chatBusy) {
+    _interruptAndSend(text);
+    return;
+  }
+
+  _dispatchChat(text);
+}
+
+function _dispatchChat(text) {
+  const input = document.getElementById('chat-input');
   const attachments = [...pendingFiles];
   addChatMessage('user', text || '(attached files)', attachments.length ? attachments : undefined);
 
@@ -4489,6 +4502,36 @@ function sendChat() {
   input.style.height = 'auto';
   pendingFiles = [];
   updateAttachmentUI();
+}
+
+function _interruptAndSend(newText) {
+  _chatStopped = true;
+  ws.send(JSON.stringify({ type: 'chat:stop' }));
+  finalizeStreamingMsg();
+
+  const input = document.getElementById('chat-input');
+  input.value = '';
+  input.style.height = 'auto';
+  pendingFiles = [];
+  updateAttachmentUI();
+
+  // Queue the new message — wait for the abort to release the session,
+  // then send. Poll briefly since abort is near-instant.
+  let attempts = 0;
+  const trySend = () => {
+    attempts++;
+    if (!chatBusy) {
+      _dispatchChat(newText);
+      return;
+    }
+    if (attempts < 30) {
+      setTimeout(trySend, 100);
+    } else {
+      addChatMessage('system', 'Could not interrupt — try again.');
+      setChatBusy(false);
+    }
+  };
+  setTimeout(trySend, 50);
 }
 
 document.getElementById('chat-send').addEventListener('click', sendChat);

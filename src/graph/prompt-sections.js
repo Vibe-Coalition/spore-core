@@ -448,8 +448,8 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('');
     lines.push('### Tool Selection Rules');
     lines.push('- **read_file** for ALL file reading. Never use exec with grep/cat/sed/head/tail to read files.');
-    lines.push('- **edit_file** for targeted changes (find & replace). Never use exec with sed/node -e to edit files.');
-    lines.push('- **write_file** for creating new files or full rewrites.');
+    lines.push('- **edit_file** for ALL modifications to existing files. This is faster and safer than write_file — it only changes what needs to change. Use it even for large changes by making multiple edit_file calls.');
+    lines.push('- **write_file** ONLY for creating brand-new files. Do NOT use write_file to modify existing files — use edit_file instead. Rewriting an entire file wastes time and risks losing code.');
     lines.push('- **exec** ONLY for running scripts, git, npm, or commands with no dedicated tool.');
     lines.push('- **startup_tasks** to register persistent background processes (collectors, watchers, servers) that auto-restart on container reboot. NEVER use raw nohup — it won\'t survive restarts.');
     lines.push('- For cron inside this container, use plain `cron` to ensure the daemon is running and `crontab` to manage jobs. NEVER use `/etc/init.d/cron start`, `service cron start`, or `/usr/sbin/cron` directly — those paths bypass the wrapper and can fail with pidfile permission errors even when cron is already running.');
@@ -903,6 +903,19 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push('- Omit `project` to use your personal/local graph (identity, preferences, personal facts).');
       parts.push('- The learner auto-routes: personal facts go to your local graph, project-related discoveries go to the shared graph.');
       parts.push('- Other animas in the same project see everything you write to the shared graph, and vice versa.');
+    }
+
+    if (opts.webappStatus?.active) {
+      const ws = opts.webappStatus;
+      parts.push('');
+      parts.push('### Hosted Webapp');
+      parts.push(`You are hosting a webapp on port ${ws.port}.${ws.hasBackend ? ' A backend process is running (proxied via /api/*).' : ''}`);
+      parts.push('You can interact with your own webapp using the **webapp_request** tool — make HTTP requests as if you were the user, with their session cookie automatically injected.');
+      if (ws.users?.length) {
+        const userList = [...new Set(ws.users.map(u => u.user))].join(', ');
+        parts.push(`Currently logged-in users: ${userList}`);
+      }
+      parts.push('Use `webapp_request` to: test endpoints after building them, fetch data on behalf of users, check health/status, or debug issues.');
     }
 
     return parts.join('\n');

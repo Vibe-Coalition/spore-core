@@ -185,6 +185,7 @@ class AgentLoop {
     this.tools._currentUserMessage = opts.content || null;
     this.tools._currentUserName = opts.userName || null;
     this.tools._currentUserId = opts.userId || null;
+    this.tools._currentSessionToken = opts.sessionToken || null;
     this.tools._abortSignal = opts._abortSignal || null;
 
     const dynamicOpts = {
@@ -200,6 +201,7 @@ class AgentLoop {
       isThread: opts.isThread,
       parentChannelName: opts.parentChannelName,
       messageId: opts.messageId,
+      webappStatus: this.tools?.gateway?.getWebappStatus?.() || null,
       clientCwd: opts.clientCwd || null,
     };
 
@@ -229,6 +231,9 @@ class AgentLoop {
 
     // 2. Add the user message to session history (text only — images are ephemeral)
     // Task completion messages are internal system prompts — don't pollute chat history
+    // If this message follows an interruption, the new instruction takes priority
+    const wasInterrupted = this._recentAborts?.delete(sessionKey) || false;
+
     if (opts.trigger !== 'task_complete') {
       this.sessions.addMessage(sessionKey, 'user', opts.content);
     }
@@ -256,6 +261,16 @@ class AgentLoop {
           { type: 'text', text: lastMsg.content + pathNote },
         ];
       }
+    }
+
+    // 3.9. If this follows an interruption, prefix the user's new message with a priority signal.
+    // This goes into the messages array (not session storage) so it's ephemeral.
+    if (wasInterrupted && messages.length > 0) {
+      const last = messages[messages.length - 1];
+      if (last.role === 'user' && typeof last.content === 'string') {
+        last.content = `[PRIORITY — The user interrupted your previous task. That task is CANCELLED. Focus ONLY on this new message:]\n\n${last.content}`;
+      }
+      this.log.info(`[interrupt] Priority framing injected for ${sessionKey}`);
     }
 
     // 4. Ensure messages alternate user/assistant properly
@@ -413,6 +428,12 @@ class AgentLoop {
         const response = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta, onToolUse: opts.onToolUse, onStatus: opts.onStatus, tools: chatTools, model: activeModel, abortSignal });
 
         const iterMs = Date.now() - iterStart;
+
+        if (abortSignal?.aborted) {
+          this.log.info(`[abort] Session ${sessionKey} aborted after LLM call (before tool execution)`);
+          loopBroken = true;
+          break;
+        }
 
         // Plugin middleware: afterInference
         if (this._pluginManager) {
@@ -1273,55 +1294,118 @@ class AgentLoop {
   }
 
   /**
-   * After a user-initiated abort, trim the session so the next message
-   * doesn't carry stale partial tool results from the interrupted run.
-   * Strategy: keep everything up to the last complete assistant text reply,
-   * then append a short system note so the model knows the previous task
-   * was cancelled.
+   * After a user-initiated abort, aggressively trim the session so the
+   * new instruction has maximum weight over old context.
+   *
+   * Strategy: keep only the last few real conversational exchanges
+   * (user text + assistant text, no tool blocks). This prevents hundreds
+   * of old messages from drowning out the user's new direction.
    */
   _cleanSessionAfterAbort(sessionKey) {
     const history = this.sessions.getHistory(sessionKey, 200);
     if (!history || history.length === 0) return;
 
-    // Walk backwards to find the last "clean" boundary — either a real user
-    // message or an assistant message that contains actual text (not just
-    // tool_use blocks from the interrupted run).
-    let lastCleanIdx = -1;
-    for (let i = history.length - 1; i >= 0; i--) {
-      const msg = history[i];
-      if (msg.role === 'assistant') {
-        const hasText = typeof msg.content === 'string'
-          ? msg.content.trim().length > 0
-          : (Array.isArray(msg.content) && msg.content.some(b => b.type === 'text' && b.text?.trim()));
-        const hasToolUse = Array.isArray(msg.content) && msg.content.some(b => b.type === 'tool_use');
-        // Accept as clean boundary only if it has real text AND no dangling tool_use
-        if (hasText && !hasToolUse) { lastCleanIdx = i; break; }
-        continue;
-      }
+    // ── Pass 1: extract real conversational turns and tool activity ──
+    const realTurns = [];
+    const filesRead = new Set();
+    const filesWritten = new Set();
+    const commandsRun = [];
+    const toolCounts = {};
+    const userTopics = [];
+
+    for (const msg of history) {
       if (msg.role === 'user') {
         const isToolResult = Array.isArray(msg.content) && msg.content.every(b => b.type === 'tool_result');
-        if (!isToolResult) { lastCleanIdx = i; break; }
+        if (isToolResult) continue;
+        const text = typeof msg.content === 'string' ? msg.content
+          : Array.isArray(msg.content) ? msg.content.filter(b => b.type === 'text').map(b => b.text).join('') : '';
+        if (text.startsWith('[SYSTEM:') || text.startsWith('[PRIORITY')) continue;
+        if (text.trim()) {
+          realTurns.push({ role: 'user', content: text.length > 2000 ? text.slice(0, 2000) + '...' : text });
+          if (text.length > 20 && text.length < 500) userTopics.push(text.slice(0, 150));
+        }
+      } else if (msg.role === 'assistant') {
+        const blocks = Array.isArray(msg.content) ? msg.content : [];
+        // Extract tool usage from assistant messages
+        for (const b of blocks) {
+          if (b.type === 'tool_use') {
+            toolCounts[b.name] = (toolCounts[b.name] || 0) + 1;
+            const inp = b.input || {};
+            if (b.name === 'read_file' && inp.path) filesRead.add(inp.path);
+            if (b.name === 'write_file' && inp.path) filesWritten.add(inp.path);
+            if (b.name === 'edit_file' && inp.path) filesWritten.add(inp.path);
+            if (b.name === 'exec' && inp.command) commandsRun.push(inp.command.slice(0, 80));
+          }
+        }
+        const text = typeof msg.content === 'string' ? msg.content
+          : blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+        if (text.trim()) realTurns.push({ role: 'assistant', content: text.length > 2000 ? text.slice(0, 2000) + '...' : text });
       }
     }
 
-    if (lastCleanIdx < 0) {
-      this.sessions.clearSession(sessionKey);
-      this.log.info(`[abort-clean] Session ${sessionKey} cleared entirely (no clean boundary found)`);
-      return;
+    // ── Pass 2: build the activity summary ──
+    const summaryParts = ['[SESSION SUMMARY — your previous work before the user interrupted:]'];
+    if (userTopics.length > 0) {
+      summaryParts.push(`User requests: ${userTopics.slice(0, 5).join(' | ')}`);
+    }
+    if (filesWritten.size > 0) {
+      summaryParts.push(`Files modified: ${[...filesWritten].slice(0, 10).join(', ')}`);
+    }
+    if (filesRead.size > 0) {
+      const readOnly = [...filesRead].filter(f => !filesWritten.has(f));
+      if (readOnly.length > 0) summaryParts.push(`Files read: ${readOnly.slice(0, 8).join(', ')}`);
+    }
+    if (commandsRun.length > 0) {
+      summaryParts.push(`Commands run (${commandsRun.length}): ${commandsRun.slice(-5).join(' ; ')}`);
+    }
+    const toolList = Object.entries(toolCounts).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${t}×${c}`).join(', ');
+    if (toolList) summaryParts.push(`Tool usage: ${toolList}`);
+    summaryParts.push('Use read_file to check the current state of any files if needed.');
+
+    // ── Pass 3: keep early + recent turns with summary in the gap ──
+    const KEEP_EARLY = 4;
+    const KEEP_RECENT = 4;
+    const early = realTurns.slice(0, KEEP_EARLY);
+    const recent = realTurns.length > KEEP_EARLY + KEEP_RECENT
+      ? realTurns.slice(-KEEP_RECENT)
+      : realTurns.slice(KEEP_EARLY);
+
+    const kept = [...early];
+    // Insert the activity summary in the gap between early and recent
+    const summary = summaryParts.join('\n');
+    if (kept.length > 0 && kept[kept.length - 1].role === 'user') {
+      kept.push({ role: 'assistant', content: summary });
+    } else if (kept.length > 0) {
+      kept.push({ role: 'user', content: summary });
+    }
+    if (recent.length > 0) kept.push(...recent);
+
+    // Ensure starts with user and alternates
+    while (kept.length > 0 && kept[0].role !== 'user') kept.shift();
+    const cleaned = [];
+    for (const msg of kept) {
+      if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === msg.role) continue;
+      cleaned.push(msg);
     }
 
-    const trimmed = history.slice(0, lastCleanIdx + 1);
-    // If last message is assistant text, append a note so the model knows
-    // the previous task was cancelled.
-    if (trimmed.length > 0 && trimmed[trimmed.length - 1].role === 'assistant') {
-      trimmed.push({
-        role: 'user',
-        content: '[The user stopped the previous task. Disregard it and await their next instruction.]',
-      });
+    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === 'user') {
+      cleaned.push({ role: 'assistant', content: 'OK.' });
     }
 
-    this.sessions.setMessages(sessionKey, trimmed);
-    this.log.info(`[abort-clean] Session ${sessionKey} trimmed from ${history.length} to ${trimmed.length} messages`);
+    // Cancellation note + ack
+    cleaned.push({
+      role: 'user',
+      content: '[You were working on a task but the user STOPPED you. That task is CANCELLED. Await their next message — it is a completely new instruction. Follow ONLY the new instruction. You can reference the session summary above if context is needed, and use read_file to check file state.]',
+    });
+    cleaned.push({ role: 'assistant', content: 'Understood — previous task cancelled. I have the summary of what was done. What would you like me to do?' });
+
+    // Mark as recently interrupted
+    if (!this._recentAborts) this._recentAborts = new Set();
+    this._recentAborts.add(sessionKey);
+    setTimeout(() => this._recentAborts?.delete(sessionKey), 30_000);
+
+    this.sessions.setMessages(sessionKey, cleaned);
+    this.log.info(`[abort-clean] Session ${sessionKey} trimmed ${history.length} → ${cleaned.length} messages (summary: ${filesWritten.size} files modified, ${Object.values(toolCounts).reduce((a, b) => a + b, 0)} tool calls)`);
   }
 
   /**

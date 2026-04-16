@@ -166,6 +166,56 @@ class WebGateway {
     return [{ id: 'web:control-panel', name: 'web chat' }];
   }
 
+  /**
+   * Returns active user sessions for use by the webapp_request tool.
+   * Filters expired sessions and returns user → sessionId mapping.
+   */
+  getActiveUserSessions() {
+    const results = [];
+    const now = Date.now();
+    for (const [sid, sess] of this._webSessions) {
+      if (now - sess.created >= SESSION_TTL) continue;
+      results.push({
+        sessionId: sid,
+        user: sess.user,
+        type: sess.type,
+        cookieName: sess.type === 'webapp' ? 'anima_webapp' : 'anima_session',
+      });
+    }
+    return results;
+  }
+
+  /**
+   * Find a valid session ID for a given username.
+   * Prefers creator/admin sessions over webapp sessions.
+   */
+  getSessionForUser(username) {
+    const now = Date.now();
+    let best = null;
+    const priority = { admin: 3, creator: 2, acorn: 1, webapp: 0 };
+    for (const [sid, sess] of this._webSessions) {
+      if (now - sess.created >= SESSION_TTL) continue;
+      if (sess.user !== username) continue;
+      if (!best || (priority[sess.type] || 0) > (priority[best.type] || 0)) {
+        best = { sessionId: sid, user: sess.user, type: sess.type, cookieName: sess.type === 'webapp' ? 'anima_webapp' : 'anima_session' };
+      }
+    }
+    return best;
+  }
+
+  /** Returns info about the hosted webapp (if any) for prompt context. */
+  getWebappStatus() {
+    if (!this._server) return null;
+    const port = this.config.webPort;
+    const hasBackend = !!this._backendChild;
+    return {
+      active: true,
+      port,
+      hasBackend,
+      users: this.getActiveUserSessions().map(s => ({ user: s.user, type: s.type })),
+    };
+  }
+
   injectProactivePrompt(channelId, context, topic) {
     if (!this._wss || !this.hasConnectedClients()) {
       this.log.debug('[proactive:web] No connected clients, skipping');
@@ -2010,6 +2060,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       wss.handleUpgrade(req, socket, head, (ws) => {
         ws._role = wsRole;
         ws._user = wsUser;
+        ws._sessionToken = token || null;
         wss.emit('connection', ws, req);
       });
     });
@@ -2492,6 +2543,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               channelName: isAcorn ? `acorn:${ws._user}` : 'control-panel',
               userId: ws._user || 'operator',
               userName: ws._user || msg.userName || 'Operator',
+              sessionToken: ws._sessionToken || null,
               trigger: 'dm',
               platform: isAcorn ? 'cli' : 'web',
               isDm: !isAcorn,

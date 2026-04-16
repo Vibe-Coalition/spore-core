@@ -55,6 +55,7 @@ class DataPoller {
     this._log = log;
     this._audit = auditFn || (() => {});
     this._pollers = new Map();
+    this._disabledPollers = [];
     this._persistFile = path.join(dataDir || '.', '.data-pollers.json');
   }
 
@@ -147,7 +148,15 @@ class DataPoller {
         this._log.warn(`[data-poller] ${pollerId} failed (${state.consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${e.message}`);
 
         if (state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          this._log.error(`[data-poller] ${pollerId} stopped after ${MAX_CONSECUTIVE_FAILURES} consecutive failures`);
+          this._log.error(`[data-poller] ${pollerId} disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failures`);
+          this._disabledPollers.push({
+            hostId: state.hostId,
+            templateId: state.templateId,
+            intervalMs: state.intervalMs,
+            outputDir: path.dirname(state.outputFile),
+            disabled: true,
+            disabledReason: `${MAX_CONSECUTIVE_FAILURES} consecutive failures: ${e.message}`,
+          });
           this.stop(pollerId);
           return;
         }
@@ -190,7 +199,7 @@ class DataPoller {
   }
 
   list() {
-    return [...this._pollers.values()].map(s => ({
+    const active = [...this._pollers.values()].map(s => ({
       pollerId: s.pollerId,
       template: s.templateId,
       host: s.hostName,
@@ -201,7 +210,31 @@ class DataPoller {
       lastSuccess: s.lastSuccess,
       lastError: s.lastError,
       consecutiveFailures: s.consecutiveFailures,
+      status: 'active',
     }));
+    const disabled = (this._disabledPollers || []).map(d => ({
+      template: d.templateId,
+      host: d.hostId,
+      intervalSeconds: Math.round((d.intervalMs || 120000) / 1000),
+      reason: d.disabledReason || 'consecutive failures',
+      status: 'disabled',
+    }));
+    return [...active, ...disabled];
+  }
+
+  reenable(hostId, templateId, intervalMs, outputDir) {
+    this._disabledPollers = (this._disabledPollers || []).filter(
+      d => !(d.hostId === hostId && d.templateId === templateId)
+    );
+    this._persist();
+    return this.start(hostId, templateId, intervalMs, outputDir);
+  }
+
+  clearDisabled() {
+    const count = (this._disabledPollers || []).length;
+    this._disabledPollers = [];
+    this._persist();
+    return { cleared: count };
   }
 
   stopAll() {
@@ -215,7 +248,12 @@ class DataPoller {
         templateId: s.templateId,
         intervalMs: s.intervalMs,
         outputDir: path.dirname(s.outputFile),
+        disabled: false,
       }));
+      // Also keep disabled entries so the user can see what was stopped
+      if (this._disabledPollers) {
+        for (const d of this._disabledPollers) configs.push(d);
+      }
       fs.writeFileSync(this._persistFile, JSON.stringify(configs, null, 2));
     } catch (e) {
       this._log.warn(`[data-poller] Failed to persist config: ${e.message}`);
@@ -232,8 +270,15 @@ class DataPoller {
     if (!Array.isArray(configs) || configs.length === 0) return { restored: 0 };
 
     let restored = 0;
+    let skipped = 0;
     const errors = [];
     for (const cfg of configs) {
+      if (cfg.disabled) {
+        skipped++;
+        this._disabledPollers.push(cfg);
+        this._log.info(`[data-poller] Skipping disabled poller ${cfg.templateId}@${cfg.hostId}: ${cfg.disabledReason || 'previously failed'}`);
+        continue;
+      }
       const result = this.start(cfg.hostId, cfg.templateId, cfg.intervalMs, cfg.outputDir);
       if (result.error) {
         errors.push(`${cfg.templateId}@${cfg.hostId}: ${result.error}`);
@@ -243,7 +288,7 @@ class DataPoller {
         this._log.info(`[data-poller] Restored ${cfg.templateId} on ${result.host} every ${result.intervalSeconds}s`);
       }
     }
-    return { restored, total: configs.length, errors: errors.length > 0 ? errors : undefined };
+    return { restored, total: configs.length, skipped, errors: errors.length > 0 ? errors : undefined };
   }
 
   _parse(parserId, raw, exitCode) {

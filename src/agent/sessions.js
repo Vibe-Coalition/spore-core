@@ -377,14 +377,18 @@ class SessionManager {
     const insert = this.db.prepare(`
       INSERT INTO messages (session_key, role, content) VALUES (?, ?, ?)
     `);
-    const tx = this.db.transaction(() => {
+    this.db.exec('BEGIN');
+    try {
       this.db.prepare('DELETE FROM messages WHERE session_key = ?').run(key);
       for (const msg of messages) {
         const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
         insert.run(key, msg.role, content);
       }
-    });
-    tx();
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
   
   _estimateTokens(text) {
