@@ -2493,9 +2493,20 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           // Store the client's working directory (sent by Acorn CLI)
           if (msg.cwd && isAcorn) ws._cwd = msg.cwd;
 
-          // Register this client as origin for the session (if not already an observer)
+          // Register this client for the session.
+          // If the client is already an observer (companion app), keep that role —
+          // don't promote to origin or it will evict the CLI's origin registration.
           if (isAcorn) {
-            this._registerSessionClient(sessionId, ws, 'origin');
+            const existingClients = this._sessionClients.get(sessionId);
+            let isObserver = false;
+            if (existingClients) {
+              for (const entry of existingClients) {
+                if (entry.ws === ws && entry.role === 'observer') { isObserver = true; break; }
+              }
+            }
+            if (!isObserver) {
+              this._registerSessionClient(sessionId, ws, 'origin');
+            }
             // Echo user message to all OTHER session clients so observers see it
             const clients = this._sessionClients.get(sessionId);
             if (clients) {
