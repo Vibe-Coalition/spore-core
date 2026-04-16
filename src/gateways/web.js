@@ -2508,11 +2508,12 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               this._registerSessionClient(sessionId, ws, 'origin');
             }
             // Echo user message to all OTHER session clients so observers see it
+            // Use displayText (clean user text) if available, not content (which includes context/delegation policy)
             const clients = this._sessionClients.get(sessionId);
             if (clients) {
               const echoPayload = JSON.stringify({
                 type: 'chat:user-message',
-                text: (msg.content || '').substring(0, 2000),
+                text: (msg.displayText || msg.content || '').substring(0, 2000),
                 userName: ws._user || msg.userName || 'user',
                 sessionId,
               });
