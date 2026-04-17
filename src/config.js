@@ -118,6 +118,7 @@ const DEFAULTS = {
   subagentMaxIter: 100,
   subagentTimeoutSeconds: 3600,
   lullMaxIterations: 4,
+  openaiReasoningEffort: null,
   loopDetection: {
     warn: 8,
     critical: 15,
@@ -211,7 +212,7 @@ function loadConfigFresh() {
   if (process.env.SLACK_BOT_TOKEN) config.slackBotToken = process.env.SLACK_BOT_TOKEN;
   if (process.env.SLACK_APP_TOKEN) config.slackAppToken = process.env.SLACK_APP_TOKEN;
 
-  // Voice / STT / TTS keys
+  // Voice / STT / TTS keys + shared OpenAI API key
   if (process.env.DEEPGRAM_API_KEY) config.deepgramApiKey = process.env.DEEPGRAM_API_KEY;
   if (process.env.OPENAI_API_KEY) config.openaiApiKey = process.env.OPENAI_API_KEY;
   if (process.env.XI_API_KEY) config.xiApiKey = process.env.XI_API_KEY;
@@ -235,12 +236,16 @@ function loadConfigFresh() {
   if (process.env.ANIMA_LEARNER_MODEL) config.learnerModel = process.env.ANIMA_LEARNER_MODEL;
   if (process.env.ANIMA_SUBAGENT_MODEL) config.subagentModel = process.env.ANIMA_SUBAGENT_MODEL;
   if (process.env.ANIMA_SUBAGENT_MAX_TOKENS) config.subagentMaxTokens = parseInt(process.env.ANIMA_SUBAGENT_MAX_TOKENS, 10);
+  if (process.env.ANIMA_OPENAI_REASONING_EFFORT) config.openaiReasoningEffort = process.env.ANIMA_OPENAI_REASONING_EFFORT;
   if (process.env.ANIMA_HEARTBEAT_MINUTES) config.heartbeatIntervalMinutes = parseInt(process.env.ANIMA_HEARTBEAT_MINUTES, 10);
   if (process.env.ANIMA_DEBOUNCE_MS) config.messageDebounceMs = parseInt(process.env.ANIMA_DEBOUNCE_MS, 10);
   if (process.env.HEALTH_BIND_ADDR) config.healthBindAddr = process.env.HEALTH_BIND_ADDR;
   if (process.env.ANIMA_DISCORD_ADMINS) config.discordAdmins = process.env.ANIMA_DISCORD_ADMINS.split(',').map(s => s.trim()).filter(Boolean);
   if (process.env.ANIMA_PLUGINS_DIR) config.pluginsDir = process.env.ANIMA_PLUGINS_DIR;
   if (process.env.ANIMA_INTERMEDIATE_THROTTLE) config.intermediateTextThrottleSeconds = parseInt(process.env.ANIMA_INTERMEDIATE_THROTTLE, 10);
+
+  // OpenAI
+  if (process.env.OPENAI_BASE_URL) config.openaiBaseUrl = process.env.OPENAI_BASE_URL;
 
   // OpenRouter
   if (process.env.OPENROUTER_API_KEY) config.openrouterApiKey = process.env.OPENROUTER_API_KEY;
@@ -362,15 +367,20 @@ function loadConfigFresh() {
   if (!config.discordToken && !config.telegramBotToken && !config.slackBotToken && !config.webPort) {
     console.warn('[config] No platform tokens or web port set — agent will only be reachable via the invoke API');
   }
-  // Anthropic key only required when main model is Anthropic-backed
-  const mainPrefix = config.model?.split('/')[0];
-  const mainBackend = config.model?.startsWith('openrouter/') ? 'openrouter'
-    : config.model?.startsWith('local/') ? 'local'
-      : config.model?.startsWith('gemini/') ? 'gemini'
+  // Validate provider-specific keys for the selected main model backend.
+  const selectedModel = config.plannerModel || config.normalModel || config.casualModel || config.model;
+  const mainPrefix = selectedModel?.split('/')[0];
+  const mainBackend = selectedModel?.startsWith('openai/') ? 'openai'
+    : selectedModel?.startsWith('openrouter/') ? 'openrouter'
+    : selectedModel?.startsWith('local/') ? 'local'
+      : selectedModel?.startsWith('gemini/') ? 'gemini'
         : (config.customProviders?.[mainPrefix]) ? 'custom'
           : 'anthropic';
   if (mainBackend === 'anthropic' && !config.anthropicApiKey) {
     console.error('[config] Missing Anthropic API key. Set ANTHROPIC_API_KEY env var or configure anima.json');
+  }
+  if (mainBackend === 'openai' && !config.openaiApiKey && !process.env.OPENAI_API_KEY) {
+    console.error('[config] Missing OpenAI API key. Set OPENAI_API_KEY env var or configure anima.json');
   }
   if (mainBackend === 'openrouter' && !config.openrouterApiKey) {
     console.error('[config] Missing OpenRouter API key. Set OPENROUTER_API_KEY env var or configure anima.json');

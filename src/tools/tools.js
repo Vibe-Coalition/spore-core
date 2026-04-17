@@ -599,7 +599,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       },
       {
         name: 'startup_tasks',
-        description: 'Manage persistent background tasks that automatically restart when the container reboots. Use this for long-running processes like collectors, watchers, servers, or any nohup/background job that should survive restarts. Tasks are stored in /data/.startup-tasks.json and executed after the app boots.',
+        description: 'Manage persistent background tasks that automatically restart when the container reboots. Use this for long-running processes like collectors, watchers, servers, or any nohup/background job that should survive restarts. Tasks are stored in /data/.startup-tasks.json and executed after the app boots. For cron-based scheduling inside this container, use plain `cron` plus `crontab` — do not use `/etc/init.d/cron start`, `service cron start`, or `/usr/sbin/cron` directly.',
         input_schema: {
           type: 'object',
           properties: {
@@ -777,10 +777,15 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
    * @returns {Promise<Object>} Tool result
    */
   async executeTool(name, input) {
-    this.log.debug(`Executing tool: ${name}`, JSON.stringify(input).substring(0, 200));
-
+    const normalizedName = name === 'graph' ? 'graph_update' : name;
+    this.log.debug(`Executing tool: ${normalizedName}`, JSON.stringify(input).substring(0, 200));
+    // Abort guard: refuse destructive tools if the user already hit stop.
+    const DESTRUCTIVE = new Set(['write_file', 'edit_file', 'exec', 'save_tool', 'web_serve']);
+    if (DESTRUCTIVE.has(normalizedName) && this._abortSignal?.aborted) {
+      return { error: 'Aborted by user — tool execution skipped.' };
+    }
     try {
-      switch (name) {
+      switch (normalizedName) {
         case 'exec':
           return await this._execTool(input);
         case 'message_send':
@@ -869,18 +874,18 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
 
         default: {
           if (this._pluginManager) {
-            const pluginResult = await this._pluginManager.executePluginTool(name, input, {
+            const pluginResult = await this._pluginManager.executePluginTool(normalizedName, input, {
               trigger: this._currentTrigger,
               channelId: this._currentChannelId,
               platform: this._currentPlatform,
             });
             if (pluginResult !== null) return pluginResult;
           }
-          return { error: `Unknown tool: ${name}` };
+          return { error: `Unknown tool: ${normalizedName}` };
         }
       }
     } catch (e) {
-      this.log.error(`Tool ${name} failed:`, e.message);
+      this.log.error(`Tool ${normalizedName} failed:`, e.message);
       return { error: e.message };
     }
   }
@@ -1922,6 +1927,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           '',
           'RULES:',
           '- Use read_file/write_file/edit_file for file operations — not exec with cat/sed/grep.',
+          '- For cron inside this container, use plain `cron` to ensure the daemon is running and `crontab` to manage jobs. Do NOT use `/etc/init.d/cron start`, `service cron start`, or `/usr/sbin/cron` directly — those bypass the wrapper and can fail with pidfile permission errors.',
           '- Use graph_update to persist knowledge and graph_delete to remove nodes/aspects/attributes/edges. Do NOT write SQL directly against graph.db.',
           '- For code/content: write to files using write_file, not inline text.',
           '- For reusable scripts: use save_tool instead of write_file.',

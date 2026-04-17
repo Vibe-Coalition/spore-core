@@ -128,8 +128,23 @@ class TelegramGateway {
       || message.from?.username
       || `telegram:${userId}`;
     const channelName = message.chat.title || message.chat.username || (isDm ? 'telegram-dm' : `telegram:${chatId}`);
-    const trigger = this._getTriggerType(message, content, isDm);
     const policy = resolveSourcePolicy(this.config, 'telegram', chatId);
+    const targetId = threadId ? `${chatId}:topic:${threadId}` : chatId;
+    const sessionKey = this.agent.sessions.constructor.buildKey({
+      platform: 'telegram',
+      channelId: targetId,
+      isDm,
+      userId,
+      private: !!policy.private,
+    });
+
+    const cmd = content.trim().toLowerCase();
+    if (cmd === '/new' || cmd === '/reset') {
+      await this._handleNewSession(message, targetId, channelName, sessionKey);
+      return;
+    }
+
+    const trigger = this._getTriggerType(message, content, isDm);
     if (!this._isAllowed(message, isDm, trigger)) {
       await this._handleRejectedMessage(message, isDm, chatId, userId);
       return;
@@ -147,13 +162,6 @@ class TelegramGateway {
     });
 
     const labeledContent = isDm ? content : `[${userName}]: ${content}`;
-    const sessionKey = this.agent.sessions.constructor.buildKey({
-      platform: 'telegram',
-      channelId: threadId ? `${chatId}:topic:${threadId}` : chatId,
-      isDm,
-      userId,
-      private: !!policy.private,
-    });
 
     if (!trigger || !policy.respond) {
       this.agent.sessions.addMessage(sessionKey, 'user', labeledContent);
@@ -161,7 +169,6 @@ class TelegramGateway {
       return;
     }
 
-    const targetId = threadId ? `${chatId}:topic:${threadId}` : chatId;
     const targetChatId = this._parseTarget(targetId).chatId;
 
     // Send typing indicator and keep it alive every 4s (Telegram expires it after ~5s)
@@ -214,6 +221,21 @@ class TelegramGateway {
     }
   }
 
+  async _handleNewSession(message, targetId, channelName, sessionKey) {
+    try {
+      this.agent.sessions.clearSession(sessionKey);
+      await this.sendMessage(targetId, '🔄 Session cleared. Starting fresh.', null, {
+        replyToMessageId: message.message_id,
+      });
+      this.log.info(`[telegram] Session reset in ${channelName}`);
+    } catch (e) {
+      this.log.error(`[telegram] Session reset failed in ${channelName}: ${e.message}`);
+      await this.sendMessage(targetId, 'Failed to reset session.', null, {
+        replyToMessageId: message.message_id,
+      });
+    }
+  }
+
   _getTriggerNames() {
     const names = [
       this.botUsername,
@@ -259,11 +281,15 @@ class TelegramGateway {
     );
     const messages = [];
     for (let i = 0; i < chunks.length; i++) {
-      const payload = { ...baseFields, text: chunks[i] };
+      const payload = {
+        ...baseFields,
+        text: this._formatTelegramHtml(chunks[i]),
+        parse_mode: 'HTML',
+      };
       if (i > 0) {
         delete payload.reply_to_message_id;
       }
-      const data = await this._api('sendMessage', payload);
+      const data = await this._apiText('sendMessage', payload, 'text', chunks[i]);
       messages.push({
         messageId: String(data.result.message_id),
         channelId: String(data.result.chat.id),
@@ -293,9 +319,21 @@ class TelegramGateway {
     else                          { method = 'sendDocument';  fileField = 'document'; }
 
     const fields = { ...baseFields };
-    if (caption) fields.caption = caption.slice(0, 1024);
+    const rawCaption = caption ? caption.slice(0, 1024) : '';
+    if (rawCaption) {
+      fields.caption = this._formatTelegramHtml(rawCaption);
+      fields.parse_mode = 'HTML';
+    }
 
-    const data = await this._apiMultipart(method, fields, fileField, filePath);
+    let data;
+    try {
+      data = await this._apiMultipart(method, fields, fileField, filePath);
+    } catch (e) {
+      if (!rawCaption) throw e;
+      this.log.warn(`[telegram] ${method} HTML caption failed, falling back to plain text: ${e.message}`);
+      const fallbackFields = { ...baseFields, caption: rawCaption };
+      data = await this._apiMultipart(method, fallbackFields, fileField, filePath);
+    }
     return {
       sent: 1,
       messages: [{
@@ -378,11 +416,12 @@ class TelegramGateway {
   async editMessage(chatId, messageId, content) {
     try {
       const target = this._parseTarget(chatId);
-      await this._api('editMessageText', {
+      await this._apiText('editMessageText', {
         chat_id: target.chatId,
         message_id: Number(messageId),
-        text: content,
-      });
+        text: this._formatTelegramHtml(content),
+        parse_mode: 'HTML',
+      }, 'text', content);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e.message };
@@ -583,7 +622,11 @@ class TelegramGateway {
     addField('chat_id', target.chatId);
     if (target.threadId) addField('message_thread_id', target.threadId);
     if (opts.replyToMessageId) addField('reply_to_message_id', opts.replyToMessageId);
-    if (opts.caption) addField('caption', opts.caption);
+    const rawCaption = opts.caption ? String(opts.caption).slice(0, 1024) : '';
+    if (rawCaption) {
+      addField('caption', opts._plainCaption ? rawCaption : this._formatTelegramHtml(rawCaption));
+      if (!opts._plainCaption) addField('parse_mode', 'HTML');
+    }
 
     // The voice file
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="voice"; filename="voice.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`));
@@ -592,33 +635,39 @@ class TelegramGateway {
 
     const body = Buffer.concat(parts);
 
-    return new Promise((resolve, reject) => {
-      const req = https.request(`${this.baseUrl}/sendVoice`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-        },
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => { data += chunk; });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(data || '{}');
-            if (res.statusCode >= 400 || parsed.ok === false) {
-              this.log.warn(`[telegram] sendVoice failed: ${parsed.description || res.statusCode}`);
-              return reject(new Error(parsed.description || `sendVoice ${res.statusCode}`));
+    try {
+      return await new Promise((resolve, reject) => {
+        const req = https.request(`${this.baseUrl}/sendVoice`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+          },
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => { data += chunk; });
+          res.on('end', () => {
+            try {
+              const parsed = JSON.parse(data || '{}');
+              if (res.statusCode >= 400 || parsed.ok === false) {
+                this.log.warn(`[telegram] sendVoice failed: ${parsed.description || res.statusCode}`);
+                return reject(new Error(parsed.description || `sendVoice ${res.statusCode}`));
+              }
+              resolve(parsed);
+            } catch (e) {
+              reject(e);
             }
-            resolve(parsed);
-          } catch (e) {
-            reject(e);
-          }
+          });
         });
+        req.on('error', reject);
+        req.write(body);
+        req.end();
       });
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
+    } catch (e) {
+      if (!rawCaption || opts._plainCaption) throw e;
+      this.log.warn(`[telegram] sendVoice HTML caption failed, falling back to plain text: ${e.message}`);
+      return this._sendVoiceNote(chatId, audioBuffer, { ...opts, caption: rawCaption, _plainCaption: true });
+    }
   }
 
   // ─── End Voice ───────────────────────────────────────────────────────
@@ -643,6 +692,58 @@ class TelegramGateway {
       remaining = remaining.slice(breakPoint).trimStart();
     }
     return chunks;
+  }
+
+  _escapeTelegramHtml(text) {
+    return String(text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  _formatTelegramHtml(text) {
+    const lines = String(text || '').split(/\r?\n/);
+    const rendered = [];
+    let inCodeBlock = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('```')) {
+        rendered.push(inCodeBlock ? '</pre>' : '<pre>');
+        inCodeBlock = !inCodeBlock;
+        continue;
+      }
+
+      if (inCodeBlock) {
+        rendered.push(this._escapeTelegramHtml(line));
+        continue;
+      }
+
+      let html = this._escapeTelegramHtml(line);
+      html = html.replace(/^#{1,6}\s+(.+)$/u, '<b>$1</b>');
+      html = html.replace(/^(\s*)[-*]\s+/u, '$1• ');
+      html = html.replace(/\*\*([^*\n]+)\*\*/gu, '<b>$1</b>');
+      html = html.replace(/__([^_\n]+)__/gu, '<b>$1</b>');
+      html = html.replace(/`([^`\n]+)`/gu, '<code>$1</code>');
+      rendered.push(html);
+    }
+
+    if (inCodeBlock) {
+      rendered.push('</pre>');
+    }
+    return rendered.join('\n');
+  }
+
+  async _apiText(method, payload, textField, plainText) {
+    try {
+      return await this._api(method, payload);
+    } catch (e) {
+      if (!payload.parse_mode) throw e;
+      this.log.warn(`[telegram] ${method} HTML formatting failed, falling back to plain text: ${e.message}`);
+      const fallback = { ...payload, [textField]: plainText };
+      delete fallback.parse_mode;
+      return this._api(method, fallback);
+    }
   }
 
   _parseTarget(raw) {

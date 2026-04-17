@@ -4,6 +4,7 @@
  * Supports multiple backends, chosen by model string prefix:
  *
  *   Anthropic (default):  model = "claude-*" or no prefix
+ *   OpenAI:               model = "openai/<model>"    (native OpenAI API)
  *   OpenRouter:           model = "openrouter/<model>"
  *   Local (OAI-compat):   model = "local/<model>"     (Ollama / LM Studio / vLLM)
  *   Gemini:               model = "gemini/<model>"
@@ -27,7 +28,103 @@ const Anthropic = require('@anthropic-ai/sdk');
 // Helpers
 // ---------------------------------------------------------------------------
 
-const _BUILTIN_PREFIXES = new Set(['openrouter', 'local', 'gemini']);
+const _BUILTIN_PREFIXES = new Set(['openai', 'openrouter', 'local', 'gemini']);
+const _TOOL_NAME_ALIASES = new Map([
+  ['graph', 'graph_update'],
+]);
+
+function normalizeToolName(name) {
+  if (!name) return name;
+  const trimmed = String(name).trim();
+  return _TOOL_NAME_ALIASES.get(trimmed.toLowerCase()) || trimmed;
+}
+
+function _trimRepeatedTail(value) {
+  if (typeof value !== 'string' || value.length < 2) return value;
+  const last = value[value.length - 1];
+  const prev = value[value.length - 2];
+  if (last !== prev) return value;
+  if (!/[A-Za-z0-9_-]/.test(last)) return value;
+  return value.slice(0, -1);
+}
+
+function _repairGraphToolInput(value, key = '') {
+  if (Array.isArray(value)) return value.map(item => _repairGraphToolInput(item, key));
+  if (value && typeof value === 'object') {
+    for (const [childKey, childValue] of Object.entries(value)) {
+      value[childKey] = _repairGraphToolInput(childValue, childKey);
+    }
+    return value;
+  }
+  if (typeof value === 'string' && ['nodeId', 'type', 'target', 'project'].includes(key)) {
+    return _trimRepeatedTail(value);
+  }
+  return value;
+}
+
+function _postProcessToolInput(toolName, input) {
+  if (!input || typeof input !== 'object') return input;
+  switch (normalizeToolName(toolName)) {
+    case 'graph_update':
+      return _repairGraphToolInput(input);
+    default:
+      return input;
+  }
+}
+
+function _repairToolJson(raw) {
+  let repaired = String(raw || '').trim();
+  if (!repaired) return repaired;
+
+  repaired = repaired
+    .replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, '\'')
+    .replace(/,\s*([}\]])/g, '$1');
+
+  // Quote bare object keys.
+  repaired = repaired.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)/g, '$1"$2"$3');
+
+  // Fix the common broken pattern: `"key": bareword"` (missing opening quote).
+  repaired = repaired.replace(
+    /(:\s*)([A-Za-z_./:-][A-Za-z0-9_./:-]*)(\")(\s*[,}\]])/g,
+    '$1"$2"$4',
+  );
+
+  // Quote remaining bareword scalar values in objects.
+  repaired = repaired.replace(/(:\s*)([A-Za-z_./:-][A-Za-z0-9_./:-]*)(\s*[,}\]])/g, (match, prefix, value, suffix) => {
+    if (/^(true|false|null)$/i.test(value)) return match;
+    if (/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value)) return match;
+    return `${prefix}"${value}"${suffix}`;
+  });
+
+  // Quote remaining bareword scalar values in arrays.
+  repaired = repaired.replace(/([\[,]\s*)([A-Za-z_./:-][A-Za-z0-9_./:-]*)(\s*[,]\s*|\s*\])/g, (match, prefix, value, suffix) => {
+    if (/^(true|false|null)$/i.test(value)) return match;
+    if (/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value)) return match;
+    return `${prefix}"${value}"${suffix}`;
+  });
+
+  return repaired;
+}
+
+function _parseToolInput(rawArgs, toolName) {
+  const raw = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {});
+  try {
+    return _postProcessToolInput(toolName, JSON.parse(raw || '{}'));
+  } catch {}
+
+  const repaired = _repairToolJson(raw);
+  if (repaired && repaired !== raw) {
+    try {
+      return _postProcessToolInput(toolName, JSON.parse(repaired || '{}'));
+    } catch {}
+  }
+
+  return {
+    _parse_error: `Tool arguments were malformed JSON and could not be parsed. Raw args (first 500 chars): ${(raw || '').substring(0, 500)}`,
+  };
+}
 
 /** Strip provider prefix from model string: "openrouter/x/y" → "x/y", "together/llama" → "llama" */
 function stripPrefix(model) {
@@ -45,6 +142,7 @@ let _customProviderNames = new Set();
 /** Detect which backend a model string targets */
 function detectBackend(model) {
   if (!model) return 'none';
+  if (model.startsWith('openai/')) return 'openai';
   if (model.startsWith('openrouter/')) return 'openrouter';
   if (model.startsWith('local/')) return 'local';
   if (model.startsWith('gemini/')) return 'gemini';
@@ -112,6 +210,7 @@ function _inferCapabilities(model) {
   const backend = detectBackend(model);
 
   if (backend === 'anthropic') return { tools: true, vision: true, audio: false, video: false };
+  if (backend === 'openai')    return { tools: true, vision: true, audio: false, video: false };
   if (backend === 'gemini')    return { tools: true, vision: true, audio: true,  video: true  };
 
   const name = stripPrefix(model).toLowerCase();
@@ -121,6 +220,10 @@ function _inferCapabilities(model) {
     audio:  _AUDIO_PATTERNS.test(name)  ? true : false,
     video:  _VIDEO_PATTERNS.test(name)  ? true : false,
   };
+}
+
+function _maxOutputTokenField(model) {
+  return detectBackend(model) === 'openai' ? 'max_completion_tokens' : 'max_tokens';
 }
 
 /**
@@ -179,7 +282,7 @@ function toOAIRequest(params) {
         tool_calls: toolUseBlocks.map(tu => ({
           id: tu.id,
           type: 'function',
-          function: { name: tu.name, arguments: JSON.stringify(tu.input || {}) },
+          function: { name: normalizeToolName(tu.name), arguments: JSON.stringify(tu.input || {}) },
         })),
       };
       oaiMessages.push(oaiMsg);
@@ -224,9 +327,12 @@ function toOAIRequest(params) {
 
   const strippedModel = stripPrefix(params.model);
   const body = {
-    max_tokens: params.max_tokens,
     messages: oaiMessages,
   };
+  if (params.max_tokens != null) body[_maxOutputTokenField(params.model)] = params.max_tokens;
+  if (detectBackend(params.model) === 'openai' && params.reasoning_effort) {
+    body.reasoning_effort = params.reasoning_effort;
+  }
   if (strippedModel) body.model = strippedModel;
   if (oaiTools) {
     body.tools = oaiTools;
@@ -256,8 +362,8 @@ function _extractInlineToolCalls(text) {
         toolBlocks.push({
           type: 'tool_use',
           id: `tc_${toolBlocks.length}`,
-          name: parsed.name,
-          input: parsed.arguments || {},
+          name: normalizeToolName(parsed.name),
+          input: _postProcessToolInput(parsed.name, parsed.arguments || {}),
         });
         return '';
       } catch {}
@@ -274,7 +380,12 @@ function _extractInlineToolCalls(text) {
         const val = pm[2].trim();
         try { input[pm[1].trim()] = JSON.parse(val); } catch { input[pm[1].trim()] = val; }
       }
-      toolBlocks.push({ type: 'tool_use', id: `tc_${toolBlocks.length}`, name, input });
+      toolBlocks.push({
+        type: 'tool_use',
+        id: `tc_${toolBlocks.length}`,
+        name: normalizeToolName(name),
+        input: _postProcessToolInput(name, input),
+      });
       return '';
     }
     return '';
@@ -300,11 +411,12 @@ function fromOAIResponse(oaiResp) {
   if (msg.tool_calls && msg.tool_calls.length > 0) {
     if (text) content.push({ type: 'text', text });
     for (const tc of msg.tool_calls) {
-      let input = {};
-      try { input = JSON.parse(tc.function.arguments || '{}'); } catch (parseErr) {
-        input = { _parse_error: `Tool arguments were malformed JSON and could not be parsed. Raw args (first 500 chars): ${(tc.function.arguments || '').substring(0, 500)}` };
-      }
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
+      content.push({
+        type: 'tool_use',
+        id: tc.id,
+        name: normalizeToolName(tc.function.name),
+        input: _parseToolInput(tc.function.arguments || '{}', tc.function.name),
+      });
     }
   } else {
     // Check for inline tool calls (Qwen/Hermes format in text when vLLM parser fails)
@@ -419,6 +531,7 @@ class OAICompatClient {
     const body = toOAIRequest(params);
     const model = body.model || '';
     const timeout = this._timeoutFor(model);
+    const maxTokenField = _maxOutputTokenField(params.model);
 
     try {
       const oaiResp = await this._fetchJSON(body, timeout);
@@ -446,9 +559,9 @@ class OAICompatClient {
         this._markContacted(model);
         return fromOAIResponse(oaiResp);
       }
-      // Retry with halved max_tokens on context-length errors
-      if (this._isContextLengthError(err) && body.max_tokens > 512) {
-        body.max_tokens = Math.floor(body.max_tokens / 2);
+      // Retry with halved output tokens on context-length errors
+      if (this._isContextLengthError(err) && body[maxTokenField] > 512) {
+        body[maxTokenField] = Math.floor(body[maxTokenField] / 2);
         const oaiResp = await this._fetchJSON(body, timeout);
         this._markContacted(model);
         return fromOAIResponse(oaiResp);
@@ -470,6 +583,7 @@ class OAICompatClient {
     const origBody = { ...toOAIRequest(params), stream: true, stream_options: { include_usage: true } };
     const model = origBody.model || '';
     const timeout = this._timeoutFor(model);
+    const maxTokenField = _maxOutputTokenField(params.model);
 
     const listeners = { text: [], event: [], end: [] };
     const emit = (type, data) => {
@@ -640,15 +754,16 @@ class OAICompatClient {
         const content = [];
         const serverToolCalls = Object.values(toolCalls);
 
-        if (serverToolCalls.length > 0) {
+          if (serverToolCalls.length > 0) {
           // Server parsed tool calls normally
           if (fullText) content.push({ type: 'text', text: fullText });
           for (const tc of serverToolCalls) {
-            let input = {};
-            try { input = JSON.parse(tc.args || '{}'); } catch (parseErr) {
-              input = { _parse_error: `Tool arguments were malformed JSON and could not be parsed. Raw args (first 500 chars): ${(tc.args || '').substring(0, 500)}` };
-            }
-            content.push({ type: 'tool_use', id: tc.id, name: tc.name, input });
+            content.push({
+              type: 'tool_use',
+              id: tc.id,
+              name: normalizeToolName(tc.name),
+              input: _parseToolInput(tc.args || '{}', tc.name),
+            });
           }
         } else {
           // Check for inline tool calls in text (Qwen/Hermes when vLLM parser fails)
@@ -689,8 +804,8 @@ class OAICompatClient {
           const { tools, tool_choice, ...rest } = body;
           return await runStream(rest);
         }
-        if (self._isContextLengthError(err) && body.max_tokens > 512) {
-          body.max_tokens = Math.floor(body.max_tokens / 2);
+        if (self._isContextLengthError(err) && body[maxTokenField] > 512) {
+          body[maxTokenField] = Math.floor(body[maxTokenField] / 2);
           return await runStream(body);
         }
         throw err;
@@ -810,6 +925,16 @@ function createClientForModel(model, config) {
       baseURL: prov.url,
       apiKey: prov.key || '',
       authHeader: prov.authHeader || 'bearer',
+      timeoutMs: config.apiTimeoutMs || 120000,
+    });
+  }
+
+  if (backend === 'openai') {
+    const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY || '';
+    if (!apiKey) throw new Error('OpenAI model requested but OPENAI_API_KEY not set');
+    return new OAICompatClient({
+      baseURL: config.openaiBaseUrl || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+      apiKey,
       timeoutMs: config.apiTimeoutMs || 120000,
     });
   }

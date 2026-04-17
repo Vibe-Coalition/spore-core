@@ -263,7 +263,15 @@ class AgentLoop {
 
     // 4.5. Token-aware compaction: summarize old messages instead of dropping them
     const contextWindow = this.config.contextWindow || 200000;
-    const hardCeiling = Math.floor(contextWindow * 0.75);
+    const configuredCeiling = Number.isFinite(Number(this.config.compactTokenThreshold))
+      ? Number(this.config.compactTokenThreshold)
+      : null;
+    const hardCeiling = Math.min(
+      contextWindow,
+      configuredCeiling && configuredCeiling > 0
+        ? configuredCeiling
+        : Math.floor(contextWindow * 0.75)
+    );
     const systemTokens = this._estimateTokens(systemPrompt);
     let msgTokens = messages.reduce((sum, m) => sum + this._estimateTokens(
       typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
@@ -1161,12 +1169,16 @@ class AgentLoop {
       : this._modelMaxOutputTokens(model);
     const supportsThinking = /sonnet|opus/i.test(model) && !/3-5|3\.5/i.test(model);
     const thinkingBudget = supportsThinking ? (this.config.thinkingBudget || 10000) : 0;
+    const openaiReasoningEffort = /^openai\//i.test(model)
+      ? (this.config.openaiReasoningEffort || null)
+      : null;
     const requestOpts = {
       model,
       max_tokens: maxTokens,
       system,
       messages,
       tools,
+      ...(openaiReasoningEffort ? { reasoning_effort: openaiReasoningEffort } : {}),
       ...(thinkingBudget > 0 ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
     };
 

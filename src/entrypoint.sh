@@ -10,6 +10,7 @@ TOOLS_SRC="/app/tools-default"
 TOOLS_DEST="/app/tools"
 VENV_PATH="/workspace/.venv"
 MANIFEST="/workspace/.env-manifest.json"
+CRONTAB_PERSIST_DIR="/workspace/.crontabs"
 
 # ── Fixed anima identity ─────────────────────────────────────────────
 # All anima containers run as UID/GID 2000 (anima:anima).
@@ -30,6 +31,12 @@ if [ -d /shared/skills ]; then
   chmod 2775 /shared/skills 2>/dev/null || true
   chmod g+rw /shared/skills/* 2>/dev/null || true
 fi
+
+mkdir -p "$CRONTAB_PERSIST_DIR" /home/anima 2>/dev/null || true
+chown -R "$ANIMA_UID:$ANIMA_GID" "$CRONTAB_PERSIST_DIR" /home/anima 2>/dev/null || true
+chmod 700 "$CRONTAB_PERSIST_DIR" /home/anima 2>/dev/null || true
+export CRONTAB_PERSIST_DIR
+export HOME="/home/anima"
 
 # Seed /app/tools from image snapshot if the volume is empty
 if [ -d "$TOOLS_SRC" ] && [ -z "$(ls -A $TOOLS_DEST 2>/dev/null)" ]; then
@@ -150,6 +157,27 @@ APT_MANIFEST="/workspace/.apt-packages"
 if [ -f "$APT_MANIFEST" ] && [ -s "$APT_MANIFEST" ]; then
   echo "[entrypoint] reinstalling persisted apt packages in background..."
   (apt-get update -qq && xargs -a "$APT_MANIFEST" apt-get install -y -qq --no-install-recommends > /dev/null 2>&1 && echo "[entrypoint] apt packages restored") &
+fi
+
+# ── Restore persisted crontabs and start cron ──────────────────────
+if [ "${ANIMA_ENABLE_CRON:-true}" != "false" ] && command -v /usr/bin/crontab >/dev/null 2>&1; then
+  for file in "$CRONTAB_PERSIST_DIR"/*; do
+    [ -f "$file" ] || continue
+    user="$(basename "$file")"
+    if id "$user" >/dev/null 2>&1; then
+      chmod 600 "$file" 2>/dev/null || true
+      /usr/bin/crontab -u "$user" "$file" >/dev/null 2>&1 \
+        && echo "[entrypoint] restored crontab for $user" \
+        || echo "[entrypoint] failed to restore crontab for $user"
+    fi
+  done
+
+  if command -v cron >/dev/null 2>&1; then
+    rm -f /var/run/crond.pid /var/run/cron.pid 2>/dev/null || true
+    cron >/dev/null 2>&1 \
+      && echo "[entrypoint] cron daemon started" \
+      || echo "[entrypoint] cron daemon failed to start (non-fatal)"
+  fi
 fi
 
 # ── User on-boot script ──────────────────────────────────────────────

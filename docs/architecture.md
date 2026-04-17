@@ -132,6 +132,7 @@ Results are ranked by a weighted score combining relevance, importance, recency,
 | Prefix | Backend | Key |
 |--------|---------|-----|
 | `claude-*` | Anthropic | `ANTHROPIC_API_KEY` |
+| `openai/*` | OpenAI | `OPENAI_API_KEY` |
 | `gemini/*` | Google Gemini | `GEMINI_API_KEY` |
 | `openrouter/*` | OpenRouter | `OPENROUTER_API_KEY` |
 | `local/*` | Ollama / LM Studio / vLLM | `LOCAL_MODEL_API_KEY` |

@@ -452,6 +452,7 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('- **write_file** for creating new files or full rewrites.');
     lines.push('- **exec** ONLY for running scripts, git, npm, or commands with no dedicated tool.');
     lines.push('- **startup_tasks** to register persistent background processes (collectors, watchers, servers) that auto-restart on container reboot. NEVER use raw nohup — it won\'t survive restarts.');
+    lines.push('- For cron inside this container, use plain `cron` to ensure the daemon is running and `crontab` to manage jobs. NEVER use `/etc/init.d/cron start`, `service cron start`, or `/usr/sbin/cron` directly — those paths bypass the wrapper and can fail with pidfile permission errors even when cron is already running.');
     lines.push('- **web_serve** action:"backend" for webapps with a backend — auto-injects vault keys, manages ports, proxies routes, and **persists across restarts**. The backend auto-restores on container reboot with fresh vault keys. Use relative fetch paths in frontend code (`fetch(\'api/endpoint\')`).');
     lines.push('- **graph_delete** to remove nodes, aspects, attributes, or edges. NEVER use exec/sqlite3 to modify graph.db directly.');
     lines.push('- Learning happens automatically — use graph_update only for deliberate corrections or explicit knowledge persistence.');

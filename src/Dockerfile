@@ -3,6 +3,7 @@ FROM node:22-slim
 ## ── System packages ────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl wget git jq bc \
+    cron \
     sudo \
     sqlite3 \
     ffmpeg \
@@ -71,11 +72,15 @@ COPY plugins/ ./plugins/
 RUN groupadd -g 2000 anima && useradd -r -u 2000 -g 2000 anima \
     && mkdir -p /data /workspace /app/tools \
     && chown -R anima:anima /app /data /workspace /opt/pw-browsers \
-    && echo 'anima ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg' > /etc/sudoers.d/anima-apt \
+    && echo 'anima ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg, /usr/sbin/cron' > /etc/sudoers.d/anima-apt \
     && chmod 0440 /etc/sudoers.d/anima-apt
 
 COPY entrypoint.sh ./entrypoint.sh
+COPY cron-wrapper.sh /usr/local/bin/cron
+COPY crontab-wrapper.sh /usr/local/bin/crontab
 RUN chmod +x ./entrypoint.sh
+RUN chmod +x /usr/local/bin/cron
+RUN chmod +x /usr/local/bin/crontab
 
 HEALTHCHECK --interval=30s --timeout=60s --start-period=15s --retries=3 \
   CMD curl -sf http://localhost:${ANIMA_HEALTH_PORT:-18790}/health || exit 1

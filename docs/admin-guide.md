@@ -118,7 +118,8 @@ animas/<agent-id>/
 | `BRAVE_API_KEY` | Web search |
 | `GEMINI_API_KEY` | Semantic embeddings |
 | `REPLICATE_API_TOKEN` | Image generation (FLUX, SD, etc.) |
-| `OPENAI_API_KEY` | Whisper STT / OpenAI TTS |
+| `OPENAI_API_KEY` | OpenAI models (`openai/*`), Whisper STT / OpenAI TTS |
+| `OPENAI_BASE_URL` | Optional base URL override for `openai/*` models |
 
 ### Voice
 
