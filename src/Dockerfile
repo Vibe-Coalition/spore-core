@@ -40,6 +40,7 @@ RUN pip3 install --break-system-packages --no-cache-dir \
     moderngl \
     av \
     pedalboard \
+    curl-cffi \
     requests \
     pyyaml \
     Pillow \

@@ -2772,6 +2772,141 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return blocked.some(r => r.test(hostname));
   }
 
+  _finalizeWebFetchResult({ body = '', contentType = '', url, maxLength = 8000, bytesRaw = 0, transport }) {
+    const raw = typeof body === 'string' ? body : String(body || '');
+    const normalizedType = String(contentType || '').toLowerCase();
+
+    if (normalizedType.includes('application/json')) {
+      return {
+        content: raw.substring(0, maxLength),
+        type: 'json',
+        url,
+        bytesRaw,
+        transport,
+      };
+    }
+
+    const isHtmlLike = normalizedType.includes('text/html')
+      || normalizedType.includes('application/xhtml')
+      || normalizedType.includes('application/xml')
+      || normalizedType.includes('text/xml');
+    const text = isHtmlLike ? this._extractTextFromHtml(raw) : raw;
+    return {
+      content: text.substring(0, maxLength),
+      type: 'text',
+      url,
+      bytesRaw,
+      transport,
+    };
+  }
+
+  async _curlCffiFetch({ url, maxLength = 8000, method, body: reqBody, headers: extraHeaders }) {
+    const helperPath = path.join(__dirname, 'curl_fetch.py');
+    if (!fs.existsSync(helperPath)) {
+      return { transportError: `curl_cffi helper not found: ${helperPath}` };
+    }
+
+    const abortSignal = this._abortSignal;
+    if (abortSignal?.aborted) {
+      return { error: 'Aborted', transport: 'curl_cffi' };
+    }
+
+    return await new Promise((resolve) => {
+      const { spawn } = require('child_process');
+      const payload = {
+        url,
+        maxLength,
+        method: (method || 'GET').toUpperCase(),
+        body: reqBody,
+        headers: { ...(extraHeaders || {}) },
+        timeout: 20,
+        impersonate: 'safari_ios',
+      };
+
+      let resolved = false;
+      let stdout = '';
+      let stderr = '';
+      let onAbort;
+      let child = null;
+      let hardTimeout = null;
+
+      const done = (result) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(hardTimeout);
+        if (abortSignal && onAbort) {
+          try { abortSignal.removeEventListener('abort', onAbort); } catch {}
+        }
+        if (child?.pid) this._trackedPids.delete(child.pid);
+        resolve(result);
+      };
+
+      child = spawn('python3', [helperPath], {
+        cwd: this.config.workspacePath || process.cwd(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      if (!child.pid || !this._trackProcess(child.pid)) {
+        done({ transportError: 'Unable to start curl_cffi helper — process limit reached' });
+        return;
+      }
+
+      hardTimeout = setTimeout(() => {
+        try { child.kill('SIGTERM'); } catch {}
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000);
+        done({ transportError: `curl_cffi helper timed out after 22s for ${url}` });
+      }, 22000);
+
+      if (abortSignal) {
+        onAbort = () => {
+          try { child.kill('SIGTERM'); } catch {}
+          setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000);
+          done({ error: 'Aborted by user', transport: 'curl_cffi' });
+        };
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      child.stdout.on('data', chunk => {
+        stdout += chunk;
+        if (stdout.length > Math.max(maxLength * 5, 20000)) {
+          stdout = stdout.substring(0, Math.max(maxLength * 5, 20000));
+        }
+      });
+      child.stderr.on('data', chunk => {
+        stderr += chunk;
+        if (stderr.length > 4000) stderr = stderr.substring(0, 4000);
+      });
+
+      child.on('error', (e) => done({ transportError: `curl_cffi helper failed: ${e.message}` }));
+      child.on('exit', () => {
+        if (resolved) return;
+        let parsed;
+        try {
+          parsed = JSON.parse(stdout || '{}');
+        } catch {
+          done({
+            transportError: `curl_cffi helper returned invalid JSON${stderr ? `: ${stderr.substring(0, 300)}` : ''}`,
+          });
+          return;
+        }
+        if (parsed.transport_error) {
+          done({ transportError: parsed.transport_error });
+          return;
+        }
+        if (stderr.trim() && !parsed.detail) {
+          parsed.detail = stderr.trim().substring(0, 500);
+        }
+        done(parsed);
+      });
+
+      try {
+        child.stdin.end(JSON.stringify(payload));
+      } catch (e) {
+        done({ transportError: `curl_cffi helper input failed: ${e.message}` });
+      }
+    });
+  }
+
   async _webFetchTool(input, _redirectDepth = 0) {
     const { url, maxLength = 8000, credential, method, body: reqBody, headers: extraHeaders } = input;
     if (!url) return { error: 'URL is required' };
@@ -2791,6 +2926,36 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       return { error: `Invalid URL: ${url}` };
     }
 
+    const curlResult = await this._curlCffiFetch({
+      url,
+      maxLength,
+      method,
+      body: reqBody,
+      headers: extraHeaders,
+    });
+    if (curlResult?.transportError) {
+      this.log.warn(`[web_fetch] curl_cffi unavailable, falling back to Node fetch: ${curlResult.transportError}`);
+      return this._nodeWebFetchTool(input, _redirectDepth);
+    }
+    if (curlResult?.error) return curlResult;
+    if (curlResult && typeof curlResult.body === 'string') {
+      return this._finalizeWebFetchResult({
+        body: curlResult.body,
+        contentType: curlResult.contentType,
+        url: curlResult.url || url,
+        maxLength,
+        bytesRaw: curlResult.bytesRaw,
+        transport: curlResult.transport || 'curl_cffi',
+      });
+    }
+
+    this.log.warn('[web_fetch] curl_cffi returned no usable payload, falling back to Node fetch');
+    return this._nodeWebFetchTool(input, _redirectDepth);
+  }
+
+  async _nodeWebFetchTool(input, _redirectDepth = 0) {
+    const { url, maxLength = 8000, method, body: reqBody, headers: extraHeaders } = input;
+    if (_redirectDepth > 3) return { error: 'Too many redirects' };
     return new Promise((resolve) => {
       let resolved = false;
       let onAbort;
@@ -2830,7 +2995,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         }, 10000);
       };
 
-      const fetchHeaders = { 'User-Agent': 'Anima/0.2 (bot)', ...(extraHeaders || {}) };
+      const fetchHeaders = { ...(extraHeaders || {}) };
       const fetchMethod = (method || 'GET').toUpperCase();
       const proto = url.startsWith('https') ? https : http;
 
@@ -2856,13 +3021,27 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             done({ error: `Invalid redirect URL: ${redirectUrl}` });
             return;
           }
-          this._webFetchTool({ url: redirectUrl, maxLength }, _redirectDepth + 1).then(result => done(result));
+          const shouldBecomeGet = res.statusCode === 303
+            || ((res.statusCode === 301 || res.statusCode === 302) && fetchMethod !== 'GET' && fetchMethod !== 'HEAD');
+          const redirectMethod = shouldBecomeGet ? 'GET' : fetchMethod;
+          const redirectBody = shouldBecomeGet ? undefined : reqBody;
+          this._nodeWebFetchTool({
+            url: redirectUrl,
+            maxLength,
+            method: redirectMethod,
+            body: redirectBody,
+            headers: extraHeaders,
+          }, _redirectDepth + 1).then(result => done(result));
           return;
         }
         if (res.statusCode !== 200) {
           let errData = '';
           res.on('data', c => { errData += c; if (errData.length > 2000) res.destroy(); });
-          res.on('end', () => done({ error: `HTTP ${res.statusCode}`, detail: errData.substring(0, 500) }));
+          res.on('end', () => done({
+            error: `HTTP ${res.statusCode}`,
+            detail: errData.substring(0, 500),
+            transport: 'node',
+          }));
           return;
         }
 
@@ -2874,19 +3053,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           if (data.length > maxLength * 3) res.destroy();
         });
         res.on('end', () => {
-          const contentType = res.headers['content-type'] || '';
-          if (contentType.includes('application/json')) {
-            done({ content: data.substring(0, maxLength), type: 'json', url });
-            return;
-          }
-
-          const text = this._extractTextFromHtml(data);
-          done({
-            content: text.substring(0, maxLength),
-            type: 'text',
+          done(this._finalizeWebFetchResult({
+            body: data,
+            contentType: res.headers['content-type'] || '',
             url,
+            maxLength,
             bytesRaw: data.length,
-          });
+            transport: 'node',
+          }));
         });
         res.on('error', (e) => done({ error: `Response error: ${e.message}` }));
       });
