@@ -120,7 +120,7 @@ class SSHManager {
   _deriveKey() {
     const passphrase = this.config.webAuthPass;
     if (passphrase) {
-      this._encryptionKey = crypto.pbkdf2Sync(passphrase, 'anima-ssh-keystore-v1', PBKDF2_ITERATIONS, 32, 'sha256');
+      this._encryptionKey = crypto.pbkdf2Sync(passphrase, 'spore-ssh-keystore-v1', PBKDF2_ITERATIONS, 32, 'sha256');
       this._keystoreSource = 'webAuthPass';
       this.log.info('[ssh] Keystore encryption derived from webAuthPass');
     } else {
@@ -134,7 +134,7 @@ class SSHManager {
     if (!passphrase || typeof passphrase !== 'string' || passphrase.length < 8) {
       throw new Error('Keystore passphrase must be at least 8 characters');
     }
-    this._encryptionKey = crypto.pbkdf2Sync(passphrase, 'anima-ssh-keystore-v1', PBKDF2_ITERATIONS, 32, 'sha256');
+    this._encryptionKey = crypto.pbkdf2Sync(passphrase, 'spore-ssh-keystore-v1', PBKDF2_ITERATIONS, 32, 'sha256');
     this._keystoreSource = 'ui-passphrase';
     this.log.info('[ssh] Keystore unlocked via UI passphrase (held in memory only)');
   }

@@ -143,6 +143,32 @@ class GraphContext {
         this.log.warn?.('Provenance migration:', e.message);
       }
 
+      // Themes / semantic groupings produced by the maintainer's categorization step
+      try {
+        this.db.exec(`CREATE TABLE IF NOT EXISTS node_groups (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id       TEXT NOT NULL,
+          name         TEXT NOT NULL,
+          description  TEXT,
+          member_count INTEGER DEFAULT 0,
+          created      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          model        TEXT,
+          superseded_at TIMESTAMP
+        )`);
+        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_node_groups_active ON node_groups(superseded_at, run_id)`);
+        this.db.exec(`CREATE TABLE IF NOT EXISTS node_group_members (
+          group_id   INTEGER NOT NULL,
+          node_id    TEXT NOT NULL,
+          confidence REAL DEFAULT 1.0,
+          PRIMARY KEY (group_id, node_id),
+          FOREIGN KEY (group_id) REFERENCES node_groups(id) ON DELETE CASCADE,
+          FOREIGN KEY (node_id)  REFERENCES nodes(id)        ON DELETE CASCADE
+        )`);
+        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_ngm_node ON node_group_members(node_id)`);
+      } catch (e) {
+        this.log.warn?.('node_groups init:', e.message);
+      }
+
       const count = this.db.prepare('SELECT count(*) as c FROM nodes').get().c;
       this.log.info(`Graph has ${count} nodes`);
 
@@ -452,7 +478,7 @@ class GraphContext {
 
               let sqlSweepHits = 0;
               if (queryType === 'aggregation') {
-                const agentId = this.config.agentId || 'anima';
+                const agentId = this.config.agentId || 'spore';
                 try {
                   const { SEARCH_STOPWORDS } = require('./retrieval');
                   const queryTerms = opts.messageContent.toLowerCase()
@@ -595,7 +621,7 @@ class GraphContext {
     const mode = opts.promptMode || 'full';
 
     if (mode === 'none') {
-      const agentNode = this.getNode(this.config.agentId || 'anima');
+      const agentNode = this.getNode(this.config.agentId || 'spore');
       return agentNode ? `You are ${agentNode.label}.` : 'You are an AI agent.';
     }
 

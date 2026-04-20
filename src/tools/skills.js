@@ -1,7 +1,7 @@
 /**
  * skills.js — Shared Skills System
  *
- * Manages a shared knowledge base across all Anima agents.
+ * Manages a shared knowledge base across all SPORE agents.
  * Skills are markdown files with YAML frontmatter stored in a shared volume.
  * An auto-maintained _index.json provides fast catalog lookups.
  */

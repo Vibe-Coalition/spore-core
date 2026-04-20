@@ -102,6 +102,8 @@ class TelegramGateway {
       return;
     }
 
+    const mediaBlocks = await this._extractMediaBlocks(message);
+
     // Describe attached media so the agent knows what arrived
     let mediaPrefix = '';
     if (message.photo) {
@@ -182,6 +184,7 @@ class TelegramGateway {
       result = await this.agent.processMessage({
         content: labeledContent,
         messageContent: labeledContent,
+        media: mediaBlocks,
         channelId: targetId,
         channelName,
         userId,
@@ -219,6 +222,100 @@ class TelegramGateway {
       this.log.warn(`[telegram] No response for direct trigger in ${channelName} — sending fallback`);
       await this.sendMessage(targetId, "Sorry, I ran into an issue and couldn't generate a response. Please try again.", null, { replyToMessageId: message.message_id });
     }
+  }
+
+  async _extractMediaBlocks(message) {
+    const blocks = [];
+    const pushDownloaded = async ({ type, fileId, mimeType, filename, label }) => {
+      if (!fileId) return;
+      try {
+        const { buffer, filePath } = await this._downloadFileWithMeta(fileId);
+        const resolvedName = filename || path.basename(filePath) || `${label || type}-${Date.now()}`;
+        const resolvedMime = this._guessTelegramMimeType(resolvedName, mimeType, type);
+        blocks.push({
+          type,
+          source: {
+            type: 'base64',
+            media_type: resolvedMime,
+            data: buffer.toString('base64'),
+            filename: resolvedName,
+          },
+        });
+        this.log.info(`[telegram] Downloaded ${type} attachment ${resolvedName} (${buffer.length} bytes, ${resolvedMime})`);
+      } catch (e) {
+        this.log.warn(`[telegram] Failed to download ${label || type} attachment: ${e.message}`);
+      }
+    };
+
+    if (Array.isArray(message.photo) && message.photo.length > 0) {
+      const best = message.photo[message.photo.length - 1];
+      await pushDownloaded({
+        type: 'image',
+        fileId: best.file_id,
+        mimeType: 'image/jpeg',
+        filename: `telegram-photo-${best.file_unique_id || best.file_id}.jpg`,
+        label: 'photo',
+      });
+    }
+
+    if (message.video) {
+      await pushDownloaded({
+        type: 'video',
+        fileId: message.video.file_id,
+        mimeType: message.video.mime_type,
+        filename: message.video.file_name || `telegram-video-${message.video.file_unique_id || message.video.file_id}`,
+        label: 'video',
+      });
+    }
+
+    if (message.animation) {
+      await pushDownloaded({
+        type: 'video',
+        fileId: message.animation.file_id,
+        mimeType: message.animation.mime_type,
+        filename: message.animation.file_name || `telegram-animation-${message.animation.file_unique_id || message.animation.file_id}`,
+        label: 'animation',
+      });
+    }
+
+    if (message.document) {
+      const docName = message.document.file_name || `telegram-document-${message.document.file_unique_id || message.document.file_id}`;
+      await pushDownloaded({
+        type: this._telegramMediaKind(docName, message.document.mime_type),
+        fileId: message.document.file_id,
+        mimeType: message.document.mime_type,
+        filename: docName,
+        label: 'document',
+      });
+    }
+
+    return blocks;
+  }
+
+  _telegramMediaKind(filename = '', mimeType = '') {
+    const lowerMime = String(mimeType || '').toLowerCase();
+    const ext = path.extname(String(filename || '')).toLowerCase();
+    if (lowerMime.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.heic'].includes(ext)) {
+      return 'image';
+    }
+    if (lowerMime.startsWith('video/') || ['.mp4', '.avi', '.mov', '.mkv', '.webm'].includes(ext)) {
+      return 'video';
+    }
+    if (lowerMime.startsWith('audio/') || ['.mp3', '.ogg', '.oga', '.wav', '.m4a', '.flac', '.aac'].includes(ext)) {
+      return 'audio';
+    }
+    return 'file';
+  }
+
+  _guessTelegramMimeType(filename = '', mimeType = '', type = 'file') {
+    const lowerMime = String(mimeType || '').toLowerCase();
+    if (lowerMime) return lowerMime;
+    const ext = path.extname(String(filename || '')).toLowerCase();
+    if (TELEGRAM_MIME[ext]) return TELEGRAM_MIME[ext];
+    if (type === 'image') return 'image/jpeg';
+    if (type === 'video') return 'video/mp4';
+    if (type === 'audio') return 'audio/mpeg';
+    return 'application/octet-stream';
   }
 
   async _handleNewSession(message, targetId, channelName, sessionKey) {
@@ -588,6 +685,11 @@ class TelegramGateway {
    * @returns {Promise<Buffer>}
    */
   async _downloadFile(fileId) {
+    const { buffer } = await this._downloadFileWithMeta(fileId);
+    return buffer;
+  }
+
+  async _downloadFileWithMeta(fileId) {
     const fileInfo = await this._api('getFile', { file_id: fileId });
     const filePath = fileInfo.result?.file_path;
     if (!filePath) throw new Error('No file_path in getFile response');
@@ -601,7 +703,7 @@ class TelegramGateway {
         }
         const chunks = [];
         res.on('data', chunk => chunks.push(chunk));
-        res.on('end', () => resolve(Buffer.concat(chunks)));
+        res.on('end', () => resolve({ buffer: Buffer.concat(chunks), filePath }));
         res.on('error', reject);
       }).on('error', reject);
     });

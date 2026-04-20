@@ -30,23 +30,23 @@ class DiscordGateway {
 
     this._voice = new DiscordVoice(this);
 
-    // Watch anima.json for channel gating changes — reload on file change, not per-message
+    // Watch spore.json for channel gating changes — reload on file change, not per-message
     this._gateConfig = null;
     this._loadGateConfig();
     try {
-      const configPath = require('path').join(__dirname, '..', 'anima.json');
+      const configPath = require('path').join(__dirname, '..', 'spore.json');
       require('fs').watch(configPath, () => {
         this._loadGateConfig();
-        this.log.info('[gate] anima.json changed — reloaded listenChannels');
+        this.log.info('[gate] spore.json changed — reloaded listenChannels');
       });
     } catch (e) {
-      this.log.warn('[gate] Could not watch anima.json:', e.message);
+      this.log.warn('[gate] Could not watch spore.json:', e.message);
     }
   }
 
   _loadGateConfig() {
     try {
-      const raw = require('fs').readFileSync(require('path').join(__dirname, '..', 'anima.json'), 'utf8');
+      const raw = require('fs').readFileSync(require('path').join(__dirname, '..', 'spore.json'), 'utf8');
       const parsed = JSON.parse(raw);
       this._gateConfig = parsed.listenChannels || null;
       this._guildGateConfig = parsed.guilds || null;
@@ -733,7 +733,7 @@ class DiscordGateway {
     try {
       const fs = require('fs');
       const path = require('path');
-      const agentId = this.config.agentId || 'anima';
+      const agentId = this.config.agentId || 'spore';
       
       // Read current agent node from graph for backup
       const graphContext = this.agent.graphContext;
@@ -818,7 +818,7 @@ class DiscordGateway {
   }
 
   /**
-   * /status — show Anima status
+   * /status — show SPORE status
    */
   async _handleStatus(message) {
     const uptime = process.uptime();
@@ -829,9 +829,9 @@ class DiscordGateway {
     
     await message.reply([
       '```',
-      `Anima v0.1.0`,
+      `SPORE v0.1.0`,
       `Model: ${this.config.model}`,
-      `Agent: ${this.config.agentId || 'anima'}`,
+      `Agent: ${this.config.agentId || 'spore'}`,
       `Graph: ${nodeCount} nodes`,
       `Sessions: ${sessions.length} active`,
       `Uptime: ${h}h ${m}m`,

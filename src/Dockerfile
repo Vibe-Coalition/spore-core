@@ -22,14 +22,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim nano \
     tmux screen \
     openssh-client \
+    mosh \
+    parallel \
+    slurm-client \
     htop less tree file \
     rsync zip unzip \
     net-tools iputils-ping dnsutils \
+    ca-certificates gnupg \
     # Chromium system dependencies for Playwright
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdbus-1-3 libxkbcommon0 libatspi2.0-0 \
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
+    && rm -rf /var/lib/apt/lists/*
+
+## ── Tailscale (private-tailnet access, userspace mode) ─────────────
+RUN curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
+      | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \
+      | tee /etc/apt/sources.list.d/tailscale.list > /dev/null \
+    && apt-get update && apt-get install -y --no-install-recommends tailscale \
     && rm -rf /var/lib/apt/lists/*
 
 ## ── Python packages (heavy, rarely changing — cached layer) ───────
@@ -41,6 +53,7 @@ RUN pip3 install --break-system-packages --no-cache-dir \
     av \
     pedalboard \
     curl-cffi \
+    zendriver \
     requests \
     pyyaml \
     Pillow \
@@ -58,7 +71,7 @@ RUN npx playwright-core install chromium
 
 ## ── Application code (changes frequently — fast layer) ────────────
 COPY index.js app.js config.js test.js ./
-COPY anima.json ./
+COPY spore.json ./
 COPY seed-graph.sql ./
 COPY graph/ ./graph/
 COPY agent/ ./agent/
@@ -69,12 +82,14 @@ COPY tools/ ./tools-default/
 COPY voice/ ./voice/
 COPY static/ ./static/
 COPY plugins/ ./plugins/
+COPY lib/ ./lib/
+COPY reference-nodes.sql ./
 
-RUN groupadd -g 2000 anima && useradd -r -u 2000 -g 2000 anima \
+RUN groupadd -g 2000 spore && useradd -r -u 2000 -g 2000 spore \
     && mkdir -p /data /workspace /app/tools \
-    && chown -R anima:anima /app /data /workspace /opt/pw-browsers \
-    && echo 'anima ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg, /usr/sbin/cron' > /etc/sudoers.d/anima-apt \
-    && chmod 0440 /etc/sudoers.d/anima-apt
+    && chown -R spore:spore /app /data /workspace /opt/pw-browsers \
+    && echo 'spore ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg, /usr/sbin/cron' > /etc/sudoers.d/spore-apt \
+    && chmod 0440 /etc/sudoers.d/spore-apt
 
 COPY entrypoint.sh ./entrypoint.sh
 COPY cron-wrapper.sh /usr/local/bin/cron
@@ -84,10 +99,10 @@ RUN chmod +x /usr/local/bin/cron
 RUN chmod +x /usr/local/bin/crontab
 
 HEALTHCHECK --interval=30s --timeout=60s --start-period=15s --retries=3 \
-  CMD curl -sf http://localhost:${ANIMA_HEALTH_PORT:-18790}/health || exit 1
+  CMD curl -sf http://localhost:${SPORE_HEALTH_PORT:-18790}/health || exit 1
 
 ENV NODE_ENV=production
-ENV ANIMA_LOG_LEVEL=info
+ENV SPORE_LOG_LEVEL=info
 
 STOPSIGNAL SIGTERM
 

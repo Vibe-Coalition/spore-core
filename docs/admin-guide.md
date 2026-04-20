@@ -92,6 +92,9 @@ animas/<agent-id>/
 | `ANIMA_DISPLAY_NAME` | How the agent introduces itself | from `anima.json` |
 | `ANIMA_LEARNER_MODEL` | Model for fact extraction | `claude-haiku-4-5` |
 | `ANIMA_SUBAGENT_MODEL` | Model for background tasks | main model |
+| `ANIMA_IMAGE_VLM_MODEL` | Dedicated model used by `analyze_image` | unset |
+| `ANIMA_VIDEO_VLM_MODEL` | Dedicated model used by `analyze_video` | unset |
+| `ANIMA_AUDIO_VLM_MODEL` | Dedicated model used by `analyze_audio` | unset |
 
 ### Web & Security
 

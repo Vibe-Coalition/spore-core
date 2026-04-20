@@ -63,10 +63,25 @@ Extract every durable fact, preference, plan, relationship, opinion, or event. O
 - **EXCHANGES & RETURNS:** When a user mentions exchanging an item at a store, this involves TWO separate pending actions: (1) returning the old item to the store, and (2) picking up the new/replacement item. Extract BOTH as separate attributes. E.g. "exchanged boots at Zara for larger size" yields "Old boots (too small) need to be returned to Zara" AND "New boots (larger size) need to be picked up from Zara." Each physical item is tracked separately.
 - **ENTITY DISTRIBUTION (CRITICAL):** Do NOT pile event-specific, product-specific, or project-specific facts onto the person node. Each event, product, project, or place that has specific details (dates, specs, outcomes, schedules) MUST have its own entity node carrying those details. The person node should only hold intrinsic traits: personality, preferences, biographical basics, skills, communication style, relationships. Example: "Alex attended Data Analysis webinar on 2023-03-28" — create/use a "data-analysis-webinar" event node with the attendance date as its attribute, and an edge from the person to that event. Do NOT add this as a "professional_development" attribute on the person node. This keeps entity nodes searchable and prevents the person node from becoming a mega-node that gets truncated in retrieval.
 
+**EPHEMERAL ENTITIES (USE LIBERALLY FOR TASK-SCOPED ARTIFACTS):** Some entities exist only to carry data through the current task — they have zero value a week from now and will just clutter the graph if kept. Set \`ephemeral: true\` on these. The maintainer auto-cleans them after 48h. This is a feature, not a demotion — ephemeral is the RIGHT tag for a huge class of work-in-progress stuff.
+
+**Actively tag as ephemeral:**
+- One-off error logs, crawl-result dumps, debug traces, stack trace captures
+- Temporary state: port-forward configs, session tokens about to expire, transient job IDs, scratch render jobs
+- Intermediate working artifacts: draft outlines that will be thrown away once the final doc exists, batch-processing checkpoints, temp export files
+- Testing/debugging runs: "Tuesday's crawl output", "diagnostic run #3", "captured failure state from this bug hunt"
+- Screenshots/downloads tied to a single task turn
+- Generated project scaffolds during exploration ("exploratory flask project we set up to try X")
+- Content labeled with words like "log", "dump", "capture", "scratch", "draft-N", "temp", "run-N", "batch-N" — these almost always mean task-scoped
+
+**Keep as permanent (ephemeral: false):** people, real projects that will span multiple sessions, products, places, organizations, preferences, skills, durable plans, company processes, anything referenced by a user's ongoing identity.
+
+**Rule of thumb:** If you'd be surprised to still be talking about this entity in a week, mark it ephemeral. When there's a clean split (log of a run vs. the run's lasting conclusion), the log is temp, the conclusion is durable. Default to ephemeral: false only for entities where you genuinely can't tell if they'll matter later.
+
 Return ONLY valid JSON:
 {
   "entities": [
-    { "id": "entity-id", "label": "Human Name", "type": "person|concept|project|system|channel|event|skill|product|place|organization|document", "description": "Brief description" }
+    { "id": "entity-id", "label": "Human Name", "type": "person|concept|project|system|channel|event|skill|product|place|organization|document", "description": "Brief description", "ephemeral": false }
   ],
   "aspects": [
     { "nodeId": "existing-or-new-entity-id", "name": "aspect_name", "attributes": ["fact 1", "fact 2"], "importance": 5, "eventDate": "YYYY-MM-DD or null" }
@@ -526,7 +541,7 @@ Return ONLY valid JSON (same schema as extraction):
     if (!this.db) return 'Graph unavailable.';
 
     try {
-      const agentId = this.config.agentId || 'anima';
+      const agentId = this.config.agentId || 'spore';
 
       const allNodes = this.db.prepare(
         'SELECT id, label, type, description, importance FROM nodes ORDER BY importance DESC, updated DESC LIMIT 200'
@@ -825,7 +840,7 @@ The JSON schema for updates becomes:
    * Avoid persisting relative/stale time phrases on the agent node (they rot; Runtime computes tenure).
    */
   _shouldSkipStaleAgentTimeAttribute(content, nodeId) {
-    const agentId = this.config.agentId || 'anima';
+    const agentId = this.config.agentId || 'spore';
     if (nodeId !== agentId) return false;
     const c = (content || '').toLowerCase();
     if (/\b\d+\s+days?\s+old\b/.test(c)) return true;
@@ -937,10 +952,26 @@ The JSON schema for updates becomes:
               this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(resolved, ent.label);
             } catch {}
           }
+          // If the LLM re-extracts an existing temp node as non-ephemeral
+          // (worth keeping long-term), promote it by clearing the ttl marker.
+          if (ent.ephemeral === false) {
+            try {
+              const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(resolved);
+              let extraObj = {}; try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
+              if (extraObj.ttl === 'temp') {
+                delete extraObj.ttl; delete extraObj.tempCreated;
+                this.db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), resolved);
+                this.log.info(`[learner] Promoted temp node to permanent: ${resolved}`);
+              }
+            } catch {}
+          }
         } else {
+          const extraJson = (ent.ephemeral === true)
+            ? JSON.stringify({ ttl: 'temp', tempCreated: new Date().toISOString() })
+            : '{}';
           this.db.prepare(
-            'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)'
-          ).run(id, ent.label, ent.type, ent.description || '', 5, 'self', 'anima-learner', new Date().toISOString());
+            'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
+          ).run(id, ent.label, ent.type, ent.description || '', 5, 'self', 'spore-learner', new Date().toISOString(), extraJson);
           idRemap[id] = id;
           newNodeIds.add(id);
           wrote.entities++;
@@ -963,11 +994,11 @@ The JSON schema for updates becomes:
           ? (targetDb.prepare('SELECT id FROM nodes WHERE id = ?').get(rawNodeId)?.id || rawNodeId)
           : (idRemap[rawNodeId] || this._resolveNodeId(rawNodeId, null) || rawNodeId);
 
-        if (!isShared && nodeId === (this.config.agentId || 'anima')) {
+        if (!isShared && nodeId === (this.config.agentId || 'spore')) {
           asp.name = this._canonicalizeAspect(asp.name);
         }
 
-        if (!isShared && !this.config.personalityEditable && nodeId === (this.config.agentId || 'anima') && PERSONALITY_ASPECTS.has(asp.name?.toLowerCase())) {
+        if (!isShared && !this.config.personalityEditable && nodeId === (this.config.agentId || 'spore') && PERSONALITY_ASPECTS.has(asp.name?.toLowerCase())) {
           this.log.debug(`[learner] Skipping personality aspect "${asp.name}" on own node (locked)`);
           continue;
         }
@@ -977,7 +1008,7 @@ The JSON schema for updates becomes:
           if (isShared) {
             targetDb.prepare(
               'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)'
-            ).run(nodeId, asp.nodeId, 'concept', '', 5, this.config.agentId || 'shared', 'anima-learner', new Date().toISOString());
+            ).run(nodeId, asp.nodeId, 'concept', '', 5, this.config.agentId || 'shared', 'spore-learner', new Date().toISOString());
             wrote.entities++;
             this.stats.entities++;
             this.log.info(`[learner] Created node "${nodeId}" in shared graph "${targetSlug}"`);
@@ -993,7 +1024,7 @@ The JSON schema for updates becomes:
         if (!aspectRow) {
           targetDb.prepare(
             'INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, ?, ?)'
-          ).run(nodeId, asp.name, asp.importance || 5, 'anima-learner');
+          ).run(nodeId, asp.name, asp.importance || 5, 'spore-learner');
           aspectRow = { id: targetDb.prepare('SELECT last_insert_rowid() as id').get().id };
           wrote.aspects++;
           this.stats.aspects++;
@@ -1089,7 +1120,7 @@ The JSON schema for updates becomes:
         if (!nodeExists) continue;
 
         let aspectName = upd.aspectName;
-        if (!updIsShared && nodeId === (this.config.agentId || 'anima')) {
+        if (!updIsShared && nodeId === (this.config.agentId || 'spore')) {
           aspectName = this._canonicalizeAspect(aspectName);
         }
 
@@ -1168,7 +1199,7 @@ The JSON schema for updates becomes:
       // Auto-link: connect newly created entities to the speaker to prevent orphans
       const speakerHint = opts.userId || opts.userName;
       if (speakerHint && newNodeIds.size > 0) {
-        const agentId = (this.config.agentId || 'anima').toLowerCase();
+        const agentId = (this.config.agentId || 'spore').toLowerCase();
         const normalizedHint = speakerHint.toLowerCase().replace(/\s+/g, '-');
         const speakerId = this._resolveNodeId(normalizedHint, opts.userName) || normalizedHint;
         const speakerExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(speakerId);
@@ -1695,7 +1726,7 @@ ${structuredTemplate}`;
 
     if (!result || result.action === 'none' || !result.slug || !result.content) return;
 
-    const author = this.config.agentId || 'anima';
+    const author = this.config.agentId || 'spore';
 
     if (result.action === 'create') {
       const existing = this._skills.read(result.slug);

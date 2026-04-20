@@ -2,7 +2,7 @@
  * plugins/manager.js — Plugin Manager
  *
  * Discovers, validates, loads, and lifecycle-manages plugins.
- * Supports both native Anima plugins (anima.plugin.json) and
+ * Supports both native SPORE plugins (spore.plugin.json) and
  * OpenClaw-compatible plugins (openclaw.plugin.json).
  */
 
@@ -28,7 +28,7 @@ class PluginManager {
 
   /**
    * Scan pluginsDir for plugin directories, validate manifests, require entries.
-   * Each subdirectory must contain anima.plugin.json or openclaw.plugin.json.
+   * Each subdirectory must contain spore.plugin.json or openclaw.plugin.json.
    */
   async loadAll(pluginsDir) {
     if (!pluginsDir || !fs.existsSync(pluginsDir)) {
@@ -85,10 +85,10 @@ class PluginManager {
   }
 
   /**
-   * Read manifest from either anima.plugin.json or openclaw.plugin.json.
+   * Read manifest from either spore.plugin.json or openclaw.plugin.json.
    */
   _readManifest(pluginPath) {
-    const animaManifest = path.join(pluginPath, 'anima.plugin.json');
+    const animaManifest = path.join(pluginPath, 'spore.plugin.json');
     const openclawManifest = path.join(pluginPath, 'openclaw.plugin.json');
 
     if (fs.existsSync(animaManifest)) {
@@ -119,11 +119,11 @@ class PluginManager {
       };
     }
 
-    // Also check package.json for an "anima" or "openclaw" field
+    // Also check package.json for an "spore" or "openclaw" field
     const pkgPath = path.join(pluginPath, 'package.json');
     if (fs.existsSync(pkgPath)) {
       const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-      const meta = pkg.anima || pkg.openclaw;
+      const meta = pkg.spore || pkg.openclaw;
       if (meta?.kind) {
         return {
           id: meta.id || pkg.name,

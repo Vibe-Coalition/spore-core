@@ -8,16 +8,18 @@
  *   OpenRouter:           model = "openrouter/<model>"
  *   Local (OAI-compat):   model = "local/<model>"     (Ollama / LM Studio / vLLM)
  *   Gemini:               model = "gemini/<model>"
- *   Custom providers:     model = "<name>/<model>"     (any OAI-compat endpoint via ANIMA_PROVIDER_<NAME>_URL)
+ *   Custom providers:     model = "<name>/<model>"     (any OAI-compat endpoint via SPORE_PROVIDER_<NAME>_URL)
  *
  * All backends expose the same interface:
  *
  *   provider.messages.create({ model, max_tokens, system, messages, tools? })
  *     → { content: [{type:'text',text},...], usage: {input_tokens, output_tokens}, stop_reason }
  *
- * Vision auto-routing: when the active model lacks VLM support and the message
- * contains images, MultiProvider transparently swaps to visionFallbackModel for
- * that single API call.
+ * Multimodal handling:
+ *   - legacy vision/audio/video fallbacks still work for backwards compatibility
+ *   - when dedicated IMAGE/VIDEO/AUDIO VLM tiers are configured, the main chat
+ *     path stays on the primary model and multimodal subcalls are expected to
+ *     happen through explicit tools instead of silent model replacement
  */
 
 'use strict';
@@ -31,6 +33,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const _BUILTIN_PREFIXES = new Set(['openai', 'openrouter', 'local', 'gemini']);
 const _TOOL_NAME_ALIASES = new Map([
   ['graph', 'graph_update'],
+  ['analyze', 'analyze_media'],
 ]);
 
 function normalizeToolName(name) {
@@ -62,11 +65,31 @@ function _repairGraphToolInput(value, key = '') {
   return value;
 }
 
+function _repairAnalyzeMediaToolInput(value, key = '') {
+  if (Array.isArray(value)) return value.map(item => _repairAnalyzeMediaToolInput(item, key));
+  if (value && typeof value === 'object') {
+    for (const [childKey, childValue] of Object.entries(value)) {
+      value[childKey] = _repairAnalyzeMediaToolInput(childValue, childKey);
+    }
+    return value;
+  }
+  if (typeof value === 'string' && ['path', 'prompt', 'kind'].includes(key)) {
+    const trimmed = _trimRepeatedTail(value.trim());
+    return key === 'kind' ? trimmed.toLowerCase() : trimmed;
+  }
+  return value;
+}
+
 function _postProcessToolInput(toolName, input) {
   if (!input || typeof input !== 'object') return input;
   switch (normalizeToolName(toolName)) {
     case 'graph_update':
       return _repairGraphToolInput(input);
+    case 'analyze_media':
+    case 'analyze_image':
+    case 'analyze_video':
+    case 'analyze_audio':
+      return _repairAnalyzeMediaToolInput(input);
     default:
       return input;
   }
@@ -226,6 +249,85 @@ function _maxOutputTokenField(model) {
   return detectBackend(model) === 'openai' ? 'max_completion_tokens' : 'max_tokens';
 }
 
+const _EXT_BY_MEDIA_TYPE = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+  'image/avif': 'avif',
+  'image/heic': 'heic',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/mp4': 'm4a',
+  'audio/ogg': 'ogg',
+  'audio/webm': 'webm',
+  'audio/flac': 'flac',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/quicktime': 'mov',
+  'video/x-matroska': 'mkv',
+  'video/x-msvideo': 'avi',
+};
+
+function _sanitizeFilename(name) {
+  const base = String(name || '').split(/[\\/]/).pop();
+  return base.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function _extensionFromMediaType(mediaType, fallback = 'bin') {
+  const key = String(mediaType || '').toLowerCase();
+  if (_EXT_BY_MEDIA_TYPE[key]) return _EXT_BY_MEDIA_TYPE[key];
+  const tail = key.split('/')[1] || fallback;
+  const clean = tail.replace(/[^a-z0-9]/gi, '');
+  return clean || fallback;
+}
+
+function _oaiFilePartFromSource(source, prefix) {
+  if (source?.type !== 'base64' || !source?.data) return null;
+  const ext = _extensionFromMediaType(source.media_type, 'bin');
+  const filename = _sanitizeFilename(source.filename) || `${prefix}.${ext}`;
+  return {
+    type: 'file',
+    file: {
+      filename,
+      file_data: source.data,
+    },
+  };
+}
+
+function _oaiAudioPartFromSource(source) {
+  if (source?.type !== 'base64' || !source?.data) return null;
+  const mediaType = String(source.media_type || '').toLowerCase();
+  const format = mediaType === 'audio/wav' || mediaType === 'audio/x-wav'
+    ? 'wav'
+    : mediaType === 'audio/mpeg' || mediaType === 'audio/mp3'
+      ? 'mp3'
+      : null;
+  if (!format) return null;
+  return {
+    type: 'input_audio',
+    input_audio: {
+      data: source.data,
+      format,
+    },
+  };
+}
+
+function _oaiVideoUrlPartFromSource(source) {
+  if (source?.type !== 'base64' || !source?.data) return null;
+  const mediaType = String(source.media_type || '').toLowerCase() || 'video/mp4';
+  return {
+    type: 'video_url',
+    video_url: {
+      url: `data:${mediaType};base64,${source.data}`,
+    },
+  };
+}
+
 /**
  * Convert Anthropic-style messages.create params → OpenAI chat/completions body.
  *
@@ -289,20 +391,39 @@ function toOAIRequest(params) {
       continue;
     }
 
-    // Multimodal: text + image blocks → OAI content array
-    const imageBlocks = msg.content.filter(b => b.type === 'image');
-    if (imageBlocks.length > 0) {
-      const parts = [];
-      for (const b of msg.content) {
-        if (b.type === 'text') {
-          parts.push({ type: 'text', text: b.text });
-        } else if (b.type === 'image' && b.source?.type === 'base64') {
-          parts.push({
-            type: 'image_url',
-            image_url: { url: `data:${b.source.media_type || 'image/png'};base64,${b.source.data}` },
-          });
+    // Multimodal: text + image/audio/video/file blocks → OAI content array
+    const parts = [];
+    let hasStructuredInput = false;
+    for (const b of msg.content) {
+      if (b.type === 'text') {
+        parts.push({ type: 'text', text: b.text });
+      } else if (b.type === 'image' && b.source?.type === 'base64') {
+        parts.push({
+          type: 'image_url',
+          image_url: { url: `data:${b.source.media_type || 'image/png'};base64,${b.source.data}` },
+        });
+        hasStructuredInput = true;
+      } else if ((b.type === 'audio' || b.type === 'input_audio') && b.source?.type === 'base64') {
+        const audioPart = _oaiAudioPartFromSource(b.source) || _oaiFilePartFromSource(b.source, 'input-audio');
+        if (audioPart) {
+          parts.push(audioPart);
+          hasStructuredInput = true;
+        }
+      } else if (b.type === 'video' && b.source?.type === 'base64') {
+        const videoPart = _oaiVideoUrlPartFromSource(b.source);
+        if (videoPart) {
+          parts.push(videoPart);
+          hasStructuredInput = true;
+        }
+      } else if (b.type === 'file' && b.source?.type === 'base64') {
+        const filePart = _oaiFilePartFromSource(b.source, 'input-file');
+        if (filePart) {
+          parts.push(filePart);
+          hasStructuredInput = true;
         }
       }
+    }
+    if (hasStructuredInput) {
       if (parts.length > 0) oaiMessages.push({ role, content: parts });
       continue;
     }
@@ -906,7 +1027,7 @@ class GeminiClient {
  * Falls back to Anthropic for unknown / unprefixed models.
  *
  * @param {string} model          — model identifier (may include prefix)
- * @param {object} config         — full anima config
+ * @param {object} config         — full spore config
  * @returns {{ messages: { create: Function }, _backend: string }}
  */
 function createClientForModel(model, config) {
@@ -920,7 +1041,7 @@ function createClientForModel(model, config) {
   if (backend === 'custom') {
     const prefix = model.substring(0, model.indexOf('/'));
     const prov = config.customProviders?.[prefix];
-    if (!prov?.url) throw new Error(`Custom provider '${prefix}' has no URL. Set ANIMA_PROVIDER_${prefix.toUpperCase()}_URL`);
+    if (!prov?.url) throw new Error(`Custom provider '${prefix}' has no URL. Set SPORE_PROVIDER_${prefix.toUpperCase()}_URL`);
     return new OAICompatClient({
       baseURL: prov.url,
       apiKey: prov.key || '',
@@ -946,8 +1067,8 @@ function createClientForModel(model, config) {
       baseURL: config.openrouterBaseUrl || 'https://openrouter.ai/api/v1',
       apiKey,
       headers: {
-        'HTTP-Referer': config.openrouterReferer || 'https://anima.local',
-        'X-Title': config.openrouterTitle || (config.displayName || 'Anima'),
+        'HTTP-Referer': config.openrouterReferer || 'https://spore.local',
+        'X-Title': config.openrouterTitle || (config.displayName || 'SPORE'),
       },
       timeoutMs: config.apiTimeoutMs || 120000,
     });
@@ -1006,6 +1127,12 @@ class MultiProvider {
     }
   }
 
+  clearCache() {
+    this._cache.clear();
+    this._capabilities.clear();
+    _customProviderNames = new Set(Object.keys(this.config?.customProviders || {}));
+  }
+
   _clientFor(model) {
     if (!this._cache.has(model)) {
       const client = createClientForModel(model, this.config);
@@ -1029,6 +1156,14 @@ class MultiProvider {
     caps[cap] = val;
   }
 
+  resolveRequest(params) {
+    return this._adaptRequest(params);
+  }
+
+  resolveModel(params) {
+    return this.resolveRequest(params).model;
+  }
+
   /**
    * Adapt a request based on model capabilities:
    *  - Strip tools if model doesn't support them
@@ -1036,24 +1171,31 @@ class MultiProvider {
    */
   _adaptRequest(params) {
     let adapted = params;
-    const caps = this._getCaps(params.model);
+    const hasDedicatedVlmTiers = Boolean(
+      this.config?.imageVlmModel
+      || this.config?.videoVlmModel
+      || this.config?.audioVlmModel
+    );
+    let caps = this._getCaps(adapted.model);
 
     if (_hasTools(adapted) && caps.tools === false) {
       const { tools, tool_choice, ...rest } = adapted;
       adapted = rest;
     }
 
-    if (_hasImages(adapted) && !caps.vision) {
+    if (!hasDedicatedVlmTiers && _hasImages(adapted) && caps.vision === false) {
       const fb = this.config.visionFallbackModel || this.config.model;
       if (fb) adapted = { ...adapted, model: fb };
+      caps = this._getCaps(adapted.model);
     }
 
-    if (_hasAudio(adapted) && !caps.audio) {
+    if (!hasDedicatedVlmTiers && _hasAudio(adapted) && caps.audio === false) {
       const fb = this.config.audioFallbackModel || this.config.visionFallbackModel || this.config.model;
       if (fb) adapted = { ...adapted, model: fb };
+      caps = this._getCaps(adapted.model);
     }
 
-    if (_hasVideo(adapted) && !caps.video) {
+    if (!hasDedicatedVlmTiers && _hasVideo(adapted) && caps.video === false) {
       const fb = this.config.videoFallbackModel || this.config.visionFallbackModel || this.config.model;
       if (fb) adapted = { ...adapted, model: fb };
     }
@@ -1064,12 +1206,12 @@ class MultiProvider {
   get messages() {
     return {
       create: (params, opts) => {
-        const effective = this._adaptRequest(params);
+        const effective = this.resolveRequest(params);
         const client = this._clientFor(effective.model);
         return client.messages.create(effective, opts);
       },
       stream: (params, opts) => {
-        const effective = this._adaptRequest(params);
+        const effective = this.resolveRequest(params);
         const client = this._clientFor(effective.model);
         if (typeof client.messages.stream === 'function') {
           return client.messages.stream(effective, opts);
@@ -1093,7 +1235,7 @@ class MultiProvider {
     try {
       const data = await new Promise((resolve, reject) => {
         const req = http_.get(`${managerUrl}/api/providers/config`, {
-          headers: { 'X-Service-Key': serviceKey, 'X-Anima-Id': config.agentId || 'unknown' },
+          headers: { 'X-Service-Key': serviceKey, 'X-SPORE-Id': config.agentId || 'unknown' },
           timeout: 5000,
         }, (res) => {
           let body = '';
@@ -1155,7 +1297,7 @@ class MultiProvider {
       try {
         const val = await new Promise((resolve, reject) => {
           const req = http_.get(`${managerUrl}/api/vault/key?name=${encodeURIComponent(envName)}`, {
-            headers: { 'X-Service-Key': serviceKey, 'X-Anima-Id': config.agentId || 'unknown' },
+            headers: { 'X-Service-Key': serviceKey, 'X-SPORE-Id': config.agentId || 'unknown' },
             timeout: 5000,
           }, (res) => {
             let data = '';

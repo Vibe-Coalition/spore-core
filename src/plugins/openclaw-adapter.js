@@ -1,9 +1,9 @@
 /**
  * plugins/openclaw-adapter.js — OpenClaw ContextEngine Compatibility Layer
  *
- * Wraps OpenClaw ContextEngine plugins so they work within Anima's
+ * Wraps OpenClaw ContextEngine plugins so they work within SPORE's
  * GraphContext prompt pipeline. Maps the 7 OpenClaw lifecycle hooks
- * to Anima's internal architecture.
+ * to SPORE's internal architecture.
  *
  * OpenClaw ContextEngine hooks:
  *   1. bootstrap()              — Engine init, connect to vector DB, load state
@@ -66,7 +66,7 @@ class OpenClawAdapter {
   }
 
   /**
-   * Call assemble() with an Anima-compatible token budget.
+   * Call assemble() with an SPORE-compatible token budget.
    * Returns a string to be appended as an extra context section.
    */
   async assemble() {
@@ -131,7 +131,7 @@ class OpenClawAdapter {
 
   /**
    * Stub: prepareSubagentSpawn() — returns a context snapshot.
-   * Full implementation when Anima adds sub-agent support.
+   * Full implementation when SPORE adds sub-agent support.
    */
   async prepareSubagentSpawn() {
     if (typeof this.engine.prepareSubagentSpawn === 'function') {
@@ -159,14 +159,14 @@ class OpenClawAdapter {
 }
 
 /**
- * Wraps an OpenClaw plugin's register function into an Anima-compatible
+ * Wraps an OpenClaw plugin's register function into an SPORE-compatible
  * PluginAPI registerContextEngine call.
  *
  * Usage in PluginManager: when manifest.openclawCompat is true, the
  * register function is wrapped through this adapter before being called.
  *
  * @param {Function} openclawRegisterFn — The plugin's definePluginEntry register function
- * @param {object} appContext — Anima app context
+ * @param {object} appContext — SPORE app context
  * @param {object} log — Logger
  * @returns {OpenClawAdapter} — Adapted engine instance
  */

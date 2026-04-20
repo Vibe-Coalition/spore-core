@@ -24,6 +24,458 @@ function _newerFile(a, b) {
 
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// Compact theme table — kept in sync with THEMES in graph-viewer.html. Only the
+// subset of vars needed by the login overlay is inlined; the viewer's JS applies
+// the full set once `applyGraphTheme` runs post-auth.
+const _THEME_VARS = {
+  midnight: {},
+  dark: {'--bg':'#09090b','--surface':'#18181b','--panel':'#0f0f11','--border':'#27272a','--text':'#d4d4d8','--text-dim':'#71717a','--text-bright':'#fafafa','--accent':'#3b82f6','--accent2':'#8b5cf6','--danger':'#ef4444'},
+  paper: {'--bg':'#f5f3ef','--surface':'#ffffff','--panel':'#f8f6f2','--border':'#c8c0b4','--text':'#1a1a1a','--text-dim':'#6b6560','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#7c3aed','--danger':'#dc2626'},
+  terminal: {'--bg':'#000000','--surface':'#0a0a0a','--panel':'#050505','--border':'#1a3a1a','--text':'#33ff33','--text-dim':'#1a6b1a','--text-bright':'#66ff66','--accent':'#33ff33','--accent2':'#00cc00','--danger':'#ff3333'},
+  ember: {'--bg':'#12100e','--surface':'#1a1614','--panel':'#151210','--border':'#3a2e24','--text':'#e8d5c0','--text-dim':'#7a6a58','--text-bright':'#f5e8d8','--accent':'#f59e0b','--accent2':'#ef4444','--danger':'#ef4444'},
+  arctic: {'--bg':'#e8edf4','--surface':'#f0f4f9','--panel':'#e0e6f0','--border':'#b0bad0','--text':'#0f172a','--text-dim':'#5a6a80','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#4f46e5','--danger':'#dc2626'},
+  neon: {'--bg':'#0a0318','--surface':'#0d0520','--panel':'#080215','--border':'#2a1050','--text':'#e0d0f0','--text-dim':'#6040a0','--text-bright':'#f0e0ff','--accent':'#ff2d95','--accent2':'#00f0ff','--danger':'#ff2d55'},
+  forest: {'--bg':'#080e08','--surface':'#0e1a0e','--panel':'#0a140a','--border':'#1e3a1e','--text':'#c0dcc0','--text-dim':'#4a7a4a','--text-bright':'#d8f0d8','--accent':'#4ade80','--accent2':'#a3e635','--danger':'#ef4444'},
+};
+
+function _readServerTheme(dataDir) {
+  // The login overlay reflects the OPERATOR's theme — never a webapp user's
+  // pick — so guests don't impose their pastel obsession on everyone.
+  try {
+    const prefs = JSON.parse(fs.readFileSync(path.join(dataDir, 'preferences.json'), 'utf8'));
+    let creatorUsernames = [];
+    try {
+      const users = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8'));
+      creatorUsernames = users.filter(u => u?.role === 'creator').map(u => u.username);
+    } catch {}
+    for (const u of creatorUsernames) {
+      if (prefs[u]?.theme && _THEME_VARS[prefs[u].theme]) return prefs[u].theme;
+    }
+    // No creator theme yet (fresh install pre-onboarding) → fall back to the
+    // legacy _lastUsed marker so the operator's wizard pick still lands.
+    if (prefs._lastUsed?.theme && _THEME_VARS[prefs._lastUsed.theme]) return prefs._lastUsed.theme;
+  } catch {}
+  return 'midnight';
+}
+
+function _buildThemeInlineStyle(dataDir) {
+  const name = _readServerTheme(dataDir);
+  const vars = _THEME_VARS[name] || {};
+  return Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';');
+}
+
+function _acornKeyMatches(typed, stored) {
+  if (!typed || !stored) return false;
+  const a = Buffer.from(String(typed));
+  const b = Buffer.from(String(stored));
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+}
+
+function _isOnboardingNeeded(dataDir, config) {
+  const prefsPath = path.join(dataDir, 'preferences.json');
+  let prefs = {};
+  try { prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8')); } catch {}
+  if (prefs.onboardingCompleted === true) return false;
+  if (prefs.onboardingCompleted === false) return true;
+  // Auto-backfill for pre-existing installs: if the instance already has
+  // webapp users or a usable model+provider configured, treat it as already
+  // onboarded so we don't ambush returning operators with the wizard.
+  if (config) {
+    let hasUsers = false;
+    try { hasUsers = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8')).length > 0; } catch {}
+    const hasProvider = !!(
+      config.anthropicApiKey || config.openaiApiKey || config.openrouterApiKey ||
+      config.geminiApiKey || config.localModelBaseUrl ||
+      (config.customProviders && Object.keys(config.customProviders).length > 0)
+    );
+    const hasModel = !!(config.plannerModel || config.normalModel || config.casualModel);
+    // Both signals required. A lone user (created mid-wizard at step 4) or a
+    // lone provider isn't enough — only treat as "already onboarded" when the
+    // install can actually serve a request.
+    if (hasUsers && hasProvider && hasModel) {
+      try {
+        prefs.onboardingCompleted = true;
+        prefs.onboardingBackfilledAt = Date.now();
+        const tmp = prefsPath + '.tmp.' + process.pid;
+        fs.writeFileSync(tmp, JSON.stringify(prefs, null, 2));
+        fs.renameSync(tmp, prefsPath);
+      } catch {}
+      return false;
+    }
+  }
+  return true;
+}
+
+function _writeJsonAtomic(filePath, data) {
+  const tmp = filePath + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, filePath);
+}
+
+// ── Provider / model smoke-test helpers ──
+function _readJsonBody(req) {
+  return new Promise((resolve) => {
+    let b = '';
+    req.on('data', c => { b += c; if (b.length > 256 * 1024) req.destroy(); });
+    req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } });
+    req.on('error', () => resolve({}));
+  });
+}
+
+// Build an ephemeral config object suitable for createClientForModel from
+// posted form values, so the test uses what the user just typed (not what's saved).
+function _ephemeralConfig(formProviders = {}) {
+  const cp = {};
+  for (const p of (formProviders.custom || [])) {
+    if (p?.name && p?.url) cp[p.name] = { url: p.url, key: p.key || '', authHeader: p.authHeader || 'bearer' };
+  }
+  return {
+    anthropicApiKey: formProviders.anthropic?.apiKey || '',
+    openaiApiKey: formProviders.openai?.apiKey || '',
+    openaiBaseUrl: formProviders.openai?.baseUrl || '',
+    openrouterApiKey: formProviders.openrouter?.apiKey || '',
+    openrouterBaseUrl: formProviders.openrouter?.baseUrl || '',
+    openrouterReferer: formProviders.openrouter?.referer || '',
+    localModelBaseUrl: formProviders.local?.baseUrl || '',
+    localModelApiKey: formProviders.local?.apiKey || '',
+    geminiApiKey: formProviders.gemini?.apiKey || '',
+    customProviders: cp,
+    apiTimeoutMs: 240000,
+  };
+}
+
+async function _probeProvider(name, body) {
+  const { createClientForModel } = require('../providers');
+  const cfg = _ephemeralConfig({ [name]: body, ...body.providers || {} });
+  if (name === 'gemini') {
+    const apiKey = body.apiKey;
+    if (!apiKey) return { ok: false, error: 'missing apiKey' };
+    const { embedText } = require('../graph/embedder');
+    const t0 = Date.now();
+    const vec = await embedText('hello', apiKey).catch(e => { throw new Error('Gemini: ' + (e?.message || e)); });
+    if (!Array.isArray(vec) || !vec.length) return { ok: false, error: 'empty embedding response' };
+    return { ok: true, latency_ms: Date.now() - t0, model: 'gemini-embedding-2-preview', excerpt: `${vec.length}-dim vector` };
+  }
+  // Pick a probe model per provider
+  let probeModel;
+  if (name === 'anthropic') { if (!cfg.anthropicApiKey) return { ok: false, error: 'missing apiKey' }; probeModel = 'claude-haiku-4-5-20251001'; }
+  else if (name === 'openai') { if (!cfg.openaiApiKey) return { ok: false, error: 'missing apiKey' }; probeModel = 'openai/gpt-4o-mini'; }
+  else if (name === 'openrouter') { if (!cfg.openrouterApiKey) return { ok: false, error: 'missing apiKey' }; probeModel = 'openrouter/anthropic/claude-haiku-4-5'; }
+  else if (name === 'local') {
+    if (!cfg.localModelBaseUrl) return { ok: false, error: 'missing baseUrl' };
+    // Probe /models endpoint — lighter than a chat call and doesn't need a model name
+    const url = (cfg.localModelBaseUrl.replace(/\/$/, '')) + '/models';
+    const t0 = Date.now();
+    const headers = cfg.localModelApiKey ? { Authorization: `Bearer ${cfg.localModelApiKey}` } : {};
+    try {
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
+      if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+      const d = await r.json().catch(() => ({}));
+      const count = Array.isArray(d?.data) ? d.data.length : 0;
+      return { ok: true, latency_ms: Date.now() - t0, model: `${count} models listed`, excerpt: (d.data?.[0]?.id || '').slice(0, 60) };
+    } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  } else {
+    // Custom provider: probe by name
+    const custom = cfg.customProviders?.[name];
+    if (!custom) return { ok: false, error: 'unknown provider' };
+    probeModel = `${name}/`; // bare prefix — expects user to provide a real model via route-level tests
+    return { ok: false, error: 'custom providers: use a Model Tier test instead' };
+  }
+  // Chat probe
+  const t0 = Date.now();
+  try {
+    const client = createClientForModel(probeModel, cfg);
+    const response = await client.messages.create({
+      model: probeModel,
+      max_tokens: 64,
+      messages: [{ role: 'user', content: "Respond with a single word: ok" }],
+    });
+    const text = (response.content || []).find(b => b.type === 'text')?.text || '';
+    return { ok: true, latency_ms: Date.now() - t0, model: probeModel, excerpt: text.slice(0, 80) };
+  } catch (e) {
+    return { ok: false, error: (e?.message || String(e)).slice(0, 300) };
+  }
+}
+
+// Anthropic doesn't surface context length on /v1/models, so we keep a small
+// table of public model families. Matched by prefix.
+const _ANTHROPIC_CTX = [
+  ['claude-opus-4-7-1m', 1000000],
+  ['claude-opus-4-7', 1000000],
+  ['claude-opus-4-1', 200000],
+  ['claude-sonnet-4-6', 200000],
+  ['claude-sonnet-4', 200000],
+  ['claude-haiku-4-5', 200000],
+  ['claude-3-5-sonnet', 200000],
+  ['claude-3-5-haiku', 200000],
+  ['claude-3-opus', 200000],
+  ['claude-3-sonnet', 200000],
+  ['claude-3-haiku', 200000],
+];
+function _resolveContextLength(rawModel, kind) {
+  if (!rawModel) return null;
+  // Common OAI-compatible fields, in order of preference.
+  // `max_model_len` is what vLLM returns. The rest cover OpenAI / OpenRouter /
+  // llama.cpp / various adapters.
+  const fields = ['context_length', 'context_window', 'max_context_length', 'max_model_len', 'max_position_embeddings', 'max_input_tokens'];
+  for (const f of fields) {
+    const v = Number(rawModel[f]);
+    if (Number.isFinite(v) && v > 0) return Math.floor(v);
+  }
+  // Some providers nest under `top_provider` (OpenRouter does this for some models).
+  const tp = rawModel.top_provider;
+  if (tp) {
+    for (const f of fields) {
+      const v = Number(tp[f]);
+      if (Number.isFinite(v) && v > 0) return Math.floor(v);
+    }
+  }
+  // Anthropic fallback table by id prefix.
+  if (kind === 'anthropic' && rawModel.id) {
+    for (const [prefix, ctx] of _ANTHROPIC_CTX) {
+      if (rawModel.id.startsWith(prefix)) return ctx;
+    }
+  }
+  return null;
+}
+
+// For every tier-routed model in `models`, if `modelLimits` doesn't already
+// have a contextWindow entry, probe the relevant provider's /models endpoint
+// and fill it in. Guarantees per-model ctx is captured even if the wizard UI
+// didn't pre-fill correctly. Probes each provider at most once per save.
+async function _enrichModelLimits(modelLimits, models, providers) {
+  const out = { ...(modelLimits || {}) };
+  const tierEntries = Object.values(models || {}).filter(t => t?.model);
+  if (!tierEntries.length) return out;
+  const probedProviders = new Map(); // providerName → cached models response
+  const probeProvider = async (providerName) => {
+    if (probedProviders.has(providerName)) return probedProviders.get(providerName);
+    const p = providers || {};
+    let probeArgs = null;
+    if (providerName === 'anthropic' && p.anthropic?.apiKey) probeArgs = { kind: 'anthropic', apiKey: p.anthropic.apiKey };
+    else if (providerName === 'openai' && p.openai?.apiKey) probeArgs = { kind: 'openai', apiKey: p.openai.apiKey, baseUrl: p.openai.baseUrl };
+    else if (providerName === 'openrouter' && p.openrouter?.apiKey) probeArgs = { kind: 'openrouter', apiKey: p.openrouter.apiKey, baseUrl: p.openrouter.baseUrl };
+    else {
+      const c = (p.custom || []).find(x => x?.name === providerName);
+      if (c?.url) probeArgs = { kind: 'custom', baseUrl: c.url, apiKey: c.key, authHeader: c.authHeader };
+    }
+    if (!probeArgs) { probedProviders.set(providerName, null); return null; }
+    const res = await _listModelsForProvider(probeArgs).catch(() => null);
+    probedProviders.set(providerName, res);
+    return res;
+  };
+
+  for (const tier of tierEntries) {
+    const provider = tier.provider || 'anthropic';
+    const model = tier.model;
+    const key = (provider && provider !== 'anthropic') ? `${provider}/${model}` : model;
+    if (out[key]?.contextWindow > 0) continue;
+    const probed = await probeProvider(provider);
+    if (!probed?.ok) continue;
+    // Fold in EVERY model with a known ctx so we have a ready cache for future
+    // tier changes too — not just the active one.
+    for (const m of (probed.models || [])) {
+      if (!m?.contextLength) continue;
+      const k = (provider && provider !== 'anthropic') ? `${provider}/${m.id}` : m.id;
+      if (!out[k]?.contextWindow) out[k] = { ...(out[k] || {}), contextWindow: m.contextLength };
+    }
+  }
+  return out;
+}
+
+// List models for a given provider (used by the onboarding wizard's Populate button).
+// Hits the provider's /models endpoint server-side so we sidestep CORS.
+async function _listModelsForProvider({ kind, baseUrl, apiKey, authHeader }) {
+  if (!kind) return { ok: false, error: 'missing kind' };
+  let url, headers = {};
+  if (kind === 'anthropic') {
+    if (!apiKey) return { ok: false, error: 'missing apiKey' };
+    url = 'https://api.anthropic.com/v1/models';
+    headers['x-api-key'] = apiKey;
+    headers['anthropic-version'] = '2023-06-01';
+  } else if (kind === 'openai') {
+    if (!apiKey) return { ok: false, error: 'missing apiKey' };
+    url = (baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '') + '/models';
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  } else if (kind === 'openrouter') {
+    url = (baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '') + '/models';
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  } else if (kind === 'gemini') {
+    return { ok: false, error: 'Gemini is embeddings-only' };
+  } else if (kind === 'custom' || kind === 'local') {
+    if (!baseUrl) return { ok: false, error: 'missing baseUrl' };
+    url = baseUrl.replace(/\/$/, '') + '/models';
+    if (apiKey) {
+      if (authHeader === 'x-api-key') headers['x-api-key'] = apiKey;
+      else if (authHeader === 'x-key') headers['x-key'] = apiKey;
+      else headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+  } else {
+    return { ok: false, error: `unsupported kind: ${kind}` };
+  }
+  try {
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      return { ok: false, error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 160) : ''}` };
+    }
+    const d = await r.json().catch(() => null);
+    if (!d) return { ok: false, error: 'invalid JSON response' };
+    const arr = Array.isArray(d?.data) ? d.data : (Array.isArray(d?.models) ? d.models : null);
+    if (!arr) return { ok: false, error: 'no `data` or `models` array in response' };
+    const models = arr.map(m => {
+      if (typeof m === 'string') return { id: m, contextLength: null };
+      const id = m.id || m.name || '';
+      if (!id) return null;
+      return { id, contextLength: _resolveContextLength(m, kind) };
+    }).filter(Boolean);
+    return { ok: true, models };
+  } catch (e) {
+    return { ok: false, error: (e?.message || String(e)).slice(0, 200) };
+  }
+}
+
+const _TIER_PROMPTS = {
+  casual: { system: '', user: 'What is 2+2? Answer with just the number.', expectText: /\b4\b/ },
+  normal: { system: '', user: 'Respond with EXACTLY this JSON and nothing else: {"ok":true}', expectJson: v => v?.ok === true },
+  planner: { system: 'You are a planning assistant.', user: 'Plan a 3-step approach for: "Investigate and fix a unit test failure". Output a numbered list with 3 items only.', expectText: /3[\.\)]|three/i },
+  subagent: { system: '', user: 'Respond with EXACTLY this JSON: {"task":"noted"}', expectJson: v => v?.task === 'noted' },
+  learner: {
+    system: 'You are a knowledge extraction system. Extract entities/facts/relationships from the given conversation as JSON.',
+    user: 'Conversation:\nUser: I bought a red Tesla Model 3 last Tuesday at the Palo Alto showroom for $52k.\n\nReturn JSON of form {"entities":[{"id":"...","type":"...","label":"..."}]} with at least one entity.',
+    expectJson: v => Array.isArray(v?.entities) && v.entities.length >= 1,
+  },
+};
+
+async function _probeModelTier(tier, body, appConfig) {
+  const { createClientForModel, detectBackend } = require('../providers');
+  const { provider, model, providers } = body || {};
+  if (!model) return { ok: false, error: 'missing model' };
+
+  // Merge config with posted form values so the ephemeral client honors current keys
+  const cfg = { ...(appConfig || {}), ..._ephemeralConfig(providers || {}) };
+
+  // Compose the effective model id (provider prefix + model).
+  // The /api/settings API returns the model split into provider + model where
+  // `model` can itself contain slashes (e.g. "/shared/home/.../GLM-5.1-FP8").
+  // So "includes('/')" is NOT a safe proxy for "already prefixed". Prepend
+  // whenever the model doesn't START with "${provider}/" (or the provider
+  // isn't anthropic, which has no prefix).
+  let effectiveModel = model;
+  if (provider && provider !== 'anthropic' && !model.startsWith(provider + '/')) {
+    effectiveModel = `${provider}/${model}`;
+  }
+
+  if (tier === 'imageVlm' || tier === 'videoVlm' || tier === 'audioVlm') {
+    return await _probeVLMTier(tier, effectiveModel, cfg);
+  }
+
+  const spec = _TIER_PROMPTS[tier];
+  if (!spec) return { ok: false, error: `unknown tier: ${tier}` };
+
+  const t0 = Date.now();
+  try {
+    const client = createClientForModel(effectiveModel, cfg);
+    const messages = [{ role: 'user', content: spec.user }];
+    // 8K so reasoning models (Qwen3/GLM/etc.) have room to finish thinking
+    // and still produce a final-answer block before max_tokens cuts them off.
+    const params = { model: effectiveModel, max_tokens: 8192, messages };
+    if (spec.system) params.system = spec.system;
+
+    let text = '';
+    let ttft = null;
+    let reasoningOnly = false;
+    // Prefer streaming so nginx tunnels don't 504 on slow models
+    const stream = (typeof client.messages.stream === 'function') ? client.messages.stream(params) : null;
+    const extractText = (blocks) => {
+      const t = (blocks || []).find(b => b.type === 'text')?.text || '';
+      if (t) return { text: t, reasoningOnly: false };
+      // Reasoning-only fallback: if the model emitted only thinking blocks
+      // (typical when max_tokens cut it off mid-reasoning), surface that so
+      // the probe at least sees SOMETHING. Common on Qwen3/GLM-style models.
+      const thinking = (blocks || []).find(b => b.type === 'thinking')?.thinking
+                    || (blocks || []).find(b => b.type === 'thinking')?.text || '';
+      if (thinking) return { text: thinking, reasoningOnly: true };
+      return { text: '', reasoningOnly: false };
+    };
+    if (stream && typeof stream.on === 'function' && typeof stream.finalMessage === 'function') {
+      stream.on('text', chunk => { if (ttft == null) ttft = Date.now() - t0; });
+      const result = await stream.finalMessage();
+      ({ text, reasoningOnly } = extractText(result?.content));
+    } else {
+      const r = await client.messages.create(params);
+      ({ text, reasoningOnly } = extractText(r?.content));
+    }
+
+    // Check expectation
+    let matched = true;
+    if (spec.expectText) matched = spec.expectText.test(text);
+    else if (spec.expectJson) {
+      try {
+        const m = text.match(/[\{\[][\s\S]*[\}\]]/);
+        const j = JSON.parse((m ? m[0] : text).trim().replace(/^```json\s*|```\s*$/g, ''));
+        matched = !!spec.expectJson(j);
+      } catch { matched = false; }
+    }
+    return {
+      ok: matched,
+      latency_ms: Date.now() - t0,
+      ttft_ms: ttft,
+      model: effectiveModel,
+      excerpt: text.slice(0, 200),
+      reasoningOnly,
+      error: matched ? undefined : (
+        reasoningOnly
+          ? 'model returned only reasoning (no final answer) — likely cut off by max_tokens. Bump max_tokens or pick a non-reasoning model for the casual tier.'
+          : (text ? 'response did not match expected format' : 'model returned empty response')
+      ),
+    };
+  } catch (e) {
+    return { ok: false, error: (e?.message || String(e)).slice(0, 300) };
+  }
+}
+
+async function _probeVLMTier(tier, effectiveModel, cfg) {
+  const { createClientForModel } = require('../providers');
+  const mapping = {
+    imageVlm: { file: 'test-image.png', mime: 'image/png', prompt: 'What color is the main shape in this image? Answer with one word.' },
+    videoVlm: { file: 'test-video.mp4', mime: 'video/mp4', prompt: 'Briefly describe what this video shows in one sentence.' },
+    audioVlm: { file: 'test-audio.mp3', mime: 'audio/mp3', prompt: 'Briefly describe what you hear in one sentence.' },
+  };
+  const spec = mapping[tier];
+  const filePath = path.join(__dirname, '..', 'static', 'test-assets', spec.file);
+  let b64 = '';
+  try { b64 = fs.readFileSync(filePath).toString('base64'); }
+  catch (e) { return { ok: false, error: `test asset missing: ${spec.file}` }; }
+
+  // Build content — use image block for imageVlm; for video/audio, Anthropic does not
+  // support those content blocks directly, so fall back to a text-only smoke test that
+  // states a file was sent (lets us at least verify connectivity on the routed model).
+  let content;
+  if (tier === 'imageVlm') {
+    content = [
+      { type: 'image', source: { type: 'base64', media_type: spec.mime, data: b64 } },
+      { type: 'text', text: spec.prompt },
+    ];
+  } else {
+    // video / audio — most providers don't accept raw media as a content block here.
+    // Do a text-only reachability probe; real analysis happens via the analyze tool.
+    content = spec.prompt + ' (Note: smoke test — this tier is used by the analyze_' + (tier === 'videoVlm' ? 'video' : 'audio') + ' tool.)';
+  }
+
+  const t0 = Date.now();
+  try {
+    const client = createClientForModel(effectiveModel, cfg);
+    const params = { model: effectiveModel, max_tokens: 1024, messages: [{ role: 'user', content }] };
+    const r = await client.messages.create(params);
+    const text = (r.content || []).find(b => b.type === 'text')?.text || '';
+    return { ok: true, latency_ms: Date.now() - t0, model: effectiveModel, excerpt: text.slice(0, 200) };
+  } catch (e) {
+    return { ok: false, error: (e?.message || String(e)).slice(0, 300) };
+  }
+}
+
 class WebGateway {
   constructor(toolSystem) {
     this.tools = toolSystem;
@@ -40,6 +492,749 @@ class WebGateway {
     this._webSessions = new Map();
     // Session client registry: sessionId -> Set<{ws, role:'origin'|'observer'}>
     this._sessionClients = new Map();
+  }
+
+  _settingsConfigPath() {
+    return path.resolve(__dirname, '..', 'spore.json');
+  }
+
+  _settingsEnvPath() {
+    return path.resolve(__dirname, '..', '.env');
+  }
+
+  _readSettingsConfigFile() {
+    const filePath = this._settingsConfigPath();
+    try {
+      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+
+  _writeSettingsConfigFile(nextConfig) {
+    fs.writeFileSync(this._settingsConfigPath(), `${JSON.stringify(nextConfig, null, 2)}\n`);
+  }
+
+  _applyEnvUpdates(envUpdates) {
+    const envPath = this._settingsEnvPath();
+    const raw = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+    const lines = raw ? raw.split(/\r?\n/) : [];
+    const pending = new Map(Object.entries(envUpdates || {}));
+    const seen = new Set();
+    const nextLines = [];
+
+    for (const line of lines) {
+      const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (!m) {
+        nextLines.push(line);
+        continue;
+      }
+      const key = m[1];
+      if (!pending.has(key)) {
+        nextLines.push(line);
+        continue;
+      }
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const value = pending.get(key);
+      pending.delete(key);
+      if (value === null || value === undefined || value === '') continue;
+      nextLines.push(`${key}=${String(value)}`);
+    }
+
+    for (const [key, value] of pending.entries()) {
+      if (value === null || value === undefined || value === '') continue;
+      nextLines.push(`${key}=${String(value)}`);
+    }
+
+    const normalized = nextLines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s*$/, '\n');
+    fs.writeFileSync(envPath, normalized);
+
+    for (const [key, value] of Object.entries(envUpdates || {})) {
+      if (value === null || value === undefined || value === '') delete process.env[key];
+      else process.env[key] = String(value);
+    }
+  }
+
+  _deriveDisplayName(agentId) {
+    return (agentId || 'spore')
+      .replace(/-/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  _normalizeSettingsModelRef(rawValue) {
+    const raw = String(rawValue || '').trim();
+    if (!raw) return { raw: '', provider: 'anthropic', model: '' };
+    const slash = raw.indexOf('/');
+    if (slash <= 0) return { raw, provider: 'anthropic', model: raw };
+    return {
+      raw,
+      provider: raw.slice(0, slash).trim().toLowerCase() || 'anthropic',
+      model: raw.slice(slash + 1).trim(),
+    };
+  }
+
+  _composeSettingsModelRef(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed || null;
+    }
+    const provider = String(value.provider || 'anthropic').trim().toLowerCase() || 'anthropic';
+    const model = String(value.model || value.name || '').trim();
+    if (!model) return null;
+    return provider === 'anthropic' ? model : `${provider}/${model}`;
+  }
+
+  _currentCustomProviderNames() {
+    const names = new Set(Object.keys(this.config.customProviders || {}));
+    const providerRe = /^SPORE_PROVIDER_([A-Z0-9_]+)_(URL|KEY|AUTH_HEADER)$/;
+    for (const key of Object.keys(process.env)) {
+      const m = key.match(providerRe);
+      if (m) names.add(m[1].toLowerCase());
+    }
+    return [...names];
+  }
+
+  _normalizeSettingsCustomProviders(rawProviders) {
+    const builtins = new Set(['anthropic', 'openai', 'openrouter', 'local', 'gemini']);
+    const providers = [];
+    const seen = new Set();
+    for (const entry of Array.isArray(rawProviders) ? rawProviders : []) {
+      const name = String(entry?.name || '').trim().toLowerCase();
+      if (!name) continue;
+      if (builtins.has(name)) {
+        throw new Error(`Custom provider "${name}" conflicts with a built-in provider name`);
+      }
+      if (!/^[a-z0-9_]+$/.test(name)) {
+        throw new Error(`Custom provider "${name}" must use lowercase letters, numbers, and underscores only`);
+      }
+      if (seen.has(name)) continue;
+      seen.add(name);
+      providers.push({
+        name,
+        url: String(entry?.url || '').trim(),
+        key: String(entry?.key || '').trim(),
+        authHeader: String(entry?.authHeader || 'bearer').trim() || 'bearer',
+      });
+    }
+    return providers;
+  }
+
+  _normalizeBrowserBackendSetting(rawValue) {
+    const raw = String(rawValue || '').trim().toLowerCase();
+    if (!raw || raw === 'zd') return 'zendriver';
+    if (raw === 'pw') return 'playwright';
+    if (!['zendriver', 'playwright'].includes(raw)) {
+      throw new Error(`Unknown browser backend "${rawValue}". Use zendriver or playwright.`);
+    }
+    return raw;
+  }
+
+  _getSettingsState() {
+    const fileConfig = this._readSettingsConfigFile();
+    const envDisplay = !!process.env.SPORE_DISPLAY_NAME;
+    const envNicknames = !!process.env.SPORE_NICKNAMES;
+    const envVoice = [
+      'SPORE_VOICE_ENABLED',
+      'SPORE_STT_PROVIDER',
+      'SPORE_TTS_PROVIDER',
+      'SPORE_TTS_VOICE',
+      'SPORE_TTS_MODEL',
+      'SPORE_TTS_EDGE_VOICE',
+    ].some(k => !!process.env[k]);
+    const envProactive = [
+      'SPORE_PROACTIVE_ENABLED',
+      'SPORE_PROACTIVE_COOLDOWN',
+      'SPORE_PROACTIVE_MAX_DAY',
+      'SPORE_PROACTIVE_CHANNELS',
+    ].some(k => !!process.env[k]);
+    const sttConfigured = !!(this.config.deepgramApiKey || this.config.openaiApiKey);
+    const pipeline = this._ensureVoicePipeline();
+    const customProviders = Object.entries(this.config.customProviders || {})
+      .map(([name, provider]) => ({
+        name,
+        url: provider?.url || '',
+        key: provider?.key || '',
+        authHeader: provider?.authHeader || 'bearer',
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      identity: {
+        agentId: this.config.agentId,
+        displayName: this.config.displayName || this._deriveDisplayName(this.config.agentId),
+        nicknames: Array.isArray(this.config.nicknames) ? this.config.nicknames : [],
+      },
+      memory: {
+        enhancedRecall: !!this.config.enhancedRecall,
+      },
+      proactive: {
+        enabled: !!this.config.proactive?.enabled,
+        cooldownMinutes: Number(this.config.proactive?.cooldownMinutes || 60),
+        maxPerDay: Number(this.config.proactive?.maxPerDay || 5),
+        channels: Array.isArray(this.config.proactive?.channels) ? this.config.proactive.channels : [],
+      },
+      voice: {
+        enabled: !!this.config.voice?.enabled,
+        sttProvider: this.config.voice?.sttProvider || 'deepgram',
+        ttsProvider: this.config.voice?.ttsProvider || '',
+        ttsVoice: this.config.voice?.ttsVoice || '',
+        ttsModel: this.config.voice?.ttsModel || '',
+        edgeVoice: this.config.voice?.edgeVoice || 'en-US-AriaNeural',
+        ready: !!pipeline,
+        sttConfigured,
+        note: sttConfigured
+          ? (pipeline ? 'Voice pipeline is ready.' : 'Voice is enabled but the pipeline is not ready.')
+          : 'Voice needs an STT key (Deepgram or OpenAI) to become active.',
+      },
+      runtime: {
+        publicUrl: this.config.publicUrl || null,
+        webPort: this.config.webPort || null,
+        workspacePath: this.config.workspacePath || process.cwd(),
+        dataDir: this.config.dataDir || null,
+      },
+      models: {
+        casual: this._normalizeSettingsModelRef(this.config.casualModel),
+        normal: this._normalizeSettingsModelRef(this.config.normalModel),
+        planner: this._normalizeSettingsModelRef(this.config.plannerModel),
+        subagent: this._normalizeSettingsModelRef(this.config.subagentModel),
+        learner: this._normalizeSettingsModelRef(this.config.learnerModel),
+        imageVlm: this._normalizeSettingsModelRef(this.config.imageVlmModel),
+        videoVlm: this._normalizeSettingsModelRef(this.config.videoVlmModel),
+        audioVlm: this._normalizeSettingsModelRef(this.config.audioVlmModel),
+      },
+      providers: {
+        anthropic: {
+          apiKey: this.config.anthropicApiKey || '',
+          apiKeySet: !!this.config.anthropicApiKey,
+        },
+        openai: {
+          apiKey: this.config.openaiApiKey || '',
+          apiKeySet: !!this.config.openaiApiKey,
+          baseUrl: this.config.openaiBaseUrl || '',
+        },
+        openrouter: {
+          apiKey: this.config.openrouterApiKey || '',
+          apiKeySet: !!this.config.openrouterApiKey,
+          baseUrl: this.config.openrouterBaseUrl || '',
+          referer: this.config.openrouterReferer || '',
+        },
+        local: {
+          apiKey: this.config.localModelApiKey || '',
+          apiKeySet: !!this.config.localModelApiKey,
+          baseUrl: this.config.localModelBaseUrl || '',
+        },
+        gemini: {
+          apiKey: this.config.geminiApiKey || '',
+          apiKeySet: !!this.config.geminiApiKey,
+        },
+        custom: customProviders,
+      },
+      acorn: {
+        enabled: !!this.config.acornKey,
+        key: this.config.acornKey || '',
+      },
+      webSearch: {
+        searxngUrl: this.config.searxngUrl || '',
+        searxngApiKey: this.config.searxngApiKey ? '***hidden***' : '',
+        searxngApiKeySet: !!this.config.searxngApiKey,
+        braveApiKey: this.config.braveApiKey ? '***hidden***' : '',
+        braveApiKeySet: !!this.config.braveApiKey,
+      },
+      modelLimits: this.config.modelLimits || {},
+      browser: {
+        backend: this.config.browserBackend || 'zendriver',
+        availableBackends: ['zendriver', 'playwright'],
+      },
+      sources: {
+        displayName: envDisplay ? 'env' : (fileConfig.displayName ? 'file' : 'derived'),
+        nicknames: envNicknames ? 'env' : ((Array.isArray(fileConfig.nicknames) && fileConfig.nicknames.length) ? 'file' : 'derived'),
+        proactive: envProactive ? 'env' : (fileConfig.proactive ? 'file' : 'default'),
+        voice: envVoice ? 'env' : (fileConfig.voice ? 'file' : 'default'),
+        enhancedRecall: Object.prototype.hasOwnProperty.call(fileConfig, 'enhancedRecall') ? 'file' : 'default',
+        models: 'env',
+        providers: 'env',
+        acorn: this.config.acornKey ? 'env' : 'disabled',
+        browser: process.env.SPORE_BROWSER_BACKEND ? 'env' : (fileConfig.browserBackend ? 'file' : 'default'),
+      },
+    };
+  }
+
+  _persistSettingsPatch(body = {}) {
+    const fileConfig = this._readSettingsConfigFile();
+    const nextConfig = {
+      ...fileConfig,
+      proactive: { ...(fileConfig.proactive || this.config.proactive || {}) },
+      voice: { ...(fileConfig.voice || this.config.voice || {}) },
+    };
+    const envUpdates = {};
+    const runtimePatch = {};
+    let voiceTouched = false;
+    let modelTouched = false;
+    let providerTouched = false;
+
+    if (Object.prototype.hasOwnProperty.call(body, 'displayName')) {
+      const displayName = String(body.displayName || '').trim();
+      if (displayName) {
+        nextConfig.displayName = displayName;
+        runtimePatch.displayName = displayName;
+        envUpdates.SPORE_DISPLAY_NAME = displayName;
+      } else {
+        delete nextConfig.displayName;
+        runtimePatch.displayName = this._deriveDisplayName(this.config.agentId);
+        envUpdates.SPORE_DISPLAY_NAME = null;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'nicknames')) {
+      const raw = Array.isArray(body.nicknames)
+        ? body.nicknames
+        : String(body.nicknames || '').split(',');
+      const nicknames = raw.map(v => String(v).toLowerCase().trim()).filter(Boolean);
+      nextConfig.nicknames = nicknames;
+      runtimePatch.nicknames = nicknames;
+      envUpdates.SPORE_NICKNAMES = nicknames.length ? nicknames.join(',') : null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'enhancedRecall')) {
+      const enabled = !!body.enhancedRecall;
+      nextConfig.enhancedRecall = enabled;
+      runtimePatch.enhancedRecall = enabled;
+    }
+
+    if (body.proactive && typeof body.proactive === 'object') {
+      const nextProactive = { ...(nextConfig.proactive || {}) };
+      if (Object.prototype.hasOwnProperty.call(body.proactive, 'enabled')) {
+        nextProactive.enabled = !!body.proactive.enabled;
+        envUpdates.SPORE_PROACTIVE_ENABLED = nextProactive.enabled ? 'true' : 'false';
+      }
+      if (Object.prototype.hasOwnProperty.call(body.proactive, 'cooldownMinutes')) {
+        nextProactive.cooldownMinutes = Math.max(1, parseInt(body.proactive.cooldownMinutes, 10) || 60);
+        envUpdates.SPORE_PROACTIVE_COOLDOWN = String(nextProactive.cooldownMinutes);
+      }
+      if (Object.prototype.hasOwnProperty.call(body.proactive, 'maxPerDay')) {
+        nextProactive.maxPerDay = Math.max(1, parseInt(body.proactive.maxPerDay, 10) || 5);
+        envUpdates.SPORE_PROACTIVE_MAX_DAY = String(nextProactive.maxPerDay);
+      }
+      if (Object.prototype.hasOwnProperty.call(body.proactive, 'channels')) {
+        const raw = Array.isArray(body.proactive.channels)
+          ? body.proactive.channels
+          : String(body.proactive.channels || '').split(',');
+        nextProactive.channels = raw.map(v => String(v).trim()).filter(Boolean);
+        envUpdates.SPORE_PROACTIVE_CHANNELS = nextProactive.channels.length ? nextProactive.channels.join(',') : null;
+      }
+      nextConfig.proactive = nextProactive;
+      runtimePatch.proactive = {
+        ...(this.config.proactive || {}),
+        ...nextProactive,
+      };
+    }
+
+    if (body.voice && typeof body.voice === 'object') {
+      const nextVoice = { ...(nextConfig.voice || {}) };
+      const runtimeVoice = { ...(this.config.voice || {}) };
+      if (Object.prototype.hasOwnProperty.call(body.voice, 'enabled')) {
+        nextVoice.enabled = !!body.voice.enabled;
+        runtimeVoice.enabled = !!body.voice.enabled;
+        envUpdates.SPORE_VOICE_ENABLED = nextVoice.enabled ? 'true' : null;
+        voiceTouched = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(body.voice, 'sttProvider')) {
+        const sttProvider = String(body.voice.sttProvider || 'deepgram').trim() || 'deepgram';
+        nextVoice.sttProvider = sttProvider;
+        runtimeVoice.sttProvider = sttProvider;
+        envUpdates.SPORE_STT_PROVIDER = sttProvider;
+        voiceTouched = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(body.voice, 'ttsProvider')) {
+        const ttsProvider = String(body.voice.ttsProvider || '').trim();
+        nextVoice.ttsProvider = ttsProvider || null;
+        runtimeVoice.ttsProvider = ttsProvider || null;
+        envUpdates.SPORE_TTS_PROVIDER = ttsProvider || null;
+        voiceTouched = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(body.voice, 'ttsVoice')) {
+        const ttsVoice = String(body.voice.ttsVoice || '').trim();
+        nextVoice.ttsVoice = ttsVoice || null;
+        runtimeVoice.ttsVoice = ttsVoice || null;
+        envUpdates.SPORE_TTS_VOICE = ttsVoice || null;
+        voiceTouched = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(body.voice, 'ttsModel')) {
+        const ttsModel = String(body.voice.ttsModel || '').trim();
+        nextVoice.ttsModel = ttsModel || null;
+        runtimeVoice.ttsModel = ttsModel || null;
+        envUpdates.SPORE_TTS_MODEL = ttsModel || null;
+        voiceTouched = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(body.voice, 'edgeVoice')) {
+        const edgeVoice = String(body.voice.edgeVoice || '').trim();
+        nextVoice.edgeVoice = edgeVoice || 'en-US-AriaNeural';
+        runtimeVoice.edgeVoice = edgeVoice || 'en-US-AriaNeural';
+        envUpdates.SPORE_TTS_EDGE_VOICE = edgeVoice || null;
+        voiceTouched = true;
+      }
+      Object.keys(nextVoice).forEach(key => {
+        if (nextVoice[key] === null || nextVoice[key] === undefined || nextVoice[key] === '') delete nextVoice[key];
+      });
+      nextConfig.voice = nextVoice;
+      runtimePatch.voice = runtimeVoice;
+    }
+
+    if (body.models && typeof body.models === 'object') {
+      const modelFields = [
+        ['casual', 'casualModel', 'SPORE_CASUAL_MODEL'],
+        ['normal', 'normalModel', 'SPORE_NORMAL_MODEL'],
+        ['planner', 'plannerModel', 'SPORE_PLANNER_MODEL'],
+        ['subagent', 'subagentModel', 'SPORE_SUBAGENT_MODEL'],
+        ['learner', 'learnerModel', 'SPORE_LEARNER_MODEL'],
+        ['imageVlm', 'imageVlmModel', 'SPORE_IMAGE_VLM_MODEL'],
+        ['videoVlm', 'videoVlmModel', 'SPORE_VIDEO_VLM_MODEL'],
+        ['audioVlm', 'audioVlmModel', 'SPORE_AUDIO_VLM_MODEL'],
+      ];
+      for (const [bodyKey, configKey, envKey] of modelFields) {
+        if (!Object.prototype.hasOwnProperty.call(body.models, bodyKey)) continue;
+        const rawModel = this._composeSettingsModelRef(body.models[bodyKey]);
+        envUpdates[envKey] = rawModel || null;
+        runtimePatch[configKey] = rawModel || null;
+        modelTouched = true;
+      }
+      if (modelTouched) envUpdates.SPORE_MODEL = null;
+    }
+
+    if (body.providers && typeof body.providers === 'object') {
+      const providers = body.providers;
+      const assignProviderField = (bodyValue, envKey, runtimeKey) => {
+        const nextValue = String(bodyValue || '').trim();
+        envUpdates[envKey] = nextValue || null;
+        runtimePatch[runtimeKey] = nextValue || '';
+        providerTouched = true;
+      };
+
+      if (providers.anthropic && typeof providers.anthropic === 'object') {
+        if (Object.prototype.hasOwnProperty.call(providers.anthropic, 'apiKey')) {
+          assignProviderField(providers.anthropic.apiKey, 'ANTHROPIC_API_KEY', 'anthropicApiKey');
+        }
+      }
+
+      if (providers.openai && typeof providers.openai === 'object') {
+        if (Object.prototype.hasOwnProperty.call(providers.openai, 'apiKey')) {
+          assignProviderField(providers.openai.apiKey, 'OPENAI_API_KEY', 'openaiApiKey');
+        }
+        if (Object.prototype.hasOwnProperty.call(providers.openai, 'baseUrl')) {
+          assignProviderField(providers.openai.baseUrl, 'OPENAI_BASE_URL', 'openaiBaseUrl');
+        }
+      }
+
+      if (providers.openrouter && typeof providers.openrouter === 'object') {
+        if (Object.prototype.hasOwnProperty.call(providers.openrouter, 'apiKey')) {
+          assignProviderField(providers.openrouter.apiKey, 'OPENROUTER_API_KEY', 'openrouterApiKey');
+        }
+        if (Object.prototype.hasOwnProperty.call(providers.openrouter, 'baseUrl')) {
+          assignProviderField(providers.openrouter.baseUrl, 'OPENROUTER_BASE_URL', 'openrouterBaseUrl');
+        }
+        if (Object.prototype.hasOwnProperty.call(providers.openrouter, 'referer')) {
+          assignProviderField(providers.openrouter.referer, 'OPENROUTER_REFERER', 'openrouterReferer');
+        }
+      }
+
+      if (providers.local && typeof providers.local === 'object') {
+        if (Object.prototype.hasOwnProperty.call(providers.local, 'apiKey')) {
+          assignProviderField(providers.local.apiKey, 'LOCAL_MODEL_API_KEY', 'localModelApiKey');
+        }
+        if (Object.prototype.hasOwnProperty.call(providers.local, 'baseUrl')) {
+          assignProviderField(providers.local.baseUrl, 'LOCAL_MODEL_BASE_URL', 'localModelBaseUrl');
+        }
+      }
+
+      if (providers.gemini && typeof providers.gemini === 'object') {
+        if (Object.prototype.hasOwnProperty.call(providers.gemini, 'apiKey')) {
+          assignProviderField(providers.gemini.apiKey, 'GEMINI_API_KEY', 'geminiApiKey');
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(providers, 'custom')) {
+        const normalizedProviders = this._normalizeSettingsCustomProviders(providers.custom);
+        const currentNames = this._currentCustomProviderNames();
+        for (const name of currentNames) {
+          const upper = name.toUpperCase();
+          envUpdates[`SPORE_PROVIDER_${upper}_URL`] = null;
+          envUpdates[`SPORE_PROVIDER_${upper}_KEY`] = null;
+          envUpdates[`SPORE_PROVIDER_${upper}_AUTH_HEADER`] = null;
+        }
+        const nextCustomProviders = {};
+        for (const provider of normalizedProviders) {
+          const upper = provider.name.toUpperCase();
+          envUpdates[`SPORE_PROVIDER_${upper}_URL`] = provider.url || null;
+          envUpdates[`SPORE_PROVIDER_${upper}_KEY`] = provider.key || null;
+          envUpdates[`SPORE_PROVIDER_${upper}_AUTH_HEADER`] = provider.authHeader || null;
+          nextCustomProviders[provider.name] = {
+            name: provider.name,
+            url: provider.url || '',
+            key: provider.key || '',
+            authHeader: provider.authHeader || 'bearer',
+          };
+        }
+        runtimePatch.customProviders = nextCustomProviders;
+        providerTouched = true;
+      }
+    }
+
+    if (body.acorn && typeof body.acorn === 'object') {
+      const enabled = !!body.acorn.enabled;
+      const requestedKey = String(body.acorn.key || '').trim();
+      let nextKey = '';
+      let generated = false;
+      if (enabled) {
+        if (requestedKey) {
+          nextKey = requestedKey;
+        } else if (this.config.acornKey) {
+          nextKey = this.config.acornKey;
+        } else {
+          // First-time enable with no key supplied → mint a fresh team key.
+          nextKey = crypto.randomUUID();
+          generated = true;
+        }
+      }
+      envUpdates.SPORE_ACORN_KEY = nextKey || null;
+      runtimePatch.acornKey = nextKey || null;
+      if (generated) runtimePatch._acornKeyGenerated = true;
+    }
+
+    if (body.browser && typeof body.browser === 'object'
+      && Object.prototype.hasOwnProperty.call(body.browser, 'backend')) {
+      const backend = this._normalizeBrowserBackendSetting(body.browser.backend);
+      envUpdates.SPORE_BROWSER_BACKEND = backend;
+      runtimePatch.browserBackend = backend;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'publicUrl')) {
+      const raw = String(body.publicUrl || '').trim().replace(/\/+$/, '');
+      envUpdates.SPORE_PUBLIC_URL = raw || null;
+      runtimePatch.publicUrl = raw || null;
+    }
+
+    if (body.modelLimits && typeof body.modelLimits === 'object') {
+      // Sanitize: only keep entries with positive integers
+      const cleaned = {};
+      for (const [model, lim] of Object.entries(body.modelLimits)) {
+        if (!model) continue;
+        const ctx = Number(lim?.contextWindow);
+        const cmp = Number(lim?.compactAt);
+        const entry = {};
+        if (Number.isFinite(ctx) && ctx > 0) entry.contextWindow = Math.floor(ctx);
+        if (Number.isFinite(cmp) && cmp > 0) entry.compactAt = Math.floor(cmp);
+        if (Object.keys(entry).length) cleaned[model] = entry;
+      }
+      const json = Object.keys(cleaned).length ? JSON.stringify(cleaned) : null;
+      envUpdates.SPORE_MODEL_LIMITS = json;
+      runtimePatch.modelLimits = cleaned;
+    }
+
+    if (body.webSearch && typeof body.webSearch === 'object') {
+      if (Object.prototype.hasOwnProperty.call(body.webSearch, 'searxngUrl')) {
+        const u = String(body.webSearch.searxngUrl || '').trim();
+        envUpdates.SEARXNG_URL = u || null;
+        runtimePatch.searxngUrl = u || '';
+      }
+      if (Object.prototype.hasOwnProperty.call(body.webSearch, 'searxngApiKey')) {
+        const k = String(body.webSearch.searxngApiKey || '').trim();
+        if (k && k !== '***hidden***') {
+          envUpdates.SEARXNG_API_KEY = k;
+          runtimePatch.searxngApiKey = k;
+        } else if (!k) {
+          envUpdates.SEARXNG_API_KEY = null;
+          runtimePatch.searxngApiKey = '';
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(body.webSearch, 'braveApiKey')) {
+        const k = String(body.webSearch.braveApiKey || '').trim();
+        if (k && k !== '***hidden***') {
+          envUpdates.BRAVE_API_KEY = k;
+          runtimePatch.braveApiKey = k;
+        } else if (!k) {
+          envUpdates.BRAVE_API_KEY = null;
+          runtimePatch.braveApiKey = '';
+        }
+      }
+    }
+
+    this._writeSettingsConfigFile(nextConfig);
+    this._applyEnvUpdates(envUpdates);
+
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'displayName')) this.config.displayName = runtimePatch.displayName;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'nicknames')) this.config.nicknames = runtimePatch.nicknames;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'enhancedRecall')) this.config.enhancedRecall = runtimePatch.enhancedRecall;
+    if (runtimePatch.proactive) this.config.proactive = runtimePatch.proactive;
+    if (runtimePatch.voice) this.config.voice = runtimePatch.voice;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'casualModel')) this.config.casualModel = runtimePatch.casualModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'normalModel')) this.config.normalModel = runtimePatch.normalModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'plannerModel')) this.config.plannerModel = runtimePatch.plannerModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'subagentModel')) this.config.subagentModel = runtimePatch.subagentModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'learnerModel')) this.config.learnerModel = runtimePatch.learnerModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'imageVlmModel')) this.config.imageVlmModel = runtimePatch.imageVlmModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'videoVlmModel')) this.config.videoVlmModel = runtimePatch.videoVlmModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'audioVlmModel')) this.config.audioVlmModel = runtimePatch.audioVlmModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'anthropicApiKey')) this.config.anthropicApiKey = runtimePatch.anthropicApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openaiApiKey')) this.config.openaiApiKey = runtimePatch.openaiApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openaiBaseUrl')) this.config.openaiBaseUrl = runtimePatch.openaiBaseUrl;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openrouterApiKey')) this.config.openrouterApiKey = runtimePatch.openrouterApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openrouterBaseUrl')) this.config.openrouterBaseUrl = runtimePatch.openrouterBaseUrl;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openrouterReferer')) this.config.openrouterReferer = runtimePatch.openrouterReferer;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelApiKey')) this.config.localModelApiKey = runtimePatch.localModelApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelBaseUrl')) this.config.localModelBaseUrl = runtimePatch.localModelBaseUrl;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'geminiApiKey')) this.config.geminiApiKey = runtimePatch.geminiApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'customProviders')) this.config.customProviders = runtimePatch.customProviders;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'acornKey')) this.config.acornKey = runtimePatch.acornKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'browserBackend')) this.config.browserBackend = runtimePatch.browserBackend;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'publicUrl')) this.config.publicUrl = runtimePatch.publicUrl;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngUrl')) this.config.searxngUrl = runtimePatch.searxngUrl;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngApiKey')) this.config.searxngApiKey = runtimePatch.searxngApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'braveApiKey')) this.config.braveApiKey = runtimePatch.braveApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'modelLimits')) this.config.modelLimits = runtimePatch.modelLimits;
+    this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
+    this.config._isOAuth = !!(this.config.anthropicApiKey && String(this.config.anthropicApiKey).includes('sk-ant-oat'));
+    if (voiceTouched) this._voicePipeline = null;
+    if (providerTouched || modelTouched) {
+      this.tools?.anthropicClient?.clearCache?.();
+      // (Re)initialize the agent loop. On a fresh install the loop boots with
+      // no model and `client` is never set; once the operator saves a real
+      // provider+model via the wizard or settings pane, we need to wire it up
+      // without forcing a container restart.
+      const agent = this.tools?._agent;
+      if (agent) {
+        try {
+          // Force a fresh MultiProvider so it picks up the new config.
+          agent.client = null;
+          if (typeof agent.init === 'function') agent.init();
+        } catch (e) { this.log.warn(`[settings] agent re-init failed: ${e.message}`); }
+      }
+    }
+
+    const state = this._getSettingsState();
+    if (runtimePatch._acornKeyGenerated) state._acornKeyGenerated = true;
+    return state;
+  }
+
+  _applyOnboardingToGraph(db, payload = {}) {
+    let agentId = this.config.agentId;
+    // If the configured agentId doesn't match a node, fall back to the first type='self' node.
+    let selfRow = agentId && db.prepare('SELECT id FROM nodes WHERE id = ?').get(agentId);
+    if (!selfRow) selfRow = db.prepare("SELECT id FROM nodes WHERE type = 'self' LIMIT 1").get();
+    if (!selfRow) { this.log.warn(`[onboarding] no self node found; skipping graph sync`); return; }
+    agentId = selfRow.id;
+
+    const run = () => {
+      const displayName = String(payload.displayName || '').trim();
+      const nicknames = Array.isArray(payload.nicknames) ? payload.nicknames.map(s => String(s).trim()).filter(Boolean) : [];
+
+      if (displayName) {
+        const pitch = nicknames.length
+          ? `${displayName} — known as ${nicknames.join(', ')}. Configured via the first-run wizard.`
+          : `${displayName}. Configured via the first-run wizard.`;
+        db.prepare("UPDATE nodes SET label = ?, description = ?, updated = datetime('now') WHERE id = ?")
+          .run(displayName, pitch, agentId);
+      }
+
+      if (nicknames.length) {
+        db.prepare('DELETE FROM aliases WHERE node_id = ?').run(agentId);
+        const ins = db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)');
+        for (const a of nicknames) ins.run(agentId, a);
+      }
+
+      const ensureAspect = (nodeId, name, weight) => {
+        const existing = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(nodeId, name);
+        if (existing) return existing.id;
+        return db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?,?,?,?)')
+          .run(nodeId, name, weight, 'onboarding').lastInsertRowid;
+      };
+      const upsertAttr = (aspectId, content, importance) => {
+        const existing = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? AND content = ?').get(aspectId, content);
+        if (existing) return;
+        db.prepare('INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?,?,?,?,?)')
+          .run(aspectId, content, importance, 'onboarding', 'onboarding');
+      };
+
+      // Providers — attach to ref-api-keys if present, else to self
+      const providers = payload.providers || {};
+      const configuredProviders = [];
+      if (providers.anthropic?.apiKey) configuredProviders.push('Anthropic (ANTHROPIC_API_KEY)');
+      if (providers.openai?.apiKey) configuredProviders.push('OpenAI (OPENAI_API_KEY)');
+      if (providers.openrouter?.apiKey) configuredProviders.push('OpenRouter (OPENROUTER_API_KEY)');
+      if (providers.local?.apiKey || providers.local?.baseUrl) configuredProviders.push('Local OAI-compatible (LOCAL_MODEL_*)');
+      if (providers.gemini?.apiKey) configuredProviders.push('Gemini Embedder (GEMINI_API_KEY)');
+      if (Array.isArray(providers.custom)) {
+        for (const p of providers.custom) {
+          if (p?.name && (p.key || p.url)) configuredProviders.push(`Custom provider: ${p.name}`);
+        }
+      }
+      if (configuredProviders.length) {
+        const refApiKeys = db.prepare("SELECT id FROM nodes WHERE id = 'ref-api-keys'").get();
+        const targetNode = refApiKeys ? 'ref-api-keys' : agentId;
+        const aspId = ensureAspect(targetNode, 'configured_providers', 8);
+        for (const line of configuredProviders) upsertAttr(aspId, `${line} — configured during onboarding`, 7);
+      }
+
+      // Models
+      const models = payload.models || {};
+      const modelLines = [];
+      for (const [tier, ref] of Object.entries(models)) {
+        if (!ref) continue;
+        const provider = ref.provider || '';
+        const name = (ref.model || '').trim();
+        if (!name) continue;
+        const full = provider && provider !== 'anthropic' ? `${provider}/${name}` : name;
+        modelLines.push(`${tier}: ${full}`);
+      }
+      if (modelLines.length) {
+        const aspId = ensureAspect(agentId, 'model_routing', 7);
+        for (const line of modelLines) upsertAttr(aspId, line, 6);
+      }
+
+      // Voice
+      const voice = payload.voice || {};
+      if (voice.enabled) {
+        const aspId = ensureAspect(agentId, 'voice_pipeline', 6);
+        const parts = [];
+        if (voice.sttProvider) parts.push(`STT: ${voice.sttProvider}`);
+        if (voice.ttsProvider) parts.push(`TTS: ${voice.ttsProvider}`);
+        if (voice.ttsVoice) parts.push(`voice: ${voice.ttsVoice}`);
+        upsertAttr(aspId, `Voice enabled — ${parts.join(', ') || 'defaults'}`, 6);
+      }
+
+      // Web search
+      const ws = payload.webSearch || {};
+      if (ws.searxngUrl || ws.braveApiKey) {
+        const refApiKeys = db.prepare("SELECT id FROM nodes WHERE id = 'ref-api-keys'").get();
+        const targetNode = refApiKeys ? 'ref-api-keys' : agentId;
+        const aspId = ensureAspect(targetNode, 'web_search', 7);
+        if (ws.searxngUrl) upsertAttr(aspId, `SearXNG configured (primary): ${ws.searxngUrl}`, 7);
+        if (ws.braveApiKey && ws.braveApiKey !== '***hidden***') upsertAttr(aspId, 'Brave Search configured (fallback)', 6);
+      }
+
+      // Browser backend
+      const browserBackend = payload.browser?.backend;
+      if (browserBackend) {
+        const aspId = ensureAspect(agentId, 'tooling_preferences', 5);
+        upsertAttr(aspId, `Browser backend: ${browserBackend}`, 5);
+      }
+
+      // Theme
+      if (payload.theme) {
+        const aspId = ensureAspect(agentId, 'operator_preferences', 4);
+        upsertAttr(aspId, `UI theme: ${payload.theme}`, 4);
+      }
+    };
+
+    try {
+      db.exec('BEGIN');
+      run();
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw e;
+    }
   }
 
   // ── Public API ──────────────────────────────────────────────────────
@@ -383,7 +1578,7 @@ class WebGateway {
       }
       return result;
     }
-    return { running: false, port: webPort || null, note: webPort ? 'Server is not running. Use action:start to launch it.' : 'No web port configured. Set ANIMA_WEB_PORT and re-deploy.' };
+    return { running: false, port: webPort || null, note: webPort ? 'Server is not running. Use action:start to launch it.' : 'No web port configured. Set SPORE_WEB_PORT and re-deploy.' };
   }
 
   _stop() {
@@ -438,14 +1633,14 @@ class WebGateway {
   }
 
   _fetchVaultKeys() {
-    const managerUrl = this.config.managerUrl || 'http://anima-manager:18900';
+    const managerUrl = this.config.managerUrl || 'http://spore-manager:18900';
     const serviceKey = this.config.managerServiceKey || '';
     const agentId = this.config.agentId || 'unknown';
     const env = {};
     try {
       const { execSync } = require('child_process');
       const result = execSync(
-        `curl -sf -H "X-Service-Key: ${serviceKey}" -H "X-Anima-Id: ${agentId}" "${managerUrl}/api/vault/keys" 2>/dev/null`,
+        `curl -sf -H "X-Service-Key: ${serviceKey}" -H "X-SPORE-Id: ${agentId}" "${managerUrl}/api/vault/keys" 2>/dev/null`,
         { encoding: 'utf8', timeout: 5000 }
       );
       const rawKeys = JSON.parse(result).keys || [];
@@ -453,7 +1648,7 @@ class WebGateway {
       for (const keyName of keyNames) {
         try {
           const val = execSync(
-            `curl -sf -H "X-Service-Key: ${serviceKey}" -H "X-Anima-Id: ${agentId}" "${managerUrl}/api/vault/key?name=${encodeURIComponent(keyName)}" 2>/dev/null`,
+            `curl -sf -H "X-Service-Key: ${serviceKey}" -H "X-SPORE-Id: ${agentId}" "${managerUrl}/api/vault/key?name=${encodeURIComponent(keyName)}" 2>/dev/null`,
             { encoding: 'utf8', timeout: 5000 }
           );
           const parsed = JSON.parse(val);
@@ -581,7 +1776,7 @@ class WebGateway {
 
   _start(dir) {
     const webPort = this.config.webPort;
-    if (!webPort) return { error: 'No web port configured. Set ANIMA_WEB_PORT in .env and re-deploy the container.' };
+    if (!webPort) return { error: 'No web port configured. Set SPORE_WEB_PORT in .env and re-deploy the container.' };
     const serveDir_ = dir || path.join(this.config.workspacePath || process.cwd(), 'web');
     if (this._server) {
       if (this._serverDir === serveDir_) {
@@ -598,7 +1793,7 @@ class WebGateway {
 
     const indexPath = path.join(serveDir, 'index.html');
     if (!fs.existsSync(indexPath)) {
-      const name = this.config.displayName || this.config.agentId || 'Anima';
+      const name = this.config.displayName || this.config.agentId || 'SPORE';
       fs.writeFileSync(indexPath, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${name}</title><style>*{margin:0;padding:0;box-sizing:border-box}body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0f;color:#e0e0e0;font-family:system-ui,sans-serif}h1{font-size:2.5rem;opacity:.8}</style></head><body><h1>${name}</h1></body></html>`);
     }
 
@@ -724,13 +1919,13 @@ class WebGateway {
           const sid = crypto.randomBytes(32).toString('hex');
           if (webappOnly) {
             _sessions.set(sid, { type: 'webapp', created: Date.now(), user: result.username, viaSSO: true });
-            const secure = process.env.ANIMA_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+            const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
             res.setHeader('Set-Cookie', `anima_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
             return 'webapp';
           }
           const mgrRole = result.role === 'super' ? 'admin' : 'creator';
           _sessions.set(sid, { type: mgrRole, created: Date.now(), user: result.username, viaSSO: true });
-          const secure = process.env.ANIMA_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+          const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
           res.setHeader('Set-Cookie', `anima_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
           return mgrRole;
         }
@@ -754,6 +1949,17 @@ class WebGateway {
           return true;
         }
         if (sess.type === 'creator' || sess.type === 'admin') _sessions.delete(sid);
+      }
+      // Also accept an anima_webapp session whose user record is role=creator
+      // (covers the case where a browser has the webapp-cookie naming scheme
+      // but the user was created as a creator during onboarding).
+      const wsid = cookies['anima_webapp'];
+      if (wsid && _sessions.has(wsid)) {
+        const sess = _sessions.get(wsid);
+        if (sess && Date.now() - sess.created < SESSION_TTL && sess.user) {
+          const wu = loadWebappUsers().find(u => u.username === sess.user);
+          if (wu && (wu.role === 'creator' || wu.role === 'admin')) return true;
+        }
       }
       if (authUser && authPass) {
         const authHeader = req.headers.authorization || '';
@@ -831,9 +2037,20 @@ class WebGateway {
     const getSessionFromReq = (req) => {
       const cookies = parseCookies(req);
       const sid = cookies['anima_session'];
-      if (sid && _sessions.has(sid)) return sid;
       const wsid = cookies['anima_webapp'];
-      if (wsid && _sessions.has(wsid)) return wsid;
+      const sidValid = sid && _sessions.has(sid);
+      const wsidValid = wsid && _sessions.has(wsid);
+      // When both cookies exist and both are valid, prefer whichever was created
+      // more recently. This prevents a stale creator cookie from shadowing a
+      // fresh webapp login (or vice versa) when both browsers/tabs share a
+      // cookie jar.
+      if (sidValid && wsidValid) {
+        const sCreated = _sessions.get(sid)?.created || 0;
+        const wCreated = _sessions.get(wsid)?.created || 0;
+        return wCreated >= sCreated ? wsid : sid;
+      }
+      if (sidValid) return sid;
+      if (wsidValid) return wsid;
       return null;
     };
 
@@ -915,31 +2132,69 @@ class WebGateway {
                 }
               } catch (e) {
                 this.log.warn('[web] Manager SSO unreachable, falling back to local auth:', e.message);
-                if (authUser && authPass && username === authUser && password === authPass) {
+                // Prefer webapp-users.json local record (populated by the
+                // onboarding wizard) when the manager is down.
+                const wu = loadWebappUsers().find(u => u.username === username);
+                if (wu && !wu.blocked && verifyWebappPassword(password, wu.salt, wu.hash)) {
+                  verified = true;
+                  verifiedUser = username;
+                  if (wu.role === 'webapp') req._loginRoleHint = 'webapp';
+                } else if (authUser && authPass && username === authUser && password === authPass) {
                   verified = true;
                 } else {
                   res.writeHead(401, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
                 }
               }
-            } else if (authUser && authPass) {
-              if (username === authUser && password === authPass) verified = true;
-              else { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid credentials' })); return; }
+            } else if (authUser && authPass && username === authUser && password === authPass) {
+              verified = true;
             } else {
-              res.writeHead(403, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Auth not configured' })); return;
+              // Local webapp-users.json (populated by the onboarding wizard or
+              // self-registered via /api/webapp/users/self-register).
+              const webappUsers = loadWebappUsers();
+              const wu = webappUsers.find(u => u.username === username);
+              if (wu && wu.blocked) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Your account has been blocked. Contact the operator.' })); return;
+              }
+              if (wu && verifyWebappPassword(password, wu.salt, wu.hash)) {
+                verified = true;
+                verifiedUser = username;
+                // Honor stored role: creator → loginRole 'creator', webapp → 'webapp'.
+                if (wu.role === 'webapp') req._loginRoleHint = 'webapp';
+              } else if (authUser && authPass) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+              } else if (webappUsers.length === 0) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Auth not configured' })); return;
+              } else {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+              }
             }
 
             if (verified) {
               const sid = crypto.randomBytes(32).toString('hex');
-              const loginRole = req._mgrRole === 'super' ? 'admin' : 'creator';
+              let loginRole;
+              if (req._loginRoleHint === 'webapp') loginRole = 'webapp';
+              else loginRole = req._mgrRole === 'super' ? 'admin' : 'creator';
+              const cookieName = loginRole === 'webapp' ? 'anima_webapp' : 'anima_session';
               _sessions.set(sid, { user: verifiedUser, created: Date.now(), type: loginRole });
-              const secure = process.env.ANIMA_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+              const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+              // Webapp users haven't run the user wizard yet → flag it.
+              let wizardNeeded = false;
+              if (loginRole === 'webapp') {
+                try {
+                  const prefs = JSON.parse(fs.readFileSync(path.join(this.config.dataDir, 'preferences.json'), 'utf8'));
+                  wizardNeeded = !prefs[verifiedUser]?.wizardCompleted;
+                } catch { wizardNeeded = true; }
+              }
               res.writeHead(200, {
                 'Content-Type': 'application/json',
-                'Set-Cookie': `anima_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+                'Set-Cookie': `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
               });
-              res.end(JSON.stringify({ ok: true, user: verifiedUser, role: loginRole }));
+              res.end(JSON.stringify({ ok: true, user: verifiedUser, role: loginRole, wizardNeeded }));
             }
           } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Bad request' })); }
         });
@@ -960,12 +2215,23 @@ class WebGateway {
       if (urlPath === '/api/auth/check') {
         let valid = false;
         let role = null;
+        let username = null;
         const cookies = parseCookies(req);
         const sid = cookies['anima_session'];
         const sess = sid && _sessions.get(sid);
         if (sess && (sess.type === 'creator' || sess.type === 'admin') && (Date.now() - sess.created < SESSION_TTL)) {
           valid = true;
           role = sess.type;
+          username = sess.user || null;
+        }
+        if (!valid) {
+          const wsid = cookies['anima_webapp'];
+          const wsess = wsid && _sessions.get(wsid);
+          if (wsess && wsess.type === 'webapp' && (Date.now() - wsess.created < SESSION_TTL)) {
+            valid = true;
+            role = 'webapp';
+            username = wsess.user || null;
+          }
         }
         if (!valid) {
           const ssoRole = await tryManagerSSO(req, res);
@@ -973,7 +2239,6 @@ class WebGateway {
         }
         const hasWebappUsers = loadWebappUsers().length > 0;
         const needsAuth = !!(managerUrl || (authUser && authPass));
-        const username = sess?.user || null;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ authenticated: valid, needsAuth, role, hasWebappUsers, username }));
         return;
@@ -998,18 +2263,35 @@ class WebGateway {
               res.end(JSON.stringify({ ok: true, user: 'guest', noAuth: true })); return;
             }
             const user = users.find(u => u.username === username);
+            if (user?.blocked) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Your account has been blocked. Contact the operator.' })); return;
+            }
             if (!user || !verifyWebappPassword(password, user.salt, user.hash)) {
               res.writeHead(401, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
             }
             const sid = crypto.randomBytes(32).toString('hex');
-            _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
-            const secure = process.env.ANIMA_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+            const role = user.role === 'creator' ? 'creator' : 'webapp';
+            const cookieName = role === 'creator' ? 'anima_session' : 'anima_webapp';
+            const otherCookieName = cookieName === 'anima_session' ? 'anima_webapp' : 'anima_session';
+            // Invalidate any lingering session under the other cookie so a user
+            // logging in as webapp can't inherit a previous creator identity
+            // (which would route chats into the wrong dm:<user> session and
+            // show the other user's history).
+            const otherCookies = parseCookies(req);
+            const otherSid = otherCookies[otherCookieName];
+            if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
+            _sessions.set(sid, { user: username, created: Date.now(), type: role });
+            const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
             res.writeHead(200, {
               'Content-Type': 'application/json',
-              'Set-Cookie': `anima_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+              'Set-Cookie': [
+                `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+                `${otherCookieName}=; Path=/; HttpOnly; Max-Age=0`,
+              ],
             });
-            res.end(JSON.stringify({ ok: true, user: username }));
+            res.end(JSON.stringify({ ok: true, user: username, role }));
           } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Bad request' })); }
         });
         return;
@@ -1037,11 +2319,329 @@ class WebGateway {
         return;
       }
 
+      // ── First-run onboarding ──
+      if (urlPath === '/api/onboarding/state' && req.method === 'GET') {
+        const needed = _isOnboardingNeeded(this.config.dataDir, this.config);
+        const hasWebappUsers = loadWebappUsers().length > 0;
+        const s = this._getSettingsState();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          needed,
+          hasWebappUsers,
+          currentState: {
+            identity: s.identity,
+            providers: {
+              anthropic: { apiKeySet: s.providers.anthropic.apiKeySet },
+              openai: { apiKeySet: s.providers.openai.apiKeySet, baseUrl: s.providers.openai.baseUrl },
+              openrouter: { apiKeySet: s.providers.openrouter.apiKeySet, baseUrl: s.providers.openrouter.baseUrl },
+              local: { apiKeySet: s.providers.local.apiKeySet, baseUrl: s.providers.local.baseUrl },
+              gemini: { apiKeySet: s.providers.gemini.apiKeySet },
+              custom: s.providers.custom.map(p => ({ name: p.name, url: p.url })),
+            },
+            models: s.models,
+            voice: s.voice,
+            webSearch: { searxngUrl: s.webSearch?.searxngUrl || '', braveApiKeySet: !!s.webSearch?.braveApiKeySet },
+            browser: s.browser,
+          },
+        }));
+        return;
+      }
+
+      if (urlPath === '/api/webapp/users' && req.method === 'POST') {
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
+        const username = String(parsed.username || '').trim();
+        const password = String(parsed.password || '');
+        if (!username || username.length > 64) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Username must be 1–64 chars' })); return; }
+        if (password.length < 8) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Password must be at least 8 characters' })); return; }
+        const existing = loadWebappUsers();
+        const onboardingDone = !_isOnboardingNeeded(this.config.dataDir, this.config);
+        const isAdmin = !!isAnyAuth(req);
+        // Allow user creation when: onboarding still pending (zero users), OR caller is an admin.
+        if (existing.length > 0 && onboardingDone && !isAdmin) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'User creation disabled post-setup' }));
+          return;
+        }
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+        // During onboarding, account creation is idempotent: the operator can
+        // restart the wizard at any time and re-submit credentials. The user
+        // list is reset to just this account. After onboarding completes,
+        // duplicate usernames are rejected.
+        let next;
+        if (!onboardingDone) {
+          next = [{ username, hash, salt, created: Date.now(), role: 'creator' }];
+        } else {
+          if (existing.some(u => u.username === username)) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'User already exists' })); return;
+          }
+          next = existing.concat([{ username, hash, salt, created: Date.now(), role: 'webapp' }]);
+        }
+        _writeJsonAtomic(WEBAPP_USERS_PATH, next);
+        const isFirstUser = !onboardingDone;
+        const sid = crypto.randomBytes(32).toString('hex');
+        const sessType = isFirstUser ? 'creator' : 'webapp';
+        const cookieName = isFirstUser ? 'anima_session' : 'anima_webapp';
+        const otherCookieName = cookieName === 'anima_session' ? 'anima_webapp' : 'anima_session';
+        const otherCookies = parseCookies(req);
+        const otherSid = otherCookies[otherCookieName];
+        if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
+        _sessions.set(sid, { user: username, created: Date.now(), type: sessType });
+        const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': [
+            `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+            `${otherCookieName}=; Path=/; HttpOnly; Max-Age=0`,
+          ],
+        });
+        res.end(JSON.stringify({ ok: true, user: username, role: sessType }));
+        return;
+      }
+
+      // Self-register: anyone with the Acorn team key can create a webapp user
+      // without operator intervention. Always issues a 'webapp' role session
+      // (never creator), regardless of how many users exist.
+      if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
+        const username = String(parsed.username || '').trim();
+        const password = String(parsed.password || '');
+        const acornKey = String(parsed.acornKey || '').trim();
+        if (!this.config.acornKey) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
+        }
+        if (!username || username.length > 64 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Username must be 1\u201364 chars, alphanumeric/_.-' })); return;
+        }
+        if (password.length < 8) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Password must be at least 8 characters' })); return;
+        }
+        if (!_acornKeyMatches(acornKey, this.config.acornKey)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid team key' })); return;
+        }
+        const existing = loadWebappUsers();
+        const dup = existing.find(u => u.username === username);
+        if (dup?.blocked) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'That username is blocked.' })); return;
+        }
+        if (dup) {
+          // If creds match the existing record (i.e. an interrupted self-reg
+          // where the user is retrying with the same password) just hand them
+          // a fresh session + wizard. If the password is wrong, 409.
+          if (!verifyWebappPassword(password, dup.salt, dup.hash)) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Username already taken' })); return;
+          }
+          const sid = crypto.randomBytes(32).toString('hex');
+          const otherCookies = parseCookies(req);
+          if (otherCookies['anima_session'] && _sessions.has(otherCookies['anima_session'])) _sessions.delete(otherCookies['anima_session']);
+          _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
+          const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Set-Cookie': [
+              `anima_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+              `anima_session=; Path=/; HttpOnly; Max-Age=0`,
+            ],
+          });
+          // Re-show wizard only if it wasn't already completed.
+          let wizardNeeded = true;
+          try {
+            const prefs = JSON.parse(fs.readFileSync(path.join(this.config.dataDir, 'preferences.json'), 'utf8'));
+            if (prefs[username]?.wizardCompleted) wizardNeeded = false;
+          } catch {}
+          res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded, resumed: true }));
+          return;
+        }
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+        existing.push({ username, hash, salt, created: Date.now(), role: 'webapp', selfRegistered: true });
+        _writeJsonAtomic(WEBAPP_USERS_PATH, existing);
+        const sid = crypto.randomBytes(32).toString('hex');
+        const otherCookies = parseCookies(req);
+        if (otherCookies['anima_session'] && _sessions.has(otherCookies['anima_session'])) _sessions.delete(otherCookies['anima_session']);
+        _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
+        const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': [
+            `anima_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+            `anima_session=; Path=/; HttpOnly; Max-Age=0`,
+          ],
+        });
+        res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded: true }));
+        return;
+      }
+
+      // ── Admin user-management endpoints (creator-only) ──
+      if (urlPath === '/api/webapp/users' && req.method === 'GET') {
+        if (!(await checkAuth(req, res))) return;
+        const users = loadWebappUsers().map(u => ({
+          username: u.username,
+          role: u.role || 'webapp',
+          blocked: !!u.blocked,
+          selfRegistered: !!u.selfRegistered,
+          created: u.created || null,
+          passwordUpdatedAt: u.passwordUpdatedAt || null,
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ users }));
+        return;
+      }
+
+      if (urlPath.startsWith('/api/webapp/users/') && (req.method === 'PATCH' || req.method === 'DELETE')) {
+        if (!(await checkAuth(req, res))) return;
+        // Find requesting user (so we can prevent self-demotion / self-delete).
+        const cookies = parseCookies(req);
+        const sid = cookies['anima_session'];
+        const sess = sid && _sessions.get(sid);
+        const meUsername = sess?.user || null;
+        const target = decodeURIComponent(urlPath.slice('/api/webapp/users/'.length));
+        if (target === 'me') { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Reserved' })); return; }
+        if (target === meUsername) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'You can\u2019t modify your own account here.' })); return; }
+        const users = loadWebappUsers();
+        const idx = users.findIndex(u => u.username === target);
+        if (idx < 0) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'No such user' })); return; }
+
+        if (req.method === 'DELETE') {
+          // Refuse to delete the last creator.
+          if ((users[idx].role || 'webapp') === 'creator') {
+            const creatorCount = users.filter(u => (u.role || 'webapp') === 'creator').length;
+            if (creatorCount <= 1) { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Cannot delete the only creator account' })); return; }
+          }
+          users.splice(idx, 1);
+          _writeJsonAtomic(WEBAPP_USERS_PATH, users);
+          // Drop any active session for the deleted user.
+          for (const [k, v] of _sessions) { if (v?.user === target) _sessions.delete(k); }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
+        // PATCH: { role?: 'creator'|'webapp', blocked?: boolean }
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
+        const allowedRoles = ['creator', 'webapp'];
+        if (Object.prototype.hasOwnProperty.call(parsed, 'role')) {
+          if (!allowedRoles.includes(parsed.role)) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'role must be creator or webapp' })); return; }
+          // Refuse to demote the last creator.
+          if ((users[idx].role || 'webapp') === 'creator' && parsed.role !== 'creator') {
+            const creatorCount = users.filter(u => (u.role || 'webapp') === 'creator').length;
+            if (creatorCount <= 1) { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Cannot demote the only creator account' })); return; }
+          }
+          users[idx].role = parsed.role;
+        }
+        if (Object.prototype.hasOwnProperty.call(parsed, 'blocked')) {
+          users[idx].blocked = !!parsed.blocked;
+          if (users[idx].blocked) {
+            for (const [k, v] of _sessions) { if (v?.user === target) _sessions.delete(k); }
+          }
+        }
+        _writeJsonAtomic(WEBAPP_USERS_PATH, users);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, user: { username: users[idx].username, role: users[idx].role, blocked: !!users[idx].blocked } }));
+        return;
+      }
+
+      // Webapp user changes their own password (any-auth — uses session cookie to identify user)
+      if (urlPath === '/api/webapp/users/me/password' && req.method === 'POST') {
+        const sessType = isAnyAuth(req);
+        if (!sessType) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"Authentication required"}'); return; }
+        const cookies = parseCookies(req);
+        const sid = cookies['anima_session'] || cookies['anima_webapp'];
+        const sess = sid && _sessions.get(sid);
+        if (!sess?.user) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"No session user"}'); return; }
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
+        const currentPassword = String(parsed.currentPassword || '');
+        const newPassword = String(parsed.newPassword || '');
+        if (newPassword.length < 8) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'New password must be at least 8 characters' })); return; }
+        const users = loadWebappUsers();
+        const idx = users.findIndex(u => u.username === sess.user);
+        if (idx < 0) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end('{"error":"User record missing"}'); return; }
+        if (!verifyWebappPassword(currentPassword, users[idx].salt, users[idx].hash)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Current password is incorrect' })); return;
+        }
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = crypto.pbkdf2Sync(newPassword, salt, 100000, 64, 'sha512').toString('hex');
+        users[idx].salt = salt;
+        users[idx].hash = hash;
+        users[idx].passwordUpdatedAt = Date.now();
+        _writeJsonAtomic(WEBAPP_USERS_PATH, users);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (urlPath === '/api/onboarding/complete' && req.method === 'POST') {
+        const cookies = parseCookies(req);
+        const sid = cookies['anima_session'] || cookies['anima_webapp'];
+        const sess = sid && _sessions.get(sid);
+        if (!sess) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"No session"}'); return; }
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (body.length > 64 * 1024) { req.destroy(); return; } }
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
+        try {
+          // 0. Auto-fill any missing per-model ctx by probing the configured providers' /models endpoints.
+          parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers);
+          // 1. Persist settings through the existing pipeline
+          const newState = this._persistSettingsPatch(parsed);
+          // 2. Theme preference
+          const PREFS_PATH = path.join(this.config.dataDir, 'preferences.json');
+          const VALID_THEMES = ['midnight', 'dark', 'paper', 'terminal', 'ember', 'arctic', 'neon', 'forest'];
+          let prefs = {};
+          try { prefs = JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch {}
+          const theme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : 'midnight';
+          if (!prefs[sess.user]) prefs[sess.user] = {};
+          prefs[sess.user].theme = theme;
+          prefs._lastUsed = { theme, ts: Date.now() };
+          prefs.onboardingCompleted = true;
+          prefs.onboardingCompletedAt = Date.now();
+          _writeJsonAtomic(PREFS_PATH, prefs);
+          // 3. Mirror choices into the active graph
+          try {
+            const graphDb = this.graph?.db;
+            if (graphDb) this._applyOnboardingToGraph(graphDb, parsed);
+          } catch (e) { this.log.warn(`[onboarding] graph sync skipped: ${e.message}`); }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            theme,
+            // Surface the freshly-minted Acorn team key so the wizard can show it once.
+            acornKey: newState.acorn?.enabled ? newState.acorn.key : null,
+            acornKeyGenerated: !!newState._acornKeyGenerated,
+          }));
+        } catch (e) {
+          this.log.warn(`[onboarding] complete failed: ${e.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
+
       // /graph — serve without auth (HTML has its own login form)
       if (urlPath === '/graph' || urlPath === '/graph/') {
         try {
           const localViewer = path.join(__dirname, '..', 'static', 'graph-viewer.html');
-          const sharedStaticDir = process.env.ANIMA_SHARED_STATIC || '/app/shared-static';
+          const sharedStaticDir = process.env.SPORE_SHARED_STATIC || '/app/shared-static';
           const sharedViewer = path.join(sharedStaticDir, 'graph-viewer.html');
           const viewerPath = _newerFile(sharedViewer, localViewer);
           let html = fs.readFileSync(viewerPath, 'utf8');
@@ -1050,9 +2650,21 @@ class WebGateway {
             const inline = `<script>\n${fs.readFileSync(brandPath, 'utf8')}\n</script>`;
             html = html.replace(/<script src="brand\.js"><\/script>/, inline);
           }
+          // Inject theme CSS vars into <html> so the login overlay is themed before JS runs
+          html = html.replace(/<html\s+lang="en">/, `<html lang="en" style="${_buildThemeInlineStyle(this.config.dataDir)}">`);
+          // Inject onboarding flag so the viewer knows to show the wizard before login
+          const obFlag = `<script>window.__ONBOARDING__=${JSON.stringify({ needed: _isOnboardingNeeded(this.config.dataDir, this.config) })};</script>`;
+          html = html.replace(/<\/head>/, obFlag + '</head>');
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' });
           res.end(html);
         } catch { res.writeHead(500); res.end('Graph viewer not found.'); }
+        return;
+      }
+
+      if (urlPath === '/' || urlPath === '/index.html') {
+        const basePath = (this.config.ingressPath || '').replace(/\/$/, '');
+        res.writeHead(302, { 'Location': basePath + '/graph' });
+        res.end();
         return;
       }
 
@@ -1095,7 +2707,7 @@ class WebGateway {
               res.end(JSON.stringify({ error: 'Invalid username (alphanumeric, max 32 chars)' }));
               return;
             }
-            if (!key || key !== acornKey) {
+            if (!_acornKeyMatches(key, acornKey)) {
               res.writeHead(401, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Invalid team key' }));
               return;
@@ -1160,17 +2772,16 @@ class WebGateway {
 
       if (urlPath === '/api/ws-token') {
         const sid = getSessionFromReq(req);
-        if (!sid) {
-          if (!(await checkAuth(req, res))) return;
-        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ token: sid || '' }));
         return;
       }
 
       if (urlPath === '/api/identity') {
-        if (!(await checkAuth(req, res))) return;
-        const displayName = this.config.displayName || this.config.agentId || 'anima';
+        if (!isAnyAuth(req)) {
+          if (!(await checkAuth(req, res))) return;
+        }
+        const displayName = this.config.displayName || this.config.agentId || 'spore';
         const names = [displayName.toLowerCase()];
         if (Array.isArray(this.config.nicknames)) {
           this.config.nicknames.forEach(n => { if (n && !names.includes(n.toLowerCase())) names.push(n.toLowerCase()); });
@@ -1178,7 +2789,7 @@ class WebGateway {
         try {
           const db = this.graph?.db || graphDb;
           if (db) {
-            const agentId = this.config.agentId || 'anima';
+            const agentId = this.config.agentId || 'spore';
             try {
               const aliases = db.prepare("SELECT alias FROM aliases WHERE node_id = ?").all(agentId);
               aliases.forEach(a => { if (a.alias && !names.includes(a.alias.toLowerCase())) names.push(a.alias.toLowerCase()); });
@@ -1348,7 +2959,72 @@ class WebGateway {
         }
       }
 
-      if (urlPath.startsWith('/api/graph') || urlPath === '/api/tokens') {
+      if (urlPath === '/api/settings') {
+        if (req.method === 'GET') {
+          // Any authenticated session can read settings (webapp users see them
+          // read-only via the role gating in the UI).
+          if (!isAnyAuth(req)) { res.writeHead(401); res.end('{"error":"Authentication required"}'); return; }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(this._getSettingsState()));
+          return;
+        }
+        if (!(await checkAuth(req, res))) return;
+        if (req.method === 'PUT') {
+          let body = '';
+          for await (const chunk of req) body += chunk;
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            // Auto-fill missing per-model ctx by probing the configured providers' /models endpoints.
+            parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers);
+            const settings = this._persistSettingsPatch(parsed);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, settings }));
+          } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e?.message || 'invalid body' }));
+          }
+          return;
+        }
+      }
+
+      // Read-only probe endpoints accept any authenticated session (webapp or creator),
+      // so the onboarding wizard can test provider keys / model tiers / web search with
+      // only the webapp cookie it just obtained from /api/webapp/users.
+      const isTestProbe =
+        (urlPath.startsWith('/api/providers/') && urlPath.endsWith('/test')) ||
+        (urlPath.startsWith('/api/models/') && urlPath.endsWith('/test')) ||
+        urlPath === '/api/providers/list-models' ||
+        urlPath === '/api/websearch/test';
+      if (isTestProbe) {
+        // Allow access either with any session, OR while the wizard is still
+        // running (so a restart-orphaned cookie doesn't lock the operator out
+        // of the populate / test buttons mid-setup).
+        const onboardingNeeded = _isOnboardingNeeded(this.config.dataDir, this.config);
+        if (!isAnyAuth(req) && !onboardingNeeded) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Authentication required' }));
+          return;
+        }
+        const currentDb = this.graph?.db || graphDb;
+        this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
+        return;
+      }
+
+      // Graph endpoints accept any authenticated session — webapp users have
+      // read/write to the graph + chat by design. Maintainer / providers /
+      // models / websearch stay creator-only.
+      if (urlPath.startsWith('/api/graph')) {
+        if (!isAnyAuth(req)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Authentication required' }));
+          return;
+        }
+        const currentDb = this.graph?.db || graphDb;
+        this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
+        return;
+      }
+
+      if (urlPath === '/api/tokens' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/tailscale') || urlPath.startsWith('/api/cluster') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch')) {
         if (!(await checkAuth(req, res))) return;
         const currentDb = this.graph?.db || graphDb;
         this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
@@ -1412,29 +3088,56 @@ class WebGateway {
         let username = 'default';
         const sid = cookies['anima_session'];
         const sess = sid && _sessions.get(sid);
-        if (sess?.username) username = sess.username;
+        // Sessions are stored with `user` (legacy code looked at `username`).
+        if (sess?.user || sess?.username) username = sess.user || sess.username;
         else {
           const wsid = cookies['anima_webapp'];
           const wsess = wsid && _sessions.get(wsid);
-          if (wsess?.username) username = wsess.username;
+          if (wsess?.user || wsess?.username) username = wsess.user || wsess.username;
         }
         if (req.method === 'GET') {
           const prefs = loadPrefs();
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ theme: prefs[username]?.theme || 'midnight' }));
+          res.end(JSON.stringify({
+            theme: prefs[username]?.theme || 'midnight',
+            displayName: prefs[username]?.displayName || '',
+            username,
+          }));
           return;
         }
         if (req.method === 'PUT') {
           let body = '';
           for await (const chunk of req) body += chunk;
           try {
-            const { theme } = JSON.parse(body);
+            const parsed = JSON.parse(body);
             const prefs = loadPrefs();
             if (!prefs[username]) prefs[username] = {};
-            prefs[username].theme = VALID_THEMES.includes(theme) ? theme : 'midnight';
+            if (Object.prototype.hasOwnProperty.call(parsed, 'theme')) {
+              const safeTheme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : 'midnight';
+              prefs[username].theme = safeTheme;
+              // Only creator-tier sessions can update the global "last used"
+              // marker that the login page falls back on.
+              const sessRole = sess?.type || (sid && _sessions.get(sid)?.type);
+              if (sessRole === 'creator' || sessRole === 'admin') {
+                prefs._lastUsed = { theme: safeTheme, ts: Date.now() };
+              }
+            }
+            if (Object.prototype.hasOwnProperty.call(parsed, 'displayName')) {
+              const dn = String(parsed.displayName || '').trim().slice(0, 64);
+              if (dn) prefs[username].displayName = dn;
+              else delete prefs[username].displayName;
+            }
+            if (parsed.wizardCompleted === true) {
+              prefs[username].wizardCompleted = true;
+              prefs[username].wizardCompletedAt = Date.now();
+            }
             fs.writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2));
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, theme: prefs[username].theme }));
+            res.end(JSON.stringify({
+              ok: true,
+              theme: prefs[username].theme,
+              displayName: prefs[username].displayName || '',
+            }));
           } catch { res.writeHead(400); res.end('{"error":"invalid body"}'); }
           return;
         }
@@ -1840,24 +3543,36 @@ class WebGateway {
 
       // ── Webapp login page ──
       if (urlPath === '/login' || urlPath === '/login/') {
-        const displayName = this.config.displayName || this.config.agentId || 'Anima';
+        const displayName = this.config.displayName || this.config.agentId || 'SPORE';
         const brandJs = (() => { try { return fs.readFileSync(path.join(__dirname, '..', 'static', 'brand.js'), 'utf8'); } catch { return ''; } })();
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        const serverTheme = _readServerTheme(this.config.dataDir);
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Pragma': 'no-cache',
+        });
         res.end(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Sign in - ${displayName}</title>
+<title>Sign in \u00b7 SPORE</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+:root{
+  --bg:#08090e;--surface:#0e1017;--panel:#0e1017;
+  --border:#1e2133;--text:#c8cdd8;--text-dim:#4a4f68;--text-bright:#e2e6f0;
+  --accent:#5b8af5;--accent2:#8b6cf7;--danger:#f05858;
+  --login-card-bg:rgba(14,16,23,.85);
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{height:100vh;display:flex;align-items:center;justify-content:center;background:#08090e;color:#c8cdd8;font-family:'Inter',system-ui,sans-serif}
-.login-box{width:340px;padding:36px 32px 28px;background:rgba(14,16,23,.85);border:1px solid #1e2133;border-radius:14px;backdrop-filter:blur(24px);text-align:center}
-.login-box h1{font-size:1.15rem;font-weight:600;color:#e2e6f0;margin-bottom:4px}
-.login-box .sub{font-size:.78rem;color:#4a4f68;margin-bottom:20px}
-.login-box label{display:block;text-align:left;font-size:.68rem;color:#4a4f68;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px;margin-top:12px}
-.login-box input{width:100%;padding:10px 12px;border:1px solid #1e2133;border-radius:8px;background:#0e1017;color:#e2e6f0;font-size:.88rem;outline:none}
-.login-box input:focus{border-color:#5b8af5;box-shadow:0 0 0 2px rgba(91,138,245,.15)}
-.login-box .btn{width:100%;margin-top:18px;padding:11px;border:none;border-radius:8px;cursor:pointer;font-size:.88rem;font-weight:600;color:#fff;background:linear-gradient(135deg,#5b8af5,#8b6cf7)}
+html,body{background:var(--bg);color:var(--text)}
+body{height:100vh;display:flex;align-items:center;justify-content:center;font-family:'Inter',system-ui,sans-serif;transition:background-color .3s ease,color .3s ease}
+.login-box{width:340px;padding:36px 32px 28px;background:var(--login-card-bg);border:1px solid var(--border);border-radius:14px;backdrop-filter:blur(24px);text-align:center;transition:background-color .3s ease,border-color .3s ease}
+.login-box h1{font-size:1.15rem;font-weight:600;color:var(--text-bright);margin-bottom:4px}
+.login-box .sub{font-size:.78rem;color:var(--text-dim);margin-bottom:20px}
+.login-box label{display:block;text-align:left;font-size:.68rem;color:var(--text-dim);letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px;margin-top:12px}
+.login-box input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--panel);color:var(--text-bright);font-size:.88rem;outline:none;transition:border-color .2s ease,box-shadow .2s ease,background-color .3s ease}
+.login-box input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent)}
+.login-box .btn{width:100%;margin-top:18px;padding:11px;border:none;border-radius:8px;cursor:pointer;font-size:.88rem;font-weight:600;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:opacity .2s ease,background .3s ease}
 .login-box .btn:hover{opacity:.9}.btn:disabled{opacity:.5;cursor:not-allowed}
-.err{color:#f05858;font-size:.78rem;margin-top:8px;display:none}
+.err{color:var(--danger);font-size:.78rem;margin-top:8px;display:none}
 </style></head><body>
 <div class="login-box">
 <h1>${displayName}</h1>
@@ -1870,6 +3585,23 @@ body{height:100vh;display:flex;align-items:center;justify-content:center;backgro
 </form>
 </div>
 <script>${brandJs}
+(function(){
+  const THEMES={
+    midnight:{},
+    dark:{'--bg':'#09090b','--surface':'#18181b','--panel':'#0f0f11','--border':'#27272a','--text':'#d4d4d8','--text-dim':'#71717a','--text-bright':'#fafafa','--accent':'#3b82f6','--accent2':'#8b5cf6','--danger':'#ef4444'},
+    paper:{'--bg':'#f5f3ef','--surface':'#ffffff','--panel':'#f8f6f2','--border':'#c8c0b4','--text':'#1a1a1a','--text-dim':'#6b6560','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#7c3aed','--danger':'#dc2626','--login-card-bg':'rgba(255,255,255,.9)'},
+    terminal:{'--bg':'#000000','--surface':'#0a0a0a','--panel':'#050505','--border':'#1a3a1a','--text':'#33ff33','--text-dim':'#1a6b1a','--text-bright':'#66ff66','--accent':'#33ff33','--accent2':'#00cc00','--danger':'#ff3333','--login-card-bg':'rgba(10,10,10,.85)'},
+    ember:{'--bg':'#12100e','--surface':'#1a1614','--panel':'#151210','--border':'#3a2e24','--text':'#e8d5c0','--text-dim':'#7a6a58','--text-bright':'#f5e8d8','--accent':'#f59e0b','--accent2':'#ef4444','--danger':'#ef4444','--login-card-bg':'rgba(26,22,20,.85)'},
+    arctic:{'--bg':'#e8edf4','--surface':'#f0f4f9','--panel':'#e0e6f0','--border':'#b0bad0','--text':'#0f172a','--text-dim':'#5a6a80','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#4f46e5','--danger':'#dc2626','--login-card-bg':'rgba(240,244,249,.9)'},
+    neon:{'--bg':'#0a0318','--surface':'#0d0520','--panel':'#080215','--border':'#2a1050','--text':'#e0d0f0','--text-dim':'#6040a0','--text-bright':'#f0e0ff','--accent':'#ff2d95','--accent2':'#00f0ff','--danger':'#ff2d55','--login-card-bg':'rgba(13,5,32,.85)'},
+    forest:{'--bg':'#080e08','--surface':'#0e1a0e','--panel':'#0a140a','--border':'#1e3a1e','--text':'#c0dcc0','--text-dim':'#4a7a4a','--text-bright':'#d8f0d8','--accent':'#4ade80','--accent2':'#a3e635','--danger':'#ef4444','--login-card-bg':'rgba(14,26,14,.85)'}
+  };
+  const name=localStorage.getItem('spore-theme')||${JSON.stringify(serverTheme)};
+  const vars=THEMES[name]||{};
+  const root=document.documentElement.style;
+  Object.keys(vars).forEach(k=>root.setProperty(k,vars[k]));
+  try{localStorage.setItem('spore-theme',name);}catch(e){}
+})();
 const API=window.location.pathname.replace(/\\/login\\/?$/,'');
 document.getElementById('f').onsubmit=async e=>{e.preventDefault();
 const err=document.getElementById('err');err.style.display='none';
@@ -2114,7 +3846,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
 
     wss.on('connection', (ws) => {
       const isAcornClient = ws._role === 'acorn';
-      this.log.info(`[ws] Client connected${isAcornClient ? ` (acorn: ${ws._user})` : ' to control panel'}`);
+      this.log.info(`[ws] Client connected: user=${ws._user || '(anon)'} role=${ws._role || '(none)'}${isAcornClient ? ' [acorn]' : ''}`);
       ws._missedPongs = 0;
       ws._pendingTools = new Map();
       ws.on('pong', () => { ws._missedPongs = 0; });
@@ -2124,6 +3856,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         try {
           if (this.tools._sessions) {
             const sessionKey = this.tools._sessions.constructor.buildKey('web:control-panel', true, ws._user || 'operator');
+            this.log.info(`[ws] history-fetch user=${ws._user || '(anon)'} → sessionKey=${sessionKey}`);
             const rows = this.tools._sessions.db.prepare(
               `SELECT role, content, created FROM messages WHERE session_key = ? ORDER BY id DESC LIMIT 60`
             ).all(sessionKey);
@@ -2161,10 +3894,14 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           const activeKeys = agent ? [...agent.activeRuns] : [];
           this.log.info(`[ws] Connect: user=${userId}, activeRuns=${activeKeys.length > 0 ? activeKeys.join(',') : 'none'}`);
           if (agent && activeKeys.length > 0) {
-            const webBusy = activeKeys.some(k => k.startsWith('dm:'));
+            // Only flag THIS user's session as busy — don't let user A's active
+            // loop disable user B's send button. Each user has their own dm:<user>
+            // session key; match on that specifically.
+            const myKey = `dm:${userId}`;
+            const webBusy = activeKeys.includes(myKey);
             if (webBusy) {
               ws.send(JSON.stringify({ type: 'chat:busy' }));
-              this.log.info(`[ws] Sent chat:busy to reconnecting client`);
+              this.log.info(`[ws] Sent chat:busy to reconnecting client (own session ${myKey} active)`);
             }
           }
         } catch (e) { this.log.warn('[ws] Busy check failed:', e.message); }
@@ -2461,6 +4198,21 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           }
           const sessionId = msg.sessionId || 'web:control-panel';
           const isAcorn = ws._role === 'acorn';
+          // If auth is required (webapp users exist or manager URL is set), refuse
+          // anonymous chat — otherwise every user's messages collapse into the same
+          // 'dm:operator' session and the agent can't tell them apart.
+          let hasWebappUsers = false;
+          try {
+            const wuPath = path.join(this.config.dataDir, 'webapp-users.json');
+            hasWebappUsers = fs.existsSync(wuPath) && JSON.parse(fs.readFileSync(wuPath, 'utf8')).length > 0;
+          } catch {}
+          const requiresChatAuth = hasWebappUsers || !!this.config.managerUrl || !!(this.config.webAuthUser && this.config.webAuthPass);
+          if (requiresChatAuth && !isAcorn && !ws._user) {
+            this.log.warn(`[ws] chat refused — no authenticated user on this connection (token=${ws._sessionToken ? 'stale' : 'missing'})`);
+            ws.send(JSON.stringify({ type: 'chat:error', error: 'Session expired — reload the page and log in again.', code: 'auth-required' }));
+            return;
+          }
+          this.log.info(`[ws] chat from user=${ws._user || '(anon)'} role=${ws._role || '(none)'} displayName=${(msg.userName || '').slice(0, 40)} sessionId=${sessionId}`);
 
           // Store the client's working directory (sent by Acorn CLI)
           if (msg.cwd && isAcorn) ws._cwd = msg.cwd;
@@ -2498,10 +4250,10 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           }
 
           try {
-            // Only broadcast chat:start to web panel for non-Acorn sessions.
-            // Acorn sessions are isolated — leaking events locks up the web panel.
+            // Acorn fans out to all session clients (CLI + observer mobile apps).
+            // Web users are isolated — chat:start only goes to the sending socket.
             if (!isAcorn) {
-              this.broadcast({ type: 'chat:start', sessionId });
+              try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch {}
             } else {
               this._sendToSession(sessionId, { type: 'chat:start', sessionId });
             }
@@ -2509,6 +4261,32 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               type: 'image',
               source: { type: 'base64', media_type: img.mediaType || 'image/png', data: img.data },
             })) : undefined;
+            const media = Array.isArray(msg.files) ? msg.files.flatMap(f => {
+              const mediaType = String(f.mediaType || '').toLowerCase();
+              if (mediaType.startsWith('audio/')) {
+                return [{
+                  type: 'audio',
+                  source: {
+                    type: 'base64',
+                    media_type: f.mediaType || 'application/octet-stream',
+                    data: f.data,
+                    filename: f.name || 'audio-input',
+                  },
+                }];
+              }
+              if (mediaType.startsWith('video/')) {
+                return [{
+                  type: 'video',
+                  source: {
+                    type: 'base64',
+                    media_type: f.mediaType || 'application/octet-stream',
+                    data: f.data,
+                    filename: f.name || 'video-input',
+                  },
+                }];
+              }
+              return [];
+            }) : undefined;
             // Save non-image file attachments to disk
             let fileNote = '';
             if (Array.isArray(msg.files) && msg.files.length > 0) {
@@ -2535,14 +4313,23 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               content: msg.content + fileNote,
               channelId: sessionId,
               channelName: isAcorn ? `acorn:${ws._user}` : 'control-panel',
+              // userId is server-trusted (from the authenticated WS session)
+              // to prevent spoofing another user's conversation. The client's
+              // msg.userId is ignored — only ws._user matters.
               userId: ws._user || 'operator',
-              userName: ws._user || msg.userName || 'Operator',
+              // userName is a display string only; client-chosen is fine.
+              userName: msg.userName || ws._user || 'Operator',
+              // Role comes from the WS session (server-trusted). The agent
+              // uses this to decide what it will / won't agree to do for
+              // non-creator users.
+              userRole: ws._role || (isAcorn ? 'acorn' : 'creator'),
               sessionToken: ws._sessionToken || null,
               trigger: 'dm',
               platform: isAcorn ? 'cli' : 'web',
               isDm: !isAcorn,
               clientCwd: ws._cwd || null,
               images,
+              media,
               onTextDelta: (delta) => {
                 if (isAcorn) {
                   this._sendToSession(sessionId, { type: 'chat:delta', text: delta });
@@ -2642,7 +4429,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
                 ]);
                 // Re-send chat:start for the retry
                 if (isAcorn) { this._sendToSession(sessionId, { type: 'chat:start', sessionId }); }
-                else { this.broadcast({ type: 'chat:start', sessionId }); }
+                else { try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch {} }
                 result = await this.tools._agent.processMessage(agentOpts);
               } catch (waitErr) {
                 this.log.error(`[ws] Interjection wait failed: ${waitErr.message}`);
@@ -2701,7 +4488,9 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             const result = await this.tools._agent.processMessage({
               content: msg.content,
               channelId: sessionId, channelName: 'voice-call',
-              userId: 'operator', userName: msg.userName || 'Operator',
+              userId: ws._user || 'operator',
+              userName: msg.userName || ws._user || 'Operator',
+              userRole: ws._role || 'creator',
               trigger: 'dm', platform: 'web', isDm: true,
               onTextDelta: (delta) => {
                 try { ws.send(JSON.stringify({ type: 'voice:delta', text: delta })); } catch { }
@@ -2766,7 +4555,9 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               ws.send(JSON.stringify({ type: 'voice:thinking' }));
               const result = await pipeline.processFromText(sttFirst.text, this.tools._agent, {
                 channelId: sessionId, channelName: 'voice-call',
-                userId: 'operator', userName: msg.userName || 'Operator',
+                userId: msg.userId || ws._user || 'operator',
+                userName: msg.userName || ws._user || 'Operator',
+                userRole: ws._role || 'creator',
                 trigger: 'dm', platform: 'web', isDm: true,
               });
               const resp = {
@@ -3088,7 +4879,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       const http_ = managerUrl.startsWith('https') ? require('https') : require('http');
       const val = await new Promise((resolve) => {
         const req = http_.get(`${managerUrl}/api/vault/key?name=${encodeURIComponent(keyName)}`, {
-          headers: { 'X-Service-Key': serviceKey, 'X-Anima-Id': this.config.agentId || 'unknown' },
+          headers: { 'X-Service-Key': serviceKey, 'X-SPORE-Id': this.config.agentId || 'unknown' },
           timeout: 5000,
         }, (res) => {
           let data = '';
@@ -3314,7 +5105,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
     res.end(JSON.stringify({ error: 'Unknown multi-graph endpoint' }));
   }
 
-  _handleGraphApiOnWeb(req, res, urlPath, db) {
+  async _handleGraphApiOnWeb(req, res, urlPath, db) {
     if (!db) { res.writeHead(503); res.end(JSON.stringify({ error: 'Graph database not available' })); return; }
 
     const MAX_BODY = 1024 * 256;
@@ -3335,11 +5126,567 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         for (const a of aliases) { (aliasesByNode[a.node_id] ||= []).push(a.alias); }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-          nodes: nodes.map(n => ({ id: n.id, label: n.label, type: n.type, description: n.description || '', importance: n.importance, mentions: n.mentions || 0, aliases: aliasesByNode[n.id] || [], aspects: aspectsByNode[n.id] || [] })),
+          nodes: nodes.map(n => {
+            let extra = null;
+            try { if (n.extra && n.extra !== '{}') extra = JSON.parse(n.extra); } catch {}
+            return { id: n.id, label: n.label, type: n.type, description: n.description || '', importance: n.importance, mentions: n.mentions || 0, aliases: aliasesByNode[n.id] || [], aspects: aspectsByNode[n.id] || [], extra };
+          }),
           edges: edges.map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })),
           meta: { nodeCount: nodes.length, edgeCount: edges.length },
         }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Maintainer on-demand + status ──
+    if (urlPath === '/api/maintainer/run' && req.method === 'POST') {
+      try {
+        const maintainer = this.tools?._maintainer;
+        if (!maintainer) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'maintainer not available' }));
+          return;
+        }
+        if (this._maintRunJob && this._maintRunJob.state === 'running') {
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ state: 'running', started: this._maintRunJob.started }));
+          return;
+        }
+        this._maintRunJob = { state: 'running', started: Date.now(), error: null, result: null };
+        maintainer.runMaintenance({ force: true })
+          .then(r => { this._maintRunJob = { state: 'done', started: this._maintRunJob.started, completed: Date.now(), result: r }; })
+          .catch(e => { this._maintRunJob = { state: 'error', started: this._maintRunJob.started, completed: Date.now(), error: e?.message || String(e) }; });
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ state: 'running', started: this._maintRunJob.started }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/maintainer/status' && req.method === 'GET') {
+      try {
+        const maintainer = this.tools?._maintainer;
+        const openGaps = db.prepare("SELECT COUNT(*) AS c FROM gaps WHERE status='open'").get()?.c || 0;
+        const dormantGaps = db.prepare("SELECT COUNT(*) AS c FROM gaps WHERE status='dormant'").get()?.c || 0;
+        const answeredGaps = db.prepare("SELECT COUNT(*) AS c FROM gaps WHERE status='answered'").get()?.c || 0;
+        const reflections = db.prepare("SELECT COUNT(*) AS c FROM reflections").get()?.c || 0;
+        let derived = 0;
+        try { derived = db.prepare("SELECT COUNT(*) AS c FROM derived_facts WHERE invalidated_at IS NULL").get()?.c || 0; } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          job: this._maintRunJob || { state: 'idle' },
+          last_run_at: maintainer?._lastRunAt || null,
+          running: !!maintainer?._running,
+          model: maintainer?.model || null,
+          stats: maintainer?.stats || {},
+          counts: { openGaps, dormantGaps, answeredGaps, reflections, derivedFacts: derived },
+        }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Janitor on-demand + status + recycling bin ──
+    if (urlPath === '/api/janitor/run' && req.method === 'POST') {
+      try {
+        const janitor = this.tools?._janitor;
+        if (!janitor) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'janitor not available' })); return; }
+        if (this._janitorRunJob && this._janitorRunJob.state === 'running') {
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ state: 'running', started: this._janitorRunJob.started }));
+          return;
+        }
+        this._janitorRunJob = { state: 'running', started: Date.now(), error: null, result: null };
+        janitor.runJanitor({ force: true })
+          .then(r => { this._janitorRunJob = { state: 'done', started: this._janitorRunJob.started, completed: Date.now(), result: r }; })
+          .catch(e => { this._janitorRunJob = { state: 'error', started: this._janitorRunJob.started, completed: Date.now(), error: e?.message || String(e) }; });
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ state: 'running', started: this._janitorRunJob.started }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/janitor/status' && req.method === 'GET') {
+      try {
+        const janitor = this.tools?._janitor;
+        let binCount = 0;
+        try { binCount = db.prepare('SELECT COUNT(*) AS c FROM recycle_bin').get()?.c || 0; } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          job: this._janitorRunJob || { state: 'idle' },
+          last_run_at: janitor?._lastRunAt || null,
+          running: !!janitor?._running,
+          model: janitor?.model || null,
+          mode: this.config.janitorMode || 'moderate',
+          interval_minutes: this.config.janitorIntervalMinutes || 360,
+          recycle_bin_ttl_days: this.config.janitorRecycleBinTtlDays || 14,
+          enabled: this.config.janitorEnabled !== false,
+          stats: janitor?.stats || {},
+          counts: { binItems: binCount },
+        }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/janitor/recycle-bin' && req.method === 'GET') {
+      try {
+        const janitor = this.tools?._janitor;
+        if (!janitor) { res.writeHead(503); res.end(JSON.stringify({ error: 'janitor not available' })); return; }
+        const u = new URL(req.url, 'http://x');
+        const limit = Math.min(500, Math.max(1, parseInt(u.searchParams.get('limit') || '100', 10)));
+        const offset = Math.max(0, parseInt(u.searchParams.get('offset') || '0', 10));
+        const out = janitor.listBin({ limit, offset });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/janitor/recycle-bin/empty' && req.method === 'POST') {
+      try {
+        const janitor = this.tools?._janitor;
+        if (!janitor) { res.writeHead(503); res.end(JSON.stringify({ error: 'janitor not available' })); return; }
+        const out = janitor.emptyBin();
+        res.writeHead(out.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    const binRestoreMatch = urlPath.match(/^\/api\/janitor\/restore\/(\d+)$/);
+    if (binRestoreMatch && req.method === 'POST') {
+      try {
+        const janitor = this.tools?._janitor;
+        if (!janitor) { res.writeHead(503); res.end(JSON.stringify({ error: 'janitor not available' })); return; }
+        const out = janitor.restoreItem(binRestoreMatch[1]);
+        res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    const binDeleteMatch = urlPath.match(/^\/api\/janitor\/recycle-bin\/(\d+)$/);
+    if (binDeleteMatch && req.method === 'DELETE') {
+      try {
+        const janitor = this.tools?._janitor;
+        if (!janitor) { res.writeHead(503); res.end(JSON.stringify({ error: 'janitor not available' })); return; }
+        const out = janitor.deleteBinItem(binDeleteMatch[1]);
+        res.writeHead(out.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/janitor/settings' && req.method === 'POST') {
+      try {
+        const body = await json();
+        const mode = String(body.mode || '').toLowerCase();
+        if (!['conservative', 'moderate', 'aggressive'].includes(mode)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid mode' }));
+          return;
+        }
+        this.config.janitorMode = mode;
+        // Persist via _applyEnvUpdates if available
+        try {
+          if (typeof this._applyEnvUpdates === 'function') {
+            this._applyEnvUpdates({ SPORE_JANITOR_MODE: mode });
+          }
+        } catch (e) { this.log.warn('[janitor-settings] persist failed: ' + e.message); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, mode }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Graph backup ──
+    if (urlPath === '/api/backups' && req.method === 'GET') {
+      try {
+        const backup = this.tools?._backup;
+        if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(backup.listBackups()));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/backups/run' && req.method === 'POST') {
+      try {
+        const backup = this.tools?._backup;
+        if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
+        const body = await json().catch(() => ({}));
+        const note = typeof body.note === 'string' ? body.note : null;
+        const out = await backup.runBackup({ force: true, note });
+        res.writeHead(out.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/backups/status' && req.method === 'GET') {
+      try {
+        const backup = this.tools?._backup;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          enabled: this.config.graphBackupEnabled !== false,
+          interval_minutes: this.config.graphBackupIntervalMinutes || 60,
+          retention: this.config.graphBackupRetention || 20,
+          on_change_only: this.config.graphBackupOnChangeOnly !== false,
+          dir: backup?._backupDir?.() || null,
+          stats: backup?.stats || {},
+        }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/backups/settings' && req.method === 'POST') {
+      try {
+        const backup = this.tools?._backup;
+        if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
+        const body = await json();
+        const changes = backup.applySettings({
+          intervalMinutes: typeof body.intervalMinutes === 'number' ? body.intervalMinutes : undefined,
+          retention: typeof body.retention === 'number' ? body.retention : undefined,
+          enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+          onChangeOnly: typeof body.onChangeOnly === 'boolean' ? body.onChangeOnly : undefined,
+        });
+        try {
+          if (typeof this._applyEnvUpdates === 'function') {
+            const envUpd = {};
+            if ('intervalMinutes' in changes) envUpd.SPORE_BACKUP_INTERVAL_MINUTES = String(changes.intervalMinutes);
+            if ('retention' in changes) envUpd.SPORE_BACKUP_RETENTION = String(changes.retention);
+            if ('enabled' in changes) envUpd.SPORE_BACKUP_ENABLED = changes.enabled ? 'true' : 'false';
+            if ('onChangeOnly' in changes) envUpd.SPORE_BACKUP_ON_CHANGE_ONLY = changes.onChangeOnly ? 'true' : 'false';
+            if (Object.keys(envUpd).length) this._applyEnvUpdates(envUpd);
+          }
+        } catch (e) { this.log.warn('[backup-settings] persist failed: ' + e.message); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, changes }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    const restoreMatch = urlPath.match(/^\/api\/backups\/restore$/);
+    if (restoreMatch && req.method === 'POST') {
+      try {
+        const backup = this.tools?._backup;
+        if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
+        const body = await json();
+        const filename = String(body.file || body.filename || '').trim();
+        if (!filename) { res.writeHead(400); res.end(JSON.stringify({ error: 'file required' })); return; }
+        const out = await backup.restoreBackup(filename);
+        res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    const backupDelMatch = urlPath.match(/^\/api\/backups\/([^\/]+)$/);
+    if (backupDelMatch && req.method === 'DELETE') {
+      try {
+        const backup = this.tools?._backup;
+        if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
+        const out = backup.deleteBackup(decodeURIComponent(backupDelMatch[1]));
+        res.writeHead(out.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Tailscale ─────────────────────────────────────────────────────
+    const TS_SOCKET = '/data/tailscale/ts.sock';
+    const _tsRun = (args, timeoutMs = 10000) => new Promise((resolve) => {
+      const { spawn } = require('child_process');
+      const proc = spawn('tailscale', ['--socket', TS_SOCKET, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '', err = '';
+      proc.stdout.on('data', c => { out += c.toString(); });
+      proc.stderr.on('data', c => { err += c.toString(); });
+      const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, timeoutMs);
+      proc.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout: out, stderr: err }); });
+      proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: e.message }); });
+    });
+
+    if (urlPath === '/api/tailscale/status' && req.method === 'GET') {
+      try {
+        const r = await _tsRun(['status', '--json'], 8000);
+        if (r.code !== 0) {
+          // daemon not running or socket missing
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ backend: 'Stopped', error: (r.stderr || '').trim().slice(0, 300), authUrl: this._tsAuthUrl || null }));
+          return;
+        }
+        let j = null;
+        try { j = JSON.parse(r.stdout); } catch (e) {
+          res.writeHead(500); res.end(JSON.stringify({ error: 'tailscale status parse: ' + e.message })); return;
+        }
+        const peers = [];
+        for (const key of Object.keys(j.Peer || {})) {
+          const p = j.Peer[key];
+          peers.push({ hostName: p.HostName, dnsName: p.DNSName, addrs: p.TailscaleIPs || [], online: !!p.Online, os: p.OS, tags: p.Tags || [] });
+        }
+        peers.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          backend: j.BackendState || 'Unknown',
+          tailnetIp: (j.Self?.TailscaleIPs || [])[0] || null,
+          hostname: j.Self?.HostName || null,
+          dnsName: j.Self?.DNSName || null,
+          peers,
+          peerCount: peers.length,
+          onlineCount: peers.filter(p => p.online).length,
+          authUrl: (j.BackendState === 'NeedsLogin' ? (this._tsAuthUrl || null) : null),
+        }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/tailscale/login' && req.method === 'POST') {
+      try {
+        // If already logged in, short-circuit.
+        const status = await _tsRun(['status', '--json'], 5000);
+        if (status.code === 0) {
+          try {
+            const j = JSON.parse(status.stdout);
+            if (j.BackendState === 'Running') {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ status: 'already-connected', tailnetIp: (j.Self?.TailscaleIPs || [])[0] || null }));
+              return;
+            }
+          } catch {}
+        }
+
+        // Spawn `tailscale up` non-blocking, parse out the login URL from stderr.
+        const { spawn } = require('child_process');
+        const hostname = this.config.tailscaleHostname || `spore-${this.config.agentId || 'agent'}`;
+        const args = [
+          '--socket', TS_SOCKET, 'up',
+          '--hostname', hostname,
+          '--operator', 'spore',
+          '--accept-routes',
+          '--ssh',
+          '--timeout=0',
+        ];
+        // Kill any stale previous login attempt
+        if (this._tsLoginProc && !this._tsLoginProc.killed) {
+          try { this._tsLoginProc.kill('SIGTERM'); } catch {}
+        }
+        this._tsAuthUrl = null;
+        const proc = spawn('tailscale', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        this._tsLoginProc = proc;
+        this._tsAuthUrlExpiresAt = Date.now() + 10 * 60_000;
+
+        const urlRegex = /https:\/\/login\.tailscale\.com\/a\/[A-Za-z0-9]+/;
+        const capture = (chunk) => {
+          const m = chunk.toString().match(urlRegex);
+          if (m && !this._tsAuthUrl) {
+            this._tsAuthUrl = m[0];
+            this.log.info(`[tailscale] login URL captured`);
+          }
+        };
+        proc.stdout.on('data', capture);
+        proc.stderr.on('data', capture);
+        proc.on('close', (code) => {
+          this.log.info(`[tailscale] up process exited ${code}`);
+          this._tsLoginProc = null;
+          // Clear auth URL once login completes successfully (status will now be Running)
+          if (code === 0) this._tsAuthUrl = null;
+        });
+
+        // Poll for URL up to 6s
+        let waited = 0;
+        while (!this._tsAuthUrl && waited < 6000) {
+          await new Promise(r => setTimeout(r, 200));
+          waited += 200;
+        }
+
+        if (!this._tsAuthUrl) {
+          // No URL printed — either daemon issue or already connecting
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'no-url-yet', message: 'tailscale up running; poll /api/tailscale/status' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'pending-auth', authUrl: this._tsAuthUrl, expiresAt: this._tsAuthUrlExpiresAt }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/tailscale/logout' && req.method === 'POST') {
+      try {
+        const r = await _tsRun(['logout'], 15000);
+        this._tsAuthUrl = null;
+        if (this._tsLoginProc && !this._tsLoginProc.killed) {
+          try { this._tsLoginProc.kill('SIGTERM'); } catch {}
+        }
+        res.writeHead(r.code === 0 ? 200 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: r.code === 0, stderr: (r.stderr || '').trim().slice(0, 300) }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Cluster settings ─────────────────────────────────────────────
+    if (urlPath === '/api/cluster/settings' && req.method === 'GET') {
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          clusterUsername: this.config.clusterUsername || '',
+          clusterLoginHost: this.config.clusterLoginHost || '',
+          clusterDefaultPartition: this.config.clusterDefaultPartition || '',
+          clusterTmuxPrefix: this.config.clusterTmuxPrefix || 'spore',
+          tailscaleHostname: this.config.tailscaleHostname || `spore-${this.config.agentId || 'agent'}`,
+        }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/cluster/settings' && req.method === 'POST') {
+      try {
+        const body = await json();
+        const envUpd = {};
+        const clean = (v) => (typeof v === 'string' ? v.trim() : '');
+        const updates = {};
+        if ('clusterUsername' in body) { updates.clusterUsername = clean(body.clusterUsername) || null; envUpd.SPORE_CLUSTER_USERNAME = clean(body.clusterUsername); }
+        if ('clusterLoginHost' in body) { updates.clusterLoginHost = clean(body.clusterLoginHost) || null; envUpd.SPORE_CLUSTER_LOGIN_HOST = clean(body.clusterLoginHost); }
+        if ('clusterDefaultPartition' in body) { updates.clusterDefaultPartition = clean(body.clusterDefaultPartition) || null; envUpd.SPORE_CLUSTER_PARTITION = clean(body.clusterDefaultPartition); }
+        if ('clusterTmuxPrefix' in body) {
+          const p = clean(body.clusterTmuxPrefix).replace(/[^a-zA-Z0-9_-]/g, '') || 'spore';
+          updates.clusterTmuxPrefix = p;
+          envUpd.SPORE_CLUSTER_TMUX_PREFIX = p;
+        }
+        if ('tailscaleHostname' in body) {
+          const h = clean(body.tailscaleHostname).replace(/[^a-zA-Z0-9.-]/g, '') || `spore-${this.config.agentId || 'agent'}`;
+          updates.tailscaleHostname = h;
+          envUpd.SPORE_TAILSCALE_HOSTNAME = h;
+        }
+        // Live-patch
+        Object.assign(this.config, updates);
+        try {
+          if (typeof this._applyEnvUpdates === 'function' && Object.keys(envUpd).length) {
+            this._applyEnvUpdates(envUpd);
+          }
+        } catch (e) { this.log.warn('[cluster-settings] persist failed: ' + e.message); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, saved: updates }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/cluster/test-ssh' && req.method === 'POST') {
+      try {
+        const body = await json().catch(() => ({}));
+        const user = String(body.user || this.config.clusterUsername || '').trim();
+        const host = String(body.host || this.config.clusterLoginHost || '').trim();
+        if (!user || !host) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'username and host required (set Cluster settings first)' }));
+          return;
+        }
+        const { spawn } = require('child_process');
+        const proc = spawn('ssh', [
+          '-o', 'BatchMode=yes',
+          '-o', 'ConnectTimeout=8',
+          '-o', 'StrictHostKeyChecking=accept-new',
+          '-o', 'UserKnownHostsFile=/data/.ssh-known-hosts',
+          `${user}@${host}`,
+          'hostname; which sbatch || echo no-slurm; sinfo --version 2>/dev/null || echo no-sinfo',
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let out = '', err = '';
+        proc.stdout.on('data', c => { out += c.toString(); });
+        proc.stderr.on('data', c => { err += c.toString(); });
+        const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12000);
+        const code = await new Promise((r) => { proc.on('close', (c) => { clearTimeout(timer); r(c); }); });
+        const output = (out || '').trim();
+        const stderr = (err || '').trim();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: code === 0,
+          code,
+          output: output.slice(0, 800),
+          stderr: stderr.slice(0, 800),
+          hint: code !== 0 ? 'SSH failed — add a public key for this host (check ~/.ssh/authorized_keys on the login node). If the hostname is unreachable, verify tailscale is connected.' : null,
+        }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Provider smoke tests ──
+    if (urlPath.startsWith('/api/providers/') && urlPath.endsWith('/test') && req.method === 'POST') {
+      const name = urlPath.slice('/api/providers/'.length, -'/test'.length);
+      const body = await _readJsonBody(req);
+      try {
+        const result = await _probeProvider(name, body);
+        res.writeHead(result.ok ? 200 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // ── List models from a provider's /models endpoint ──
+    if (urlPath === '/api/providers/list-models' && req.method === 'POST') {
+      const body = await _readJsonBody(req);
+      try {
+        const result = await _listModelsForProvider(body);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // ── Model tier smoke tests ──
+    if (urlPath.startsWith('/api/models/') && urlPath.endsWith('/test') && req.method === 'POST') {
+      const tier = urlPath.slice('/api/models/'.length, -'/test'.length);
+      const body = await _readJsonBody(req);
+      try {
+        const result = await _probeModelTier(tier, body, this.config);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // ── Web search smoke test ──
+    if (urlPath === '/api/websearch/test' && req.method === 'POST') {
+      const body = await _readJsonBody(req);
+      try {
+        const { searchWeb } = require('../lib/web-search');
+        const searxngUrl = String(body.searxngUrl || this.config.searxngUrl || '').trim();
+        let searxngApiKey = String(body.searxngApiKey || '').trim();
+        if (!searxngApiKey || searxngApiKey === '***hidden***') searxngApiKey = this.config.searxngApiKey || '';
+        let braveApiKey = String(body.braveApiKey || '').trim();
+        if (!braveApiKey || braveApiKey === '***hidden***') braveApiKey = this.config.braveApiKey || '';
+        if (!searxngUrl && !braveApiKey) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'No search provider configured' }));
+          return;
+        }
+        const t0 = Date.now();
+        const result = await searchWeb({ query: 'spore web search smoke test', count: 3, searxngUrl, searxngApiKey, braveApiKey, log: this.log });
+        const latency = Date.now() - t0;
+        if (result?.error) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: result.error, latency_ms: latency }));
+          return;
+        }
+        const results = Array.isArray(result?.results) ? result.results : [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          provider: result?.provider || 'unknown',
+          result_count: results.length,
+          latency_ms: latency,
+          excerpt: results[0]?.title || result?.note || '',
+        }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
       return;
     }
 
@@ -3350,6 +5697,64 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(summary || { error: 'No token data yet' }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Research selected nodes via the agent ──
+    if (urlPath === '/api/graph/research' && req.method === 'POST') {
+      try {
+        const body = await _readJsonBody(req);
+        const ids = Array.isArray(body.nodeIds) ? body.nodeIds.filter(x => typeof x === 'string').slice(0, 12) : [];
+        if (!ids.length) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'nodeIds (1-12) required' })); return; }
+        const agent = this.tools?._agent;
+        if (!agent || !agent.client) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Agent loop not initialised — finish onboarding first.' })); return; }
+
+        // Build a focused brief per node so the agent has concrete context.
+        const brief = ids.map(id => {
+          const n = db.prepare('SELECT id, label, type, description FROM nodes WHERE id = ?').get(id);
+          if (!n) return null;
+          const aspects = db.prepare('SELECT id, name FROM aspects WHERE node_id = ? ORDER BY weight DESC LIMIT 6').all(id);
+          const aspectLines = aspects.map(a => {
+            const attrs = db.prepare('SELECT content FROM attributes WHERE aspect_id = ? ORDER BY importance DESC LIMIT 4').all(a.id);
+            return `  • ${a.name}: ${attrs.map(at => at.content).join(' | ').slice(0, 220)}`;
+          }).join('\n');
+          return `- **${n.label}** (\`${n.id}\`, type=${n.type})\n  ${n.description || '_(no description)_'}\n${aspectLines}`;
+        }).filter(Boolean).join('\n\n');
+
+        if (!brief) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'No matching nodes found' })); return; }
+
+        const prompt = [
+          `Research request: bring the following node(s) up to date with the latest information from the web and your own knowledge.`,
+          ``,
+          brief,
+          ``,
+          `Steps:`,
+          `1. Use **web_search** (and **web_fetch** when you need full article context) to find recent, authoritative info about each node.`,
+          `2. Then use **graph_update** to record what you learned: add new attributes to existing aspects, create new aspects on the same node, or create entirely new connected nodes when something genuinely new comes up.`,
+          `3. Do NOT delete anything that already exists. Be additive.`,
+          `4. When you're done, post a short summary of what you changed.`,
+        ].join('\n');
+
+        const sessionKey = `research-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        // Fire and forget — the agent's graph_update calls will broadcast via
+        // graphEvents and the viewer will pick them up over its existing WS.
+        agent.processMessage({
+          content: prompt,
+          channelId: sessionKey,
+          channelName: 'research',
+          userId: 'operator',
+          userName: 'Operator',
+          trigger: 'dm',
+          platform: 'web',
+          isDm: true,
+        }).catch(e => this.log.warn(`[research] agent run failed: ${e.message}`));
+
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, sessionKey, nodeCount: ids.length }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
       return;
     }
 

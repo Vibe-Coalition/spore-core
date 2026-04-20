@@ -45,3 +45,16 @@ traefik/
 
 # Backup files
 *.bak
+
+# Timestamped backup files (created by ad-hoc rebuild/rebrand snapshots)
+*.bak.*
+
+# Full-tree snapshot tarballs from rebrands
+.spore-rename-snapshot.*.tgz
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# Large test assets (not needed in git)
+src/static/test-assets/

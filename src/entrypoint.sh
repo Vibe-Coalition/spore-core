@@ -1,10 +1,10 @@
 #!/bin/sh
 # Entrypoint: fixes bind-mount ownership, seeds agent-owned directories,
 # ensures a persistent Python venv, generates an env manifest, then starts
-# node as the unprivileged anima user (UID/GID 2000).
+# node as the unprivileged spore user (UID/GID 2000).
 #
 # The container starts as root so we can chown bind-mounted volumes, then
-# drops to anima (2000:2000) via setpriv before exec-ing node.
+# drops to spore (2000:2000) via setpriv before exec-ing node.
 
 TOOLS_SRC="/app/tools-default"
 TOOLS_DEST="/app/tools"
@@ -12,37 +12,37 @@ VENV_PATH="/workspace/.venv"
 MANIFEST="/workspace/.env-manifest.json"
 CRONTAB_PERSIST_DIR="/workspace/.crontabs"
 
-# ── Fixed anima identity ─────────────────────────────────────────────
-# All anima containers run as UID/GID 2000 (anima:anima).
+# ── Fixed spore identity ─────────────────────────────────────────────
+# All spore containers run as UID/GID 2000 (spore:spore).
 # Host admins (ubuntu, connor) access files via group membership.
-ANIMA_UID=2000
-ANIMA_GID=2000
+SPORE_UID=2000
+SPORE_GID=2000
 
 # ── Fix bind-mount ownership ────────────────────────────────────────
-chown -R "$ANIMA_UID:$ANIMA_GID" /data /workspace /app/tools 2>/dev/null || true
-chown -R "$ANIMA_UID:$ANIMA_GID" /app/plugins 2>/dev/null || true
+chown -R "$SPORE_UID:$SPORE_GID" /data /workspace /app/tools 2>/dev/null || true
+chown -R "$SPORE_UID:$SPORE_GID" /app/plugins 2>/dev/null || true
 # Group-write so the manager container (UID 1000, GID 2000 supplementary) can
-# update .env and anima.json through the shared bind mount
+# update .env and spore.json through the shared bind mount
 chmod -R g+rw /data 2>/dev/null || true
 
-# ── Shared volumes — group-writable for all anima instances ────────
+# ── Shared volumes — group-writable for all spore instances ────────
 if [ -d /shared/skills ]; then
-  chgrp -R "$ANIMA_GID" /shared/skills 2>/dev/null || true
+  chgrp -R "$SPORE_GID" /shared/skills 2>/dev/null || true
   chmod 2775 /shared/skills 2>/dev/null || true
   chmod g+rw /shared/skills/* 2>/dev/null || true
 fi
 
-mkdir -p "$CRONTAB_PERSIST_DIR" /home/anima 2>/dev/null || true
-chown -R "$ANIMA_UID:$ANIMA_GID" "$CRONTAB_PERSIST_DIR" /home/anima 2>/dev/null || true
-chmod 700 "$CRONTAB_PERSIST_DIR" /home/anima 2>/dev/null || true
+mkdir -p "$CRONTAB_PERSIST_DIR" /home/spore 2>/dev/null || true
+chown -R "$SPORE_UID:$SPORE_GID" "$CRONTAB_PERSIST_DIR" /home/spore 2>/dev/null || true
+chmod 700 "$CRONTAB_PERSIST_DIR" /home/spore 2>/dev/null || true
 export CRONTAB_PERSIST_DIR
-export HOME="/home/anima"
+export HOME="/home/spore"
 
 # Seed /app/tools from image snapshot if the volume is empty
 if [ -d "$TOOLS_SRC" ] && [ -z "$(ls -A $TOOLS_DEST 2>/dev/null)" ]; then
   echo "[entrypoint] seeding /app/tools from image defaults"
   cp -r "$TOOLS_SRC/." "$TOOLS_DEST/"
-  chown -R "$ANIMA_UID:$ANIMA_GID" "$TOOLS_DEST" 2>/dev/null || true
+  chown -R "$SPORE_UID:$SPORE_GID" "$TOOLS_DEST" 2>/dev/null || true
 fi
 
 # Create persistent Python venv on the workspace volume if it doesn't exist.
@@ -160,7 +160,7 @@ if [ -f "$APT_MANIFEST" ] && [ -s "$APT_MANIFEST" ]; then
 fi
 
 # ── Restore persisted crontabs and start cron ──────────────────────
-if [ "${ANIMA_ENABLE_CRON:-true}" != "false" ] && command -v /usr/bin/crontab >/dev/null 2>&1; then
+if [ "${SPORE_ENABLE_CRON:-true}" != "false" ] && command -v /usr/bin/crontab >/dev/null 2>&1; then
   for file in "$CRONTAB_PERSIST_DIR"/*; do
     [ -f "$file" ] || continue
     user="$(basename "$file")"
@@ -180,19 +180,55 @@ if [ "${ANIMA_ENABLE_CRON:-true}" != "false" ] && command -v /usr/bin/crontab >/
   fi
 fi
 
+# ── Tailscale daemon (userspace mode) ──────────────────────────────
+# Start tailscaled in the background so the container can reach private
+# tailnets. Userspace mode avoids needing NET_ADMIN / /dev/net/tun.
+# State persists to /data/tailscale so login survives restart.
+# Actual `tailscale up` (SSO login) is triggered from the web settings
+# panel — we only start the daemon here.
+if [ "${SPORE_TAILSCALE_ENABLED:-false}" = "true" ] || [ -d /data/tailscale ]; then
+  TS_DIR="/data/tailscale"
+  mkdir -p "$TS_DIR"
+  chown "$SPORE_UID:$SPORE_GID" "$TS_DIR" 2>/dev/null || true
+  if command -v tailscaled >/dev/null 2>&1; then
+    if ! pgrep -x tailscaled >/dev/null 2>&1; then
+      echo "[entrypoint] starting tailscaled (userspace-networking)"
+      # Socket owned by spore so the agent can run `tailscale` without sudo.
+      # SOCKS5 + HTTP proxy exposed on localhost for any tooling that wants
+      # to tunnel through the tailnet.
+      tailscaled \
+        --tun=userspace-networking \
+        --state="$TS_DIR/state" \
+        --socket="$TS_DIR/ts.sock" \
+        --socks5-server=localhost:1055 \
+        --outbound-http-proxy-listen=localhost:1055 \
+        > "$TS_DIR/tailscaled.log" 2>&1 &
+      # Give the socket a moment, then chown so spore can talk to it
+      for i in 1 2 3 4 5; do
+        [ -S "$TS_DIR/ts.sock" ] && break
+        sleep 0.4
+      done
+      chown "$SPORE_UID:$SPORE_GID" "$TS_DIR/ts.sock" 2>/dev/null || true
+      chmod 660 "$TS_DIR/ts.sock" 2>/dev/null || true
+    fi
+  else
+    echo "[entrypoint] tailscaled not installed — skipping"
+  fi
+fi
+
 # ── User on-boot script ──────────────────────────────────────────────
 # Agents can create /workspace/.on-boot.sh to start custom servers,
 # daemons, or other processes that should survive container restarts.
 ON_BOOT="/workspace/.on-boot.sh"
 if [ -f "$ON_BOOT" ] && [ -s "$ON_BOOT" ]; then
   echo "[entrypoint] running user on-boot script in background..."
-  (setpriv --reuid="$ANIMA_UID" --regid="$ANIMA_GID" --init-groups sh "$ON_BOOT" > /workspace/.on-boot.log 2>&1 && echo "[entrypoint] on-boot script finished") &
+  (setpriv --reuid="$SPORE_UID" --regid="$SPORE_GID" --init-groups sh "$ON_BOOT" > /workspace/.on-boot.log 2>&1 && echo "[entrypoint] on-boot script finished") &
 fi
 
 # Final ownership pass — catches files created by the setup steps above
-chown -R "$ANIMA_UID:$ANIMA_GID" /data /workspace 2>/dev/null || true
+chown -R "$SPORE_UID:$SPORE_GID" /data /workspace 2>/dev/null || true
 
-# Run the node process — always drop to unprivileged anima user (2000:2000).
+# Run the node process — always drop to unprivileged spore user (2000:2000).
 # Package installation is handled via restricted sudo (apt-get/apt/dpkg only).
 umask 0002
-exec setpriv --reuid="$ANIMA_UID" --regid="$ANIMA_GID" --init-groups node index.js
+exec setpriv --reuid="$SPORE_UID" --regid="$SPORE_GID" --init-groups node index.js

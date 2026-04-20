@@ -120,6 +120,34 @@ class ToolSystem {
     }, 3000);
   }
 
+  _currentConversationTarget() {
+    const channelId = this._currentChannelId;
+    if (!channelId) return null;
+    const raw = String(channelId);
+    if (/^[a-z]+:/i.test(raw)) return raw;
+    const platform = String(this._currentPlatform || 'discord').toLowerCase();
+    return `${platform}:${raw}`;
+  }
+
+  _resolveMessageTargetInput(input = {}) {
+    return input.target || input.channelId || this._currentConversationTarget() || null;
+  }
+
+  _resolveMessageTargetMeta(input = {}) {
+    const target = this._resolveMessageTargetInput(input);
+    let platform = String(input.platform || this._currentPlatform || 'discord').toLowerCase();
+    if (this.platformManager) {
+      const parsed = this.platformManager.parseTarget({ target, platform });
+      return { target, platform: parsed.platform, id: parsed.id };
+    }
+    const match = /^([^:]+):(.+)$/.exec(String(target || ''));
+    if (match) {
+      platform = match[1].toLowerCase() === 'tg' ? 'telegram' : match[1].toLowerCase();
+      return { target, platform, id: match[2] };
+    }
+    return { target, platform, id: target };
+  }
+
   /**
    * Get tool definitions for the Anthropic API
    */
@@ -149,7 +177,7 @@ class ToolSystem {
       },
       {
         name: 'message_send',
-        description: 'Send a message to a chat target. Supports Discord and Telegram. Use `target` like `discord:123` or `telegram:456`. For backward compatibility, `channelId` also works.',
+        description: 'Send a message to a chat target. Supports Discord and Telegram. If `target`/`channelId` is omitted, the current conversation is used. For cross-chat sends, use `target` like `discord:123` or `telegram:456`. For backward compatibility, `channelId` also works.',
         input_schema: {
           type: 'object',
           properties: {
@@ -175,7 +203,7 @@ class ToolSystem {
       },
       {
         name: 'message_react',
-        description: 'React to a message with an emoji when supported by the target platform. Use `target` like `discord:123` or `telegram:456`. Legacy `channelId` also works.',
+        description: 'React to a message with an emoji when supported by the target platform. If `target`/`channelId` is omitted, the current conversation is used. For cross-chat actions, use `target` like `discord:123` or `telegram:456`. Legacy `channelId` also works.',
         input_schema: {
           type: 'object',
           properties: {
@@ -189,7 +217,7 @@ class ToolSystem {
       },
       {
         name: 'message_edit',
-        description: 'Edit a message you previously sent when supported by the platform. Use `target` like `discord:123` or `telegram:456`. Legacy `channelId` also works.',
+        description: 'Edit a message you previously sent when supported by the platform. If `target`/`channelId` is omitted, the current conversation is used. For cross-chat edits, use `target` like `discord:123` or `telegram:456`. Legacy `channelId` also works.',
         input_schema: {
           type: 'object',
           properties: {
@@ -203,7 +231,7 @@ class ToolSystem {
       },
       {
         name: 'message_read',
-        description: 'Read recent messages from a chat target. Discord reads live platform history; Telegram reads recent in-memory history seen by Anima.',
+        description: 'Read recent messages from a chat target. If `target`/`channelId` is omitted, the current conversation is used. Discord reads live platform history; Telegram reads recent in-memory history seen by the agent.',
         input_schema: {
           type: 'object',
           properties: {
@@ -256,7 +284,7 @@ class ToolSystem {
           properties: {
             entity: {
               type: 'string',
-              description: 'Entity name or ID to reason about (e.g. "kyle", "anima-project")',
+              description: 'Entity name or ID to reason about (e.g. "kyle", "spore-project")',
             },
             question: {
               type: 'string',
@@ -268,7 +296,15 @@ class ToolSystem {
       },
       {
         name: 'graph_update',
-        description: 'Update or create a node in the knowledge graph. Can also add aspects (facets) with attributes (facts) and edges (relationships). Use to persist learned information. IMPORTANT: Always use graph_query first to check if a node already exists before creating a new one — duplicate nodes fragment knowledge.' +
+        description: 'Update or create a node in the knowledge graph. Can also add aspects (facets) with attributes (facts) and edges (relationships). Use to persist learned information. IMPORTANT: Always use graph_query first to check if a node already exists before creating a new one — duplicate nodes fragment knowledge.\n\n' +
+          '**Use `temp: true` aggressively for task-scoped scratch nodes** — error logs, crawl dumps, debug traces, intermediate batch outputs, diagnostic captures, one-off project scaffolds, anything you\'d want to reference for the next 10 minutes but never again. The graph auto-cleans them after 48h of inactivity. This is CHEAP — don\'t hoard everything in the permanent graph out of fear of losing it. A graph packed with stale "crawl-run-3-errors" nodes is worse than one that forgot them.\n\n' +
+          'Concrete cases where temp: true is correct:\n' +
+          '- Logging errors/failures from a single task run → `temp: true`\n' +
+          '- Capturing a batch of crawled URLs/items that you\'ll process once → `temp: true`\n' +
+          '- Recording a temporary port-forward, tunnel config, or session token → `temp: true`\n' +
+          '- Holding intermediate data between tool calls during one task → `temp: true`\n' +
+          '- Scratch todo lists / working outlines you\'ll throw away once done → `temp: true`\n\n' +
+          'Pass `temp: false` to promote a previously-temp node you now want to keep. Omit `temp` to leave lifetime unchanged.' +
           (this.config.personalityEditable ? '' : ' Note: personality aspects (identity, voice, rules) on your own node are read-only.'),
         input_schema: {
           type: 'object',
@@ -277,6 +313,7 @@ class ToolSystem {
             label: { type: 'string', description: 'Human-readable label' },
             type: { type: 'string', description: 'Node type (person, concept, project, etc.)' },
             description: { type: 'string', description: 'Node description text' },
+            temp: { type: 'boolean', description: 'true = ephemeral scratch node (auto-purges after ~48h); false = promote to permanent; omitted = leave lifetime unchanged.' },
             aspects: {
               type: 'array',
               description: 'Aspects (facets) to add to the node',
@@ -489,7 +526,7 @@ class ToolSystem {
           const p = (this.config.ingressPath || '').replace(/\/$/, '');
           const pr = this.config.ingressHttps ? 'https' : 'http';
           const pub = d ? `${pr}://${d}${p}` : null;
-          return `Start, stop, or check your web server. ${pub ? `Public URL: ${pub}/` : `Internal port: ${this.config.webPort || '<ANIMA_WEB_PORT>'}.`}
+          return `Start, stop, or check your web server. ${pub ? `Public URL: ${pub}/` : `Internal port: ${this.config.webPort || '<SPORE_WEB_PORT>'}.`}
 
 For apps with a backend API, use action:"backend" — it:
 - Starts the web server for static files from the directory
@@ -499,7 +536,7 @@ For apps with a backend API, use action:"backend" — it:
 - Manages process lifecycle (kills stale, restarts clean)
 - PERSISTS across container restarts — backend auto-restores on boot with fresh vault keys
 
-CRITICAL ROUTING: Traefik strips the path prefix (${p || '/animas/<name>'}) before requests reach your server. Your backend receives paths relative to root.
+CRITICAL ROUTING: Traefik strips the path prefix (${p || '/spores/<name>'}) before requests reach your server. Your backend receives paths relative to root.
 CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/endpoint') or fetch('./api/endpoint') with credentials:'include'. NEVER use absolute paths like fetch('/api/endpoint') — they bypass the proxy entirely.`;
         })(),
         input_schema: {
@@ -513,29 +550,79 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
           required: ['action'],
         },
       },
-      // Browser tool — only registered if Playwright is installed
-      ...(() => {
-        try { require('playwright-core'); } catch { try { require('playwright'); } catch { return []; } }
-        return [{
-          name: 'browser',
-          description: 'Control a live Chromium browser with streaming visual preview. The control panel shows a floating video feed of what the browser sees in real-time. Use for web scraping, testing, form automation, or visual verification. Actions: launch (opens browser, optionally with a URL), navigate (go to URL), click (CSS selector), type (fill input), screenshot (high-quality capture), scroll (up/down), evaluate (run JS), close (stop browser). The browser persists across tool calls — launch once, then navigate/interact as needed.',
-          input_schema: {
-            type: 'object',
-            properties: {
-              action: { type: 'string', enum: ['launch', 'navigate', 'click', 'type', 'screenshot', 'scroll', 'evaluate', 'close', 'status'], description: 'Browser action to perform' },
-              url: { type: 'string', description: 'URL to open (for launch/navigate)' },
-              selector: { type: 'string', description: 'CSS selector (for click/type)' },
-              text: { type: 'string', description: 'Text to type (for type action)' },
-              direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default: down)' },
-              amount: { type: 'number', description: 'Scroll pixels (default: 500)' },
-              expression: { type: 'string', description: 'JavaScript expression to evaluate in page context' },
-              width: { type: 'number', description: 'Viewport width (default: 1280, for launch only)' },
-              height: { type: 'number', description: 'Viewport height (default: 720, for launch only)' },
-            },
-            required: ['action'],
+      {
+        name: 'browser',
+        description: `Control a persistent Chromium browser for web scraping, testing, form automation, or visual verification. Backends: zendriver (continuous frame preview via repeated screenshots) and playwright (live screencast preview). Default backend follows this instance's browser setting (${this.config.browserBackend || 'zendriver'}) unless another backend is already active. Actions: launch (opens browser, optionally with a URL), navigate (go to URL), click (CSS selector), type (fill input), screenshot (high-quality capture that also saves a JPG and returns filePath for message_send), scroll (up/down), evaluate (run JS), close (stop browser), status (inspect current backend/session). The browser persists across tool calls — launch once, then navigate/interact as needed.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['launch', 'navigate', 'click', 'type', 'screenshot', 'scroll', 'evaluate', 'close', 'status'], description: 'Browser action to perform' },
+            backend: { type: 'string', enum: ['playwright', 'zendriver'], description: 'Browser backend to use. If omitted, the instance default is used unless another backend is already active.' },
+            url: { type: 'string', description: 'URL to open (for launch/navigate)' },
+            selector: { type: 'string', description: 'CSS selector (for click/type)' },
+            text: { type: 'string', description: 'Text to type (for type action)' },
+            direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default: down)' },
+            amount: { type: 'number', description: 'Scroll pixels (default: 500)' },
+            expression: { type: 'string', description: 'JavaScript expression to evaluate in page context' },
+            width: { type: 'number', description: 'Viewport width (default: 1280, for launch only)' },
+            height: { type: 'number', description: 'Viewport height (default: 720, for launch only)' },
           },
-        }];
-      })(),
+          required: ['action'],
+        },
+      },
+      {
+        name: 'analyze_media',
+        description: 'Generic media analysis tool. Prefer `analyze_media` for uploaded attachments because it auto-detects image/video/audio from the file path or latest upload, then uses the matching dedicated VLM tier internally. Use `kind` only to force a modality when the file extension is ambiguous (for example .webm). You still write the final answer yourself.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Optional absolute path or basename of an uploaded media file. If omitted, the latest uploaded attachment is used.' },
+            prompt: { type: 'string', description: 'What to analyze. Defaults to a concise modality-specific analysis prompt.' },
+            kind: { type: 'string', enum: ['auto', 'image', 'video', 'audio'], description: 'Optional media type override. Defaults to auto-detect.' },
+            maxTokens: { type: 'number', description: 'Optional output cap for the VLM subcall (default 1200, max 4000).' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'analyze_image',
+        description: 'Use the dedicated IMAGE_VLM model to inspect an image file and return an internal analysis. Use this on uploaded images saved in /workspace/uploads when you want a specialized multimodal subcall. `path` may be omitted to use the latest uploaded image. You still write the final answer yourself.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Optional absolute path or basename of an image file (for example from /workspace/uploads/...). If omitted, the latest uploaded image is used.' },
+            prompt: { type: 'string', description: 'What to look for in the image. Defaults to a general descriptive analysis.' },
+            maxTokens: { type: 'number', description: 'Optional output cap for the VLM subcall (default 1200, max 4000).' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'analyze_video',
+        description: 'Use the dedicated VIDEO_VLM model to inspect a video file and return an internal analysis. Use this on uploaded videos saved in /workspace/uploads when you want a specialized multimodal subcall. `path` may be omitted to use the latest uploaded video. You still write the final answer yourself.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Optional absolute path or basename of a video file (for example from /workspace/uploads/...). If omitted, the latest uploaded video is used.' },
+            prompt: { type: 'string', description: 'What to analyze in the video. Defaults to a general scene/event summary.' },
+            maxTokens: { type: 'number', description: 'Optional output cap for the VLM subcall (default 1200, max 4000).' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'analyze_audio',
+        description: 'Use the dedicated AUDIO_VLM model to inspect an audio file and return an internal analysis. Use this on uploaded audio saved in /workspace/uploads when you want a specialized multimodal subcall. `path` may be omitted to use the latest uploaded audio file. You still write the final answer yourself.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Optional absolute path or basename of an audio file (for example from /workspace/uploads/...). If omitted, the latest uploaded audio file is used.' },
+            prompt: { type: 'string', description: 'What to extract from the audio. Defaults to transcription plus salient analysis.' },
+            maxTokens: { type: 'number', description: 'Optional output cap for the VLM subcall (default 1200, max 4000).' },
+          },
+          required: [],
+        },
+      },
       {
         name: 'save_tool',
         description: 'Create and register a new tool as a script. Saves to workspace/tools/, registers in TOOLS_REGISTRY.json, and creates a graph node (type: "tool") so tools are visible in the knowledge graph and discoverable by other agents.',
@@ -564,7 +651,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       },
       {
         name: 'notify_user',
-        description: 'Send a notification to YOUR user across all active channels (web panel, Discord, Telegram). Use this when another anima asks you to relay a message, when you have an important update to deliver proactively, or when a background process produces a result the user should see immediately. The message is delivered as-is — write it as you want the user to read it.',
+        description: 'Send a notification to YOUR user across all active channels (web panel, Discord, Telegram). Use this when another spore asks you to relay a message, when you have an important update to deliver proactively, or when a background process produces a result the user should see immediately. The message is delivered as-is — write it as you want the user to read it.',
         input_schema: {
           type: 'object',
           properties: {
@@ -594,7 +681,11 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     return [
       {
         name: 'remote_exec',
-        description: `Execute a command on a remote SSH host. Available hosts: ${hostList}. Returns stdout, stderr, and exit code.`,
+        description: `Execute a command on a remote SSH host. Available hosts: ${hostList}. Returns stdout, stderr, and exit code.
+
+For long-running jobs (SLURM submissions, training runs, anything over ~30s) pass a tmux_session name — the command runs inside a named tmux session on the remote host and survives SSH disconnects. Re-read output later with remote_tail; kill with remote_tmux_kill. Session names are auto-prefixed with "${this.config.clusterTmuxPrefix || 'spore'}-" so cleanup is safe.
+
+Set wait:false when you've submitted a long background job and just want to return the session name immediately.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -602,8 +693,35 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
             command: { type: 'string', description: 'Shell command to execute' },
             workdir: { type: 'string', description: 'Remote working directory (optional)' },
             timeout: { type: 'number', description: 'Timeout in ms (default 30000, max 120000)' },
+            tmux_session: { type: 'string', description: 'Optional named tmux session on the remote host. Required for any command that may run longer than the timeout. The prefix is auto-applied.' },
+            wait: { type: 'boolean', description: 'Only with tmux_session: wait for the command to finish (default true). false = return immediately with session name for later remote_tail.' },
           },
           required: ['host', 'command'],
+        },
+      },
+      {
+        name: 'remote_tail',
+        description: `Read current output from a named tmux session on a remote host. Use this to check progress of long-running jobs started with remote_exec + tmux_session. Available hosts: ${hostList}.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            host: { type: 'string', description: `Host ID — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            tmux_session: { type: 'string', description: 'Session name (prefix auto-applied if missing).' },
+            lines: { type: 'number', description: 'Number of lines of scrollback to capture (default 200, max 2000).' },
+          },
+          required: ['host', 'tmux_session'],
+        },
+      },
+      {
+        name: 'remote_tmux_kill',
+        description: `Kill a named tmux session on a remote host (and the process running inside). Available hosts: ${hostList}.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            host: { type: 'string', description: `Host ID — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            tmux_session: { type: 'string', description: 'Session name (prefix auto-applied if missing).' },
+          },
+          required: ['host', 'tmux_session'],
         },
       },
       {
@@ -692,7 +810,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     return [
       {
         name: 'skill_lookup',
-        description: `Search or read from the shared Anima skills library. Skills are reusable knowledge contributed by any Anima. Current skills: ${skillList}. Use action "list" to browse, "search" to filter, "read" to get full content.`,
+        description: `Search or read from the shared SPORE skills library. Skills are reusable knowledge contributed by any agent. Current skills: ${skillList}. Use action "list" to browse, "search" to filter, "read" to get full content.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -706,7 +824,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       },
       {
         name: 'skill_update',
-        description: 'Create or update a skill in the shared Anima skills library. Use this to share knowledge you\'ve figured out (API patterns, workflows, solutions) so other Animas don\'t have to rediscover it. Write clear, actionable content — include code examples, exact parameters, and gotchas.',
+        description: 'Create or update a skill in the shared SPORE skills library. Use this to share knowledge you\'ve figured out (API patterns, workflows, solutions) so other agents don\'t have to rediscover it. Write clear, actionable content — include code examples, exact parameters, and gotchas.',
         input_schema: {
           type: 'object',
           properties: {
@@ -753,21 +871,21 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     return [
       {
         name: 'anima_list',
-        description: 'List all anima instances on this server with their status and model. Use to discover who else is around before messaging.',
+        description: 'List all spore instances on this server with their status and model. Use to discover who else is around before messaging.',
         input_schema: {
           type: 'object',
           properties: {
-            includeHealth: { type: 'boolean', description: 'Fetch live health status for each anima (slightly slower). Default true.' },
+            includeHealth: { type: 'boolean', description: 'Fetch live health status for each spore (slightly slower). Default true.' },
           },
         },
       },
       {
-        name: 'anima_message',
-        description: 'Send a message to another anima and get its response. The target anima processes it through its full agent loop with its own personality, tools, and knowledge graph. Use for asking questions, collaborating on tasks, or just chatting with other animas. To relay a message to another anima\'s user, be explicit: "Please tell your user [message]" — the target anima will use notify_user to deliver it.',
+        name: 'spore_message',
+        description: 'Send a message to another spore and get its response. The target spore processes it through its full agent loop with its own personality, tools, and knowledge graph. Use for asking questions, collaborating on tasks, or just chatting with other animas. To relay a message to another spore\'s user, be explicit: "Please tell your user [message]" — the target spore will use notify_user to deliver it.',
         input_schema: {
           type: 'object',
           properties: {
-            target: { type: 'string', description: 'Target anima ID (e.g. "ada", "bob-the-builder")' },
+            target: { type: 'string', description: 'Target spore ID (e.g. "ada", "bob-the-builder")' },
             message: { type: 'string', description: 'The message to send' },
             context: { type: 'string', description: 'Optional context to include' },
             timeout: { type: 'number', description: 'Timeout in seconds (default 120, max 300)' },
@@ -782,11 +900,11 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     return [
       {
         name: 'anima_graph',
-        description: 'Read or write to another anima\'s knowledge graph. Requires super agent privileges. Use "read" to search/query nodes, or "write" to add/update nodes, aspects, attributes, and edges.',
+        description: 'Read or write to another spore\'s knowledge graph. Requires super agent privileges. Use "read" to search/query nodes, or "write" to add/update nodes, aspects, attributes, and edges.',
         input_schema: {
           type: 'object',
           properties: {
-            target: { type: 'string', description: 'Target anima ID' },
+            target: { type: 'string', description: 'Target spore ID' },
             mode: { type: 'string', description: '"read" or "write"', enum: ['read', 'write'] },
             query: { type: 'string', description: '(read) Search query for nodes' },
             nodeId: { type: 'string', description: '(read) Get specific node by ID, (write) Node ID to create/update' },
@@ -824,11 +942,11 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       },
       {
         name: 'anima_manage',
-        description: 'Administrative control over another anima. Requires super agent privileges. Can restart, update environment variables, update config, or check token usage and logs.',
+        description: 'Administrative control over another spore. Requires super agent privileges. Can restart, update environment variables, update config, or check token usage and logs.',
         input_schema: {
           type: 'object',
           properties: {
-            target: { type: 'string', description: 'Target anima ID' },
+            target: { type: 'string', description: 'Target spore ID' },
             action: { type: 'string', description: 'Action to perform', enum: ['restart', 'update_env', 'update_config', 'tokens', 'health', 'logs'] },
             env: { type: 'object', description: '(update_env) Key-value pairs to set' },
             config: { type: 'object', description: '(update_config) Config fields to set' },
@@ -848,7 +966,11 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
    * @returns {Promise<Object>} Tool result
    */
   async executeTool(name, input) {
-    const normalizedName = name === 'graph' ? 'graph_update' : name;
+    const normalizedName = name === 'graph'
+      ? 'graph_update'
+      : name === 'analyze'
+        ? 'analyze_media'
+        : name;
     this.log.debug(`Executing tool: ${normalizedName}`, JSON.stringify(input).substring(0, 200));
     // Abort guard: refuse destructive tools if the user already hit stop.
     const DESTRUCTIVE = new Set(['write_file', 'edit_file', 'exec', 'save_tool', 'web_serve']);
@@ -903,6 +1025,14 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
           return this._webServeTool(input);
         case 'browser':
           return await this._browserTool(input);
+        case 'analyze_media':
+          return await this._analyzeTool(input);
+        case 'analyze_image':
+          return await this._analyzeMediaTool('image', input);
+        case 'analyze_video':
+          return await this._analyzeMediaTool('video', input);
+        case 'analyze_audio':
+          return await this._analyzeMediaTool('audio', input);
         case 'save_tool':
           return this._saveToolTool(input);
         case 'list_custom_tools':
@@ -918,7 +1048,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
 
         case 'anima_list':
           return await this._animaListTool(input);
-        case 'anima_message':
+        case 'spore_message':
           return await this._animaMessageTool(input);
         case 'anima_graph':
           return await this._animaGraphTool(input);
@@ -927,6 +1057,10 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
 
         case 'remote_exec':
           return await this._remoteExecTool(input);
+        case 'remote_tail':
+          return await this._remoteTailTool(input);
+        case 'remote_tmux_kill':
+          return await this._remoteTmuxKillTool(input);
         case 'remote_read_file':
           return await this._remoteReadFileTool(input);
         case 'remote_write_file':
@@ -1017,7 +1151,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     }
 
     // Block exec from modifying framework files during lull/background triggers
-    const frameworkWritePattern = /(?:sed\s+-i|tee|cp\s|mv\s|>\s*|>>|node\s+-e.*writeFile|echo\s.*>).*\/app\/(?:agent|discord|context|tools|config|sessions|learner|feed|gateway|maintainer|embedder|anima)\.(js|json)/;
+    const frameworkWritePattern = /(?:sed\s+-i|tee|cp\s|mv\s|>\s*|>>|node\s+-e.*writeFile|echo\s.*>).*\/app\/(?:agent|discord|context|tools|config|sessions|learner|feed|gateway|maintainer|embedder|spore)\.(js|json)/;
     if (frameworkWritePattern.test(command)) {
       const trigger = this._currentTrigger;
       if (!trigger || trigger === 'lull') {
@@ -1032,13 +1166,13 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     const SENSITIVE_PATTERN = /KEY|TOKEN|SECRET|PASS|CREDENTIALS|AUTH/i;
     const SAFE_OVERRIDES = ['PATH', 'HOME', 'USER', 'LANG', 'TERM', 'NODE_ENV', 'TMPDIR', 'WORKSPACE'];
     const safeEnv = {
-      HOME: process.env.HOME || '/home/anima',
+      HOME: process.env.HOME || '/home/spore',
       PATH: process.env.PATH,
       TERM: 'xterm',
       LANG: process.env.LANG || 'en_US.UTF-8',
       NODE_ENV: process.env.NODE_ENV || 'production',
       WORKSPACE: this.config.workspacePath || process.cwd(),
-      USER: process.env.USER || 'anima',
+      USER: process.env.USER || 'spore',
       TMPDIR: '/tmp',
     };
     for (const [k, v] of Object.entries(process.env)) {
@@ -1122,11 +1256,26 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
    * Send a message to a Discord channel
    */
   async _messageSendTool(input) {
-    const { channelId, target, content, filePath } = input;
+    const { content, filePath } = input;
+    const targetMeta = this._resolveMessageTargetMeta(input);
+    const resolvedTarget = targetMeta.target;
+    const hasExplicitTarget = Boolean(input.target || input.channelId);
+
+    if (targetMeta.platform === 'web' && !hasExplicitTarget) {
+      const fileHint = filePath
+        ? ` Reply in normal assistant text with this path so the web UI can render it inline: ${filePath}`
+        : ' Reply in normal assistant text instead of using message_send.';
+      return {
+        error: `Web chat does not use message_send for the current conversation.${fileHint}`,
+        filePath: filePath || null,
+        suggested_reply: filePath || content || '',
+      };
+    }
 
     if (this.platformManager) {
-      const result = await this.platformManager.sendMessage({ target: target || channelId, content, filePath });
+      const result = await this.platformManager.sendMessage({ target: resolvedTarget, content, filePath, platform: targetMeta.platform });
       if (!result?.error) return result;
+      if (targetMeta.platform !== 'discord') return result;
     }
 
     if (!this.discord) {
@@ -1134,9 +1283,10 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     }
 
     try {
-      const legacyChannelId = target || channelId;
+      const legacyChannelId = targetMeta.id;
+      if (!legacyChannelId) return { error: 'No target specified and no current conversation available' };
       const channel = await this.discord.channels.fetch(legacyChannelId);
-      if (!channel) return { error: `Channel ${channelId} not found` };
+      if (!channel) return { error: `Channel ${legacyChannelId} not found` };
 
       // If a file is attached, send it with the message
       if (filePath) {
@@ -1188,7 +1338,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     const { message, source, urgent } = input;
     if (!message) return { error: 'message is required' };
 
-    const agentName = this.config.displayName || this.config.agentId || 'Anima';
+    const agentName = this.config.displayName || this.config.agentId || 'SPORE';
     const prefix = source ? `[${source}] ` : '';
     const fullMessage = `${prefix}${message}`;
     const delivered = [];
@@ -1282,37 +1432,45 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
    * React to a message with an emoji
    */
   async _messageReactTool(input) {
-    const { channelId, target, messageId, emoji } = input;
+    const { messageId, emoji } = input;
+    const targetMeta = this._resolveMessageTargetMeta(input);
     if (this.platformManager) {
-      const result = await this.platformManager.reactToMessage({ target: target || channelId, messageId, emoji });
+      const result = await this.platformManager.reactToMessage({ target: targetMeta.target, messageId, emoji, platform: targetMeta.platform });
       if (!result?.error) return result;
+      if (targetMeta.platform !== 'discord') return result;
     }
     if (!this.discordGateway) return { error: 'Discord gateway not available' };
-    return await this.discordGateway.reactToMessage(channelId, messageId, emoji);
+    if (!targetMeta.id) return { error: 'No target specified and no current conversation available' };
+    return await this.discordGateway.reactToMessage(targetMeta.id, messageId, emoji);
   }
 
   /**
    * Edit a previously sent message
    */
   async _messageEditTool(input) {
-    const { channelId, target, messageId, content } = input;
+    const { messageId, content } = input;
+    const targetMeta = this._resolveMessageTargetMeta(input);
     if (this.platformManager) {
-      const result = await this.platformManager.editMessage({ target: target || channelId, messageId, content });
+      const result = await this.platformManager.editMessage({ target: targetMeta.target, messageId, content, platform: targetMeta.platform });
       if (!result?.error) return result;
+      if (targetMeta.platform !== 'discord') return result;
     }
     if (!this.discordGateway) return { error: 'Discord gateway not available' };
-    return await this.discordGateway.editMessage(channelId, messageId, content);
+    if (!targetMeta.id) return { error: 'No target specified and no current conversation available' };
+    return await this.discordGateway.editMessage(targetMeta.id, messageId, content);
   }
 
   /**
    * Read messages from a Discord channel
    */
   async _messageReadTool(input) {
-    const { channelId, target, limit = 10 } = input;
+    const { limit = 10 } = input;
+    const targetMeta = this._resolveMessageTargetMeta(input);
 
     if (this.platformManager) {
-      const result = await this.platformManager.readMessages({ target: target || channelId, limit });
+      const result = await this.platformManager.readMessages({ target: targetMeta.target, limit, platform: targetMeta.platform });
       if (!result?.error) return result;
+      if (targetMeta.platform !== 'discord') return result;
     }
 
     if (!this.discord) {
@@ -1320,9 +1478,10 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
     }
 
     try {
-      const legacyChannelId = target || channelId;
+      const legacyChannelId = targetMeta.id;
+      if (!legacyChannelId) return { error: 'No target specified and no current conversation available' };
       const channel = await this.discord.channels.fetch(legacyChannelId);
-      if (!channel) return { error: `Channel ${channelId} not found` };
+      if (!channel) return { error: `Channel ${legacyChannelId} not found` };
 
       const messages = await channel.messages.fetch({ limit: Math.min(limit, 50) });
 
@@ -1646,7 +1805,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _graphUpdateTool(input) {
-    const { nodeId, label, type, description, aspects, edges, project } = input;
+    const { nodeId, label, type, description, aspects, edges, project, temp } = input;
     if (!this.learner?.db) return { error: 'Graph writer not available' };
 
     try {
@@ -1676,15 +1835,37 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         return { error: 'Personality editing is disabled. Cannot modify the agent identity node label or description. Knowledge can be stored on other nodes.' };
       }
 
+      // Build the `extra` JSON payload for new nodes, or merge into existing.
+      const setTemp = (temp === true);
+      const clearTemp = (temp === false);
       if (existing) {
         if (description) {
           db.prepare('UPDATE nodes SET description = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
             .run(description, id);
         }
+        if (setTemp || clearTemp) {
+          const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(id);
+          let extraObj = {};
+          try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
+          if (setTemp) {
+            if (extraObj.ttl !== 'temp') {
+              extraObj.ttl = 'temp';
+              extraObj.tempCreated = new Date().toISOString();
+            }
+          } else {
+            delete extraObj.ttl;
+            delete extraObj.tempCreated;
+          }
+          db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+            .run(JSON.stringify(extraObj), id);
+        }
       } else {
+        const extraJson = setTemp
+          ? JSON.stringify({ ttl: 'temp', tempCreated: new Date().toISOString() })
+          : '{}';
         db.prepare(
-          'INSERT INTO nodes (id, label, type, description, importance, mentions, extracted_with, extracted_at, provenance) VALUES (?, ?, ?, ?, 5, 1, ?, ?, ?)'
-        ).run(id, label, type, description || '', 'anima-tool', new Date().toISOString(), 'self');
+          'INSERT INTO nodes (id, label, type, description, importance, mentions, extracted_with, extracted_at, provenance, extra) VALUES (?, ?, ?, ?, 5, 1, ?, ?, ?, ?)'
+        ).run(id, label, type, description || '', 'spore-tool', new Date().toISOString(), 'self', extraJson);
       }
 
       let aspCount = 0, edgeCount = 0;
@@ -1700,7 +1881,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           let aspRow = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(id, asp.name);
           if (!aspRow) {
             db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, ?, ?)')
-              .run(id, asp.name, asp.importance || 5, 'anima-tool');
+              .run(id, asp.name, asp.importance || 5, 'spore-tool');
             aspRow = { id: db.prepare('SELECT last_insert_rowid() as id').get().id };
           }
           for (const attr of (asp.attributes || [])) {
@@ -1882,7 +2063,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     try {
       if (!this.graph) return '';
 
-      const agentId = this.config.agentId || 'anima';
+      const agentId = this.config.agentId || 'spore';
       const agentNode = this.graph.getNode(agentId);
       if (agentNode) {
         parts.push(`## Agent: ${agentNode.label || agentId}`);
@@ -2658,11 +2839,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   async _webSearchTool(input) {
     const { query, count = 5 } = input;
 
-    // Try SearXNG first (self-hosted, no API key needed)
+    // Try SearXNG first
     const searxngUrl = this.config.searxngUrl || process.env.SEARXNG_URL;
+    const searxngApiKey = this.config.searxngApiKey || process.env.SEARXNG_API_KEY || '';
     if (searxngUrl) {
       try {
-        const result = await this._searxngSearch(query, count, searxngUrl);
+        const result = await this._searxngSearch(query, count, searxngUrl, searxngApiKey);
         if (result.results && result.results.length > 0) return result;
         // Fall through to Brave if SearXNG returned nothing
       } catch (e) {
@@ -2677,7 +2859,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return this._braveSearch(query, count, apiKey);
   }
 
-  async _searxngSearch(query, count, baseUrl) {
+  async _searxngSearch(query, count, baseUrl, apiKey) {
     const url = baseUrl.replace(/\/$/, '');
     const params = new URLSearchParams({
       q: query,
@@ -2688,11 +2870,17 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return new Promise((resolve, reject) => {
       const fullUrl = `${url}/search?${params}`;
       const mod = fullUrl.startsWith('https') ? https : http;
+      const opts = { timeout: 15000, headers: {} };
+      if (apiKey) opts.headers['Authorization'] = `Bearer ${apiKey}`;
 
-      const req = mod.get(fullUrl, { timeout: 15000 }, (res) => {
+      const req = mod.get(fullUrl, opts, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`SearXNG HTTP ${res.statusCode}${data ? ': ' + data.slice(0, 120) : ''}`));
+            return;
+          }
           try {
             const json = JSON.parse(data);
             const results = (json.results || []).slice(0, count).map(r => ({
@@ -2767,7 +2955,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
       /^169\.254\./, /^0\./, /^fc00:/i, /^fe80:/i, /^::1$/,
       /^localhost$/i, /^metadata\./i, /\.internal$/i,
-      /^anima-manager$/i, /^docker-proxy$/i, /^traefik$/i,
+      /^spore-manager$/i, /^docker-proxy$/i, /^traefik$/i,
     ];
     return blocked.some(r => r.test(hostname));
   }
@@ -3102,7 +3290,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         headers: {
           'Content-Type': 'application/json',
           'X-Service-Key': serviceKey,
-          'X-Anima-Id': this.config.agentId || 'unknown',
+          'X-SPORE-Id': this.config.agentId || 'unknown',
           'Content-Length': Buffer.byteLength(proxyBody),
         },
         timeout: 60000,
@@ -3305,7 +3493,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _isFrameworkFile(resolved) {
-    const frameworkPattern = /^\/app\/(agent|discord|context|tools|config|sessions|learner|feed|gateway|maintainer|embedder|anima)\.(js|json)$/;
+    const frameworkPattern = /^\/app\/(agent|discord|context|tools|config|sessions|learner|feed|gateway|maintainer|embedder|spore)\.(js|json)$/;
     if (frameworkPattern.test(resolved)) return true;
     if (resolved === '/app/.env') return true;
     return false;
@@ -3323,7 +3511,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     // Block all .env files anywhere
     const basename = path.basename(realResolved);
-    if (basename === '.env' || basename === '.anima-users.json') {
+    if (basename === '.env' || basename === '.spore-users.json') {
       return { error: 'Access denied: protected file' };
     }
 
@@ -3344,7 +3532,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       if (this.config.srcEditable) return { path: resolved };
       const trigger = this._currentTrigger;
       if (!trigger || trigger === 'lull') {
-        return { error: `Blocked: cannot modify framework file ${resolved} during a ${trigger || 'background'} trigger. Self-modification is only allowed when a user directly asks. (To enable persistent self-modification, set ANIMA_SRC_EDITABLE=true and bind-mount src/.)` };
+        return { error: `Blocked: cannot modify framework file ${resolved} during a ${trigger || 'background'} trigger. Self-modification is only allowed when a user directly asks. (To enable persistent self-modification, set SPORE_SRC_EDITABLE=true and bind-mount src/.)` };
       }
     }
     return { path: resolved };
@@ -3447,7 +3635,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
 
     const SENSITIVE = /KEY|SECRET|TOKEN|PASS|CREDENTIALS/i;
-    const ANIMA_VARS = /^(ANIMA_|ANTHROPIC_|OPENAI_|DEEPGRAM_|ELEVENLABS_|XI_|DISCORD_|SLACK_|TELEGRAM_|GOOGLE_|GEMINI_|REPLICATE_|STABILITY_|FAL_|TOGETHER_|BRAVE_|PERPLEXITY_|GROQ_|MISTRAL_|COHERE_|HUGGINGFACE_)/;
+    const SPORE_VARS = /^(SPORE_|ANTHROPIC_|OPENAI_|DEEPGRAM_|ELEVENLABS_|XI_|DISCORD_|SLACK_|TELEGRAM_|GOOGLE_|GEMINI_|REPLICATE_|STABILITY_|FAL_|TOGETHER_|BRAVE_|SEARXNG_|PERPLEXITY_|GROQ_|MISTRAL_|COHERE_|HUGGINGFACE_)/;
 
     const maskValue = (k, v) => {
       if (!v) return '(not set)';
@@ -3457,10 +3645,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     if (action === 'list') {
       const vars = [];
-      const INCLUDE_ALWAYS = /^(GRAPH_DB_PATH|SESSION_DB_PATH|NODE_ENV|AGENT_ID|ANIMA_OWNER)$/;
+      const INCLUDE_ALWAYS = /^(GRAPH_DB_PATH|SESSION_DB_PATH|NODE_ENV|AGENT_ID|SPORE_OWNER)$/;
       const ANY_KEY_PATTERN = /_API_KEY$|_TOKEN$|_SECRET$/;
       for (const [k, v] of Object.entries(process.env)) {
-        if (ANIMA_VARS.test(k) || INCLUDE_ALWAYS.test(k) || ANY_KEY_PATTERN.test(k)) {
+        if (SPORE_VARS.test(k) || INCLUDE_ALWAYS.test(k) || ANY_KEY_PATTERN.test(k)) {
           vars.push({ key: k, value: maskValue(k, v), isSet: !!v });
         }
       }
@@ -3542,7 +3730,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       return new Promise((resolve) => {
         const proto = managerUrl.startsWith('https') ? https : http;
         const req = proto.get(`${managerUrl}/api/vault/list`, {
-          headers: { 'X-Service-Key': serviceKey, 'X-Anima-Id': this.config.agentId || 'unknown' },
+          headers: { 'X-Service-Key': serviceKey, 'X-SPORE-Id': this.config.agentId || 'unknown' },
           timeout: 10000,
         }, (res) => {
           let data = '';
@@ -3568,7 +3756,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const proto = managerUrl.startsWith('https') ? https : http;
         const reqUrl = `${managerUrl}/api/vault/key?name=${encodeURIComponent(key)}`;
         const req = proto.get(reqUrl, {
-          headers: { 'X-Service-Key': serviceKey, 'X-Anima-Id': this.config.agentId || 'unknown' },
+          headers: { 'X-Service-Key': serviceKey, 'X-SPORE-Id': this.config.agentId || 'unknown' },
           timeout: 10000,
         }, (res) => {
           let data = '';
@@ -3603,9 +3791,296 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         } else {
           this.broadcast(data);
         }
-      });
+      }, this.config);
     }
     return await this._browserInstance.execute(input);
+  }
+
+  async _analyzeTool(input = {}) {
+    const requestedKind = typeof input.kind === 'string' ? input.kind.trim().toLowerCase() : '';
+    if (requestedKind && requestedKind !== 'auto' && !['image', 'video', 'audio'].includes(requestedKind)) {
+      return { error: `Invalid analyze kind "${input.kind}". Use image, video, audio, or omit it for auto detection.` };
+    }
+    if (requestedKind && requestedKind !== 'auto') {
+      return this._analyzeMediaTool(requestedKind, input);
+    }
+
+    const resolvedTarget = this._resolveAnalyzeMediaAutoTarget(input.path);
+    if (resolvedTarget.error) return resolvedTarget;
+    return this._analyzeMediaTool(resolvedTarget.kind, {
+      ...input,
+      __resolved: resolvedTarget,
+    });
+  }
+
+  async _analyzeMediaTool(kind, input = {}) {
+    if (!this.anthropicClient) return { error: 'LLM client not available' };
+
+    const configuredModel = kind === 'image'
+      ? this.config.imageVlmModel
+      : kind === 'video'
+        ? this.config.videoVlmModel
+        : this.config.audioVlmModel;
+    if (!configuredModel) {
+      const envName = kind === 'image'
+        ? 'SPORE_IMAGE_VLM_MODEL'
+        : kind === 'video'
+          ? 'SPORE_VIDEO_VLM_MODEL'
+          : 'SPORE_AUDIO_VLM_MODEL';
+      return { error: `No ${envName} configured for ${kind} analysis.` };
+    }
+
+    const resolvedInput = input.__resolved && input.__resolved.kind === kind
+      ? input.__resolved
+      : this._resolveAnalyzeMediaPath(kind, input.path);
+    if (resolvedInput.error) return resolvedInput;
+    const safe = this._safePath(resolvedInput.path);
+    if (safe.error) return safe;
+    if (!fs.existsSync(safe.path)) return { error: `File not found: ${safe.path}` };
+
+    const stat = fs.statSync(safe.path);
+    if (!stat.isFile()) return { error: `Not a file: ${safe.path}` };
+    if (stat.size > 25 * 1024 * 1024) {
+      return { error: `File too large for multimodal analysis (${Math.round(stat.size / 1024 / 1024)} MB > 25 MB).` };
+    }
+
+    const mediaType = this._mediaTypeForPath(safe.path, kind);
+    const prompt = String(input.prompt || this._defaultMediaAnalysisPrompt(kind)).trim();
+    const maxTokens = Math.max(200, Math.min(Number(input.maxTokens) || 1200, 4000));
+    const source = {
+      type: 'base64',
+      media_type: mediaType,
+      data: fs.readFileSync(safe.path).toString('base64'),
+      filename: path.basename(safe.path),
+    };
+    this.log.info(`[analyze_${kind}] requested=${input.path || '<latest>'} resolved=${safe.path} via=${resolvedInput.source} model=${configuredModel}`);
+
+    try {
+      const response = await this.anthropicClient.messages.create({
+        model: configuredModel,
+        max_tokens: maxTokens,
+        system: `You are a specialized ${kind} analysis model assisting another agent. Analyze the provided ${kind} and answer the request directly. Be concrete and concise. Do not mention tool names, providers, or that you are a separate model.`,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: kind, source },
+            { type: 'text', text: prompt },
+          ],
+        }],
+      });
+
+      const analysis = response.content
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join('\n')
+        .trim();
+
+      return {
+        kind,
+        model: configuredModel,
+        path: safe.path,
+        requestedPath: input.path || null,
+        pathSource: resolvedInput.source,
+        mediaType,
+        analysis,
+        tokens_used: {
+          input: response.usage?.input_tokens || 0,
+          output: response.usage?.output_tokens || 0,
+        },
+      };
+    } catch (e) {
+      return { error: `${kind} analysis failed: ${e.message}` };
+    }
+  }
+
+  _defaultMediaAnalysisPrompt(kind) {
+    if (kind === 'image') return 'Describe the image and answer anything important a collaborating agent should know about it.';
+    if (kind === 'video') return 'Summarize the video, notable scenes, actions, and any visible text or important events.';
+    return 'Transcribe or summarize the audio, including speakers, tone, and any important details.';
+  }
+
+  _mediaTypeForPath(filePath, kind) {
+    const ext = path.extname(filePath).toLowerCase();
+    const mediaMap = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.bmp': 'image/bmp',
+      '.avif': 'image/avif',
+      '.heic': 'image/heic',
+      '.mp3': 'audio/mpeg',
+      '.wav': 'audio/wav',
+      '.ogg': 'audio/ogg',
+      '.oga': 'audio/ogg',
+      '.m4a': 'audio/mp4',
+      '.flac': 'audio/flac',
+      '.webm': kind === 'video' ? 'video/webm' : 'audio/webm',
+      '.aac': 'audio/aac',
+      '.mp4': 'video/mp4',
+      '.mov': 'video/quicktime',
+      '.mkv': 'video/x-matroska',
+      '.avi': 'video/x-msvideo',
+    };
+    if (mediaMap[ext]) return mediaMap[ext];
+    if (kind === 'image') return 'image/png';
+    if (kind === 'video') return 'video/mp4';
+    return 'audio/mpeg';
+  }
+
+  _analyzeMediaExtsByKind() {
+    return {
+      image: new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.heic']),
+      video: new Set(['.mp4', '.webm', '.mov', '.mkv', '.avi']),
+      audio: new Set(['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.flac', '.webm', '.aac']),
+    };
+  }
+
+  _detectAnalyzeMediaKind(filePath) {
+    const ext = path.extname(String(filePath || '')).toLowerCase();
+    const extsByKind = this._analyzeMediaExtsByKind();
+    if (extsByKind.image.has(ext)) return 'image';
+    if (extsByKind.video.has(ext)) return 'video';
+    if (extsByKind.audio.has(ext)) return 'audio';
+    return null;
+  }
+
+  _resolveAnalyzeMediaPath(kind, requestedPath) {
+    const cleanedPath = this._normalizeAnalyzeMediaPath(requestedPath);
+    const extsByKind = this._analyzeMediaExtsByKind();
+    const uploadDir = path.join(this.config.workspacePath || process.cwd(), 'uploads');
+    const allowedExts = extsByKind[kind] || new Set();
+
+    if (cleanedPath) {
+      const exact = this._findAnalyzeMediaCandidate(cleanedPath, uploadDir, allowedExts);
+      if (exact) return { path: exact, source: 'requested' };
+    }
+
+    const latest = this._latestUploadForKind(uploadDir, allowedExts);
+    if (latest) {
+      return {
+        path: latest,
+        source: cleanedPath ? 'latest_fallback' : 'latest',
+      };
+    }
+
+    const noun = kind === 'image' ? 'image' : kind === 'video' ? 'video' : 'audio file';
+    if (cleanedPath) {
+      return { error: `Could not resolve ${noun} path "${cleanedPath}" and no matching uploads were found.` };
+    }
+    return { error: `No uploaded ${noun}s found in ${uploadDir}.` };
+  }
+
+  _resolveAnalyzeMediaAutoTarget(requestedPath) {
+    const cleanedPath = this._normalizeAnalyzeMediaPath(requestedPath);
+    const uploadDir = path.join(this.config.workspacePath || process.cwd(), 'uploads');
+    const extsByKind = this._analyzeMediaExtsByKind();
+
+    if (cleanedPath) {
+      for (const kind of ['image', 'video', 'audio']) {
+        const candidate = this._findAnalyzeMediaCandidate(cleanedPath, uploadDir, extsByKind[kind]);
+        if (candidate) return { kind, path: candidate, source: 'requested' };
+      }
+    }
+
+    const latest = this._latestUploadAny(uploadDir, extsByKind);
+    if (latest) {
+      return {
+        kind: latest.kind,
+        path: latest.path,
+        source: cleanedPath ? 'latest_fallback' : 'latest',
+      };
+    }
+
+    if (cleanedPath) {
+      return { error: `Could not resolve media path "${cleanedPath}" and no matching uploads were found.` };
+    }
+    return { error: `No uploaded media files found in ${uploadDir}.` };
+  }
+
+  _normalizeAnalyzeMediaPath(value) {
+    if (typeof value !== 'string') return '';
+    let cleaned = value.trim();
+    if (!cleaned) return '';
+    cleaned = cleaned.replace(/^["'`]+|["'`]+$/g, '');
+    cleaned = cleaned.replace(/[)>.,;:!?]+$/g, '');
+    cleaned = cleaned.replace(/[\r\n\t]/g, '');
+    cleaned = cleaned.replace(/\/+/g, '/');
+    const tailTrimmed = cleaned.length >= 2 && cleaned[cleaned.length - 1] === cleaned[cleaned.length - 2]
+      ? cleaned.slice(0, -1)
+      : cleaned;
+    return tailTrimmed;
+  }
+
+  _findAnalyzeMediaCandidate(requestedPath, uploadDir, allowedExts) {
+    const maybeExact = this._safePath(requestedPath);
+    if (!maybeExact.error && fs.existsSync(maybeExact.path) && fs.statSync(maybeExact.path).isFile()) {
+      if (!allowedExts.size || allowedExts.has(path.extname(maybeExact.path).toLowerCase())) {
+        return maybeExact.path;
+      }
+    }
+
+    const basename = path.basename(requestedPath);
+    if (!basename || !fs.existsSync(uploadDir)) return null;
+
+    const entries = fs.readdirSync(uploadDir)
+      .map(name => path.join(uploadDir, name))
+      .filter(filePath => {
+        try { return fs.statSync(filePath).isFile(); } catch { return false; }
+      })
+      .filter(filePath => !allowedExts.size || allowedExts.has(path.extname(filePath).toLowerCase()));
+
+    const exactBasename = entries.find(filePath => path.basename(filePath) === basename);
+    if (exactBasename) return exactBasename;
+
+    const prefixBasename = entries.find(filePath => path.basename(filePath).startsWith(basename));
+    if (prefixBasename) return prefixBasename;
+
+    const suffixBasename = entries.find(filePath => path.basename(filePath).endsWith(basename));
+    if (suffixBasename) return suffixBasename;
+
+    return null;
+  }
+
+  _latestUploadForKind(uploadDir, allowedExts) {
+    if (!fs.existsSync(uploadDir)) return null;
+    const candidates = fs.readdirSync(uploadDir)
+      .map(name => path.join(uploadDir, name))
+      .filter(filePath => {
+        try { return fs.statSync(filePath).isFile(); } catch { return false; }
+      })
+      .filter(filePath => !allowedExts.size || allowedExts.has(path.extname(filePath).toLowerCase()))
+      .map(filePath => {
+        try { return { filePath, mtimeMs: fs.statSync(filePath).mtimeMs }; } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0]?.filePath || null;
+  }
+
+  _latestUploadAny(uploadDir, extsByKind) {
+    if (!fs.existsSync(uploadDir)) return null;
+    const candidates = fs.readdirSync(uploadDir)
+      .map(name => path.join(uploadDir, name))
+      .filter(filePath => {
+        try { return fs.statSync(filePath).isFile(); } catch { return false; }
+      })
+      .map(filePath => {
+        try {
+          const stat = fs.statSync(filePath);
+          const kind = this._detectAnalyzeMediaKind(filePath);
+          if (!kind) return null;
+          if (!extsByKind[kind]?.has(path.extname(filePath).toLowerCase())) return null;
+          return { filePath, kind, mtimeMs: stat.mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    if (!candidates[0]) return null;
+    return { path: candidates[0].filePath, kind: candidates[0].kind };
   }
 
   broadcast(msg) {
@@ -3724,7 +4199,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
 
       // Edge: agent → tool (has_tool)
-      const agentId = this.config.agentId || 'anima';
+      const agentId = this.config.agentId || 'spore';
       const edgeExists = db.prepare('SELECT rowid FROM edges WHERE source = ? AND target = ? AND type = ?')
         .get(agentId, nodeId, 'has_tool');
       if (!edgeExists) {
@@ -3778,8 +4253,20 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   // ── Remote SSH Tools ──────────────────────────────────────────────────
 
+  _normalizeTmuxSessionName(name) {
+    const prefix = (this.config.clusterTmuxPrefix || 'spore').replace(/[^a-zA-Z0-9_-]/g, '') || 'spore';
+    const clean = String(name || '').replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
+    if (!clean) return null;
+    return clean.startsWith(prefix + '-') ? clean : `${prefix}-${clean}`;
+  }
+
+  _tmuxShellEscape(cmd) {
+    // Escape single-quotes for wrapping inside sh -c '...'
+    return String(cmd).replace(/'/g, `'\\''`);
+  }
+
   async _remoteExecTool(input) {
-    const { host, command, workdir, timeout } = input;
+    const { host, command, workdir, timeout, tmux_session, wait } = input;
     if (!host || !command) return { error: 'host and command are required' };
     const mgr = this._ensureSSHManager();
     if (!mgr) return { error: 'SSH manager not available' };
@@ -3790,6 +4277,63 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
     }
 
+    // tmux-session wrap: run inside a named tmux session so the command
+    // survives SSH disconnects. wait=true (default) blocks until it exits
+    // and captures the final pane; wait=false returns immediately with
+    // the session name for later remote_tail.
+    if (tmux_session) {
+      const session = this._normalizeTmuxSessionName(tmux_session);
+      if (!session) return { error: 'invalid tmux_session name' };
+      const cdPrefix = workdir ? `cd ${String(workdir).replace(/[^\w/.\-~]/g, '')} && ` : '';
+      const innerCmd = this._tmuxShellEscape(`${cdPrefix}${command}; echo "[spore-exit $?]"`);
+      const shouldWait = wait !== false;
+
+      // Launch detached, then optionally wait via polling
+      const launch = `tmux new-session -d -s '${session}' 'sh -c '\\''${innerCmd}'\\'''`;
+      try {
+        const startRes = await mgr.remoteExec(host, `if tmux has-session -t '${session}' 2>/dev/null; then echo exists; else ${launch} && echo started; fi`, { cwd: workdir, timeout: Math.min(timeout || 30000, 60000) });
+        const startStatus = (startRes.stdout || '').trim();
+        if (!shouldWait) {
+          return {
+            tmux_session: session,
+            status: startStatus || 'started-detached',
+            note: `Session "${session}" is running on ${host}. Use remote_tail to read progress, remote_tmux_kill to stop.`,
+          };
+        }
+        // Wait-for-completion: poll every 2s until the session exits or timeout
+        const totalMs = Math.min(timeout || 120000, 120000);
+        const started = Date.now();
+        let exitLine = null;
+        while (Date.now() - started < totalMs) {
+          await new Promise(r => setTimeout(r, 2000));
+          const check = await mgr.remoteExec(host, `tmux has-session -t '${session}' 2>/dev/null && echo alive || echo dead`, { timeout: 8000 });
+          if ((check.stdout || '').trim() === 'dead') {
+            // Session ended — capture last-pane via a short-lived "attach for read" trick:
+            // We can't capture-pane on a dead session. So instead we captured at each poll below.
+            break;
+          }
+          // Sample latest output
+          const cap = await mgr.remoteExec(host, `tmux capture-pane -p -t '${session}' -S -50 2>/dev/null | tail -c 4000`, { timeout: 8000 });
+          const tail = (cap.stdout || '').trim();
+          const match = tail.match(/\[spore-exit (\d+)\]/);
+          if (match) { exitLine = parseInt(match[1], 10); break; }
+        }
+        // Final capture (best-effort while session still exists)
+        const final = await mgr.remoteExec(host, `tmux capture-pane -p -t '${session}' -S -500 2>/dev/null | tail -c 8000 || echo '(session already ended)'`, { timeout: 8000 });
+        let output = (final.stdout || '').trim();
+        if (output.length > 10000) output = output.slice(-10000);
+        return {
+          tmux_session: session,
+          exitCode: exitLine,
+          output: output || '(no output captured)',
+          note: exitLine === null ? 'Session still running after timeout — use remote_tail to keep checking, or remote_tmux_kill to stop.' : undefined,
+        };
+      } catch (e) {
+        return { error: `tmux remote_exec failed: ${e.message}`, tmux_session: session };
+      }
+    }
+
+    // Non-tmux path (unchanged)
     try {
       const result = await mgr.remoteExec(host, command, { cwd: workdir, timeout });
       let output = '';
@@ -3799,6 +4343,49 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       return { exitCode: result.exitCode, output: output || '(no output)' };
     } catch (e) {
       return { error: e.message };
+    }
+  }
+
+  async _remoteTailTool(input) {
+    const { host, tmux_session, lines } = input;
+    if (!host || !tmux_session) return { error: 'host and tmux_session are required' };
+    const mgr = this._ensureSSHManager();
+    if (!mgr) return { error: 'SSH manager not available' };
+    const session = this._normalizeTmuxSessionName(tmux_session);
+    if (!session) return { error: 'invalid tmux_session name' };
+    const n = Math.min(Math.max(1, Number(lines) || 200), 2000);
+    try {
+      const exists = await mgr.remoteExec(host, `tmux has-session -t '${session}' 2>/dev/null && echo alive || echo dead`, { timeout: 8000 });
+      if ((exists.stdout || '').trim() === 'dead') {
+        return { tmux_session: session, alive: false, note: 'Session not found — it may have finished and been cleaned up, or never existed.' };
+      }
+      const res = await mgr.remoteExec(host, `tmux capture-pane -p -t '${session}' -S -${n} 2>/dev/null | tail -c 10000`, { timeout: 10000 });
+      let output = (res.stdout || '').trim();
+      const exitMatch = output.match(/\[spore-exit (\d+)\]/);
+      return {
+        tmux_session: session,
+        alive: true,
+        exitCode: exitMatch ? parseInt(exitMatch[1], 10) : null,
+        output: output || '(no output yet)',
+      };
+    } catch (e) {
+      return { error: e.message, tmux_session: session };
+    }
+  }
+
+  async _remoteTmuxKillTool(input) {
+    const { host, tmux_session } = input;
+    if (!host || !tmux_session) return { error: 'host and tmux_session are required' };
+    const mgr = this._ensureSSHManager();
+    if (!mgr) return { error: 'SSH manager not available' };
+    const session = this._normalizeTmuxSessionName(tmux_session);
+    if (!session) return { error: 'invalid tmux_session name' };
+    try {
+      const res = await mgr.remoteExec(host, `tmux kill-session -t '${session}' 2>&1 && echo killed || echo 'not found'`, { timeout: 8000 });
+      const msg = (res.stdout || '').trim();
+      return { tmux_session: session, killed: msg.includes('killed'), output: msg };
+    } catch (e) {
+      return { error: e.message, tmux_session: session };
     }
   }
 
@@ -4255,14 +4842,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   async _animaListTool(input) {
     const data = await this._managerFetch('/api/animas');
     const list = data?.animas;
-    if (!Array.isArray(list)) return { error: 'Failed to fetch anima list' };
+    if (!Array.isArray(list)) return { error: 'Failed to fetch spore list' };
 
     const results = [];
     for (const a of list) {
       const entry = { id: a.id, displayName: a.displayName, model: a.model, status: a.status };
       if (input.includeHealth !== false) {
         try {
-          const health = await this._managerFetch(`/api/animas/${a.id}/health`);
+          const health = await this._managerFetch(`/api/spores/${a.id}/health`);
           entry.health = health;
         } catch { entry.health = { status: 'unreachable' }; }
       }
@@ -4275,10 +4862,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const { target, message, context, timeout } = input;
     if (!target || !message) return { error: 'target and message are required' };
 
-    const animaData = await this._managerFetch(`/api/animas/${target}`);
-    if (animaData?.error) return { error: `Could not find anima "${target}": ${animaData.error}` };
+    const animaData = await this._managerFetch(`/api/spores/${target}`);
+    if (animaData?.error) return { error: `Could not find spore "${target}": ${animaData.error}` };
 
-    const healthPort = animaData.env?.ANIMA_HEALTH_PORT || '18790';
+    const healthPort = animaData.env?.SPORE_HEALTH_PORT || '18790';
     const invokeUrl = `http://${target}:${healthPort}/api/invoke`;
 
     const headers = { 'Content-Type': 'application/json' };
@@ -4286,7 +4873,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       headers['X-Service-Key'] = this.config.managerServiceKey;
     }
 
-    const myName = this.config.displayName || this.config.agentId || 'unknown-anima';
+    const myName = this.config.displayName || this.config.agentId || 'unknown-spore';
 
     try {
       const resp = await fetch(invokeUrl, {
@@ -4316,12 +4903,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       if (input.query) params.set('query', input.query);
       if (input.nodeId) params.set('nodeId', input.nodeId);
       if (input.type) params.set('type', input.type);
-      return await this._managerFetch(`/api/animas/${target}/graph?${params.toString()}`);
+      return await this._managerFetch(`/api/spores/${target}/graph?${params.toString()}`);
     }
 
     if (mode === 'write') {
       if (!input.nodeId) return { error: 'nodeId required for write mode' };
-      return await this._managerFetch(`/api/animas/${target}/graph`, 'POST', {
+      return await this._managerFetch(`/api/spores/${target}/graph`, 'POST', {
         nodeId: input.nodeId,
         label: input.label,
         type: input.type,
@@ -4340,21 +4927,21 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     switch (action) {
       case 'health':
-        return await this._managerFetch(`/api/animas/${target}/health`);
+        return await this._managerFetch(`/api/spores/${target}/health`);
       case 'tokens':
-        return await this._managerFetch(`/api/animas/${target}/tokens`);
+        return await this._managerFetch(`/api/spores/${target}/tokens`);
       case 'logs':
-        return await this._managerFetch(`/api/animas/${target}/logs?lines=50`);
+        return await this._managerFetch(`/api/spores/${target}/logs?lines=50`);
       case 'restart':
-        return await this._managerFetch(`/api/animas/${target}/restart`, 'POST', {
+        return await this._managerFetch(`/api/spores/${target}/restart`, 'POST', {
           rebuild: input.rebuild !== false,
         });
       case 'update_env':
         if (!input.env || typeof input.env !== 'object') return { error: 'env object required' };
-        return await this._managerFetch(`/api/animas/${target}/env`, 'PUT', { env: input.env });
+        return await this._managerFetch(`/api/spores/${target}/env`, 'PUT', { env: input.env });
       case 'update_config':
         if (!input.config || typeof input.config !== 'object') return { error: 'config object required' };
-        return await this._managerFetch(`/api/animas/${target}/config`, 'PUT', { config: input.config });
+        return await this._managerFetch(`/api/spores/${target}/config`, 'PUT', { config: input.config });
       default:
         return { error: `Unknown action: ${action}. Use: health, tokens, logs, restart, update_env, update_config` };
     }

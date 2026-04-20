@@ -831,7 +831,7 @@ Rules:
   proto._graphWalk = function _graphWalk(seedNodeIds, maxDepth = 2, maxNodes = 10) {
     if (!this.db || seedNodeIds.size === 0) return [];
     const visited = new Set(seedNodeIds);
-    const agentId = this.config.agentId || 'anima';
+    const agentId = this.config.agentId || 'spore';
     visited.add(agentId);
     const results = [];
     let frontier = [...seedNodeIds];
@@ -1002,7 +1002,7 @@ Rules:
   proto._buildRelevantContext = function _buildRelevantContext(messageContent, opts = {}) {
     if (!messageContent || messageContent.length < 10) return null;
 
-    const agentId = this.config.agentId || 'anima';
+    const agentId = this.config.agentId || 'spore';
     const todayStr = opts._referenceDate || new Date().toISOString().substring(0, 10);
     const queryLower = messageContent.toLowerCase();
     const queryWords = queryLower.split(/\s+/).filter(w => w.length > 3 && !SEARCH_STOPWORDS.has(w));

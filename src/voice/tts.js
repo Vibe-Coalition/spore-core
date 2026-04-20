@@ -12,9 +12,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-/** Writable dir for edge-tts output — avoid /tmp/anima-edge-tts if root created it (Permission denied). */
+/** Writable dir for edge-tts output — avoid /tmp/spore-edge-tts if root created it (Permission denied). */
 function edgeTtsTmpDir() {
-  const ws = process.env.ANIMA_WORKSPACE_PATH || process.cwd();
+  const ws = process.env.SPORE_WORKSPACE_PATH || process.cwd();
   try {
     if (fs.existsSync(ws)) {
       const d = path.join(ws, '.edge-tts-tmp');
@@ -23,7 +23,7 @@ function edgeTtsTmpDir() {
     }
   } catch {}
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'u';
-  const d = path.join(os.tmpdir(), `anima-edge-tts-${uid}`);
+  const d = path.join(os.tmpdir(), `spore-edge-tts-${uid}`);
   fs.mkdirSync(d, { recursive: true, mode: 0o700 });
   return d;
 }

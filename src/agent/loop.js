@@ -40,7 +40,12 @@ class AgentLoop {
       return false;
     }
     if (!this.client) this.client = new MultiProvider(this.config);
-    this.log.info(`Agent loop initialized — tiers: casual=${this.config.casualModel} normal=${this.config.normalModel} planner=${this.config.plannerModel} (${backend})`);
+    const multimodal = [
+      this.config.imageVlmModel ? `imageVLM=${this.config.imageVlmModel}` : null,
+      this.config.videoVlmModel ? `videoVLM=${this.config.videoVlmModel}` : null,
+      this.config.audioVlmModel ? `audioVLM=${this.config.audioVlmModel}` : null,
+    ].filter(Boolean).join(' ');
+    this.log.info(`Agent loop initialized — tiers: casual=${this.config.casualModel} normal=${this.config.normalModel} planner=${this.config.plannerModel}${multimodal ? ` ${multimodal}` : ''} (${backend})`);
     return true;
   }
 
@@ -174,6 +179,7 @@ class AgentLoop {
       userMessage: opts.content || null,
       userName: opts.userName || null,
       userId: opts.userId || null,
+      userRole: opts.userRole || null,
       abortSignal: opts._abortSignal || null,
     });
 
@@ -185,6 +191,7 @@ class AgentLoop {
     this.tools._currentUserMessage = opts.content || null;
     this.tools._currentUserName = opts.userName || null;
     this.tools._currentUserId = opts.userId || null;
+    this.tools._currentUserRole = opts.userRole || null;
     this.tools._currentSessionToken = opts.sessionToken || null;
     this.tools._abortSignal = opts._abortSignal || null;
 
@@ -193,6 +200,7 @@ class AgentLoop {
       channelName: opts.channelName,
       userId: opts.userId,
       userName: opts.userName,
+      userRole: opts.userRole,
       guildName: opts.guildName,
       messageContent: opts.content || opts.messageContent,
       trigger: opts.trigger,
@@ -247,19 +255,34 @@ class AgentLoop {
       messages.push({ role: 'user', content: opts.content });
     }
 
-    // 3.5. Attach images to the last user message if present (multimodal vision)
-    //      Also persist images to disk so agent tools (exec, delegate_task) can access them.
-    if (opts.images && opts.images.length > 0 && messages.length > 0) {
-      const savedPaths = this._saveImagesToDisk(opts.images);
+    // 3.5. Attach multimodal inputs to the last user message.
+    //      Images/audio/video are ephemeral in the prompt, but also saved to disk
+    //      so tools (exec, delegate_task, browser, etc.) can access them.
+    const mediaBlocks = this._buildMediaBlocks(opts);
+    if (mediaBlocks.length > 0 && messages.length > 0) {
+      const savedPaths = this._saveMediaToDisk(mediaBlocks);
+      const attachInline = !this._hasDedicatedVlmTiers();
       const lastMsg = messages[messages.length - 1];
-      if (lastMsg.role === 'user' && typeof lastMsg.content === 'string') {
+      if (lastMsg.role === 'user') {
         const pathNote = savedPaths.length
           ? `\n[Attached files saved to disk: ${savedPaths.join(', ')}]`
           : '';
-        lastMsg.content = [
-          ...opts.images,
-          { type: 'text', text: lastMsg.content + pathNote },
-        ];
+        if (attachInline && typeof lastMsg.content === 'string') {
+          lastMsg.content = [
+            ...mediaBlocks,
+            { type: 'text', text: lastMsg.content + pathNote },
+          ];
+        } else if (attachInline && Array.isArray(lastMsg.content)) {
+          lastMsg.content = [
+            ...mediaBlocks,
+            ...lastMsg.content,
+            ...(pathNote ? [{ type: 'text', text: pathNote.trim() }] : []),
+          ];
+        } else if (typeof lastMsg.content === 'string' && pathNote) {
+          lastMsg.content = `${lastMsg.content}${pathNote}`;
+        } else if (Array.isArray(lastMsg.content) && pathNote) {
+          lastMsg.content = [...lastMsg.content, { type: 'text', text: pathNote.trim() }];
+        }
       }
     }
 
@@ -276,11 +299,19 @@ class AgentLoop {
     // 4. Ensure messages alternate user/assistant properly
     messages = this._sanitizeMessages(messages);
 
-    // 4.5. Token-aware compaction: summarize old messages instead of dropping them
-    const contextWindow = this.config.contextWindow || 200000;
-    const configuredCeiling = Number.isFinite(Number(this.config.compactTokenThreshold))
-      ? Number(this.config.compactTokenThreshold)
-      : null;
+    // 4.5. Token-aware compaction: summarize old messages instead of dropping them.
+    // Per-model overrides win when set. Otherwise the context defaults to a
+    // safe 200k ceiling and we compact at 85% of whatever the effective ctx is.
+    const _activeForLimits = isCasualChat
+      ? (this.config.casualModel || this.config.normalModel || this.config.plannerModel)
+      : (this.config.normalModel || this.config.plannerModel);
+    const _modelLimit = (this.config.modelLimits && _activeForLimits) ? this.config.modelLimits[_activeForLimits] : null;
+    const contextWindow = (_modelLimit?.contextWindow && Number(_modelLimit.contextWindow) > 0)
+      ? Number(_modelLimit.contextWindow)
+      : 200000;
+    const configuredCeiling = (_modelLimit?.compactAt && Number(_modelLimit.compactAt) > 0)
+      ? Number(_modelLimit.compactAt)
+      : Math.floor(contextWindow * 0.85);
     const hardCeiling = Math.min(
       contextWindow,
       configuredCeiling && configuredCeiling > 0
@@ -387,6 +418,11 @@ class AgentLoop {
       }
 
       const iterModel = activeModel || this.config.plannerModel;
+      const resolvedIterModel = this.client?.resolveModel?.({
+        model: iterModel,
+        messages,
+        tools: chatTools,
+      }) || iterModel;
       this.log.debug(`Agent iteration ${iterations}, messages: ${messages.length}, sysPromptLen: ${systemPrompt.length}`);
 
       try {
@@ -423,7 +459,7 @@ class AgentLoop {
         }
 
         const iterStart = Date.now();
-        this.log.info(`[agent] Iter ${iterations} starting — model=${iterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
+        this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
 
         const response = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta, onToolUse: opts.onToolUse, onStatus: opts.onStatus, tools: chatTools, model: activeModel, abortSignal });
 
@@ -920,28 +956,82 @@ class AgentLoop {
     };
   }
 
-  // ── Image persistence ───────────────────────────────────────────────
+  // ── Multimodal attachment handling ──────────────────────────────────
 
-  _saveImagesToDisk(images) {
+  _buildMediaBlocks(opts = {}) {
+    const blocks = [];
+    if (Array.isArray(opts.images)) {
+      for (const img of opts.images) {
+        if (img?.type === 'image' && img.source?.type === 'base64') blocks.push(img);
+      }
+    }
+    if (Array.isArray(opts.media)) {
+      for (const media of opts.media) {
+        if (!media?.type || media.source?.type !== 'base64') continue;
+        if (['image', 'audio', 'input_audio', 'video', 'file'].includes(media.type)) {
+          blocks.push(media);
+        }
+      }
+    }
+    return blocks;
+  }
+
+  _hasDedicatedVlmTiers() {
+    return Boolean(
+      this.config.imageVlmModel
+      || this.config.videoVlmModel
+      || this.config.audioVlmModel
+    );
+  }
+
+  _saveMediaToDisk(mediaBlocks) {
     const fs = require('fs');
     const path = require('path');
     const uploadDir = path.join(this.config.workspacePath || process.cwd(), 'uploads');
     try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
     const saved = [];
-    for (const img of images) {
+    const extByMime = {
+      'image/jpeg': 'jpg',
+      'image/jpg': 'jpg',
+      'image/png': 'png',
+      'image/gif': 'gif',
+      'image/webp': 'webp',
+      'image/avif': 'avif',
+      'audio/mpeg': 'mp3',
+      'audio/mp3': 'mp3',
+      'audio/wav': 'wav',
+      'audio/x-wav': 'wav',
+      'audio/mp4': 'm4a',
+      'audio/ogg': 'ogg',
+      'audio/webm': 'webm',
+      'audio/flac': 'flac',
+      'video/mp4': 'mp4',
+      'video/webm': 'webm',
+      'video/quicktime': 'mov',
+      'video/x-matroska': 'mkv',
+      'video/x-msvideo': 'avi',
+    };
+    for (const media of mediaBlocks) {
       try {
-        if (img.type !== 'image' || img.source?.type !== 'base64') continue;
-        const ext = (img.source.media_type || 'image/png').split('/')[1] || 'png';
-        const name = `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
+        if (!media?.type || media.source?.type !== 'base64') continue;
+        const mediaType = String(media.source.media_type || '').toLowerCase();
+        const ext = extByMime[mediaType] || mediaType.split('/')[1] || 'bin';
+        const safeExt = ext.replace(/[^a-z0-9]/gi, '') || 'bin';
+        const prefix = media.type === 'input_audio' ? 'audio' : media.type;
+        const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${safeExt}`;
         const filePath = path.join(uploadDir, name);
-        fs.writeFileSync(filePath, Buffer.from(img.source.data, 'base64'));
+        fs.writeFileSync(filePath, Buffer.from(media.source.data, 'base64'));
         saved.push(filePath);
-        this.log.info(`[upload] Saved image to ${filePath} (${img.source.media_type})`);
+        this.log.info(`[upload] Saved ${prefix} to ${filePath} (${media.source.media_type})`);
       } catch (e) {
-        this.log.warn(`[upload] Failed to save image: ${e.message}`);
+        this.log.warn(`[upload] Failed to save attachment: ${e.message}`);
       }
     }
     return saved;
+  }
+
+  _saveImagesToDisk(images) {
+    return this._saveMediaToDisk(images);
   }
 
   // ── Model-aware output token limits ─────────────────────────────────
@@ -1111,6 +1201,60 @@ class AgentLoop {
   }
 
   /**
+   * Tool-enabled turns use non-stream requests so tool names/arguments are
+   * finalized in one response rather than assembled from streaming deltas.
+   */
+  _shouldUseNonStreamToolTurn(requestOpts) {
+    return Array.isArray(requestOpts?.tools) && requestOpts.tools.length > 0;
+  }
+
+  _createAbortError() {
+    const err = new Error('aborted');
+    err.name = 'AbortError';
+    return err;
+  }
+
+  async _callNonStream(requestOpts, opts = {}) {
+    const signal = opts.abortSignal;
+    if (signal?.aborted) throw this._createAbortError();
+
+    const callPromise = Promise.resolve(
+      this.client.messages.create(requestOpts, signal ? { signal } : undefined)
+    );
+
+    const response = signal
+      ? await new Promise((resolve, reject) => {
+        const onAbort = () => reject(this._createAbortError());
+        if (signal.aborted) return onAbort();
+        signal.addEventListener('abort', onAbort, { once: true });
+        callPromise
+          .then(resolve, reject)
+          .finally(() => signal.removeEventListener('abort', onAbort));
+      })
+      : await callPromise;
+
+    const textBlocks = Array.isArray(response?.content)
+      ? response.content.filter(b => b.type === 'text')
+      : [];
+    const toolBlocks = Array.isArray(response?.content)
+      ? response.content.filter(b => b.type === 'tool_use')
+      : [];
+    const responseText = textBlocks.map(b => b.text || '').join('');
+
+    if (responseText && opts.onTextDelta) {
+      try { opts.onTextDelta(responseText); } catch { }
+    }
+    if (toolBlocks.length > 0 && opts.onToolUse) {
+      for (const toolBlock of toolBlocks) {
+        if (!toolBlock?.name) continue;
+        try { opts.onToolUse(toolBlock.name); } catch { }
+      }
+    }
+
+    return response;
+  }
+
+  /**
    * Call the Claude API
    */
   async _callClaude(systemPrompt, messages, opts = {}) {
@@ -1185,7 +1329,16 @@ class AgentLoop {
       }
     }
 
-    const model = opts.model || this.config.model;
+    const requestedModel = opts.model || this.config.model;
+    const baseRequest = {
+      model: requestedModel,
+      system,
+      messages,
+      tools,
+    };
+    const resolvedRequest = this.client?.resolveRequest?.(baseRequest)
+      || { ...baseRequest, model: this.client?.resolveModel?.(baseRequest) || requestedModel };
+    const model = resolvedRequest.model || requestedModel;
     const maxTokens = this.config.maxTokens !== 8192
       ? this.config.maxTokens
       : this._modelMaxOutputTokens(model);
@@ -1195,16 +1348,44 @@ class AgentLoop {
       ? (this.config.openaiReasoningEffort || null)
       : null;
     const requestOpts = {
-      model,
       max_tokens: maxTokens,
-      system,
-      messages,
-      tools,
+      ...resolvedRequest,
+      model,
       ...(openaiReasoningEffort ? { reasoning_effort: openaiReasoningEffort } : {}),
       ...(thinkingBudget > 0 ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
     };
 
     const signal = opts.abortSignal;
+    const useToolTurnNonStream = this._shouldUseNonStreamToolTurn(requestOpts);
+
+    if (useToolTurnNonStream) {
+      const fallbackStart = Date.now();
+      this.log.info(`[stream] ${model} — tool turn using non-stream request`);
+      if (opts.onStatus) {
+        try { opts.onStatus({ type: 'mode', mode: 'non_stream_tool_turn', model, reason: 'tool_turn' }); } catch { }
+      }
+
+      const response = await this._callNonStream(requestOpts, opts);
+      const elapsedMs = Date.now() - fallbackStart;
+      const content = Array.isArray(response?.content) ? response.content : [];
+      const responseText = content.filter(b => b.type === 'text').map(b => b.text || '').join('');
+      const toolCount = content.filter(b => b.type === 'tool_use').length;
+
+      this.log.info(`[stream] ${model} — non-stream fallback complete, ${elapsedMs}ms, ${responseText.length} chars, ${toolCount} tool(s)`);
+      if (opts.onStatus) {
+        try {
+          opts.onStatus({
+            type: 'non_stream_done',
+            elapsed: Math.round(elapsedMs / 1000),
+            phase: toolCount > 0 ? 'tool_call' : 'generating',
+            chars: responseText.length,
+            tools: toolCount,
+            thinkingTokens: 0,
+          });
+        } catch { }
+      }
+      return response;
+    }
 
     // Always stream — Anthropic API requires it for long-running requests.
     // Callbacks are optional; when absent we still stream but discard events.

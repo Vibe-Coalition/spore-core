@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * app.js — Anima Application Bootstrap
+ * app.js — SPORE Application Bootstrap
  *
  * Boots the agent and connects all gateways (Discord, Telegram, Slack, Web).
  * Initializes the knowledge graph, session manager, tool system, learner,
@@ -20,7 +20,7 @@ const { GraphContext } = require('./graph');
 const { SessionManager } = require('./agent');
 const { ToolSystem } = require('./tools');
 const { AgentLoop } = require('./agent');
-const { Learner, Maintainer } = require('./workers');
+const { Learner, Maintainer, Janitor, BackupWorker } = require('./workers');
 const { GatewayManager } = require('./gateways');
 const { PluginManager } = require('./plugins');
 
@@ -40,7 +40,7 @@ async function ensureGraph(config, log) {
   }
 
   let sql = fs.readFileSync(seedPath, 'utf8');
-  const agentId = config.agentId || 'anima';
+  const agentId = config.agentId || 'spore';
   const agentName = config.displayName || agentId.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   sql = sql.replace(/AGENT_ID/g, agentId).replace(/AGENT_NAME/g, agentName);
 
@@ -60,7 +60,7 @@ function updateWebCapabilityNode(config, db, log) {
     const agentId = config.agentId;
     const nodeId = `${agentId}-web`;
 
-    // Build public URL — prefer ANIMA_PUBLIC_URL, fall back to legacy ingress vars
+    // Build public URL — prefer SPORE_PUBLIC_URL, fall back to legacy ingress vars
     let publicUrl = config.publicUrl || null;
     if (!publicUrl && config.ingressDomain) {
       const protocol = config.ingressHttps ? 'https' : 'http';
@@ -75,7 +75,7 @@ function updateWebCapabilityNode(config, db, log) {
     if (config.webPort) {
       attrs.push(`Web server is running on internal port ${config.webPort}.`);
     } else {
-      attrs.push('Web server is not enabled. Set ANIMA_WEB_PORT to activate it, or use the web_serve tool.');
+      attrs.push('Web server is not enabled. Set SPORE_WEB_PORT to activate it, or use the web_serve tool.');
     }
 
     if (publicUrl) {
@@ -96,7 +96,7 @@ function updateWebCapabilityNode(config, db, log) {
     if (config.webAuthUser) {
       attrs.push(`Web interface requires HTTP Basic Auth (username: ${config.webAuthUser}).`);
     } else if (config.webPort) {
-      attrs.push('Web interface has no authentication — consider setting ANIMA_WEB_AUTH_USER and ANIMA_WEB_AUTH_PASS.');
+      attrs.push('Web interface has no authentication — consider setting SPORE_WEB_AUTH_USER and SPORE_WEB_AUTH_PASS.');
     }
 
     if (!attrs.length) {
@@ -192,10 +192,10 @@ async function boot() {
   const config = loadConfig();
   const log = createLogger(config.logLevel);
 
-  log.info('Anima v0.3.0 starting...');
+  log.info('SPORE v0.3.0 starting...');
   log.info(`Model: ${config.model}`);
 
-  // Multi-graph registry — manages multiple knowledge graphs per anima
+  // Multi-graph registry — manages multiple knowledge graphs per spore
   const { GraphRegistry } = require('./graph/multi');
   const dataDir = path.dirname(config.graphDbPath);
   const graphRegistry = new GraphRegistry(dataDir, config, log);
@@ -249,6 +249,13 @@ async function boot() {
   maintainer.ensureSchema();
   log.info('Maintainer initialized (gaps, reflections, stale-check, sparse-connect)');
 
+  const janitor = new Janitor(config, log, anthropicClient, learner.db);
+  janitor.ensureSchema();
+  log.info(`Janitor initialized (mode=${config.janitorMode || 'moderate'}, interval=${config.janitorIntervalMinutes || 360}m)`);
+
+  const backup = new BackupWorker(config, log, learner.db, config.graphDbPath);
+  backup.start();
+
   const sessions = new SessionManager(config, log, learner);
   if (!sessions.init()) {
     log.error('Failed to initialize session manager. Exiting.');
@@ -258,6 +265,8 @@ async function boot() {
   const tools = new ToolSystem(config, log, null, graph, anthropicClient);
   tools.learner = learner;
   tools._maintainer = maintainer;
+  tools._janitor = janitor;
+  tools._backup = backup;
   tools._sessions = sessions;
   tools._graphRegistry = graphRegistry;
 
@@ -285,7 +294,7 @@ async function boot() {
   try {
     await gateways.connectAll();
     tools.platformManager = gateways;
-    log.info('Anima is running.');
+    log.info('SPORE is running.');
   } catch (e) {
     log.error('Failed to connect gateways:', e.message);
     process.exit(1);
@@ -478,12 +487,28 @@ async function boot() {
     }
   }, maintainerDelay);
 
+  // Janitor: separate interval from the maintainer
+  const janitorIntervalMs = (config.janitorIntervalMinutes || 360) * 60_000;
+  const janitorBootDelay = (config.janitorBootDelayMinutes || 8) * 60_000;
+  const janitorTimer = setInterval(async () => {
+    if (config.janitorEnabled === false) return;
+    if (config.maintainerIdleOnly && agent.activeRuns.size > 0) return;
+    try { await janitor.runJanitor(); } catch (e) { log.error('[janitor] Interval error:', e.message); }
+  }, janitorIntervalMs);
+  log.info(`[janitor] Scheduled every ${Math.round(janitorIntervalMs / 60000)}m, first cycle in ${Math.round(janitorBootDelay / 60000)}m`);
+  setTimeout(async () => {
+    if (config.janitorEnabled === false) return;
+    try { await janitor.runJanitor(); } catch (e) { log.error('[boot-janitor] Error:', e.message); }
+  }, janitorBootDelay);
+
   log.info(`Heartbeat scheduled every ${config.heartbeatIntervalMinutes || 45} minutes`);
 
   const shutdown = async (signal) => {
     log.info(`Received ${signal}, shutting down...`);
     try {
       clearInterval(heartbeatTimer);
+      clearInterval(janitorTimer);
+      try { backup.stop(); } catch {}
       tools._killAllTracked();
       await plugins.shutdownAll();
       await gateways.disconnectAll();
@@ -491,7 +516,7 @@ async function boot() {
       sessions.close();
       learner.close();
       graph.close();
-      log.info('Anima stopped cleanly.');
+      log.info('SPORE stopped cleanly.');
     } catch (e) {
       log.error('Error during shutdown:', e.message);
     }
@@ -517,7 +542,7 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
       return;
     }
 
-    // POST /api/invoke — one-shot agent invocation for inter-anima orchestration
+    // POST /api/invoke — one-shot agent invocation for inter-spore orchestration
     if (req.url === '/api/invoke' && req.method === 'POST') {
       if (!config.managerServiceKey) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -563,7 +588,7 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
           '---',
           'IMPORTANT: If this message asks you to tell, notify, inform, or relay something to your user,',
           'you MUST call the notify_user tool to actually deliver it. Your text response here goes back',
-          'to the sending anima only — your user will NOT see it unless you use notify_user.',
+          'to the sending spore only — your user will NOT see it unless you use notify_user.',
         ].filter(v => v !== null).join('\n');
 
         const resultPromise = agent.processMessage({
@@ -649,7 +674,7 @@ module.exports = { boot, startHealthServer };
 
 if (require.main === module) {
   boot().catch(e => {
-    console.error('Anima boot failed:', e);
+    console.error('SPORE boot failed:', e);
     process.exit(1);
   });
 }

@@ -143,7 +143,7 @@ Return ONLY JSON: {"action":"none"} or {"action":"post","channelId":"...","conte
   _getSelfContext() {
     if (!this.db) return 'No personality data available.';
     try {
-      const agentId = this.config.agentId || 'anima';
+      const agentId = this.config.agentId || 'spore';
       const node = this.db.prepare('SELECT id, label, description FROM nodes WHERE id = ?').get(agentId);
       if (!node) return 'No self-node found.';
 

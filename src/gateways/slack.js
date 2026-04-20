@@ -46,24 +46,24 @@ class SlackGateway {
     this._seenMessages = new Set();
     this._seenMessagesMax = 200;
 
-    // Watch anima.json for channel gating changes
+    // Watch spore.json for channel gating changes
     this._gateConfig = null;
     this._loadGateConfig();
     try {
-      const configPath = require('path').join(__dirname, '..', 'anima.json');
+      const configPath = require('path').join(__dirname, '..', 'spore.json');
       require('fs').watch(configPath, () => {
         this._loadGateConfig();
-        this.log.info('[slack][gate] anima.json changed — reloaded listenChannels');
+        this.log.info('[slack][gate] spore.json changed — reloaded listenChannels');
       });
     } catch (e) {
-      this.log.warn('[slack][gate] Could not watch anima.json:', e.message);
+      this.log.warn('[slack][gate] Could not watch spore.json:', e.message);
     }
   }
 
   _loadGateConfig() {
     try {
       const raw = require('fs').readFileSync(
-        require('path').join(__dirname, '..', 'anima.json'), 'utf8'
+        require('path').join(__dirname, '..', 'spore.json'), 'utf8'
       );
       const parsed = JSON.parse(raw);
       this._gateConfig = parsed.listenChannels || null;
@@ -265,7 +265,7 @@ class SlackGateway {
     if (isReply && ch.lastBotThreadTs && message.thread_ts === ch.lastBotThreadTs) return 'reply';
 
     // Bot's display name mentioned
-    const botName = (this.config.displayName || this.config.agentId || 'anima').toLowerCase();
+    const botName = (this.config.displayName || this.config.agentId || 'spore').toLowerCase();
     if (botName && content.toLowerCase().includes(botName)) return 'name';
 
     // Check configured nicknames
@@ -891,7 +891,7 @@ class SlackGateway {
       '```',
       `${brand.name} — ${brand.Agent} Status`,
       `Model: ${this.config.model}`,
-      `Agent: ${this.config.agentId || 'anima'}`,
+      `Agent: ${this.config.agentId || 'spore'}`,
       `Graph: ${nodeCount} nodes`,
       `Uptime: ${h}h ${m}m`,
       '```',

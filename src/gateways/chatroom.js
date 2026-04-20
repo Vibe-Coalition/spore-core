@@ -196,7 +196,7 @@ class ChatroomGateway {
       }
 
       const merged = items.map(i => {
-        const prefix = i.authorType === 'anima' ? `[${i.authorName}]` : `[${i.authorName}]`;
+        const prefix = i.authorType === 'spore' ? `[${i.authorName}]` : `[${i.authorName}]`;
         return `${prefix} ${i.content}`;
       }).join('\n');
 

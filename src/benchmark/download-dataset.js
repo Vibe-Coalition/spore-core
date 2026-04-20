@@ -40,7 +40,7 @@ function followRedirects(url, maxRedirects = 5) {
     if (maxRedirects <= 0) return reject(new Error('Too many redirects'));
 
     const mod = url.startsWith('https') ? https : require('http');
-    mod.get(url, { headers: { 'User-Agent': 'anima-benchmark/1.0' } }, (res) => {
+    mod.get(url, { headers: { 'User-Agent': 'spore-benchmark/1.0' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         resolve(followRedirects(res.headers.location, maxRedirects - 1));
         return;
@@ -128,7 +128,7 @@ module.exports = { download, resolveDatasetPath, VARIANTS };
 if (require.main === module) {
   const args = process.argv.slice(2);
   const variant = args.find(a => !a.startsWith('--')) || 'oracle';
-  const outFlag = (args.find(a => a.startsWith('--out=')) || '').split('=')[1] || path.join(process.env.ANIMA_DATA_DIR || '.', 'benchmark');
+  const outFlag = (args.find(a => a.startsWith('--out=')) || '').split('=')[1] || path.join(process.env.SPORE_DATA_DIR || '.', 'benchmark');
 
   console.log(`\n  LongMemEval Dataset Downloader`);
   console.log(`  ──────────────────────────────`);

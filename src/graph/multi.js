@@ -1,7 +1,7 @@
 /**
  * multi.js — Multi-Graph Registry & Switching
  *
- * Manages multiple knowledge graphs per anima.
+ * Manages multiple knowledge graphs per spore.
  * Each graph is a separate SQLite DB in /data/graphs/.
  * A registry file tracks metadata; an _active pointer selects the live graph.
  *
@@ -151,7 +151,7 @@ class GraphRegistry {
     const seedPath = path.join(__dirname, '..', 'seed-graph.sql');
     if (fs.existsSync(seedPath)) {
       let sql = fs.readFileSync(seedPath, 'utf8');
-      const agentId = this.config.agentId || 'anima';
+      const agentId = this.config.agentId || 'spore';
       const agentName = this.config.displayName || agentId.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
       sql = sql.replace(/AGENT_ID/g, agentId).replace(/AGENT_NAME/g, agentName);
       const db = new DatabaseSync(dbPath);

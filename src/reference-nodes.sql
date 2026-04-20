@@ -26,15 +26,16 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'XI_API_KEY — ElevenLabs TTS and sound effects', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'DEEPGRAM_API_KEY — Deepgram speech-to-text', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'OPENAI_API_KEY — OpenAI', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'GEMINI_API_KEY — Google Gemini', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'BRAVE_API_KEY — Brave Search', 7, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'GEMINI_API_KEY — Google Gemini (embeddings)', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'SEARXNG_URL — Primary web search (self-hosted metasearch). Set to base URL, e.g. http://searxng:8080', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'BRAVE_API_KEY — Fallback web search. Used when SearXNG is unset or returns nothing.', 6, 'seed', 'seed');
 
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-api-keys', 'filesystem_paths', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
   ((SELECT MAX(id) FROM aspects), '/workspace/ — persistent writable workspace (scripts, files, projects)', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/workspace/web/ — publicly served at your web URL', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/data/ — config and databases (.env lives here)', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), '/app/ — Anima runtime (mostly read-only)', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '/app/ — SPORE runtime (mostly read-only)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Never log or print full API key values', 9, 'seed', 'seed');
 
 
@@ -100,7 +101,7 @@ VALUES ('ref-web-architecture', 'Web Server & Routing', 'reference',
 
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-architecture', 'routing', 9, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Request flow: Browser -> Traefik (strips /animas/{id} prefix) -> container port (ANIMA_WEB_PORT, typically 18800)', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Request flow: Browser -> Traefik (strips /spores/{id} prefix) -> container port (SPORE_WEB_PORT, typically 18800)', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Route priority: /graph -> /api/* system routes -> user app proxy -> static files from /workspace/web/', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'web_serve tool serves static files from /workspace/web/ — files written there are live immediately', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/graph is the control panel — served automatically by the built-in server', 8, 'seed', 'seed');
@@ -114,7 +115,7 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-architecture', 'critical_rules', 10, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'NEVER run Express or any server on the ANIMA_WEB_PORT — it replaces the built-in server and breaks /graph and all system routes', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'NEVER run Express or any server on the SPORE_WEB_PORT — it replaces the built-in server and breaks /graph and all system routes', 10, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use a DIFFERENT port for custom backends (3001, 3002, etc.) and set /workspace/.app-port', 9, 'seed', 'seed');
 
 
@@ -136,28 +137,69 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 
 
 -- ═══════════════════════════════════════════════════════════════
--- NODE: Playwright & Browser
+-- NODE: Browser Automation
 -- ═══════════════════════════════════════════════════════════════
 
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-playwright', 'Playwright Browser Setup', 'reference',
-  'How to use Playwright/Chromium for browser automation and the live browser panel.', 7, 'seed');
+VALUES ('ref-browser-automation', 'Browser Automation (Zendriver Default)', 'reference',
+  'How to use the built-in browser tool. Zendriver is the default backend; Playwright remains available as an explicit opt-in backend.', 7, 'seed');
 
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-playwright', 'setup', 8, 'seed');
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-browser-automation', 'setup', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Playwright + Chromium are pre-installed. npm install will FAIL (outbound blocked). Use symlink instead.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Symlink: ln -sf /workspace/.venv/lib/python3.11/site-packages/playwright/driver/package /app/node_modules/playwright-core', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Chromium binary: /workspace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Set PLAYWRIGHT_BROWSERS_PATH=/workspace/.cache/ms-playwright', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Run Node scripts from /app directory (that''s where the symlink lives)', 8, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'Zendriver is installed in the image and is the default backend for the built-in browser tool.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Launch the browser tool without specifying a backend to get Zendriver by default.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Playwright/Chromium remain available as an explicit opt-in backend when needed.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'The browser tool persists across calls, streams the preview panel, and browser.screenshot now returns a real filePath you can send back to the user.', 8, 'seed', 'seed');
 
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-playwright', 'usage', 8, 'seed');
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-browser-automation', 'usage', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Built-in browser tool works after symlink: browser action="launch" url="..." — streams live to control panel', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Actions: launch, navigate, click, type, scroll, screenshot', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Always use --no-sandbox --disable-dev-shm-usage flags', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Use wait_until="domcontentloaded" — networkidle often times out', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Python: PLAYWRIGHT_BROWSERS_PATH=... /workspace/.venv/bin/python3 script.py', 7, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'Use browser action="launch" url="..." to start a persistent Zendriver session.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Actions: launch, navigate, click, type, scroll, screenshot, evaluate, close, status.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Set backend="playwright" only when you explicitly need the Playwright path.', 8, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- NODE: Acorn Client Context
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-acorn-context', 'Acorn Client Context', 'reference',
+  'How Acorn sessions map to a scoped project on the user''s machine and how to work within that client-side environment.', 8, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'scope', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Acorn sessions are bound to a specific project CWD on the user''s machine. Stay inside that project unless the user explicitly redirects you.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'File reads, writes, edits, and execs are sandboxed to that client project path. Paths outside the assigned project are rejected.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Do NOT use /workspace or other container-local paths for Acorn project work. Those are server-side paths, not the user''s repo.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'When you mention files back to the user, use the client project path from the Acorn context or tool results, not a container path.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'workflow', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Acorn CLI and Acorn Companion connect to the same server runtime, but each session preserves its own project scope and local-machine context.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use the normal coding tools inside that provided project scope. Keep replies concise and execution-focused.', 8, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- NODE: Cron & Startup Tasks
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-cron-runtime', 'Cron & Startup Tasks', 'reference',
+  'How scheduled jobs and persistent background tasks work inside the container runtime.', 8, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-cron-runtime', 'cron', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Use plain cron to ensure the daemon is running and crontab to manage jobs.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'NEVER use /etc/init.d/cron start, service cron start, or /usr/sbin/cron directly. Those bypass the wrapper and can fail with pidfile permission errors.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Crontabs persist under /workspace/.crontabs and are restored automatically when the container boots.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Cron starts automatically on boot unless SPORE_ENABLE_CRON=false.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use absolute paths and redirect output in cron entries because jobs run non-interactively.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-cron-runtime', 'startup_tasks', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Use startup_tasks for long-running collectors, watchers, and servers that must survive container restarts.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use cron for scheduled triggers; use startup_tasks for persistent daemons. They solve different problems.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'startup_tasks stores its registry in /data/.startup-tasks.json and replays it after boot.', 8, 'seed', 'seed');
 
 
 -- ═══════════════════════════════════════════════════════════════
@@ -166,11 +208,11 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
 VALUES ('ref-cross-agent-messaging', 'Cross-Agent Messaging', 'reference',
-  'Reliable messaging between Animas using graph inbox nodes instead of ephemeral anima_message.', 7, 'seed');
+  'Reliable messaging between agent instances using graph inbox nodes instead of ephemeral spore_message.', 7, 'seed');
 
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-cross-agent-messaging', 'pattern', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'anima_message is sync and ephemeral — if target is busy/offline, message vanishes', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'spore_message is sync and ephemeral — if target is busy/offline, message vanishes', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Better: use a {name}-inbox node in each agent''s graph as a persistent message queue', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Message format: sender|ISO-timestamp|content|ack:bool|relayed:bool', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Send: graph_update target-inbox with new message attribute', 8, 'seed', 'seed'),
@@ -239,33 +281,156 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 
 
 -- ═══════════════════════════════════════════════════════════════
--- EDGES: Connect reference nodes to anima system node
+-- EDGES: Connect reference nodes to spore system node
 -- ═══════════════════════════════════════════════════════════════
 
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-api-keys', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-api-keys');
+  SELECT 'spore', 'ref-api-keys', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-api-keys');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-bfl-api', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-bfl-api');
+  SELECT 'spore', 'ref-bfl-api', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-bfl-api');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-elevenlabs-api', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-elevenlabs-api');
+  SELECT 'spore', 'ref-elevenlabs-api', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-elevenlabs-api');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-web-architecture', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-web-architecture');
+  SELECT 'spore', 'ref-web-architecture', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-web-architecture');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-image-display', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-image-display');
+  SELECT 'spore', 'ref-image-display', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-image-display');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-playwright', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-playwright');
+  SELECT 'spore', 'ref-browser-automation', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-browser-automation');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-cross-agent-messaging', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-cross-agent-messaging');
+  SELECT 'spore', 'ref-acorn-context', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-acorn-context');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-token-efficiency', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-token-efficiency');
+  SELECT 'spore', 'ref-cross-agent-messaging', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-cross-agent-messaging');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'anima', 'ref-ssh-remote', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='anima' AND target='ref-ssh-remote');
+  SELECT 'spore', 'ref-token-efficiency', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-token-efficiency');
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'spore', 'ref-cron-runtime', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-cron-runtime');
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'spore', 'ref-ssh-remote', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-ssh-remote');
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- NODE: Tailscale (private-tailnet access)
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-tailscale', 'Tailscale', 'reference',
+  'Private-tailnet access from inside this container via the tailscaled daemon (userspace mode). Lets the agent reach the operators compute cluster and any other private peers without public IPs.', 9, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tailscale', 'overview', 10, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Tailscale runs a mesh WireGuard VPN; joining the tailnet gives this container private routing to every other member (compute nodes, operator workstations, etc.).', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'tailscaled runs in userspace-networking mode — no NET_ADMIN cap or /dev/net/tun required. State persists at /data/tailscale/ so login survives restart.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'SOCKS5 + HTTP proxy exposed on localhost:1055 for tools that need to tunnel through tailnet (rarely needed — direct dialing by hostname just works once connected).', 7, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tailscale', 'connection_flow', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Login is interactive SSO via the Settings → Compute Cluster section in the web panel. Clicking "Log in to Tailscale" spawns `tailscale up` and surfaces the login URL; the operator opens it, signs in, done.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Once logged in, the daemon auto-reconnects on every container restart without human intervention.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'If the agent sees "not logged in" / "NeedsLogin", tell the operator to visit Settings → Compute Cluster and click Log in — do not try to start login yourself, the URL must be surfaced in the UI.', 9, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tailscale', 'cli_usage', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Socket path: /data/tailscale/ts.sock — always pass it when invoking the CLI: `tailscale --socket /data/tailscale/ts.sock <cmd>`.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '`tailscale --socket /data/tailscale/ts.sock status --json` → full peer list + your tailnet IP. Also available as GET /api/tailscale/status.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '`tailscale ssh user@peer` — shells into a tailnet peer without managing host keys (Tailscale SSH handles auth). Prefer this over raw ssh when peer is tailnet-only.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '`tailscale ip -4 <peer>` → tailnet IPv4 of a peer; `tailscale ping <peer>` → verify reachability and whether traffic is direct vs DERP-relayed.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tailscale', 'naming', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'MagicDNS format: <short-host>.<tailnet-name>.ts.net — the short hostname alone also works from tailnet members.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'This container registers as `${tailscaleHostname}` (default `spore-<agentId>`, set via Settings → Compute Cluster or SPORE_TAILSCALE_HOSTNAME env).', 7, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tailscale', 'troubleshooting', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), '"NeedsLogin" / auth key expired → operator re-logs in via Settings → Compute Cluster. Do not prompt them with a raw URL; use the UI.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Peer offline → the peer itself has to be online and logged into the same tailnet; check `tailscale status` there.', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Socket permission errors → `/data/tailscale/ts.sock` must be owned by spore; entrypoint chowns it at boot. If it fails, restart the container.', 7, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- NODE: Compute cluster (SLURM, accessed over tailscale)
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-compute-cluster', 'Compute Cluster (SLURM)', 'reference',
+  'The operator runs a private SLURM cluster (CPU + GPU nodes) reachable only over tailscale. The agent SSHs to the configured login host and submits jobs via sbatch / srun.', 10, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-compute-cluster', 'overview', 10, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Cluster has CPU and GPU partitions managed by SLURM. Access path: tailscale connected → SSH to the login node using the configured cluster username → submit jobs from there.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'This container already has slurm-client binaries (sbatch/srun/squeue/scontrol/sinfo/sacct) for reference/man pages, but actual submissions go through SSH on the login node.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-compute-cluster', 'settings_source', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Cluster username, login host, default SLURM partition, and tmux session prefix are all configured in the web panel: Settings → Compute Cluster. They read at runtime as config.clusterUsername, config.clusterLoginHost, config.clusterDefaultPartition, config.clusterTmuxPrefix.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Before any cluster work, check those settings are populated; if empty, tell the operator to fill them in — do not guess.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'The login host is a tailnet MagicDNS name (e.g. "login.<tailnet>.ts.net" or just "login"); it only resolves when tailscale is connected.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-compute-cluster', 'access_flow', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Step 1: verify tailscale is connected (GET /api/tailscale/status backend=Running). Step 2: add the login host as an SSH host (terminal tab → Manage Hosts) using the cluster username and the users SSH key. Step 3: use remote_exec to run slurm commands from the login node.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'For quick sanity checks, POST /api/cluster/test-ssh runs `hostname && which sbatch && sinfo --version` to confirm the full path is up.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-compute-cluster', 'slurm_commands', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Submit a batch job: `sbatch script.sh` — returns Submitted batch job <id>. Job runs async on a cluster node.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Interactive run on a GPU node: `srun --partition=<partition> --gres=gpu:1 --pty bash`. For non-interactive: drop --pty and pass the command.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Inspect queue: `squeue -u <user>` (yours) or `squeue` (everyone). Job detail: `scontrol show job <id>`. Partition/node view: `sinfo -N` or `sinfo -s`.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Post-mortem: `sacct -j <id> --format=JobID,State,ExitCode,Elapsed,MaxRSS` — shows exit state, resources used. Use -l for full detail.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Cancel a job: `scancel <id>`. Only your own jobs unless you have admin perms.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-compute-cluster', 'job_persistence', 10, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'HARD RULE: every remote_exec that may run longer than ~30s MUST pass tmux_session: "<name>". This starts the command in a named tmux session on the remote host so a dropped SSH connection does not kill it.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Re-read progress with remote_tail {host, tmux_session}. Stop with remote_tmux_kill {host, tmux_session}. Session names are auto-prefixed with config.clusterTmuxPrefix (default "spore") so cleanup by prefix is safe.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Set wait:false when submitting a background job (long builds, training runs): remote_exec returns immediately with the session name, and you come back to check status later via remote_tail.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'For SLURM jobs specifically: the sbatch submission itself is fast (<1s) and does not need tmux. But running sbatch + tailing logs, or srun inline, DOES need tmux.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-compute-cluster', 'gpu_vs_cpu', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'GPU jobs require `--gres=gpu:1` (or higher) plus a GPU-capable partition. The operators default partition is in settings (config.clusterDefaultPartition).', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'If the operator does not specify, ask which partition and whether GPU is needed before submitting — wrong partition = instant rejection or waste of quota.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-compute-cluster', 'data_paths', 7, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Placeholder: cluster-specific storage paths (scratch, shared, home) are not seeded — the learner fills these in by observing the operator. When you learn the scratch/shared paths, record them on this aspect so future sessions find them quickly.', 7, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- EXTEND ref-ssh-remote with tmux persistence guidance
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-ssh-remote', 'tmux_persistence', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'remote_exec supports tmux_session: "<name>" — runs the command inside a named tmux session on the remote host so SSH drops do not kill it. Essential for cluster jobs and long builds.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Companion tools: remote_tail {host, tmux_session, lines} reads current pane output; remote_tmux_kill {host, tmux_session} stops the session.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Session names are auto-prefixed with the cluster tmux prefix (default "spore-"). You do not need to include the prefix yourself — just pass a descriptive tag like "build-x" or "train-ep12".', 8, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- EDGES: Connect new reference nodes to spore system node
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'spore', 'ref-tailscale', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-tailscale');
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'spore', 'ref-compute-cluster', 'documents', 0.9, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-compute-cluster');
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'ref-compute-cluster', 'ref-tailscale', 'depends_on', 0.9, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='ref-compute-cluster' AND target='ref-tailscale');
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'ref-compute-cluster', 'ref-ssh-remote', 'depends_on', 0.9, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='ref-compute-cluster' AND target='ref-ssh-remote');

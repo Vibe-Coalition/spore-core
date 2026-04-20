@@ -104,7 +104,11 @@ class Maintainer {
         this.db.exec("ALTER TABLE attributes ADD COLUMN source_excerpt TEXT");
       }
 
-      // Derived facts table with formal reasoning support
+      // Derived facts table with formal reasoning support.
+      // Create the table + safe-index first. Do NOT put the reasoning_type
+      // index in the same exec() — on older DBs the column doesn't exist
+      // yet, CREATE TABLE IF NOT EXISTS would skip, and the index creation
+      // would throw "no such column: reasoning_type", aborting the migration.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS derived_facts (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,15 +120,21 @@ class Maintainer {
           created DATETIME DEFAULT CURRENT_TIMESTAMP,
           invalidated_at DATETIME
         );
-        CREATE INDEX IF NOT EXISTS idx_derived_facts_created ON derived_facts(created);
-        CREATE INDEX IF NOT EXISTS idx_derived_facts_type ON derived_facts(reasoning_type);
       `);
+      try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_derived_facts_created ON derived_facts(created)"); } catch {}
 
+      // Add reasoning_type + premises to pre-existing tables that never had them
       const dfCols = this.db.prepare("PRAGMA table_info(derived_facts)").all().map(c => c.name);
       if (!dfCols.includes('reasoning_type')) {
-        try { this.db.exec("ALTER TABLE derived_facts ADD COLUMN reasoning_type TEXT DEFAULT 'derived'"); } catch {}
-        try { this.db.exec("ALTER TABLE derived_facts ADD COLUMN premises TEXT"); } catch {}
+        try { this.db.exec("ALTER TABLE derived_facts ADD COLUMN reasoning_type TEXT DEFAULT 'derived'"); }
+        catch (e) { this.log.warn('[maintainer] add reasoning_type:', e.message); }
       }
+      if (!dfCols.includes('premises')) {
+        try { this.db.exec("ALTER TABLE derived_facts ADD COLUMN premises TEXT"); }
+        catch (e) { this.log.warn('[maintainer] add premises:', e.message); }
+      }
+      // Now the column definitely exists — safe to create the index
+      try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_derived_facts_type ON derived_facts(reasoning_type)"); } catch {}
 
       // Ensure embedding column exists on nodes
       const nodeCols = this.db.prepare("PRAGMA table_info(nodes)").all().map(c => c.name);
@@ -141,17 +151,48 @@ class Maintainer {
 
   // ── Main cycle ──────────────────────────────────────────────────────────────
 
-  async runMaintenance() {
+  async runMaintenance({ force = false } = {}) {
     if (this._running) {
       this.log.debug('[maintainer] Skipping — already running');
       return null;
     }
 
-    const minIntervalMs = (this.config.maintainerMinIntervalMinutes || 15) * 60_000;
-    if (this._lastRunAt && (Date.now() - this._lastRunAt) < minIntervalMs) {
-      const minsAgo = Math.round((Date.now() - this._lastRunAt) / 60000);
-      this.log.info(`[maintainer] Skipping — last ran ${minsAgo}m ago (min interval: ${Math.round(minIntervalMs / 60000)}m)`);
+    if (!force) {
+      const minIntervalMs = (this.config.maintainerMinIntervalMinutes || 15) * 60_000;
+      if (this._lastRunAt && (Date.now() - this._lastRunAt) < minIntervalMs) {
+        const minsAgo = Math.round((Date.now() - this._lastRunAt) / 60000);
+        this.log.info(`[maintainer] Skipping — last ran ${minsAgo}m ago (min interval: ${Math.round(minIntervalMs / 60000)}m)`);
+        return null;
+      }
+    }
+
+    // Skip silently if no usable LLM is configured (e.g. fresh install before
+    // the onboarding wizard runs). The maintainer's first cron tick fires
+    // before the user has entered any credentials and would otherwise spam
+    // "Could not resolve authentication method" errors every cycle.
+    if (!this._hasUsableModel()) {
+      if (!this._warnedNoModel) {
+        this.log.info('[maintainer] No model/provider configured yet — sleeping until setup is complete.');
+        this._warnedNoModel = true;
+      }
       return null;
+    }
+    this._warnedNoModel = false;
+
+    // Re-resolve the model + client from the *current* config every cycle.
+    // The maintainer is constructed once at boot, but settings can change
+    // mid-life (onboarding wizard, settings pane edits) and we should pick
+    // those up without a server restart.
+    try {
+      const newModel = this.config.learnerModel || this.config.casualModel || this.config.model;
+      if (newModel && newModel !== this.model) {
+        this.model = newModel;
+      }
+      const { createClientForModel } = require('../providers');
+      const fresh = createClientForModel(this.model, this.config);
+      if (fresh) this.client = fresh;
+    } catch (e) {
+      this.log.warn(`[maintainer] client refresh failed: ${e.message}`);
     }
 
     this._running = true;
@@ -167,6 +208,7 @@ class Maintainer {
       const nodeCount = this.db.prepare('SELECT COUNT(*) as c FROM nodes').get().c;
       const scale = Math.max(1, Math.min(5, Math.floor(nodeCount / 50)));
 
+      await this.purgeExpiredTempNodes();
       await this.detectNewGaps(scale);
       await this.fillGaps(scale + 1);
       await this.reflectOnNodes(Math.min(scale, 2));
@@ -212,7 +254,10 @@ class Maintainer {
       // Don't generate more gaps if we already have too many open
       const totalOpen = this.db.prepare("SELECT COUNT(*) as c FROM gaps WHERE status = 'open'").get().c;
       const nodeCount = this.db.prepare('SELECT COUNT(*) as c FROM nodes').get().c;
-      const gapCap = Math.max(10, Math.min(50, nodeCount));
+      // Cap scales with graph size — was hardcoded 50 which permanently
+      // blocked detection on any real graph (e.g. 281 open on a 446-node
+      // graph). Cap = 1.5× node count with a floor of 30 and ceiling of 800.
+      const gapCap = Math.max(30, Math.min(800, Math.round(nodeCount * 1.5)));
       if (totalOpen > gapCap) {
         this.log.info(`[maintainer] Skipping gap detection — ${totalOpen} open gaps already (cap: ${gapCap} for ${nodeCount} nodes)`);
         return;
@@ -267,7 +312,7 @@ If no meaningful gaps exist, return: []`,
         `Nodes to analyze:\n${nodeDescriptions}`
       );
 
-      const parsed = this._parseJSON(response);
+      const parsed = this._parseJSON(response, "detectNewGaps");
       if (!Array.isArray(parsed)) return;
 
       let added = 0;
@@ -305,6 +350,24 @@ If no meaningful gaps exist, return: []`,
     if (!this.db) return;
 
     try {
+      // Revive dormant gaps whose target node changed since dormancy OR
+      // that have been dormant for >7 days (circumstances may have changed).
+      // Without this, a gap that failed 3 attempts is stuck forever.
+      try {
+        const revived = this.db.prepare(`
+          UPDATE gaps
+          SET status = 'open', attempts = 0
+          WHERE status = 'dormant'
+            AND (
+              dormant_since < datetime('now', '-7 days')
+              OR node_id IN (
+                SELECT id FROM nodes WHERE updated > gaps.dormant_since
+              )
+            )
+        `).run();
+        if (revived.changes > 0) this.log.info(`[maintainer] Revived ${revived.changes} dormant gap(s)`);
+      } catch (e) { this.log.debug?.('[maintainer] dormant revive:', e.message); }
+
       const gaps = this.db.prepare(`
         SELECT g.id, g.node_id, g.content, g.attempts,
                n.label, n.type, n.description
@@ -328,7 +391,7 @@ If no meaningful gaps exist, return: []`,
       const context = this._buildNodeContext(gap.node_id);
 
       let webContext = '';
-      if (this._isFactualGap(gap.content) && this.config.braveApiKey) {
+      if (this._isFactualGap(gap.content) && (this.config.searxngUrl || this.config.braveApiKey)) {
         try {
           const results = await this._webSearch(gap.content, 3);
           if (results.length > 0) {
@@ -351,7 +414,7 @@ Return ONLY JSON: {"answer":"your answer or UNKNOWN","confidence":"high|medium|l
         `Graph context:\n${context}${webContext}`
       );
 
-      const result = this._parseJSON(response);
+      const result = this._parseJSON(response, "fillGaps._resolveGap");
       if (!result) {
         this.db.prepare('UPDATE gaps SET attempts = attempts + 1 WHERE id = ?').run(gap.id);
         return;
@@ -524,6 +587,62 @@ Return ONLY the reflection text, no JSON wrapping.`,
     }
   }
 
+  // ── Temp Node Purge ──────────────────────────────────────────────────────────
+  // Hard-deletes nodes tagged as ephemeral (extra.ttl === 'temp') once they've
+  // aged past the configured TTL. Cascades aspects, attributes, edges, aliases.
+
+  async purgeExpiredTempNodes() {
+    if (!this.db) return;
+    // Safety net: the janitor worker normally handles temp review starting at
+    // ttlHours × 0.5. The maintainer only fires as a backstop at 2× TTL, so a
+    // crashed/disabled janitor can't leave temps around forever.
+    const ttlHours = Number(this.config?.tempNodeTtlHours) || 48;
+    const multiplier = this.config?.janitorEnabled === false ? 1 : 2;
+    const thresholdMs = ttlHours * multiplier * 3600 * 1000;
+    const now = Date.now();
+    let rows = [];
+    try {
+      rows = this.db.prepare("SELECT id, extra, created FROM nodes WHERE extra LIKE '%\"ttl\":\"temp\"%'").all();
+    } catch (e) {
+      this.log.warn(`[maintainer] temp-purge scan failed: ${e.message}`);
+      return;
+    }
+    const victims = [];
+    for (const row of rows) {
+      let extraObj = {};
+      try { extraObj = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+      if (extraObj.ttl !== 'temp') continue;
+      const refIso = extraObj.tempCreated || row.created;
+      const refMs = refIso ? Date.parse(refIso) : NaN;
+      if (!Number.isFinite(refMs)) continue;
+      if (now - refMs >= thresholdMs) victims.push(row.id);
+    }
+    if (!victims.length) return;
+    const delAttrs = this.db.prepare('DELETE FROM attributes WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = ?)');
+    const delAspects = this.db.prepare('DELETE FROM aspects WHERE node_id = ?');
+    const delEdges = this.db.prepare('DELETE FROM edges WHERE source = ? OR target = ?');
+    const delAliases = this.db.prepare('DELETE FROM aliases WHERE node_id = ?');
+    const delNode = this.db.prepare('DELETE FROM nodes WHERE id = ?');
+    let purged = 0;
+    for (const id of victims) {
+      try {
+        delAttrs.run(id);
+        delAspects.run(id);
+        delEdges.run(id, id);
+        delAliases.run(id);
+        delNode.run(id);
+        graphEvents.emit('change', { op: 'node:delete', nodeId: id, source: 'maintainer-temp-purge' });
+        purged++;
+      } catch (e) {
+        this.log.warn(`[maintainer] temp-purge failed for ${id}: ${e.message}`);
+      }
+    }
+    if (purged > 0) {
+      this.stats.tempNodesPurged = (this.stats.tempNodesPurged || 0) + purged;
+      this.log.info(`[maintainer] Purged ${purged} expired temp node(s): ${victims.slice(0, 5).join(', ')}${victims.length > 5 ? `, …(+${victims.length - 5})` : ''}`);
+    }
+  }
+
   // ── Stale Data Check ────────────────────────────────────────────────────────
 
   async checkStale(count = 5) {
@@ -576,7 +695,7 @@ Return ONLY JSON: {"status":"current"|"stale"|"uncertain","reason":"brief explan
         (factsStr ? `Answered questions:\n${factsStr}` : '')
       );
 
-      const result = this._parseJSON(response);
+      const result = this._parseJSON(response, "checkStale._checkNodeStaleness");
       if (!result) return;
 
       if (result.status === 'stale') {
@@ -602,10 +721,10 @@ Return ONLY JSON: {"status":"current"|"stale"|"uncertain","reason":"brief explan
         this.stats.staleMarked++;
         this.log.info(`[maintainer] Stale data on ${node.id}: ${result.reason}`);
       }
-
-      this.db.prepare(
-        'UPDATE nodes SET updated = CURRENT_TIMESTAMP WHERE id = ?'
-      ).run(node.id);
+      // NOTE: do NOT update nodes.updated here. That column means "this
+      // node's content changed" — the staleness check is a read-only audit
+      // and touching it would permanently hide every node from the next
+      // cycle's decay-age query, making checkStale find 0 candidates forever.
     } catch (e) {
       this.log.error(`[maintainer] Stale check error (${node.id}):`, e.message);
     }
@@ -646,7 +765,7 @@ If no good connections exist, return: []`,
         `Orphan/sparse nodes:\n${orphanList}\n\nAll nodes:\n${nodeList}`
       );
 
-      const edges = this._parseJSON(response);
+      const edges = this._parseJSON(response, "connectSparseNodes");
       if (!Array.isArray(edges)) return;
 
       let created = 0;
@@ -766,7 +885,7 @@ Do these two nodes refer to the SAME real-world entity/concept? Consider that th
             'You are a knowledge graph deduplication judge. Determine if two nodes refer to the same entity. Consider aliases, abbreviations, and partial names.',
             prompt
           );
-          const result = this._parseJSON(response);
+          const result = this._parseJSON(response, "mergeNodes");
           if (!result || !result.same) continue;
 
           const attrsA = this.db.prepare('SELECT COUNT(*) as c FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = ?').get(pair.a.id).c;
@@ -967,7 +1086,7 @@ Entity B: "${pair.target_label}" (${pair.target_type})
 ${tgtCtx}`
         );
 
-        const result = this._parseJSON(text);
+        const result = this._parseJSON(text, "_dreamDeductive");
         if (!result?.conclusions?.length) continue;
 
         const sourceNodeIds = JSON.stringify([pair.source, pair.target]);
@@ -1056,7 +1175,7 @@ Relationships:
 ${relBlock || 'none'}${existingStr}`
         );
 
-        const result = this._parseJSON(text);
+        const result = this._parseJSON(text, "_dreamInductive");
         if (!result?.patterns?.length) continue;
 
         const sourceNodeIds = JSON.stringify([person.id]);
@@ -1121,7 +1240,7 @@ Reflections:
 ${reflectionBlock || 'none yet'}`
       );
 
-      const result = this._parseJSON(text);
+      const result = this._parseJSON(text, "_dreamAbductive");
       if (!result?.hypotheses?.length) return;
 
       const allNodeIds = new Set();
@@ -1209,36 +1328,45 @@ ${reflectionBlock || 'none yet'}`
     }
   }
 
+  // Returns true when at least one model tier resolves to a provider whose
+  // credentials are present. Used to gate maintenance cycles on a fresh
+  // install where no onboarding has run yet.
+  _hasUsableModel() {
+    const c = this.config || {};
+    const tiers = [c.plannerModel, c.normalModel, c.casualModel, c.subagentModel, c.learnerModel].filter(Boolean);
+    if (!tiers.length) return false;
+    for (const tier of tiers) {
+      const ref = String(tier);
+      const slash = ref.indexOf('/');
+      const prefix = slash > 0 ? ref.slice(0, slash) : '';
+      // Anthropic-style bare model name → needs anthropicApiKey
+      if (!prefix || prefix === 'anthropic') { if (c.anthropicApiKey) return true; continue; }
+      if (prefix === 'openai') { if (c.openaiApiKey) return true; continue; }
+      if (prefix === 'openrouter') { if (c.openrouterApiKey) return true; continue; }
+      if (prefix === 'local') { if (c.localModelBaseUrl) return true; continue; }
+      // Custom OAI-compatible provider (any other prefix)
+      if (c.customProviders && c.customProviders[prefix]) return true;
+    }
+    return false;
+  }
+
   _isFactualGap(content) {
     const factualPatterns = /\b(what|where|when|who|how many|which|version|url|address|name of)\b/i;
     return factualPatterns.test(content);
   }
 
   async _webSearch(query, count = 3) {
-    if (!this.config.braveApiKey) return [];
-
-    return new Promise((resolve) => {
-      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
-      const req = https.get(url, {
-        headers: {
-          'Accept': 'application/json',
-          'X-Subscription-Token': this.config.braveApiKey,
-        },
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(data);
-            resolve((json.web?.results || []).map(r => ({
-              title: r.title, url: r.url, description: r.description,
-            })));
-          } catch { resolve([]); }
-        });
-      });
-      req.on('error', () => resolve([]));
-      req.setTimeout(8000, () => { req.destroy(); resolve([]); });
-    });
+    // Use the shared helper — SearXNG first, Brave fallback. Stays in sync
+    // with the web_search tool.
+    const { searchWeb } = require('../lib/web-search');
+    const searxngUrl = this.config.searxngUrl || process.env.SEARXNG_URL || '';
+    const searxngApiKey = this.config.searxngApiKey || process.env.SEARXNG_API_KEY || '';
+    const braveApiKey = this.config.braveApiKey || '';
+    if (!searxngUrl && !braveApiKey) return [];
+    try {
+      const res = await searchWeb({ query, count, searxngUrl, searxngApiKey, braveApiKey, log: this.log });
+      return Array.isArray(res?.results) ? res.results : [];
+    } catch { return []; }
   }
 
   async _callLLM(systemPrompt, prompt) {
@@ -1249,20 +1377,63 @@ ${reflectionBlock || 'none yet'}`
         ]
       : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
 
-    const response = await this.client.messages.create({
+    // Use streaming: non-streaming requests keep the HTTP connection idle
+    // while the model thinks, which trips nginx's default 60s idle timeout
+    // (→ HTTP 504) on slow reasoning models like Qwen. Streaming sends
+    // tokens continuously so the connection stays warm.
+    //
+    // MultiProvider.messages.stream() returns { on, abort, finalMessage } —
+    // NOT an async iterable. finalMessage() resolves with the full result
+    // once the stream finishes, while the underlying HTTP connection is
+    // fed a continuous token stream the whole time.
+    const params = {
       model: this.model,
-      max_tokens: 1024,
+      max_tokens: 16384,
       system,
       messages: [{ role: 'user', content: prompt }],
-    });
-    return response.content.find(b => b.type === 'text')?.text || '';
+    };
+    let text = '';
+    try {
+      const stream = this.client.messages.stream(params);
+      if (stream && typeof stream.finalMessage === 'function') {
+        const result = await stream.finalMessage();
+        text = (result?.content || []).find(b => b.type === 'text')?.text || '';
+      } else if (stream && typeof stream.on === 'function') {
+        // Older shape: fall back to listener-based collection
+        await new Promise((resolve, reject) => {
+          stream.on('text', chunk => { text += chunk; });
+          stream.on('end', resolve);
+          stream.on('error', reject);
+        });
+      } else {
+        // Shape we don't recognize — fall back to non-streaming
+        const response = await this.client.messages.create(params);
+        text = response.content.find(b => b.type === 'text')?.text || '';
+      }
+    } catch (e) {
+      this.log.debug?.('[maintainer] stream failed, falling back to create():', e?.message);
+      const response = await this.client.messages.create(params);
+      text = response.content.find(b => b.type === 'text')?.text || '';
+    }
+    return text;
   }
 
-  _parseJSON(text) {
+  _parseJSON(text, context = 'unknown') {
+    if (!text || !String(text).trim()) {
+      this.log.debug?.(`[maintainer] _parseJSON (${context}): empty response from LLM`);
+      return null;
+    }
     try {
-      const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      // Strip markdown fences AND extract the JSON blob from a longer response
+      // (Qwen emits "<reasoning>\n\n{...json...}" — pull out the first {...} or [...])
+      let cleaned = String(text).replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      if (cleaned[0] !== '{' && cleaned[0] !== '[') {
+        const m = cleaned.match(/[\{\[][\s\S]*[\}\]]/);
+        if (m) cleaned = m[0];
+      }
       return JSON.parse(cleaned);
-    } catch {
+    } catch (e) {
+      this.log.warn(`[maintainer] _parseJSON (${context}) failed: ${e.message} | head: ${String(text).slice(0,180).replace(/\n/g,' ')}`);
       return null;
     }
   }

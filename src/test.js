@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * test.js — Anima Test Suite
+ * test.js — SPORE Test Suite
  * 
  * Tests the graph context engine, session manager, and prompt building
  * without requiring Discord or Claude API connections.
@@ -43,15 +43,15 @@ async function runTests() {
   if (!fs.existsSync(graphDir)) fs.mkdirSync(graphDir, { recursive: true });
   if (!fs.existsSync(pre.graphDbPath)) {
     const seedSql = fs.readFileSync(path.join(__dirname, 'seed-graph.sql'), 'utf8')
-      .replace(/AGENT_ID/g, 'anima')
-      .replace(/AGENT_NAME/g, 'Anima');
-    const tmpSeed = path.join(os.tmpdir(), 'anima-test-seed.sql');
+      .replace(/AGENT_ID/g, 'spore')
+      .replace(/AGENT_NAME/g, 'SPORE');
+    const tmpSeed = path.join(os.tmpdir(), 'spore-test-seed.sql');
     fs.writeFileSync(tmpSeed, seedSql);
     try {
       execSync(`sqlite3 "${pre.graphDbPath}" < "${tmpSeed}"`, { stdio: 'pipe' });
     } catch (e) {
       console.error('\nTests need sqlite3 and a seedable graph path. Install sqlite3, or run:\n');
-      console.error(`  sed -e 's/AGENT_ID/anima/g' -e 's/AGENT_NAME/Anima/g' seed-graph.sql | sqlite3 "${pre.graphDbPath}"\n`);
+      console.error(`  sed -e 's/AGENT_ID/spore/g' -e 's/AGENT_NAME/SPORE/g' seed-graph.sql | sqlite3 "${pre.graphDbPath}"\n`);
       process.exit(1);
     }
   }
@@ -61,7 +61,7 @@ async function runTests() {
   const log = createLogger('error'); // Quiet during tests
   
   // Override session DB path for testing
-  config.sessionDbPath = '/tmp/anima-test-sessions.db';
+  config.sessionDbPath = '/tmp/spore-test-sessions.db';
   
   // ── Test 1: Config Loading ──────────────────────────────────────────────
   
@@ -79,7 +79,7 @@ async function runTests() {
   assert(initOk, 'Graph context engine initializes');
   
   // Test node retrieval (agent identity node)
-  const agentId = config.agentId || 'anima';
+  const agentId = config.agentId || 'spore';
   const agentNode = graph.getNode(agentId);
   assert(agentNode !== null, 'Can retrieve agent node');
   assert(agentNode.label !== undefined, 'Agent node has a label');
@@ -131,7 +131,7 @@ async function runTests() {
   assertContains(basicPrompt, 'Channel Awareness', 'Prompt contains Channel Awareness');
   assertContains(basicPrompt, 'Anti-Patterns', 'Prompt contains Anti-Patterns');
   assertContains(basicPrompt, 'Available Tools', 'Prompt contains tool descriptions');
-  assertContains(basicPrompt, 'Anima', 'Prompt identifies as Anima');
+  assertContains(basicPrompt, 'SPORE', 'Prompt identifies as SPORE');
   
   // Test prompt with channel context
   const channelPrompt = graph.buildSystemPrompt({
@@ -241,9 +241,9 @@ async function runTests() {
   
   // Remove test DB
   try {
-    require('fs').unlinkSync('/tmp/anima-test-sessions.db');
-    require('fs').unlinkSync('/tmp/anima-test-sessions.db-wal');
-    require('fs').unlinkSync('/tmp/anima-test-sessions.db-shm');
+    require('fs').unlinkSync('/tmp/spore-test-sessions.db');
+    require('fs').unlinkSync('/tmp/spore-test-sessions.db-wal');
+    require('fs').unlinkSync('/tmp/spore-test-sessions.db-shm');
   } catch {}
   
   // ── Results ─────────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 /**
- * config.js — Configuration loader for Anima
+ * config.js — Configuration loader for SPORE
  * 
- * Loads from anima.json and environment variables.
- * Priority: env vars > anima.json > defaults
+ * Loads from spore.json and environment variables.
+ * Priority: env vars > spore.json > defaults
  */
 
 const fs = require('fs');
@@ -18,15 +18,18 @@ if (fs.existsSync(envPath)) {
 }
 
 const DEFAULTS = {
-  // Model tiering — resolved from ANIMA_MODEL / per-tier env vars at load time.
+  // Model tiering — resolved from SPORE_MODEL / per-tier env vars at load time.
   // No hardcoded provider — the user's configured model is used for all tiers.
   casualModel: null,
   normalModel: null,
   plannerModel: null,
   subagentModel: null,
   learnerModel: null,
+  imageVlmModel: null,
+  videoVlmModel: null,
+  audioVlmModel: null,
   model: null, // DEPRECATED — backward compat; resolved to plannerModel at load time
-  agentId: 'anima',
+  agentId: 'spore',
   /** Optional YYYY-MM-DD — authoritative "born" date for prompt tenure math (overrides graph node created). */
   agentBornDate: null,
   displayName: null,      // e.g. "Harry The Alien" — how the agent introduces itself
@@ -40,11 +43,32 @@ const DEFAULTS = {
   maintainerIdleOnly: false,
 
   // Optional capabilities
-  webPort: null,            // ANIMA_WEB_PORT — expose an HTTP server on this port
-  hostReadPaths: [],        // ANIMA_HOST_READ_PATHS — host paths mounted at /host/<path>
-  extraPaths: [],           // ANIMA_EXTRA_PATHS — additional read+write paths (comma-separated)
-  personalityEditable: false, // ANIMA_PERSONALITY_EDITABLE — agent can modify its own identity/voice/rules
-  srcEditable: false,       // ANIMA_SRC_EDITABLE — src bind-mounted rw; agent can self-modify and changes persist
+  webPort: null,            // SPORE_WEB_PORT — expose an HTTP server on this port
+  browserBackend: 'zendriver', // SPORE_BROWSER_BACKEND — default browser tool backend
+  tempNodeTtlHours: 48,     // SPORE_TEMP_NODE_TTL_HOURS — maintainer purges temp nodes older than this (based on extra.tempCreated)
+  janitorMode: 'moderate',  // SPORE_JANITOR_MODE — 'conservative' | 'moderate' | 'aggressive'
+  janitorIntervalMinutes: 360,      // SPORE_JANITOR_INTERVAL_MINUTES — how often the janitor runs
+  janitorRecycleBinTtlDays: 14,     // SPORE_JANITOR_RECYCLE_BIN_TTL_DAYS — auto-purge bin rows older than this
+  janitorPruneBatchSize: 5,         // SPORE_JANITOR_PRUNE_BATCH — permanent nodes scanned per cycle
+  janitorBootDelayMinutes: 8,       // first janitor cycle after boot — slightly after maintainer
+  janitorEnabled: true,     // SPORE_JANITOR_ENABLED=false to disable entirely
+  graphBackupEnabled: true,          // SPORE_BACKUP_ENABLED=false to disable
+  graphBackupIntervalMinutes: 60,    // SPORE_BACKUP_INTERVAL_MINUTES
+  graphBackupRetention: 20,          // SPORE_BACKUP_RETENTION — rolling count kept
+  graphBackupDir: null,              // SPORE_BACKUP_DIR — defaults to <dataDir>/graphs/backups
+  graphBackupOnChangeOnly: true,     // skip snapshot if DB hasn't changed (row-count hash)
+
+  // Compute cluster + tailscale
+  clusterUsername: null,             // SPORE_CLUSTER_USERNAME — SSH user for the cluster
+  clusterLoginHost: null,            // SPORE_CLUSTER_LOGIN_HOST — tailnet hostname of login node
+  clusterDefaultPartition: null,     // SPORE_CLUSTER_PARTITION — default SLURM partition
+  clusterTmuxPrefix: 'spore',        // SPORE_CLUSTER_TMUX_PREFIX — namespace for tmux sessions
+  tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscaled at boot
+  tailscaleHostname: null,           // SPORE_TAILSCALE_HOSTNAME — default: spore-<agentId>
+  hostReadPaths: [],        // SPORE_HOST_READ_PATHS — host paths mounted at /host/<path>
+  extraPaths: [],           // SPORE_EXTRA_PATHS — additional read+write paths (comma-separated)
+  personalityEditable: false, // SPORE_PERSONALITY_EDITABLE — agent can modify its own identity/voice/rules
+  srcEditable: false,       // SPORE_SRC_EDITABLE — src bind-mounted rw; agent can self-modify and changes persist
   enhancedRecall: false,    // LLM-at-search-time query decomposition for better temporal recall
 
   // Paths (Docker overrides via GRAPH_DB_PATH=/data/graph.db in compose)
@@ -143,10 +167,10 @@ const DEFAULTS = {
   healthBindAddr: '0.0.0.0', // HEALTH_BIND_ADDR — container default; host restriction via docker-compose port mapping
 
   // Security
-  discordAdmins: [],           // ANIMA_DISCORD_ADMINS — comma-separated user/role IDs for privileged commands
+  discordAdmins: [],           // SPORE_DISCORD_ADMINS — comma-separated user/role IDs for privileged commands
 
   // Plugins
-  pluginsDir: null,            // ANIMA_PLUGINS_DIR — defaults to {workspace}/plugins
+  pluginsDir: null,            // SPORE_PLUGINS_DIR — defaults to {workspace}/plugins
 
   // Logging
   logLevel: 'info',
@@ -155,12 +179,14 @@ const DEFAULTS = {
 let _configCache = null;
 
 /**
- * Merge anima.json + env and resolve relative paths. Does not use the process cache.
+ * Merge spore.json + env and resolve relative paths. Does not use the process cache.
  */
 function loadConfigFresh() {
   const config = { ...DEFAULTS };
 
-  const configPath = path.join(__dirname, 'anima.json');
+  // Prefer spore.json; fall back to legacy anima.json for un-migrated bind mounts.
+  let configPath = path.join(__dirname, 'spore.json');
+  if (!fs.existsSync(configPath)) configPath = path.join(__dirname, 'anima.json');
   if (fs.existsSync(configPath)) {
     try {
       const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -194,18 +220,25 @@ function loadConfigFresh() {
         config.loopDetection = { ...DEFAULTS.loopDetection, ...fileConfig.loopDetection };
       }
     } catch (e) {
-      console.error('[config] Failed to parse anima.json:', e.message);
+      console.error('[config] Failed to parse spore.json:', e.message);
     }
   }
 
   if (process.env.DISCORD_TOKEN) config.discordToken = process.env.DISCORD_TOKEN;
   if (process.env.ANTHROPIC_API_KEY) config.anthropicApiKey = process.env.ANTHROPIC_API_KEY;
   if (process.env.AGENT_ID) config.agentId = process.env.AGENT_ID;
-  if (process.env.ANIMA_AGENT_BORN_DATE) config.agentBornDate = process.env.ANIMA_AGENT_BORN_DATE.trim();
-  if (process.env.ANIMA_DISPLAY_NAME) config.displayName = process.env.ANIMA_DISPLAY_NAME;
-  if (process.env.ANIMA_NICKNAMES) config.nicknames = process.env.ANIMA_NICKNAMES.split(',').map(s => s.trim()).filter(Boolean);
+  if (process.env.SPORE_AGENT_BORN_DATE) config.agentBornDate = process.env.SPORE_AGENT_BORN_DATE.trim();
+  if (process.env.SPORE_DISPLAY_NAME) config.displayName = process.env.SPORE_DISPLAY_NAME;
+  if (process.env.SPORE_NICKNAMES) config.nicknames = process.env.SPORE_NICKNAMES.split(',').map(s => s.trim()).filter(Boolean);
   if (process.env.BRAVE_API_KEY) config.braveApiKey = process.env.BRAVE_API_KEY;
   if (process.env.SEARXNG_URL) config.searxngUrl = process.env.SEARXNG_URL;
+  if (process.env.SEARXNG_API_KEY) config.searxngApiKey = process.env.SEARXNG_API_KEY;
+
+  // Per-model context overrides — JSON map of `<modelRef>: {contextWindow, compactAt}`
+  if (process.env.SPORE_MODEL_LIMITS) {
+    try { config.modelLimits = JSON.parse(process.env.SPORE_MODEL_LIMITS); }
+    catch { /* keep defaults */ }
+  }
   if (process.env.TELEGRAM_BOT_TOKEN) config.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 
   // Slack
@@ -219,30 +252,33 @@ function loadConfigFresh() {
 
   if (process.env.GRAPH_DB_PATH) config.graphDbPath = process.env.GRAPH_DB_PATH;
   if (process.env.SESSION_DB_PATH) config.sessionDbPath = process.env.SESSION_DB_PATH;
-  if (process.env.ANIMA_WORKSPACE_PATH) config.workspacePath = process.env.ANIMA_WORKSPACE_PATH;
+  if (process.env.SPORE_WORKSPACE_PATH) config.workspacePath = process.env.SPORE_WORKSPACE_PATH;
 
   // Derived directories — all persistent files should use these instead of hardcoded paths.
   // Docker: GRAPH_DB_PATH=/data/graph.db → dataDir=/data, workspacePath=/workspace
   // Bare:   GRAPH_DB_PATH=./data/graph.db → dataDir=./data, workspacePath=./workspace
-  if (process.env.ANIMA_DATA_DIR) config.dataDir = process.env.ANIMA_DATA_DIR;
+  if (process.env.SPORE_DATA_DIR) config.dataDir = process.env.SPORE_DATA_DIR;
   if (process.env.SHARED_GRAPHS_DIR) config.sharedGraphsDir = process.env.SHARED_GRAPHS_DIR;
   if (process.env.SHARED_SKILLS_DIR) config.sharedSkillsDir = process.env.SHARED_SKILLS_DIR;
-  if (process.env.ANIMA_MODEL) config.model = process.env.ANIMA_MODEL;
-  if (process.env.ANIMA_CASUAL_MODEL) config.casualModel = process.env.ANIMA_CASUAL_MODEL;
-  if (process.env.ANIMA_NORMAL_MODEL) config.normalModel = process.env.ANIMA_NORMAL_MODEL;
-  if (process.env.ANIMA_PLANNER_MODEL) config.plannerModel = process.env.ANIMA_PLANNER_MODEL;
-  if (process.env.ANIMA_LOG_LEVEL) config.logLevel = process.env.ANIMA_LOG_LEVEL;
-  if (process.env.ANIMA_HEALTH_PORT) config.healthPort = parseInt(process.env.ANIMA_HEALTH_PORT, 10);
-  if (process.env.ANIMA_LEARNER_MODEL) config.learnerModel = process.env.ANIMA_LEARNER_MODEL;
-  if (process.env.ANIMA_SUBAGENT_MODEL) config.subagentModel = process.env.ANIMA_SUBAGENT_MODEL;
-  if (process.env.ANIMA_SUBAGENT_MAX_TOKENS) config.subagentMaxTokens = parseInt(process.env.ANIMA_SUBAGENT_MAX_TOKENS, 10);
-  if (process.env.ANIMA_OPENAI_REASONING_EFFORT) config.openaiReasoningEffort = process.env.ANIMA_OPENAI_REASONING_EFFORT;
-  if (process.env.ANIMA_HEARTBEAT_MINUTES) config.heartbeatIntervalMinutes = parseInt(process.env.ANIMA_HEARTBEAT_MINUTES, 10);
-  if (process.env.ANIMA_DEBOUNCE_MS) config.messageDebounceMs = parseInt(process.env.ANIMA_DEBOUNCE_MS, 10);
+  if (process.env.SPORE_MODEL) config.model = process.env.SPORE_MODEL;
+  if (process.env.SPORE_CASUAL_MODEL) config.casualModel = process.env.SPORE_CASUAL_MODEL;
+  if (process.env.SPORE_NORMAL_MODEL) config.normalModel = process.env.SPORE_NORMAL_MODEL;
+  if (process.env.SPORE_PLANNER_MODEL) config.plannerModel = process.env.SPORE_PLANNER_MODEL;
+  if (process.env.SPORE_LOG_LEVEL) config.logLevel = process.env.SPORE_LOG_LEVEL;
+  if (process.env.SPORE_HEALTH_PORT) config.healthPort = parseInt(process.env.SPORE_HEALTH_PORT, 10);
+  if (process.env.SPORE_LEARNER_MODEL) config.learnerModel = process.env.SPORE_LEARNER_MODEL;
+  if (process.env.SPORE_SUBAGENT_MODEL) config.subagentModel = process.env.SPORE_SUBAGENT_MODEL;
+  if (process.env.SPORE_IMAGE_VLM_MODEL) config.imageVlmModel = process.env.SPORE_IMAGE_VLM_MODEL;
+  if (process.env.SPORE_VIDEO_VLM_MODEL) config.videoVlmModel = process.env.SPORE_VIDEO_VLM_MODEL;
+  if (process.env.SPORE_AUDIO_VLM_MODEL) config.audioVlmModel = process.env.SPORE_AUDIO_VLM_MODEL;
+  if (process.env.SPORE_SUBAGENT_MAX_TOKENS) config.subagentMaxTokens = parseInt(process.env.SPORE_SUBAGENT_MAX_TOKENS, 10);
+  if (process.env.SPORE_OPENAI_REASONING_EFFORT) config.openaiReasoningEffort = process.env.SPORE_OPENAI_REASONING_EFFORT;
+  if (process.env.SPORE_HEARTBEAT_MINUTES) config.heartbeatIntervalMinutes = parseInt(process.env.SPORE_HEARTBEAT_MINUTES, 10);
+  if (process.env.SPORE_DEBOUNCE_MS) config.messageDebounceMs = parseInt(process.env.SPORE_DEBOUNCE_MS, 10);
   if (process.env.HEALTH_BIND_ADDR) config.healthBindAddr = process.env.HEALTH_BIND_ADDR;
-  if (process.env.ANIMA_DISCORD_ADMINS) config.discordAdmins = process.env.ANIMA_DISCORD_ADMINS.split(',').map(s => s.trim()).filter(Boolean);
-  if (process.env.ANIMA_PLUGINS_DIR) config.pluginsDir = process.env.ANIMA_PLUGINS_DIR;
-  if (process.env.ANIMA_INTERMEDIATE_THROTTLE) config.intermediateTextThrottleSeconds = parseInt(process.env.ANIMA_INTERMEDIATE_THROTTLE, 10);
+  if (process.env.SPORE_DISCORD_ADMINS) config.discordAdmins = process.env.SPORE_DISCORD_ADMINS.split(',').map(s => s.trim()).filter(Boolean);
+  if (process.env.SPORE_PLUGINS_DIR) config.pluginsDir = process.env.SPORE_PLUGINS_DIR;
+  if (process.env.SPORE_INTERMEDIATE_THROTTLE) config.intermediateTextThrottleSeconds = parseInt(process.env.SPORE_INTERMEDIATE_THROTTLE, 10);
 
   // OpenAI
   if (process.env.OPENAI_BASE_URL) config.openaiBaseUrl = process.env.OPENAI_BASE_URL;
@@ -259,15 +295,19 @@ function loadConfigFresh() {
   // Gemini
   if (process.env.GEMINI_API_KEY) config.geminiApiKey = process.env.GEMINI_API_KEY;
 
-  // Vision fallback model (used when active model lacks VLM support)
-  if (process.env.ANIMA_VISION_FALLBACK_MODEL) config.visionFallbackModel = process.env.ANIMA_VISION_FALLBACK_MODEL;
+  // Legacy multimodal fallbacks — used only when dedicated VLM tool tiers are not configured.
+  if (process.env.SPORE_VISION_FALLBACK_MODEL) config.visionFallbackModel = process.env.SPORE_VISION_FALLBACK_MODEL;
+  if (process.env.SPORE_AUDIO_FALLBACK_MODEL) config.audioFallbackModel = process.env.SPORE_AUDIO_FALLBACK_MODEL;
+  if (process.env.SPORE_VIDEO_FALLBACK_MODEL) config.videoFallbackModel = process.env.SPORE_VIDEO_FALLBACK_MODEL;
   if (!config.visionFallbackModel) config.visionFallbackModel = null;
+  if (!config.audioFallbackModel) config.audioFallbackModel = null;
+  if (!config.videoFallbackModel) config.videoFallbackModel = null;
 
-  // Custom providers: ANIMA_PROVIDER_<NAME>_URL, _KEY, _AUTH_HEADER
-  // e.g. ANIMA_PROVIDER_TOGETHER_URL=https://api.together.xyz/v1 → config.customProviders.together
+  // Custom providers: SPORE_PROVIDER_<NAME>_URL, _KEY, _AUTH_HEADER
+  // e.g. SPORE_PROVIDER_TOGETHER_URL=https://api.together.xyz/v1 → config.customProviders.together
   // Capabilities (vision, tools, audio, video) are auto-detected at runtime.
   if (!config.customProviders) config.customProviders = {};
-  const providerRe = /^ANIMA_PROVIDER_([A-Z0-9_]+)_(URL|KEY|AUTH_HEADER)$/;
+  const providerRe = /^SPORE_PROVIDER_([A-Z0-9_]+)_(URL|KEY|AUTH_HEADER)$/;
   for (const [k, v] of Object.entries(process.env)) {
     const m = k.match(providerRe);
     if (!m) continue;
@@ -280,72 +320,115 @@ function loadConfigFresh() {
   }
 
   // Context & learning settings
-  if (process.env.ANIMA_CONTEXT_WINDOW) config.contextWindow = parseInt(process.env.ANIMA_CONTEXT_WINDOW, 10);
-  if (process.env.ANIMA_COMPACT_THRESHOLD) config.compactTokenThreshold = parseInt(process.env.ANIMA_COMPACT_THRESHOLD, 10);
-  if (process.env.ANIMA_COMPACT_KEEP_TAIL) config.compactKeepTail = parseInt(process.env.ANIMA_COMPACT_KEEP_TAIL, 10);
-  if (process.env.ANIMA_LEARNING_MODE) config.learningMode = process.env.ANIMA_LEARNING_MODE;
-  if (process.env.ANIMA_MAINTAINER_IDLE_ONLY) config.maintainerIdleOnly = process.env.ANIMA_MAINTAINER_IDLE_ONLY === 'true';
+  if (process.env.SPORE_CONTEXT_WINDOW) config.contextWindow = parseInt(process.env.SPORE_CONTEXT_WINDOW, 10);
+  if (process.env.SPORE_COMPACT_THRESHOLD) config.compactTokenThreshold = parseInt(process.env.SPORE_COMPACT_THRESHOLD, 10);
+  if (process.env.SPORE_COMPACT_KEEP_TAIL) config.compactKeepTail = parseInt(process.env.SPORE_COMPACT_KEEP_TAIL, 10);
+  if (process.env.SPORE_LEARNING_MODE) config.learningMode = process.env.SPORE_LEARNING_MODE;
+  if (process.env.SPORE_MAINTAINER_IDLE_ONLY) config.maintainerIdleOnly = process.env.SPORE_MAINTAINER_IDLE_ONLY === 'true';
 
   // Web server port (0 / unset = disabled)
-  if (process.env.ANIMA_WEB_PORT) {
-    const wp = parseInt(process.env.ANIMA_WEB_PORT, 10);
+  if (process.env.SPORE_WEB_PORT) {
+    const wp = parseInt(process.env.SPORE_WEB_PORT, 10);
     config.webPort = wp > 0 ? wp : null;
+  }
+  if (process.env.SPORE_BROWSER_BACKEND) {
+    const browserBackend = String(process.env.SPORE_BROWSER_BACKEND || '').trim().toLowerCase();
+    if (browserBackend) config.browserBackend = browserBackend;
   }
 
   // Host filesystem read access: comma-separated host paths mounted at /host/<path>
-  if (process.env.ANIMA_HOST_READ_PATHS) {
-    config.hostReadPaths = process.env.ANIMA_HOST_READ_PATHS.split(',').map(p => p.trim()).filter(Boolean);
+  if (process.env.SPORE_HOST_READ_PATHS) {
+    config.hostReadPaths = process.env.SPORE_HOST_READ_PATHS.split(',').map(p => p.trim()).filter(Boolean);
   }
 
   // Extra read+write paths: comma-separated directories the agent can freely access
-  if (process.env.ANIMA_EXTRA_PATHS) {
-    config.extraPaths = process.env.ANIMA_EXTRA_PATHS.split(',').map(p => p.trim()).filter(Boolean);
+  if (process.env.SPORE_EXTRA_PATHS) {
+    config.extraPaths = process.env.SPORE_EXTRA_PATHS.split(',').map(p => p.trim()).filter(Boolean);
   }
 
   // Web basic auth
-  if (process.env.ANIMA_WEB_AUTH_USER) config.webAuthUser = process.env.ANIMA_WEB_AUTH_USER;
-  if (process.env.ANIMA_WEB_AUTH_PASS) config.webAuthPass = process.env.ANIMA_WEB_AUTH_PASS;
+  if (process.env.SPORE_WEB_AUTH_USER) config.webAuthUser = process.env.SPORE_WEB_AUTH_USER;
+  if (process.env.SPORE_WEB_AUTH_PASS) config.webAuthPass = process.env.SPORE_WEB_AUTH_PASS;
 
   // Acorn CLI team key
-  if (process.env.ANIMA_ACORN_KEY) config.acornKey = process.env.ANIMA_ACORN_KEY;
+  if (process.env.SPORE_ACORN_KEY) config.acornKey = process.env.SPORE_ACORN_KEY;
 
   // Public URL (set by manager during creation, or derived from legacy ingress vars)
-  if (process.env.ANIMA_PUBLIC_URL) {
-    config.publicUrl = process.env.ANIMA_PUBLIC_URL.replace(/\/+$/, '');
+  if (process.env.SPORE_PUBLIC_URL) {
+    config.publicUrl = process.env.SPORE_PUBLIC_URL.replace(/\/+$/, '');
   }
   // Legacy per-agent ingress vars (backwards compat)
-  if (process.env.ANIMA_INGRESS_MODE) config.ingressMode = process.env.ANIMA_INGRESS_MODE;
-  if (process.env.ANIMA_INGRESS_DOMAIN) config.ingressDomain = process.env.ANIMA_INGRESS_DOMAIN;
-  if (process.env.ANIMA_INGRESS_PATH) config.ingressPath = process.env.ANIMA_INGRESS_PATH;
-  if (process.env.ANIMA_INGRESS_HTTPS) config.ingressHttps = process.env.ANIMA_INGRESS_HTTPS === 'true';
+  if (process.env.SPORE_INGRESS_MODE) config.ingressMode = process.env.SPORE_INGRESS_MODE;
+  if (process.env.SPORE_INGRESS_DOMAIN) config.ingressDomain = process.env.SPORE_INGRESS_DOMAIN;
+  if (process.env.SPORE_INGRESS_PATH) config.ingressPath = process.env.SPORE_INGRESS_PATH;
+  if (process.env.SPORE_INGRESS_HTTPS) config.ingressHttps = process.env.SPORE_INGRESS_HTTPS === 'true';
+  if (process.env.SPORE_TEMP_NODE_TTL_HOURS) {
+    const h = Number(process.env.SPORE_TEMP_NODE_TTL_HOURS);
+    if (Number.isFinite(h) && h > 0) config.tempNodeTtlHours = h;
+  }
+  if (process.env.SPORE_JANITOR_MODE) {
+    const m = String(process.env.SPORE_JANITOR_MODE).trim().toLowerCase();
+    if (['conservative', 'moderate', 'aggressive'].includes(m)) config.janitorMode = m;
+  }
+  if (process.env.SPORE_JANITOR_INTERVAL_MINUTES) {
+    const n = Number(process.env.SPORE_JANITOR_INTERVAL_MINUTES);
+    if (Number.isFinite(n) && n > 0) config.janitorIntervalMinutes = n;
+  }
+  if (process.env.SPORE_JANITOR_RECYCLE_BIN_TTL_DAYS) {
+    const n = Number(process.env.SPORE_JANITOR_RECYCLE_BIN_TTL_DAYS);
+    if (Number.isFinite(n) && n >= 0) config.janitorRecycleBinTtlDays = n;
+  }
+  if (process.env.SPORE_JANITOR_PRUNE_BATCH) {
+    const n = Number(process.env.SPORE_JANITOR_PRUNE_BATCH);
+    if (Number.isFinite(n) && n > 0) config.janitorPruneBatchSize = Math.floor(n);
+  }
+  if (process.env.SPORE_JANITOR_ENABLED === 'false') config.janitorEnabled = false;
+  if (process.env.SPORE_BACKUP_ENABLED === 'false') config.graphBackupEnabled = false;
+  if (process.env.SPORE_BACKUP_INTERVAL_MINUTES) {
+    const n = Number(process.env.SPORE_BACKUP_INTERVAL_MINUTES);
+    if (Number.isFinite(n) && n > 0) config.graphBackupIntervalMinutes = n;
+  }
+  if (process.env.SPORE_BACKUP_RETENTION) {
+    const n = Number(process.env.SPORE_BACKUP_RETENTION);
+    if (Number.isFinite(n) && n > 0) config.graphBackupRetention = Math.floor(n);
+  }
+  if (process.env.SPORE_BACKUP_DIR) config.graphBackupDir = process.env.SPORE_BACKUP_DIR;
+  if (process.env.SPORE_BACKUP_ON_CHANGE_ONLY === 'false') config.graphBackupOnChangeOnly = false;
+  if (process.env.SPORE_CLUSTER_USERNAME) config.clusterUsername = process.env.SPORE_CLUSTER_USERNAME.trim();
+  if (process.env.SPORE_CLUSTER_LOGIN_HOST) config.clusterLoginHost = process.env.SPORE_CLUSTER_LOGIN_HOST.trim();
+  if (process.env.SPORE_CLUSTER_PARTITION) config.clusterDefaultPartition = process.env.SPORE_CLUSTER_PARTITION.trim();
+  if (process.env.SPORE_CLUSTER_TMUX_PREFIX) config.clusterTmuxPrefix = process.env.SPORE_CLUSTER_TMUX_PREFIX.trim();
+  if (process.env.SPORE_TAILSCALE_ENABLED === 'true') config.tailscaleEnabled = true;
+  if (process.env.SPORE_TAILSCALE_HOSTNAME) config.tailscaleHostname = process.env.SPORE_TAILSCALE_HOSTNAME.trim();
+  if (!config.tailscaleHostname) config.tailscaleHostname = `spore-${config.agentId || 'agent'}`;
 
   // Personality editing: agent can modify its own identity, voice, rules, personality aspects
-  if (process.env.ANIMA_PERSONALITY_EDITABLE === 'true') config.personalityEditable = true;
+  if (process.env.SPORE_PERSONALITY_EDITABLE === 'true') config.personalityEditable = true;
 
   // Src editing: bind-mounted src allows the agent to self-modify and have changes persist
-  if (process.env.ANIMA_SRC_EDITABLE === 'true') config.srcEditable = true;
+  if (process.env.SPORE_SRC_EDITABLE === 'true') config.srcEditable = true;
 
   // Super agent orchestration
   if (process.env.MANAGER_URL) config.managerUrl = process.env.MANAGER_URL;
   if (process.env.MANAGER_SERVICE_KEY) config.managerServiceKey = process.env.MANAGER_SERVICE_KEY;
-  if (!config.managerUrl) config.managerUrl = 'http://anima-manager:18900';
+  if (!config.managerUrl) config.managerUrl = 'http://spore-manager:18900';
   if (!config.managerServiceKey) config.managerServiceKey = process.env.MANAGER_SERVICE_KEY || '';
 
   // Voice pipeline config
-  if (process.env.ANIMA_VOICE_ENABLED === 'true') config.voice.enabled = true;
-  if (process.env.ANIMA_STT_PROVIDER) config.voice.sttProvider = process.env.ANIMA_STT_PROVIDER;
-  if (process.env.ANIMA_TTS_PROVIDER) config.voice.ttsProvider = process.env.ANIMA_TTS_PROVIDER;
-  if (process.env.ANIMA_TTS_VOICE) config.voice.ttsVoice = process.env.ANIMA_TTS_VOICE;
-  if (process.env.ANIMA_TTS_MODEL) config.voice.ttsModel = process.env.ANIMA_TTS_MODEL;
-  if (process.env.ANIMA_TTS_SPEED) config.voice.ttsSpeed = parseFloat(process.env.ANIMA_TTS_SPEED);
-  if (process.env.ANIMA_TTS_EDGE_VOICE) config.voice.edgeVoice = process.env.ANIMA_TTS_EDGE_VOICE;
+  if (process.env.SPORE_VOICE_ENABLED === 'true') config.voice.enabled = true;
+  if (process.env.SPORE_STT_PROVIDER) config.voice.sttProvider = process.env.SPORE_STT_PROVIDER;
+  if (process.env.SPORE_TTS_PROVIDER) config.voice.ttsProvider = process.env.SPORE_TTS_PROVIDER;
+  if (process.env.SPORE_TTS_VOICE) config.voice.ttsVoice = process.env.SPORE_TTS_VOICE;
+  if (process.env.SPORE_TTS_MODEL) config.voice.ttsModel = process.env.SPORE_TTS_MODEL;
+  if (process.env.SPORE_TTS_SPEED) config.voice.ttsSpeed = parseFloat(process.env.SPORE_TTS_SPEED);
+  if (process.env.SPORE_TTS_EDGE_VOICE) config.voice.edgeVoice = process.env.SPORE_TTS_EDGE_VOICE;
 
   // Proactive outreach
   if (!config.proactive) config.proactive = { ...DEFAULTS.proactive };
-  if (process.env.ANIMA_PROACTIVE_ENABLED) config.proactive.enabled = process.env.ANIMA_PROACTIVE_ENABLED === 'true';
-  if (process.env.ANIMA_PROACTIVE_COOLDOWN) config.proactive.cooldownMinutes = parseInt(process.env.ANIMA_PROACTIVE_COOLDOWN, 10);
-  if (process.env.ANIMA_PROACTIVE_MAX_DAY) config.proactive.maxPerDay = parseInt(process.env.ANIMA_PROACTIVE_MAX_DAY, 10);
-  if (process.env.ANIMA_PROACTIVE_CHANNELS) config.proactive.channels = process.env.ANIMA_PROACTIVE_CHANNELS.split(',').map(s => s.trim()).filter(Boolean);
+  if (process.env.SPORE_PROACTIVE_ENABLED) config.proactive.enabled = process.env.SPORE_PROACTIVE_ENABLED === 'true';
+  if (process.env.SPORE_PROACTIVE_COOLDOWN) config.proactive.cooldownMinutes = parseInt(process.env.SPORE_PROACTIVE_COOLDOWN, 10);
+  if (process.env.SPORE_PROACTIVE_MAX_DAY) config.proactive.maxPerDay = parseInt(process.env.SPORE_PROACTIVE_MAX_DAY, 10);
+  if (process.env.SPORE_PROACTIVE_CHANNELS) config.proactive.channels = process.env.SPORE_PROACTIVE_CHANNELS.split(',').map(s => s.trim()).filter(Boolean);
 
   // Auto-enable voice if STT is available (TTS always available via free Edge TTS fallback)
   const hasSTT = !!(config.deepgramApiKey || config.openaiApiKey);
@@ -359,7 +442,7 @@ function loadConfigFresh() {
 
   // displayName falls back to a prettified agentId if not set
   if (!config.displayName) {
-    config.displayName = (config.agentId || 'anima')
+    config.displayName = (config.agentId || 'spore')
       .replace(/-/g, ' ')
       .replace(/\b\w/g, c => c.toUpperCase());
   }
@@ -377,20 +460,20 @@ function loadConfigFresh() {
         : (config.customProviders?.[mainPrefix]) ? 'custom'
           : 'anthropic';
   if (mainBackend === 'anthropic' && !config.anthropicApiKey) {
-    console.error('[config] Missing Anthropic API key. Set ANTHROPIC_API_KEY env var or configure anima.json');
+    console.error('[config] Missing Anthropic API key. Set ANTHROPIC_API_KEY env var or configure spore.json');
   }
   if (mainBackend === 'openai' && !config.openaiApiKey && !process.env.OPENAI_API_KEY) {
-    console.error('[config] Missing OpenAI API key. Set OPENAI_API_KEY env var or configure anima.json');
+    console.error('[config] Missing OpenAI API key. Set OPENAI_API_KEY env var or configure spore.json');
   }
   if (mainBackend === 'openrouter' && !config.openrouterApiKey) {
-    console.error('[config] Missing OpenRouter API key. Set OPENROUTER_API_KEY env var or configure anima.json');
+    console.error('[config] Missing OpenRouter API key. Set OPENROUTER_API_KEY env var or configure spore.json');
   }
   if (mainBackend === 'gemini' && !config.geminiApiKey && !process.env.GEMINI_API_KEY) {
-    console.error('[config] Missing Gemini API key. Set GEMINI_API_KEY env var or configure anima.json');
+    console.error('[config] Missing Gemini API key. Set GEMINI_API_KEY env var or configure spore.json');
   }
   if (mainBackend === 'custom') {
     const prov = config.customProviders[mainPrefix];
-    if (!prov?.url) console.error(`[config] Custom provider '${mainPrefix}' missing URL. Set ANIMA_PROVIDER_${mainPrefix.toUpperCase()}_URL`);
+    if (!prov?.url) console.error(`[config] Custom provider '${mainPrefix}' missing URL. Set SPORE_PROVIDER_${mainPrefix.toUpperCase()}_URL`);
   }
 
   // Channel config shims

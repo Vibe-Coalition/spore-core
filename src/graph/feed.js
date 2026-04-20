@@ -16,8 +16,8 @@ const { DatabaseSync } = require('node:sqlite');
 function graphDbPath() {
   return process.env.GRAPH_DB_PATH || path.join(__dirname, 'data', 'graph.db');
 }
-const ACTIVITY_NODE_ID = 'anima-activity-log';
-const TOKEN_NODE_ID = 'anima-token-log';
+const ACTIVITY_NODE_ID = 'spore-activity-log';
+const TOKEN_NODE_ID = 'spore-token-log';
 const MAX_ENTRIES = 200;
 const MAX_TOKEN_DAYS = 90;     // Keep 90 daily rollups (~3 months)
 const CONTEXT_LINES = 30;
@@ -111,7 +111,7 @@ function readEntries(nodeId, aspectName, maxLines) {
 
 function write(line) {
   const entry = `[${new Date().toISOString()}] ${line}`;
-  appendEntry(ACTIVITY_NODE_ID, 'Anima Activity Log', 'entries', entry, MAX_ENTRIES);
+  appendEntry(ACTIVITY_NODE_ID, 'SPORE Activity Log', 'entries', entry, MAX_ENTRIES);
 }
 
 function log({ channelName, userName, userMessage, myResponse, trigger, usage, iterations }) {
@@ -120,7 +120,7 @@ function log({ channelName, userName, userMessage, myResponse, trigger, usage, i
   const respSnip = (myResponse || '').slice(0, 100).replace(/\n/g, ' ');
   const entry = `[${ts}] #${channelName || 'dm'} | ${userName}: "${userSnip}" → Agent: "${respSnip}"`;
 
-  appendEntry(ACTIVITY_NODE_ID, 'Anima Activity Log', 'entries', entry, MAX_ENTRIES);
+  appendEntry(ACTIVITY_NODE_ID, 'SPORE Activity Log', 'entries', entry, MAX_ENTRIES);
 
   if (usage) {
     logTokens({ channelName, trigger, usage, iterations });
@@ -173,7 +173,7 @@ function logTokens({ channelName, trigger, usage, iterations }) {
   try {
     const db = getDb();
     if (!db) return;
-    const aspectId = ensureAspect(db, TOKEN_NODE_ID, 'Anima Token Log', 'daily');
+    const aspectId = ensureAspect(db, TOKEN_NODE_ID, 'SPORE Token Log', 'daily');
     if (!aspectId) return;
 
     const existing = db.prepare(
@@ -245,7 +245,7 @@ function readTokenSummary() {
   try {
     const db = getDb();
     if (!db) return null;
-    const aspectId = ensureAspect(db, TOKEN_NODE_ID, 'Anima Token Log', 'daily');
+    const aspectId = ensureAspect(db, TOKEN_NODE_ID, 'SPORE Token Log', 'daily');
     if (!aspectId) return null;
 
     const rows = db.prepare(

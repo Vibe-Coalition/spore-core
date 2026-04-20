@@ -1,5 +1,5 @@
 {
-  "name": "anima",
+  "name": "spore",
   "version": "0.3.0",
   "description": "Visual agentic system — autonomous AI agents with persistent knowledge graph memory",
   "main": "app.js",
@@ -9,7 +9,7 @@
     "test": "node test.js",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
-    "docker:logs": "docker logs -f ${AGENT_ID:-anima}"
+    "docker:logs": "docker logs -f ${AGENT_ID:-spore}"
   },
   "dependencies": {
     "discord.js": "^14.18.0",

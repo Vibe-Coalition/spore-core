@@ -80,7 +80,7 @@ function applyPromptSectionsMixin(GraphContext) {
   };
 
   proto._buildPersonaFraming = function _buildPersonaFraming() {
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     const directives = agentNode?.aspects?.find(a => a.name === 'agent_directives');
 
     if (directives && directives.attributes.length > 0) {
@@ -102,7 +102,7 @@ function applyPromptSectionsMixin(GraphContext) {
   };
 
   proto._buildIdentitySection = function _buildIdentitySection() {
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     if (!agentNode) return '## Identity\nYou are an AI agent.';
 
     const identity = agentNode.aspects.find(a => a.name === 'identity');
@@ -116,7 +116,7 @@ function applyPromptSectionsMixin(GraphContext) {
   };
 
   proto._buildVoiceSection = function _buildVoiceSection() {
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     if (!agentNode) return null;
 
     const voice = agentNode.aspects.find(a => a.name === 'voice');
@@ -129,7 +129,7 @@ function applyPromptSectionsMixin(GraphContext) {
   proto._buildRulesSection = function _buildRulesSection() {
     const parts = [];
 
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     if (agentNode) {
       const rules = agentNode.aspects.find(a => a.name === 'hard_rules');
       if (rules) {
@@ -137,6 +137,22 @@ function applyPromptSectionsMixin(GraphContext) {
           .sort((a, b) => (b.importance || 5) - (a.importance || 5))
           .map((a, i) => `${i + 1}. ${a.content}`);
         parts.push(lines.join('\n'));
+      }
+
+      const privacy = agentNode.aspects.find(a => a.name === 'user_privacy');
+      if (privacy) {
+        const lines = privacy.attributes
+          .sort((a, b) => (b.importance || 5) - (a.importance || 5))
+          .map(a => `- ${a.content}`);
+        parts.push(`### User Privacy & Confidentiality\n${lines.join('\n')}`);
+      }
+
+      const team = agentNode.aspects.find(a => a.name === 'team_context');
+      if (team) {
+        const lines = team.attributes
+          .sort((a, b) => (b.importance || 5) - (a.importance || 5))
+          .map(a => `- ${a.content}`);
+        parts.push(`### Team Context (you serve multiple people)\n${lines.join('\n')}`);
       }
 
       const startup = agentNode.aspects.find(a => a.name === 'startup_rules');
@@ -263,7 +279,7 @@ function applyPromptSectionsMixin(GraphContext) {
   proto._buildChannelSection = function _buildChannelSection(channelId, channelName) {
     const parts = [];
 
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     if (agentNode) {
       const channels = agentNode.aspects.find(a => a.name === 'channel_awareness');
       if (channels) {
@@ -328,12 +344,23 @@ function applyPromptSectionsMixin(GraphContext) {
       if (rows.length > 0) person = this._hydrateNode(rows[0]);
     }
 
-    if (!person) return null;
-    if (person.type !== 'person') return null;
+    if (!person || person.type !== 'person') {
+      // No person node matches the current speaker — emit a stub so the agent
+      // knows this is a new/unknown user and does NOT conflate them with any
+      // other person in the graph (e.g. the creator). Without this, the agent
+      // will happily answer "who am I?" by describing its primary operator.
+      return `## About the current speaker
+- **Identifier**: ${userName}${userId && userId !== userName ? ` (id: ${userId})` : ''}
+- **Status**: Not yet in your graph — this is a new user or one you haven't met under this name.
+- **Rules**:
+  - Do NOT assume they are any other person you know (your operator, creator, or anyone else).
+  - If asked "who am I?" or similar, say you don't have them on file yet and ask them to introduce themselves.
+  - When they introduce themselves, use graph_update to create a person node (id = their real name) and an edge from your agent node.`;
+    }
 
     const parts = [`## About ${person.label}`, person.description];
 
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     if (agentNode) {
       const routing = agentNode.aspects.find(a => a.name === 'person_routing');
       if (routing) {
@@ -376,7 +403,7 @@ function applyPromptSectionsMixin(GraphContext) {
   };
 
   proto._buildAntiPatternsSection = function _buildAntiPatternsSection() {
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     if (!agentNode) return null;
 
     const anti = agentNode.aspects.find(a => a.name === 'anti_patterns');
@@ -387,7 +414,7 @@ function applyPromptSectionsMixin(GraphContext) {
   };
 
   proto._buildSelfKnowledgeSection = function _buildSelfKnowledgeSection() {
-    const agentNode = this.getNode(this.config.agentId || 'anima');
+    const agentNode = this.getNode(this.config.agentId || 'spore');
     if (!agentNode) return null;
 
     const coreAspects = new Set([
@@ -470,7 +497,7 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('### Platform & Messaging');
     if (this.config.discordToken) {
       lines.push('You are connected to **Discord**. Key facts:');
-      lines.push('- **message_send**: Use `target: "discord:<channelId>"` or just `channelId` to send messages. Long messages are auto-chunked to 2000 chars.');
+      lines.push('- **message_send**: Omit `target` / `channelId` to reply in the current chat. For cross-chat sends, use `target: "discord:<channelId>"` or just `channelId`. Long messages are auto-chunked to 2000 chars.');
       lines.push('- **message_read**: Read recent messages from a channel. Use to catch up on conversation context you missed.');
       lines.push('- **message_edit**: Edit your own previously sent messages by messageId.');
       lines.push('- **message_react**: Add emoji reactions to messages.');
@@ -483,7 +510,7 @@ function applyPromptSectionsMixin(GraphContext) {
       }
     }
     if (this.config.telegramBotToken || this.config.channels?.telegram?.enabled) {
-      lines.push('You are connected to **Telegram**. Use `target: "telegram:<chatId>"` with message_send.');
+      lines.push('You are connected to **Telegram**. Omit `target` / `channelId` to reply in the current Telegram chat. Only specify `target: "telegram:<chatId>"` when you intentionally want to send somewhere else.');
     }
     if (this.config.webPort) {
       let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
@@ -500,16 +527,16 @@ function applyPromptSectionsMixin(GraphContext) {
       lines.push('- The user is chatting from a browser.');
       lines.push('- To share an image/video/audio inline, reference files in `/workspace/` by their path (e.g. `/workspace/chart.png`). The chat UI rewrites these to load from the current origin automatically, so the same path works regardless of how the user is accessing the UI.');
       lines.push('- Prefer `/workspace/<filename>` over absolute URLs. Only use an absolute URL if sharing a link meant to be opened outside the current chat.');
-      lines.push('- Do NOT use message_send for web chat — your response text is sent back automatically. Just mention the file path.');
-      lines.push('- The user can send you images which you can see (multimodal vision).');
+      lines.push('- Do NOT use message_send for the current web chat. Your response text is sent back automatically. If you want to share an image/video/audio/file with the web user, reply with the `/workspace/...` path in normal assistant text and the UI will render or link it.');
+      lines.push('- The user can send you images, audio, and video attachments. Uploads are saved into `/workspace/uploads`; when dedicated VLM tiers are configured, prefer `analyze_media` on those saved files because it auto-detects the media type and is more reliable than the longer modality-specific names. Use `analyze_image`, `analyze_video`, or `analyze_audio` only when you need to force a specific modality. If the user means the latest uploaded attachment, these tools can be called without a path. You still write the final answer yourself.');
     }
     if (this.config.superAgent) {
       lines.push('');
       lines.push('### Orchestrator (Super Agent)');
       lines.push('You have orchestration tools for managing other animas:');
-      lines.push('- **anima_list**: List all anima instances with status and health.');
-      lines.push('- **anima_message**: Send a message to another anima — it processes through its full agent loop and returns a response.');
-      lines.push('- **anima_graph**: Read or write another anima\'s knowledge graph.');
+      lines.push('- **anima_list**: List all spore instances with status and health.');
+      lines.push('- **spore_message**: Send a message to another spore — it processes through its full agent loop and returns a response.');
+      lines.push('- **anima_graph**: Read or write another spore\'s knowledge graph.');
       lines.push('- **anima_manage**: Restart, update env/config, view logs of other animas.');
     }
 
@@ -520,11 +547,11 @@ function applyPromptSectionsMixin(GraphContext) {
         const catalog = sm.getCatalogSummary();
         lines.push('');
         lines.push('### Shared Skills Library');
-        lines.push('You have access to a **shared skills library** — a knowledge base that all Anima agents can read and write.');
+        lines.push('You have access to a **shared skills library** — a knowledge base that all SPORE agents can read and write.');
         lines.push('- **skill_lookup**: Search or read skills. Use `action: "list"` to see all, `action: "search"` with a query/tags, or `action: "read"` with a slug to get full content.');
-        lines.push('- **skill_update**: Create or update a skill. Share what you\'ve learned so other Animas don\'t have to rediscover it.');
+        lines.push('- **skill_update**: Create or update a skill. Share what you\'ve learned so other agents don\'t have to rediscover it.');
         lines.push('');
-        lines.push('**IMPORTANT — check skills first:** Before spending tokens researching an API, workflow, or technical approach, use `skill_lookup` to check if another Anima has already documented it. This saves significant time and cost.');
+        lines.push('**IMPORTANT — check skills first:** Before spending tokens researching an API, workflow, or technical approach, use `skill_lookup` to check if another agent has already documented it. This saves significant time and cost.');
         lines.push('**Contribute back:** When you figure out something non-trivial (API usage, error workarounds, deployment patterns, etc.), write it to the skills library with `skill_update`. Include code examples, exact parameters, and gotchas.');
         if (catalog) {
           lines.push('');
@@ -574,8 +601,9 @@ function applyPromptSectionsMixin(GraphContext) {
       DEEPGRAM_API_KEY: 'Deepgram — speech-to-text transcription',
       XI_API_KEY: 'ElevenLabs — text-to-speech voice synthesis',
       OPENAI_API_KEY: 'OpenAI — GPT models, DALL-E, embeddings',
-      GEMINI_API_KEY: 'Google Gemini — multimodal AI',
-      BRAVE_API_KEY: 'Brave Search — web search API',
+      GEMINI_API_KEY: 'Google Gemini — multimodal AI (embeddings)',
+      SEARXNG_URL: 'SearXNG — primary web search (self-hosted metasearch). Base URL.',
+      BRAVE_API_KEY: 'Brave Search — fallback web search (used when SearXNG is unset or empty)',
       REPLICATE_API_TOKEN: 'Replicate — run ML models',
       STABILITY_API_KEY: 'Stability AI — image generation',
       GOOGLE_API_KEY: 'Google Cloud APIs',
@@ -620,14 +648,14 @@ function applyPromptSectionsMixin(GraphContext) {
 
     if (this.config.voice?.enabled) {
       const ttsProvider = this.config.xiApiKey ? 'ElevenLabs' : this.config.openaiApiKey ? 'OpenAI' : 'Edge (free)';
-      const currentVoiceId = this.config.voice.ttsVoice || process.env.ANIMA_TTS_VOICE || '(default)';
+      const currentVoiceId = this.config.voice.ttsVoice || process.env.SPORE_TTS_VOICE || '(default)';
       lines.push('');
       lines.push('### Voice (TTS/STT) — you control this');
       lines.push(`- Your voice pipeline is **active**. TTS provider: **${ttsProvider}**. Current voice ID: \`${currentVoiceId}\`.`);
-      lines.push('- To **change your voice**: use `env_manage` to set `ANIMA_TTS_VOICE` to a new voice ID, then the change takes effect on the next TTS call.');
+      lines.push('- To **change your voice**: use `env_manage` to set `SPORE_TTS_VOICE` to a new voice ID, then the change takes effect on the next TTS call.');
       if (this.config.xiApiKey) {
         lines.push('- To **browse ElevenLabs voices**: use `web_fetch({ url: "https://api.elevenlabs.io/v1/voices", credential: "XI_API_KEY" })` or search the web for popular ElevenLabs voice IDs.');
-        lines.push('- You can also change the TTS model via `ANIMA_TTS_MODEL` (default: eleven_turbo_v2_5) and speed via `ANIMA_TTS_SPEED` (default: 1.0).');
+        lines.push('- You can also change the TTS model via `SPORE_TTS_MODEL` (default: eleven_turbo_v2_5) and speed via `SPORE_TTS_SPEED` (default: 1.0).');
       }
       lines.push('- **You own your voice settings.** If a user asks you to change your voice, do it yourself — don\'t say it requires admin/infrastructure changes.');
     }
@@ -666,7 +694,7 @@ function applyPromptSectionsMixin(GraphContext) {
       );
       if (trigger === 'lull') {
         lines.push('### Lull guidance');
-        const agentNode = this.getNode(this.config.agentId || 'anima');
+        const agentNode = this.getNode(this.config.agentId || 'spore');
         const lullAsp = agentNode?.aspects?.find(a => a.name === 'lull_behavior');
         if (lullAsp?.attributes?.length > 0) {
           for (const attr of lullAsp.attributes.sort((a, b) => (b.importance || 5) - (a.importance || 5))) {
@@ -770,11 +798,11 @@ function applyPromptSectionsMixin(GraphContext) {
   proto._resolveExistenceAnchor = function _resolveExistenceAnchor() {
     const fromConfig = _parseIsoDateOnly(this.config.agentBornDate);
     if (fromConfig) {
-      return { date: fromConfig, label: fromConfig.toISOString().slice(0, 10), source: 'anima.json / ANIMA_AGENT_BORN_DATE' };
+      return { date: fromConfig, label: fromConfig.toISOString().slice(0, 10), source: 'spore.json / SPORE_AGENT_BORN_DATE' };
     }
     if (!this.db) return null;
     try {
-      const agentId = this.config.agentId || 'anima';
+      const agentId = this.config.agentId || 'spore';
       const row = this.db.prepare('SELECT created FROM nodes WHERE id = ?').get(agentId);
       if (!row || row.created == null) return null;
       const d = new Date(row.created);
@@ -799,7 +827,7 @@ function applyPromptSectionsMixin(GraphContext) {
       const days = _utcCalendarDaysSince(anchor.date, now);
       lines.push(`- **Existence:** ${anchor.source} → **${anchor.label}** — **${days}** UTC calendar days to today.`);
     } else {
-      lines.push('- **Existence:** unset (add `agentBornDate` in anima.json as YYYY-MM-DD, or ensure the agent row exists in the graph with `created`).');
+      lines.push('- **Existence:** unset (add `agentBornDate` in spore.json as YYYY-MM-DD, or ensure the agent row exists in the graph with `created`).');
     }
     return lines;
   };
@@ -808,7 +836,7 @@ function applyPromptSectionsMixin(GraphContext) {
     const now = new Date();
     const parts = [
       `## Runtime`,
-      `- Gateway: Anima v0.1.0`,
+      `- Gateway: SPORE v0.1.0`,
       `- Time: ${now.toISOString()} UTC`,
       `- Model: ${this.config.model}`,
     ];
@@ -820,6 +848,15 @@ function applyPromptSectionsMixin(GraphContext) {
     if (opts.isThread) parts.push(`- Thread: yes (parent: #${opts.parentChannelName || 'unknown'})`);
     if (opts.userName) parts.push(`- Speaking to: ${opts.userName}`);
     if (opts.userId) parts.push(`- User ID: ${opts.userId}`);
+    if (opts.userRole) {
+      const roleLabel = ({
+        admin: 'admin (operator with full control of this instance)',
+        creator: 'creator (operator with full control of this instance)',
+        webapp: 'webapp user (a guest who self-registered with the team key — they can talk and edit nodes, but should NOT be granted access to provider keys, server settings, or destructive admin actions)',
+        acorn: 'acorn CLI user (workstation operator)',
+      })[opts.userRole] || opts.userRole;
+      parts.push(`- User role: ${roleLabel}`);
+    }
     if (opts.trigger) parts.push(`- Trigger: ${opts.trigger}`);
     if (opts.messageId) parts.push(`- Triggering Message ID: ${opts.messageId}`);
     if (opts.clientCwd) parts.push(`- Client working directory: ${opts.clientCwd}`);
@@ -834,7 +871,7 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push(`**Current project directory: ${opts.clientCwd}** — This is the user's active project. When reading files, searching code, or answering questions about "the codebase" or "this project", scope your work to this directory. Do NOT read or reference files from other projects in the workspace unless the user explicitly asks.`);
       parts.push('');
     }
-    parts.push('Use `message_send` / `message_read` / `message_edit` / `message_react` with platform targets like `discord:123` or `telegram:456` when needed.');
+    parts.push('Use `message_send` / `message_read` / `message_edit` / `message_react` without a target for the current conversation. Only specify platform targets like `discord:123` or `telegram:456` for intentional cross-chat actions.');
     parts.push(`Your workspace is ${workspace} — use it for scripts, files, and tools you create. It persists across restarts.`);
 
     const envSummary = this._getEnvironmentSummary(workspace);
@@ -851,7 +888,8 @@ function applyPromptSectionsMixin(GraphContext) {
     parts.push('**All installs persist across restarts**: pip packages (/workspace/.venv), npm global packages, Go binaries, Cargo crates, Ruby gems, Playwright/Puppeteer browsers, and apt packages are all stored on persistent volumes. You do NOT need to reinstall them after a restart. Before installing something, check if it already exists (`which <cmd>`, `pip list | grep <pkg>`, etc.).');
 
 
-    parts.push('You can read/write your own config at /app/anima.json and your graph at ' + this.config.graphDbPath + ' via the exec tool.');
+    parts.push('You can read/write your own config at /app/spore.json and your graph at ' + this.config.graphDbPath + ' via the exec tool.');
+    parts.push('If a tool returns an absolute `filePath` (for example from `browser({ action: "screenshot" })`), you can deliver that file to the user with `message_send`.');
 
     const keyStatus = [];
     if (this.config.anthropicApiKey) keyStatus.push('ANTHROPIC_API_KEY ✓');
@@ -873,12 +911,13 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push('### Web Panel: Built-in Features');
       parts.push('- **Code Viewer Panel**: A floating panel for live code viewing with syntax highlighting and diff view. The user controls the mode via a dropdown: **Auto** (opens on every read_file/write_file/edit_file), **On request** (tabs accumulate silently, a badge shows the count, user clicks to view), or **Off** (disabled). You do NOT need to build a code viewer — it is built in. Just use the file tools normally.');
       parts.push('- **Browser Preview Panel**: When you use the browser tool, a live preview streams to the panel automatically.');
+      parts.push('- **Browser Screenshots**: `browser({ action: "screenshot" })` also saves a JPG and returns `filePath`. In web chat, reply with that `/workspace/...` path directly so it renders inline. In Discord/Telegram, use `message_send` only if you need to send it to another chat explicitly.');
     }
 
     if (opts.platform === 'chatroom') {
       parts.push('');
       parts.push('## Chat Room Behavior');
-      parts.push('You are in a **shared chat room** with other Anima agents and human users.');
+      parts.push('You are in a **shared chat room** with other SPORE agents and human users.');
       parts.push('- Messages from other participants appear as "[Name] message".');
       parts.push('- Use `@name` to address specific participants.');
       parts.push('- **Be concise** — this is a group chat, not a 1:1 conversation. Keep responses short and punchy.');
