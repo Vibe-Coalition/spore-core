@@ -3024,7 +3024,7 @@ class WebGateway {
         return;
       }
 
-      if (urlPath === '/api/tokens' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/tailscale') || urlPath.startsWith('/api/cluster') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch')) {
+      if (urlPath === '/api/tokens' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/tailscale') || urlPath.startsWith('/api/cluster') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch')) {
         if (!(await checkAuth(req, res))) return;
         const currentDb = this.graph?.db || graphDb;
         this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
@@ -5379,6 +5379,187 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       return;
     }
 
+    // ── Graph / settings / providers export + import ─────────────────
+    if (urlPath.startsWith('/api/graph/export') && req.method === 'GET') {
+      try {
+        const { exportGraph, exportProviders, exportSettings } = require('../graph/export-import');
+        const u = new URL(req.url, 'http://x');
+        const wantGraph = u.searchParams.get('graph') !== '0';
+        const wantProviders = u.searchParams.get('providers') === '1';
+        const wantSettings = u.searchParams.get('settings') !== '0';
+        const includeSecrets = u.searchParams.get('secrets') === '1';
+
+        const bundle = {
+          version: 2,
+          format: 'spore-export',
+          exportedAt: new Date().toISOString(),
+          sourceAgent: this.config.agentId ? { id: this.config.agentId, label: this.config.displayName || this.config.agentId } : null,
+          includesSecrets: wantProviders && includeSecrets,
+          sections: [],
+        };
+        if (wantGraph) {
+          bundle.graph = exportGraph(db, { agentId: this.config.agentId || null });
+          bundle.sections.push('graph');
+        }
+        if (wantProviders) {
+          bundle.providers = exportProviders(this.config, { includeSecrets });
+          if (bundle.providers) bundle.sections.push('providers');
+        }
+        if (wantSettings) {
+          bundle.settings = exportSettings(this.config);
+          if (bundle.settings) bundle.sections.push('settings');
+        }
+
+        const filename = `spore-export-${(this.config.agentId || 'agent').replace(/[^a-zA-Z0-9-]/g, '')}-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}.json`;
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+        });
+        res.end(JSON.stringify(bundle, null, 2));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/graph/import' && req.method === 'POST') {
+      // Import is destructive (inserts nodes + edges into the live graph),
+      // so gate to creator only — webapp users shouldn't be able to bulk
+      // upload arbitrary knowledge. Inline cookie check against _sessions.
+      try {
+        const cookies = (function parse(h) {
+          const out = {}; if (!h) return out;
+          for (const c of h.split(';')) { const i = c.indexOf('='); if (i > 0) out[c.slice(0, i).trim()] = c.slice(i + 1).trim(); }
+          return out;
+        })(req.headers.cookie || '');
+        const sid = cookies['anima_session'];
+        const sess = sid && this._webSessions.get(sid);
+        const isCreator = sess && (sess.type === 'creator' || sess.type === 'admin');
+        if (!isCreator) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Import requires creator role.' }));
+          return;
+        }
+      } catch (e) {
+        res.writeHead(500); res.end(JSON.stringify({ error: 'auth check failed: ' + e.message })); return;
+      }
+      try {
+        // Increase the body cap — exports can be multi-MB for large graphs
+        const MAX_IMPORT = 50 * 1024 * 1024;
+        const bodyRaw = await new Promise((resolve, reject) => {
+          let b = ''; req.on('data', c => {
+            b += c; if (b.length > MAX_IMPORT) { req.destroy(); reject(new Error('import too large (>50MB)')); }
+          });
+          req.on('end', () => resolve(b));
+          req.on('error', reject);
+        });
+        let payload;
+        try { payload = JSON.parse(bodyRaw); } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid JSON: ' + e.message }));
+          return;
+        }
+        // Auto pre-import backup so the operator can undo
+        try {
+          const backup = this.tools?._backup;
+          if (backup) await backup.runBackup({ force: true, note: 'pre-import' });
+        } catch (e) { this.log.warn('[import] pre-import backup failed: ' + e.message); }
+
+        const { importGraph, planProviderImport, planSettingsImport } = require('../graph/export-import');
+        const u = new URL(req.url, 'http://x');
+        const applyGraph = u.searchParams.get('apply_graph') !== '0';
+        const applyProviders = u.searchParams.get('apply_providers') === '1';
+        const applySettings = u.searchParams.get('apply_settings') !== '0';
+
+        // v2 bundle → has {graph, providers, settings}. v1 format / raw graph →
+        // the graph IS the payload (backward compat).
+        const isBundle = payload.format === 'spore-export';
+        const graphPayload = isBundle ? payload.graph : payload;
+        const providersSection = isBundle ? payload.providers : null;
+        const settingsSection = isBundle ? payload.settings : null;
+
+        const report = {
+          graph: null,
+          providers: null,
+          settings: null,
+        };
+
+        if (applyGraph && graphPayload && graphPayload.format === 'spore-graph-export') {
+          report.graph = importGraph(db, graphPayload, { log: this.log });
+        } else if (applyGraph && graphPayload) {
+          report.graph = { error: 'skipped — not a spore-graph-export payload' };
+        }
+
+        let providerTouched = false;
+        let modelTouched = false;
+        if (applyProviders && providersSection) {
+          const plan = planProviderImport(providersSection, this.config);
+          try {
+            if (typeof this._applyEnvUpdates === 'function' && Object.keys(plan.envUpdates).length) {
+              this._applyEnvUpdates(plan.envUpdates);
+            }
+            Object.assign(this.config, plan.configPatches);
+            providerTouched = plan.applied.length > 0;
+          } catch (e) {
+            this.log.warn('[import] providers apply failed: ' + e.message);
+          }
+          report.providers = { applied: plan.applied, skipped: plan.skipped };
+        }
+
+        if (applySettings && settingsSection) {
+          const plan = planSettingsImport(settingsSection);
+          try {
+            if (typeof this._applyEnvUpdates === 'function' && Object.keys(plan.envUpdates).length) {
+              this._applyEnvUpdates(plan.envUpdates);
+            }
+            Object.assign(this.config, plan.configPatches);
+            // If any model tier changed, the agent loop needs to rewire.
+            for (const k of ['casualModel', 'normalModel', 'plannerModel', 'subagentModel', 'learnerModel', 'imageVlmModel', 'videoVlmModel', 'audioVlmModel']) {
+              if (plan.configPatches[k] != null) { modelTouched = true; break; }
+            }
+          } catch (e) {
+            this.log.warn('[import] settings apply failed: ' + e.message);
+          }
+          report.settings = { applied: plan.applied };
+        }
+
+        // After applying env updates, reset the shared config cache so any
+        // other component calling loadConfig() gets fresh values.
+        try {
+          const { resetConfigCache } = require('../config');
+          if (typeof resetConfigCache === 'function') resetConfigCache();
+        } catch {}
+
+        // Resolve the top-level `model` pointer (used by detectBackend etc.)
+        this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
+        this.config._isOAuth = !!(this.config.anthropicApiKey && String(this.config.anthropicApiKey).includes('sk-ant-oat'));
+
+        // If providers or model tiers changed, rebuild the agent's LLM client
+        // so the next chat uses the new provider/model instead of the old one.
+        if (providerTouched || modelTouched) {
+          try {
+            this.tools?.anthropicClient?.clearCache?.();
+            const agent = this.tools?._agent;
+            if (agent) {
+              agent.client = null;
+              if (typeof agent.init === 'function') agent.init();
+            }
+            report.reinitialized = true;
+          } catch (e) {
+            this.log.warn('[import] agent re-init failed: ' + e.message);
+            report.reinitWarning = e.message;
+          }
+        }
+
+        // Notify viewers to reload
+        try {
+          const graphEvents = require('../graph/events');
+          graphEvents.emit('change', { op: 'graph:import', source: 'import', report });
+        } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, report }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
     const backupDelMatch = urlPath.match(/^\/api\/backups\/([^\/]+)$/);
     if (backupDelMatch && req.method === 'DELETE') {
       try {
@@ -5393,9 +5574,14 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
 
     // ── Tailscale ─────────────────────────────────────────────────────
     const TS_SOCKET = '/data/tailscale/ts.sock';
+    // The node process runs as unprivileged `spore`. Tailscale's `up` /
+    // `logout` / `set` require root (or an already-persisted operator
+    // setting, which itself can only be set by root). Sudoers grants
+    // passwordless /usr/bin/tailscale to spore — use it unconditionally
+    // so we don't depend on the operator-persist side channel.
     const _tsRun = (args, timeoutMs = 10000) => new Promise((resolve) => {
       const { spawn } = require('child_process');
-      const proc = spawn('tailscale', ['--socket', TS_SOCKET, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const proc = spawn('sudo', ['-n', 'tailscale', '--socket', TS_SOCKET, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
       let out = '', err = '';
       proc.stdout.on('data', c => { out += c.toString(); });
       proc.stderr.on('data', c => { err += c.toString(); });
@@ -5439,6 +5625,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
     }
 
     if (urlPath === '/api/tailscale/login' && req.method === 'POST') {
+      this.log.info('[tailscale] login endpoint hit — initiating `tailscale up`');
       try {
         // If already logged in, short-circuit.
         const status = await _tsRun(['status', '--json'], 5000);
@@ -5456,8 +5643,14 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         // Spawn `tailscale up` non-blocking, parse out the login URL from stderr.
         const { spawn } = require('child_process');
         const hostname = this.config.tailscaleHostname || `spore-${this.config.agentId || 'agent'}`;
+        // `--reset` clears any half-persisted flag state from a previous
+        // partial login attempt, so our flag set becomes canonical. Runs
+        // under `sudo -n tailscale` because `up` needs root (or a
+        // previously-persisted operator, which we don't rely on).
         const args = [
+          '-n', 'tailscale',
           '--socket', TS_SOCKET, 'up',
+          '--reset',
           '--hostname', hostname,
           '--operator', 'spore',
           '--accept-routes',
@@ -5469,7 +5662,7 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           try { this._tsLoginProc.kill('SIGTERM'); } catch {}
         }
         this._tsAuthUrl = null;
-        const proc = spawn('tailscale', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        const proc = spawn('sudo', args, { stdio: ['ignore', 'pipe', 'pipe'] });
         this._tsLoginProc = proc;
         this._tsAuthUrlExpiresAt = Date.now() + 10 * 60_000;
 
@@ -5529,10 +5722,39 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         res.end(JSON.stringify({
           clusterUsername: this.config.clusterUsername || '',
           clusterLoginHost: this.config.clusterLoginHost || '',
-          clusterDefaultPartition: this.config.clusterDefaultPartition || '',
           clusterTmuxPrefix: this.config.clusterTmuxPrefix || 'spore',
           tailscaleHostname: this.config.tailscaleHostname || `spore-${this.config.agentId || 'agent'}`,
+          clusterHosts: Array.isArray(this.config.clusterHosts) ? this.config.clusterHosts : [],
         }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/cluster/hosts' && req.method === 'POST') {
+      try {
+        const body = await json();
+        const hosts = Array.isArray(body.hosts) ? body.hosts : [];
+        // Sanitize each entry
+        const clean = [];
+        for (const h of hosts) {
+          if (!h || typeof h !== 'object') continue;
+          const entry = {
+            name: String(h.name || '').trim().slice(0, 64),
+            host: String(h.host || '').trim().slice(0, 128),
+            username: String(h.username || '').trim().slice(0, 64),
+          };
+          if (!entry.host && !entry.name) continue;
+          if (!entry.name) entry.name = entry.host;
+          clean.push(entry);
+        }
+        this.config.clusterHosts = clean;
+        try {
+          if (typeof this._applyEnvUpdates === 'function') {
+            this._applyEnvUpdates({ SPORE_CLUSTER_HOSTS: JSON.stringify(clean) });
+          }
+        } catch (e) { this.log.warn('[cluster-hosts] persist failed: ' + e.message); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, hosts: clean }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -5545,7 +5767,6 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         const updates = {};
         if ('clusterUsername' in body) { updates.clusterUsername = clean(body.clusterUsername) || null; envUpd.SPORE_CLUSTER_USERNAME = clean(body.clusterUsername); }
         if ('clusterLoginHost' in body) { updates.clusterLoginHost = clean(body.clusterLoginHost) || null; envUpd.SPORE_CLUSTER_LOGIN_HOST = clean(body.clusterLoginHost); }
-        if ('clusterDefaultPartition' in body) { updates.clusterDefaultPartition = clean(body.clusterDefaultPartition) || null; envUpd.SPORE_CLUSTER_PARTITION = clean(body.clusterDefaultPartition); }
         if ('clusterTmuxPrefix' in body) {
           const p = clean(body.clusterTmuxPrefix).replace(/[^a-zA-Z0-9_-]/g, '') || 'spore';
           updates.clusterTmuxPrefix = p;
@@ -5569,6 +5790,93 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       return;
     }
 
+    // ── Email settings + test ────────────────────────────────────────
+    if (urlPath === '/api/email/settings' && req.method === 'GET') {
+      try {
+        const c = this.config || {};
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          emailProvider: c.emailProvider || '',
+          emailAddress: c.emailAddress || '',
+          emailSmtpHost: c.emailSmtpHost || '',
+          emailSmtpPort: c.emailSmtpPort || 587,
+          emailSmtpSecure: !!c.emailSmtpSecure,
+          emailSmtpUsername: c.emailSmtpUsername || '',
+          emailImapHost: c.emailImapHost || '',
+          emailImapPort: c.emailImapPort || 993,
+          emailImapSecure: c.emailImapSecure !== false,
+          hasPassword: !!c.emailSmtpPassword,
+        }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/email/settings' && req.method === 'POST') {
+      try {
+        const body = await json();
+        const envUpd = {};
+        const updates = {};
+        const clean = v => typeof v === 'string' ? v.trim() : '';
+        if ('emailProvider' in body) {
+          const p = clean(body.emailProvider).toLowerCase();
+          if (p === '' || ['proton', 'google'].includes(p)) {
+            updates.emailProvider = p || null;
+            envUpd.SPORE_EMAIL_PROVIDER = p || '';
+          }
+        }
+        if ('emailAddress' in body) { updates.emailAddress = clean(body.emailAddress) || null; envUpd.SPORE_EMAIL_ADDRESS = clean(body.emailAddress); }
+        if ('emailSmtpHost' in body) { updates.emailSmtpHost = clean(body.emailSmtpHost) || null; envUpd.SPORE_EMAIL_SMTP_HOST = clean(body.emailSmtpHost); }
+        if ('emailSmtpPort' in body) {
+          const n = Number(body.emailSmtpPort);
+          if (Number.isFinite(n) && n > 0) { updates.emailSmtpPort = n; envUpd.SPORE_EMAIL_SMTP_PORT = String(n); }
+        }
+        if ('emailSmtpSecure' in body) { updates.emailSmtpSecure = !!body.emailSmtpSecure; envUpd.SPORE_EMAIL_SMTP_SECURE = body.emailSmtpSecure ? 'true' : 'false'; }
+        if ('emailSmtpUsername' in body) { updates.emailSmtpUsername = clean(body.emailSmtpUsername) || null; envUpd.SPORE_EMAIL_SMTP_USERNAME = clean(body.emailSmtpUsername); }
+        if ('emailImapHost' in body) { updates.emailImapHost = clean(body.emailImapHost) || null; envUpd.SPORE_EMAIL_IMAP_HOST = clean(body.emailImapHost); }
+        if ('emailImapPort' in body) {
+          const n = Number(body.emailImapPort);
+          if (Number.isFinite(n) && n > 0) { updates.emailImapPort = n; envUpd.SPORE_EMAIL_IMAP_PORT = String(n); }
+        }
+        if ('emailImapSecure' in body) { updates.emailImapSecure = body.emailImapSecure !== false; envUpd.SPORE_EMAIL_IMAP_SECURE = body.emailImapSecure === false ? 'false' : 'true'; }
+        if (typeof body.emailSmtpPassword === 'string' && body.emailSmtpPassword.length > 0) {
+          // Only write when the client sent a real new value (not a placeholder)
+          updates.emailSmtpPassword = body.emailSmtpPassword;
+          envUpd.SPORE_EMAIL_SMTP_PASSWORD = body.emailSmtpPassword;
+        }
+        Object.assign(this.config, updates);
+        try {
+          if (typeof this._applyEnvUpdates === 'function' && Object.keys(envUpd).length) {
+            this._applyEnvUpdates(envUpd);
+          }
+        } catch (e) { this.log.warn('[email-settings] persist failed: ' + e.message); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/email/test' && req.method === 'POST') {
+      try {
+        const tools = this.tools;
+        if (!tools) { res.writeHead(503); res.end(JSON.stringify({ error: 'tools not ready' })); return; }
+        // Round-trip: send a tiny email to the configured address, then IMAP-open
+        // the mailbox to confirm credentials. Sending alone doesn't validate IMAP.
+        const cfg = this.config || {};
+        if (!cfg.emailAddress) { res.writeHead(400); res.end(JSON.stringify({ error: 'emailAddress not set' })); return; }
+        const sendRes = await tools._emailSendTool({
+          to: cfg.emailAddress,
+          subject: 'SPORE email self-test',
+          body: `Self-test at ${new Date().toISOString()} — if you see this, SMTP from ${cfg.emailAddress} is working.`,
+        });
+        if (sendRes.error) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, stage: 'smtp', error: sendRes.error })); return; }
+        const imapRes = await tools._emailListTool({ folder: 'INBOX', limit: 1 });
+        if (imapRes.error) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, stage: 'imap', error: imapRes.error, smtp: 'ok' })); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, smtp: 'ok', imap: 'ok', messageId: sendRes.messageId }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
     if (urlPath === '/api/cluster/test-ssh' && req.method === 'POST') {
       try {
         const body = await json().catch(() => ({}));
@@ -5579,30 +5887,149 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           res.end(JSON.stringify({ ok: false, error: 'username and host required (set Cluster settings first)' }));
           return;
         }
-        const { spawn } = require('child_process');
-        const proc = spawn('ssh', [
+        const fsm = require('fs');
+        const KEY_PATH = '/data/.ssh/id_cluster';
+        const hasKey = fsm.existsSync(KEY_PATH);
+        // Route through tailscale's local SOCKS5 proxy so MagicDNS names (like
+        // "gb200-login-2") resolve against the tailnet and the outbound
+        // connection rides the userspace-networking tailscale stack. Without
+        // this, the container has no tailnet DNS and can't reach tailnet IPs
+        // from its network namespace.
+        const sshArgs = [
           '-o', 'BatchMode=yes',
-          '-o', 'ConnectTimeout=8',
+          '-o', 'ConnectTimeout=12',
           '-o', 'StrictHostKeyChecking=accept-new',
-          '-o', 'UserKnownHostsFile=/data/.ssh-known-hosts',
-          `${user}@${host}`,
-          'hostname; which sbatch || echo no-slurm; sinfo --version 2>/dev/null || echo no-sinfo',
-        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+          '-o', 'UserKnownHostsFile=/data/.ssh/known_hosts',
+          '-o', 'ProxyCommand=nc -X 5 -x 127.0.0.1:1055 %h %p',
+        ];
+        if (hasKey) sshArgs.push('-i', KEY_PATH, '-o', 'IdentitiesOnly=yes');
+        sshArgs.push(`${user}@${host}`, 'hostname; which sbatch || echo no-slurm; sinfo --version 2>/dev/null || echo no-sinfo');
+        const { spawn } = require('child_process');
+        const proc = spawn('ssh', sshArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
         let out = '', err = '';
         proc.stdout.on('data', c => { out += c.toString(); });
         proc.stderr.on('data', c => { err += c.toString(); });
-        const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12000);
+        const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 20000);
         const code = await new Promise((r) => { proc.on('close', (c) => { clearTimeout(timer); r(c); }); });
         const output = (out || '').trim();
         const stderr = (err || '').trim();
+        let hint = null;
+        if (code !== 0) {
+          if (/could not resolve hostname|getaddrinfo/i.test(stderr)) {
+            hint = 'Hostname did not resolve via MagicDNS. Verify tailscale is connected and the cluster peer is online (Settings → Tailscale status).';
+          } else if (/Permission denied|publickey/i.test(stderr)) {
+            hint = hasKey
+              ? 'SSH auth rejected. Make sure the public key (settings → Copy SSH public key) is in ~/.ssh/authorized_keys on the cluster login node.'
+              : 'No SSH key installed. Click "Generate SSH key" below, copy the public key, and install it on the cluster (~/.ssh/authorized_keys).';
+          } else {
+            hint = 'SSH failed. If the hostname is unreachable, verify tailscale is connected. Otherwise check the cluster username and that your public key is authorised.';
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           ok: code === 0,
           code,
           output: output.slice(0, 800),
           stderr: stderr.slice(0, 800),
-          hint: code !== 0 ? 'SSH failed — add a public key for this host (check ~/.ssh/authorized_keys on the login node). If the hostname is unreachable, verify tailscale is connected.' : null,
+          usedKey: hasKey ? KEY_PATH : null,
+          hint,
         }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Cluster SSH key management ────────────────────────────────────
+    if (urlPath === '/api/cluster/ssh-key' && req.method === 'GET') {
+      try {
+        const fsm = require('fs');
+        const KEY_PATH = '/data/.ssh/id_cluster';
+        const PUB_PATH = KEY_PATH + '.pub';
+        const hasPrivate = fsm.existsSync(KEY_PATH);
+        let publicKey = null, fingerprint = null;
+        if (fsm.existsSync(PUB_PATH)) {
+          try { publicKey = fsm.readFileSync(PUB_PATH, 'utf8').trim(); } catch {}
+        }
+        if (hasPrivate) {
+          try {
+            const { execFileSync } = require('child_process');
+            fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
+          } catch {}
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ hasPrivate, publicKey, fingerprint }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/cluster/ssh-key/generate' && req.method === 'POST') {
+      try {
+        const fsm = require('fs');
+        const path = require('path');
+        const SSH_DIR = '/data/.ssh';
+        const KEY_PATH = path.join(SSH_DIR, 'id_cluster');
+        fsm.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
+        try { fsm.chmodSync(SSH_DIR, 0o700); } catch {}
+        // Remove old if present
+        try { fsm.unlinkSync(KEY_PATH); } catch {}
+        try { fsm.unlinkSync(KEY_PATH + '.pub'); } catch {}
+        const { execFileSync } = require('child_process');
+        const comment = `spore-cluster-${this.config.agentId || 'agent'}`;
+        execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', comment, '-f', KEY_PATH], { stdio: ['ignore', 'pipe', 'pipe'] });
+        try { fsm.chmodSync(KEY_PATH, 0o600); } catch {}
+        try { fsm.chmodSync(KEY_PATH + '.pub', 0o644); } catch {}
+        const publicKey = fsm.readFileSync(KEY_PATH + '.pub', 'utf8').trim();
+        const fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, publicKey, fingerprint }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/cluster/ssh-key' && req.method === 'POST') {
+      try {
+        const body = await json();
+        const privateKey = String(body.privateKey || '').trim();
+        if (!privateKey.startsWith('-----BEGIN') || !privateKey.includes('PRIVATE KEY-----')) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'input does not look like an SSH private key (expected PEM with BEGIN/END PRIVATE KEY markers)' }));
+          return;
+        }
+        const fsm = require('fs');
+        const path = require('path');
+        const SSH_DIR = '/data/.ssh';
+        const KEY_PATH = path.join(SSH_DIR, 'id_cluster');
+        fsm.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
+        try { fsm.chmodSync(SSH_DIR, 0o700); } catch {}
+        fsm.writeFileSync(KEY_PATH, privateKey.endsWith('\n') ? privateKey : privateKey + '\n', { mode: 0o600 });
+        try { fsm.chmodSync(KEY_PATH, 0o600); } catch {}
+        // Derive public key
+        let publicKey = null, fingerprint = null;
+        try {
+          const { execFileSync } = require('child_process');
+          publicKey = execFileSync('ssh-keygen', ['-y', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
+          fsm.writeFileSync(KEY_PATH + '.pub', publicKey + '\n', { mode: 0o644 });
+          fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
+        } catch (e) {
+          // Key file was written but we couldn't derive public half — probably encrypted
+          try { fsm.unlinkSync(KEY_PATH); } catch {}
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Could not derive public key — is this an encrypted / passphrase-protected key? Decrypt it first (`ssh-keygen -p -f key`) or paste an unencrypted version.' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, publicKey, fingerprint }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/cluster/ssh-key' && req.method === 'DELETE') {
+      try {
+        const fsm = require('fs');
+        const KEY_PATH = '/data/.ssh/id_cluster';
+        try { fsm.unlinkSync(KEY_PATH); } catch {}
+        try { fsm.unlinkSync(KEY_PATH + '.pub'); } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -5751,6 +6178,143 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
 
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionKey, nodeCount: ids.length }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    if (urlPath === '/api/graph/merge' && req.method === 'POST') {
+      try {
+        const body = await _readJsonBody(req);
+        const sourceId = String(body.sourceNodeId || '').trim();
+        const targetId = String(body.targetNodeId || '').trim();
+        const mode = String(body.mode || 'merge').toLowerCase();
+        if (!sourceId || !targetId || sourceId === targetId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'sourceNodeId + targetNodeId (different) required' }));
+          return;
+        }
+        const src = db.prepare('SELECT id, label, type, description, importance FROM nodes WHERE id = ?').get(sourceId);
+        const tgt = db.prepare('SELECT id, label, type, description, importance FROM nodes WHERE id = ?').get(targetId);
+        if (!src || !tgt) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'one or both node ids not found' }));
+          return;
+        }
+
+        // Fast path: 'child' creates a parent_of edge directly. The graph
+        // viewer gives parent_of edges a short, high-strength link so the two
+        // nodes visually stick together — that's the "stick under as child"
+        // affordance.
+        if (mode === 'child') {
+          const edgeType = 'parent_of';
+          // target → source direction (target becomes parent of source).
+          const [s, t] = [targetId, sourceId];
+          const dup = db.prepare('SELECT id FROM edges WHERE source=? AND target=? AND type=?').get(s, t, edgeType);
+          if (!dup) {
+            db.prepare('INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 1.0, ?)')
+              .run(s, t, edgeType, 'drop-menu');
+          }
+          try {
+            const graphEvents = require('../graph/events');
+            graphEvents.emit('change', { op: 'edge:create', edge: { source: s, target: t, type: edgeType }, source: 'drop-menu' });
+          } catch {}
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, mode, edge: { source: s, target: t, type: edgeType }, created: !dup }));
+          return;
+        }
+
+        // mode === 'merge' — hand off to the agent with a detailed brief.
+        const agent = this.tools?._agent;
+        if (!agent || !agent.client) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Agent loop not initialised — finish onboarding first.' }));
+          return;
+        }
+        const briefFor = (n) => {
+          const aspects = db.prepare('SELECT id, name, weight FROM aspects WHERE node_id = ? ORDER BY weight DESC LIMIT 12').all(n.id);
+          const aspectLines = aspects.map(a => {
+            const attrs = db.prepare('SELECT content FROM attributes WHERE aspect_id = ? ORDER BY importance DESC LIMIT 4').all(a.id);
+            const attrText = attrs.map(at => at.content).join(' | ').slice(0, 300);
+            return `    • ${a.name} (importance=${a.weight}): ${attrText || '_(no attrs)_'}`;
+          }).join('\n');
+          const outgoing = db.prepare('SELECT target, type FROM edges WHERE source = ? LIMIT 20').all(n.id);
+          const incoming = db.prepare('SELECT source, type FROM edges WHERE target = ? LIMIT 20').all(n.id);
+          const outLines = outgoing.map(e => `    ${e.type} → ${e.target}`).join('\n');
+          const inLines = incoming.map(e => `    ${e.source} --${e.type}--> (this node)`).join('\n');
+          const attrCount = db.prepare('SELECT COUNT(*) AS c FROM attributes a JOIN aspects s ON s.id=a.aspect_id WHERE s.node_id=?').get(n.id).c;
+          return `- **${n.label}** (\`${n.id}\`, type=${n.type}, importance=${n.importance}, ${aspects.length} aspects / ${attrCount} attrs / ${outgoing.length + incoming.length} edges)\n  ${n.description || '_(no description)_'}\n  Aspects:\n${aspectLines || '    _(none)_'}\n  Outbound edges:\n${outLines || '    _(none)_'}\n  Inbound edges:\n${inLines || '    _(none)_'}`;
+        };
+        let prompt;
+        if (mode === 'link') {
+          prompt = [
+            `The operator dragged node \`${sourceId}\` onto node \`${targetId}\` in the graph viewer and chose "Link with an edge". Decide whether these two nodes are actually related, and if so what the relationship is.`,
+            ``,
+            briefFor(src),
+            ``,
+            briefFor(tgt),
+            ``,
+            `**Procedure:**`,
+            ``,
+            `1. Judge the relationship from the content above. Ask: is there a real, specific connection between these two? Examples of real relationships: "uses", "knows", "created_by", "part_of", "depends_on", "located_in", "works_on", "mentions", "authored".`,
+            ``,
+            `2. If they ARE related, call \`graph_update\` on \`${sourceId}\` with its existing label and type, plus \`edges: [{ target: "${targetId}", type: "<your-chosen-relationship>" }]\`. Pick the tightest, most specific verb you can justify — don't fall back to \`related_to\` unless nothing else fits.`,
+            ``,
+            `3. If they are NOT meaningfully related, do not create any edge. Just reply with a short sentence explaining that.`,
+            ``,
+            `4. End with one line: either \`Linked ${sourceId} --<type>--> ${targetId}.\` or \`No meaningful link — <reason>.\``,
+            ``,
+            `Do not call \`graph_query\` — everything you need is above.`,
+          ].join('\n');
+        } else {
+          // mode === 'merge' (default)
+          prompt = [
+            `The operator dragged node \`${sourceId}\` onto node \`${targetId}\` in the graph viewer. Merge them into one coherent node.`,
+            ``,
+            briefFor(src),
+            ``,
+            briefFor(tgt),
+            ``,
+            `**Procedure (do NOT skip steps):**`,
+            ``,
+            `1. **Pick a SURVIVOR and a LOSER.** The survivor should be whichever has richer content, more edges, higher importance, or a cleaner id. If equivalent, pick the shorter/cleaner id.`,
+            ``,
+            `2. **Call \`graph_update\` on the SURVIVOR** with:`,
+            `   - Its existing \`label\` and \`type\` (required fields)`,
+            `   - A merged \`description\` that incorporates any useful info from the loser`,
+            `   - \`aspects\`: any aspects from the loser that add new facts. Skip aspects whose attributes already exist on the survivor (dedupe).`,
+            `   - \`edges\`: for every edge where the LOSER is the source (outbound), add an equivalent edge \`{target, type}\` so it survives on the survivor. Skip duplicates.`,
+            ``,
+            `3. **For each inbound edge where the LOSER is the target** (listed above under "Inbound edges"), call \`graph_update\` on the OTHER end (the \`source\`) and add \`edges: [{target: "<survivor-id>", type: "<same-type>"}]\` so incoming connections re-home to the survivor.`,
+            ``,
+            `4. **Call \`graph_delete\` with \`{ nodeId: "<loser-id>" }\`** — this cascades the loser's aspects, attributes, and any remaining edges.`,
+            ``,
+            `5. **Reply with one line** like: \`Merged \\\`loser-id\\\` into \\\`survivor-id\\\` — kept N aspects, rehomed M edges.\``,
+            ``,
+            `Do not call \`graph_query\` — everything you need is above. Do not skip step 4 or the two nodes will remain duplicated in the graph.`,
+          ].join('\n');
+        }
+
+        // Fresh ephemeral channel session per merge/link so this doesn't
+        // ride on top of operator's DM history (which can run to hundreds of
+        // messages and blow the upstream context → 504 from the LLM proxy).
+        // The prompt is self-contained; it doesn't need any prior turns.
+        const sessionKey = `${mode}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        agent.processMessage({
+          content: prompt,
+          channelId: sessionKey,
+          channelName: mode,
+          userId: 'operator',
+          userName: 'Operator',
+          trigger: 'channel',
+          platform: 'web',
+          isDm: false,
+        }).catch(e => this.log.warn(`[${mode}] agent run failed: ${e.message}`));
+
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, sessionKey, sourceId, targetId }));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));

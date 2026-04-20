@@ -493,9 +493,8 @@
     display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden;
   }
   #settings-pane .settings-body {
-    overflow: auto; display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
-    padding: 18px 20px; flex: 1; min-height: 0;
+    display: flex; flex-direction: column;
+    flex: 1; min-height: 0;
     scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
   #settings-pane .settings-body::-webkit-scrollbar { width: 4px; }
@@ -533,10 +532,69 @@
     background: transparent; color: var(--text-dim); border: 1px solid var(--border);
     border-radius: 8px; width: 34px; height: 34px; cursor: pointer; font-size: 1rem;
   }
-  .settings-body {
-    padding: 18px 20px; overflow: auto; display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+  .settings-body { display: flex; flex-direction: column; overflow: hidden; }
+  /* Tab bar at top of the settings pane (horizontal, wraps on narrow widths) */
+  .settings-tabs {
+    display: flex; flex-wrap: wrap; gap: 2px;
+    padding: 6px 16px 0; border-bottom: 1px solid var(--border);
+    flex-shrink: 0; background: color-mix(in srgb, var(--surface) 85%, transparent);
   }
+  .settings-tab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    padding: 8px 12px; margin-bottom: -1px;
+    color: var(--text-dim); cursor: pointer;
+    font-family: 'Geist Mono', monospace; font-size: .68rem;
+    text-transform: uppercase; letter-spacing: .08em;
+    transition: color .12s, border-color .12s;
+  }
+  .settings-tab:hover { color: var(--text); }
+  .settings-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .settings-tab[hidden] { display: none; }
+  .settings-panes { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
+  .settings-tab-pane { display: none; }
+  .settings-tab-pane.active {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+  }
+  @media (max-width: 720px) {
+    .settings-tab-pane.active { grid-template-columns: 1fr; }
+  }
+  /* Shared primitives (used inside tab panes) */
+  .settings-card {
+    background: rgba(255,255,255,.025); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px;
+  }
+  .settings-card.wide { grid-column: 1 / -1; }
+  .settings-card h4 {
+    margin: 0 0 10px; font-size: .78rem; color: var(--text);
+    text-transform: uppercase; letter-spacing: .08em;
+    font-family: 'Geist Mono', monospace;
+  }
+  .settings-hint {
+    margin-top: 6px; font-size: .68rem; color: var(--text-dim);
+    line-height: 1.45;
+  }
+  .settings-status-line {
+    margin-top: 6px;
+    font-family: 'Geist Mono', monospace; font-size: .64rem;
+    color: var(--text-dim); white-space: pre-wrap;
+  }
+  .settings-status-line.ok { color: var(--text); }
+  .settings-status-line.warn { color: var(--accent2); }
+  .settings-status-line.err { color: var(--danger); }
+  .settings-export-options {
+    margin-top: 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px;
+  }
+  @media (max-width: 560px) { .settings-export-options { grid-template-columns: 1fr; } }
+  .settings-check-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+    background: color-mix(in srgb, var(--surface) 60%, transparent);
+    font-size: .72rem; color: var(--text);
+  }
+  .settings-check-row input[type=checkbox] { flex-shrink: 0; accent-color: var(--accent); }
+  .settings-check-row span { flex: 1; line-height: 1.3; }
+  .settings-hint-inline { color: var(--text-dim); font-size: .64rem; }
+  .settings-danger-inline { color: var(--danger); font-size: .64rem; }
   .settings-section {
     background: rgba(255,255,255,.025); border: 1px solid var(--border); border-radius: 12px;
     padding: 14px;
@@ -1809,22 +1867,154 @@
   }
   #stats.stats-open #stats-legend { display: flex; }
 
-  /* ── Event feed overlay ── */
-  #event-feed {
-    position: absolute; bottom: 50px; left: 16px; z-index: 20; width: 260px;
+  /* ── Event log widget (embedded in the dock) ── */
+  #event-log {
+    position: relative;
+    cursor: pointer; user-select: none;
+    border-bottom: 1px solid var(--border);
+    /* Round the top corners to match the dock's outer rounding so hover bg
+       and focus ring follow the curve instead of clipping into a rectangle. */
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+    /* Lock the widget's width so expanding/collapsing the history panel
+       doesn't re-measure the dock every time a long event-item lands. This
+       also means webapp users (who have a narrower dock row) still see a
+       consistent 340px log. */
+    width: min(340px, calc(100vw - 32px));
+    max-width: min(340px, calc(100vw - 32px));
+    box-sizing: border-box;
+    transition: background .15s ease;
+    outline: none;
+  }
+  /* Activity indicator — an accent stripe slides across the bottom edge
+     while events are firing. Sits flush with the log's border-bottom and
+     is always visible regardless of how many rows are stacked. */
+  #event-log::before {
+    content: '';
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      transparent 30%,
+      var(--accent2) 50%,
+      transparent 70%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    opacity: 0;
+    transition: opacity .25s ease;
     pointer-events: none;
+    z-index: 1;
   }
-  .event-item {
+  #event-log.has-activity::before {
+    opacity: 0.95;
+    animation: event-log-stripe 1.8s linear infinite;
+  }
+  @keyframes event-log-stripe {
+    from { background-position: -100% 0; }
+    to   { background-position: 100% 0; }
+  }
+  #event-log:hover { background: color-mix(in srgb, var(--surface) 85%, var(--accent2) 6%); }
+  #event-log:focus-visible {
+    /* Inset shadow instead of outline so it respects the dock's overflow:hidden
+       rounded corners. */
+    box-shadow: inset 0 0 0 1px var(--accent2);
+  }
+  #event-log.open { cursor: default; }
+  #event-log-stack {
+    display: flex; flex-direction: column-reverse;
+    padding: 4px 10px; gap: 2px;
+    width: 100%;
+    box-sizing: border-box;
+    /* Smooth growth / contraction when rows are added or the stack
+       collapses back to one line. Height is driven by a --row-count var
+       set from JS, multiplied by per-row height (~18px) + 8px padding. */
+    --row-count: 1;
+    max-height: calc(var(--row-count) * 18px + 8px);
+    overflow: hidden;
+    transition: max-height .28s cubic-bezier(.2,.8,.2,1);
+  }
+  .event-log-row {
     font-family: 'Geist Mono', monospace; font-size: 0.6rem;
-    padding: 4px 8px; margin-bottom: 3px; border-radius: 4px;
-    background: var(--surface); border: 1px solid var(--border);
-    color: var(--text-dim); animation: feedIn 0.3s ease;
-    opacity: 1; transition: opacity 0.5s;
+    line-height: 1.35;
+    color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    opacity: 1;
+    animation: event-log-row-in 0.18s ease;
   }
-  .event-item.fading { opacity: 0; }
+  .event-log-row.idle { opacity: 0.55; font-style: italic; }
+  .event-log-row .ev-op { color: var(--accent2); }
+  .event-log-row .ev-detail { color: var(--text); }
+  .event-log-row .ev-src { color: var(--accent3); opacity: 0.7; margin-left: 6px; }
+  @keyframes event-log-row-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  /* Expanded full history panel — always present so height transitions
+     work; visibility driven by a max-height flip on .open. */
+  #event-log-panel {
+    display: flex; flex-direction: column;
+    width: 100%;
+    box-sizing: border-box;
+    border-top: 1px solid transparent;
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-4px);
+    overflow: hidden;
+    cursor: default;
+    transition: max-height .32s cubic-bezier(.22,.95,.28,1),
+                opacity .22s ease .04s,
+                transform .28s cubic-bezier(.22,.95,.28,1),
+                border-top-color .22s ease;
+  }
+  #event-log.open #event-log-panel {
+    max-height: 320px;
+    opacity: 1;
+    transform: translateY(0);
+    border-top-color: var(--border);
+  }
+  /* Collapse runs in reverse — panel content fades out before height
+     collapses, so the drawer looks like it's sliding back up smoothly
+     rather than clipping mid-animation. */
+  #event-log:not(.open) #event-log-panel {
+    transition: max-height .28s cubic-bezier(.4,0,.8,.4) .08s,
+                opacity .12s ease,
+                transform .22s cubic-bezier(.4,0,.8,.4),
+                border-top-color .16s ease .1s;
+  }
+  #event-log-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; font-size: 0.58rem;
+    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  #event-log-head span:first-child { flex: 1; }
+  #event-log-head button {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-dim); padding: 2px 6px; border-radius: 4px;
+    font-family: inherit; font-size: 0.56rem; cursor: pointer;
+    transition: color .12s, border-color .12s;
+  }
+  #event-log-head button:hover { color: var(--accent2); border-color: var(--accent2); }
+  #event-log-list {
+    flex: 1; overflow-y: auto; padding: 4px 0;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  #event-log-list::-webkit-scrollbar { width: 4px; }
+  #event-log-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .event-item {
+    font-size: 0.6rem;
+    padding: 3px 10px;
+    color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-left: 2px solid transparent;
+  }
+  .event-item:hover { background: rgba(255,255,255,.02); border-left-color: var(--accent2); }
+  .event-item .ev-time { color: var(--text-dim); opacity: 0.6; margin-right: 6px; }
   .event-item .ev-op { color: var(--accent2); }
-  .event-item .ev-src { color: var(--accent3); }
-  @keyframes feedIn { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  .event-item .ev-src { color: var(--accent3); margin-left: 6px; opacity: 0.7; }
 
   /* ── Right Panel (unified: Node / Files / Logs) ── */
   #right-panel {
@@ -1892,22 +2082,41 @@
     bottom: 14px;
     transform: translateX(-50%);
     display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 3px;
+    flex-direction: column;
+    align-items: center;           /* children size themselves, dock wraps snug */
+    gap: 0;
+    padding: 0;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 10px;
     background: var(--surface);
     font-family: 'Geist Mono', monospace;
     box-shadow: 0 4px 12px rgba(0,0,0,.4);
     z-index: 80;
+    overflow: hidden;
+    /* Animate the dock's width when the log size changes so button row
+       expansion/contraction between roles feels smooth. */
+    transition: width .25s cubic-bezier(.2,.8,.2,1);
+  }
+  #desktop-dock-row {
+    display: flex; align-items: stretch; gap: 2px; padding: 3px;
+    /* Row matches the log's width so its buttons fan out evenly. */
+    width: min(340px, calc(100vw - 32px));
+    box-sizing: border-box;
+  }
+  #desktop-dock-row > .desktop-dock-btn {
+    flex: 1 1 0; /* each button claims an equal share of the row width */
   }
   .desktop-dock-btn {
     position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 6px 12px;
+    /* Larger padding + explicit min hit box so the whole rectangle is hoverable,
+       not just the glyph shape. Previous 6x12 was tight enough that cursor
+       movements between buttons passed through a dead zone. */
+    padding: 10px 14px;
+    min-width: 44px;
+    min-height: 36px;
     background: transparent;
     border: 0;
     border-radius: 6px;
@@ -1918,8 +2127,11 @@
   }
   .desktop-dock-btn:hover {
     color: var(--text);
-    background: rgba(255,255,255,.04);
+    background: rgba(255,255,255,.06);
   }
+  /* Icon/tooltip must never block clicks on their parent button. */
+  .desktop-dock-btn .dock-icon,
+  .desktop-dock-btn .dock-tooltip { pointer-events: none; }
   .desktop-dock-btn.dock-active {
     color: var(--accent2);
     background: rgba(120,200,255,.08);
@@ -2187,11 +2399,14 @@
     animation: glowAccess 8s ease-out forwards;
   }
 
-  /* Delete animation — keeps filter for the brief 1.2s duration (few nodes at a time) */
+  /* Delete animation — simple opacity fade. DON'T animate `transform` here:
+     the <g> has an attribute transform="translate(x,y)" set every tick and a
+     CSS transform on the element replaces it during the animation, which
+     snaps the node to origin (0,0). Use filter to keep a soft red glow. */
   @keyframes nodeDelete {
     0% { opacity: 1; filter: drop-shadow(0 0 8px var(--danger)); }
-    30% { opacity: 0.8; filter: drop-shadow(0 0 16px var(--danger)); transform: scale(1.2); }
-    100% { opacity: 0; transform: scale(0.3); }
+    40% { opacity: 0.75; filter: drop-shadow(0 0 14px var(--danger)); }
+    100% { opacity: 0; filter: drop-shadow(0 0 4px var(--danger)); }
   }
   .node-deleting { animation: nodeDelete 1.2s ease-in forwards; pointer-events: none; }
 
@@ -2251,6 +2466,63 @@
   }
   .node-selected-multi .node-glyph,
   .node-selected-multi .node-label { fill: var(--text) !important; }
+
+  /* ── Drag states ── */
+  .graph-node.node-dragging {
+    cursor: grabbing;
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,.45));
+    pointer-events: none;
+  }
+  .graph-node.node-dragging .node-circle {
+    stroke: var(--accent) !important;
+    stroke-width: 2.5 !important;
+  }
+  .graph-node.node-drag-target .node-circle {
+    stroke: var(--accent) !important;
+    stroke-width: 3 !important;
+    filter: drop-shadow(0 0 6px var(--accent));
+  }
+  .graph-node.node-drag-target .glow-ring {
+    opacity: 0.35;
+    fill: var(--accent) !important;
+  }
+
+  /* ── Drop menu (pops up where a node is dropped onto another) ── */
+  #graph-drop-menu {
+    position: fixed;
+    z-index: 200;
+    min-width: 220px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.55);
+    font-family: 'Geist Mono', monospace;
+    display: none;
+    overflow: hidden;
+  }
+  #graph-drop-menu.open { display: block; }
+  #graph-drop-menu .gdm-title {
+    padding: 8px 10px 6px;
+    font-size: .62rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 85%, transparent);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #graph-drop-menu .gdm-title code { color: var(--accent2); }
+  #graph-drop-menu button {
+    display: block; width: 100%; text-align: left;
+    background: transparent; border: none; color: var(--text);
+    font: inherit; font-size: .72rem;
+    padding: 8px 12px; cursor: pointer;
+  }
+  #graph-drop-menu button:hover { background: rgba(255,255,255,.04); color: var(--accent2); }
+  #graph-drop-menu button.gdm-danger:hover { color: var(--danger); }
+  #graph-drop-menu .gdm-hint {
+    padding: 0 12px 8px; font-size: .58rem; color: var(--text-dim);
+  }
 
   /* ── Mobile nav ── */
   #mobile-nav {
@@ -2907,30 +3179,43 @@
   </div>
 
   <div id="desktop-dock" aria-label="Desktop launcher">
-    <button class="desktop-dock-btn" id="dock-chat" title="Toggle chat window">
-      <span class="dock-icon">//</span>
-      <span class="dock-tooltip">Chat</span>
-    </button>
-    <button class="desktop-dock-btn" id="dock-node" title="Toggle node window">
-      <span class="dock-icon">◎</span>
-      <span class="dock-tooltip">Node</span>
-    </button>
-    <button class="desktop-dock-btn" id="dock-files" title="Toggle files window">
-      <span class="dock-icon">▤</span>
-      <span class="dock-tooltip">Files</span>
-    </button>
-    <button class="desktop-dock-btn" id="dock-logs" title="Toggle logs window">
-      <span class="dock-icon">≣</span>
-      <span class="dock-tooltip">Logs</span>
-    </button>
-    <button class="desktop-dock-btn dock-terminal" id="dock-terminal" title="Toggle terminal window">
-      <span class="dock-icon">&gt;_</span>
-      <span class="dock-tooltip">Terminal</span>
-    </button>
-    <button class="desktop-dock-btn dock-settings" id="dock-settings" title="Open settings">
-      <span class="dock-icon">&#9881;</span>
-      <span class="dock-tooltip">Settings</span>
-    </button>
+    <div id="event-log" role="button" tabindex="0" aria-expanded="false" title="Click to expand event log">
+      <div id="event-log-stack"></div>
+      <div id="event-log-panel" aria-hidden="true">
+        <div id="event-log-head">
+          <span>Event log</span>
+          <button id="event-log-clear" type="button" title="Clear log">clear</button>
+          <button id="event-log-close" type="button" title="Collapse">×</button>
+        </div>
+        <div id="event-log-list"></div>
+      </div>
+    </div>
+    <div id="desktop-dock-row">
+      <button class="desktop-dock-btn" id="dock-chat" title="Toggle chat window">
+        <span class="dock-icon">//</span>
+        <span class="dock-tooltip">Chat</span>
+      </button>
+      <button class="desktop-dock-btn" id="dock-node" title="Toggle node window">
+        <span class="dock-icon">◎</span>
+        <span class="dock-tooltip">Node</span>
+      </button>
+      <button class="desktop-dock-btn" id="dock-files" title="Toggle files window">
+        <span class="dock-icon">▤</span>
+        <span class="dock-tooltip">Files</span>
+      </button>
+      <button class="desktop-dock-btn" id="dock-logs" title="Toggle logs window">
+        <span class="dock-icon">≣</span>
+        <span class="dock-tooltip">Logs</span>
+      </button>
+      <button class="desktop-dock-btn dock-terminal" id="dock-terminal" title="Toggle terminal window">
+        <span class="dock-icon">&gt;_</span>
+        <span class="dock-tooltip">Terminal</span>
+      </button>
+      <button class="desktop-dock-btn dock-settings" id="dock-settings" title="Open settings">
+        <span class="dock-icon">&#9881;</span>
+        <span class="dock-tooltip">Settings</span>
+      </button>
+    </div>
   </div>
 
   <!-- Collapse tabs (shown when panels are collapsed) -->
@@ -3054,7 +3339,6 @@
       </div>
     </div>
     <div id="search"><input type="text" placeholder="search nodes..." id="search-input"></div>
-    <div id="event-feed"></div>
     <div id="stats"></div>
     <!-- LongMemEval floating HUD -->
     <div id="lme-hud">
@@ -3367,6 +3651,15 @@
   <button type="button" data-action="research-selected-nodes">research selected nodes</button>
   <button type="button" class="danger" data-action="delete-selected-nodes">delete selected nodes</button>
   <button type="button" data-action="clear-selection">clear selection</button>
+</div>
+
+<div id="graph-drop-menu" role="menu">
+  <div class="gdm-title">drop <code data-drop-source>—</code> onto <code data-drop-target>—</code></div>
+  <button type="button" data-drop-action="merge">Merge into one node</button>
+  <div class="gdm-hint">Agent decides which survives, folds aspects/edges, then deletes the other.</div>
+  <button type="button" data-drop-action="link">Link with an edge</button>
+  <button type="button" data-drop-action="child">Move under as child</button>
+  <button type="button" class="gdm-danger" data-drop-action="cancel">Cancel</button>
 </div>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
@@ -3843,37 +4136,119 @@ function _settingsProviderChoices() {
   return builtins.concat(customNames.filter(name => !builtins.includes(name)).sort());
 }
 
+// Known OpenAI-compatible providers — pick one and URL + auth header fill in.
+const PROVIDER_PRESETS = [
+  { id: '',          label: 'Pick a preset to auto-fill…', baseUrl: '', authHeader: '',       keyHint: '' },
+  { id: 'groq',      label: 'Groq',            baseUrl: 'https://api.groq.com/openai/v1',         authHeader: 'bearer', keyHint: 'console.groq.com/keys' },
+  { id: 'together',  label: 'Together AI',     baseUrl: 'https://api.together.xyz/v1',            authHeader: 'bearer', keyHint: 'api.together.ai (Settings → API Keys)' },
+  { id: 'fireworks', label: 'Fireworks',       baseUrl: 'https://api.fireworks.ai/inference/v1',  authHeader: 'bearer', keyHint: 'fireworks.ai/account/api-keys' },
+  { id: 'cerebras',  label: 'Cerebras',        baseUrl: 'https://api.cerebras.ai/v1',             authHeader: 'bearer', keyHint: 'cloud.cerebras.ai (API Keys)' },
+  { id: 'perplexity',label: 'Perplexity',      baseUrl: 'https://api.perplexity.ai',              authHeader: 'bearer', keyHint: 'perplexity.ai/settings/api' },
+  { id: 'deepinfra', label: 'DeepInfra',       baseUrl: 'https://api.deepinfra.com/v1/openai',    authHeader: 'bearer', keyHint: 'deepinfra.com/dash/api_keys' },
+  { id: 'mistral',   label: 'Mistral',         baseUrl: 'https://api.mistral.ai/v1',              authHeader: 'bearer', keyHint: 'console.mistral.ai' },
+  { id: 'ollama',    label: 'Ollama (local)',  baseUrl: 'http://localhost:11434/v1',              authHeader: 'bearer', keyHint: '(no key needed — any value)' },
+  { id: 'custom',    label: 'Other — fill in manually',    baseUrl: '', authHeader: 'bearer', keyHint: '' },
+];
+
+function _settingsOnAuthSelectChange(selectEl) {
+  const row = selectEl.closest('.settings-custom-provider');
+  if (!row) return;
+  const customInp = row.querySelector('[data-custom-provider-auth-custom]');
+  const hidden = row.querySelector('[data-custom-provider-auth]');
+  if (selectEl.value === '__custom') {
+    if (customInp) { customInp.style.display = 'block'; setTimeout(() => customInp.focus(), 30); }
+    if (hidden) hidden.value = customInp?.value || '';
+  } else {
+    if (customInp) { customInp.style.display = 'none'; }
+    if (hidden) hidden.value = selectEl.value;
+  }
+}
+
+function _settingsOnAuthCustomInput(inputEl) {
+  const row = inputEl.closest('.settings-custom-provider');
+  if (!row) return;
+  const hidden = row.querySelector('[data-custom-provider-auth]');
+  if (hidden) hidden.value = inputEl.value.trim() || 'bearer';
+}
+
+function _settingsApplyPreset(selectEl) {
+  const row = selectEl.closest('.settings-custom-provider');
+  if (!row) return;
+  const presetId = selectEl.value;
+  const preset = PROVIDER_PRESETS.find(p => p.id === presetId);
+  if (!preset || !preset.id) return;
+  const nameI = row.querySelector('[data-custom-provider-name]');
+  const urlI = row.querySelector('[data-custom-provider-url]');
+  const keyI = row.querySelector('[data-custom-provider-key]');
+  const authSelect = row.querySelector('[data-custom-provider-auth-select]');
+  const authHidden = row.querySelector('[data-custom-provider-auth]');
+  const authCustom = row.querySelector('[data-custom-provider-auth-custom]');
+  const hintEl = row.querySelector('[data-custom-provider-hint]');
+  if (nameI && !nameI.value) { nameI.value = preset.id === 'custom' ? '' : preset.id; nameI.dispatchEvent(new Event('input', { bubbles: true })); }
+  if (urlI && preset.baseUrl) urlI.value = preset.baseUrl;
+  if (preset.authHeader) {
+    const known = ['bearer', 'x-api-key', 'x-key'];
+    if (authSelect) authSelect.value = known.includes(preset.authHeader) ? preset.authHeader : '__custom';
+    if (authHidden) authHidden.value = preset.authHeader;
+    if (authCustom) {
+      if (known.includes(preset.authHeader)) {
+        authCustom.style.display = 'none'; authCustom.value = '';
+      } else {
+        authCustom.style.display = 'block'; authCustom.value = preset.authHeader;
+      }
+    }
+  }
+  if (keyI && preset.keyHint) keyI.placeholder = 'API key — get one from ' + preset.keyHint;
+  if (hintEl) hintEl.textContent = preset.keyHint ? 'Get a key: ' + preset.keyHint : '';
+  if (keyI && !keyI.value) setTimeout(() => keyI.focus(), 30);
+}
+
 function _settingsCustomProviderRow(provider = {}) {
   const name = _settingsEscapeHtml(provider.name || '');
   const url = _settingsEscapeHtml(provider.url || '');
   const key = _settingsEscapeHtml(provider.key || '');
   const authHeader = _settingsEscapeHtml(provider.authHeader || 'bearer');
+  const presetOptions = PROVIDER_PRESETS.map(p =>
+    `<option value="${_settingsEscapeHtml(p.id)}">${_settingsEscapeHtml(p.label)}</option>`
+  ).join('');
   return `
     <div class="settings-custom-provider">
       <div class="settings-custom-provider-head">
-        <strong>Custom Provider</strong>
+        <strong>${name ? _settingsEscapeHtml(name) : 'Custom Provider'}</strong>
         <button type="button" class="settings-danger-btn" onclick="removeSettingsCustomProvider(this)">Remove</button>
       </div>
-      <div class="settings-inline">
+      <label>Preset (optional)</label>
+      <select data-custom-provider-preset onchange="_settingsApplyPreset(this)">${presetOptions}</select>
+      <div class="settings-inline" style="margin-top:8px">
         <div>
           <label>Prefix</label>
-          <input data-custom-provider-name type="text" value="${name}" placeholder="bfl" oninput="onSettingsCustomProviderNameChange(this)">
+          <input data-custom-provider-name type="text" value="${name}" placeholder="e.g. groq, together" oninput="onSettingsCustomProviderNameChange(this)">
         </div>
         <div>
           <label>Auth Header</label>
-          <select data-custom-provider-auth>
-            <option value="bearer"${authHeader === 'bearer' || !authHeader ? ' selected' : ''}>Bearer</option>
-            <option value="x-api-key"${authHeader === 'x-api-key' ? ' selected' : ''}>x-api-key</option>
-            <option value="x-key"${authHeader === 'x-key' ? ' selected' : ''}>x-key</option>
-          </select>
+          ${(() => {
+            const known = ['bearer', 'x-api-key', 'x-key'];
+            const isCustom = authHeader && !known.includes(authHeader);
+            return `
+              <select data-custom-provider-auth-select onchange="_settingsOnAuthSelectChange(this)">
+                <option value="bearer"${authHeader === 'bearer' || !authHeader ? ' selected' : ''}>Bearer (most providers)</option>
+                <option value="x-api-key"${authHeader === 'x-api-key' ? ' selected' : ''}>x-api-key (Anthropic-style)</option>
+                <option value="x-key"${authHeader === 'x-key' ? ' selected' : ''}>x-key</option>
+                <option value="__custom"${isCustom ? ' selected' : ''}>Custom header…</option>
+              </select>
+              <input data-custom-provider-auth-custom type="text" value="${isCustom ? authHeader : ''}" placeholder="header-name" oninput="_settingsOnAuthCustomInput(this)" style="display:${isCustom ? 'block' : 'none'};margin-top:6px">
+              <input data-custom-provider-auth type="hidden" value="${authHeader || 'bearer'}">
+            `;
+          })()}
         </div>
       </div>
       <label>Base URL</label>
       <input data-custom-provider-url type="text" value="${url}" placeholder="https://api.example.com/v1">
       <label>API Key</label>
-      <input data-custom-provider-key type="password" value="${key}" placeholder="optional">
+      <input data-custom-provider-key type="password" value="${key}" placeholder="paste API key here">
+      <div class="settings-hint" data-custom-provider-hint></div>
       <div class="settings-test-row">
-        <button type="button" class="settings-test-btn" onclick="populateSettingsCustomProvider(this)">populate models</button>
+        <button type="button" class="settings-test-btn" onclick="populateSettingsCustomProvider(this)">test connection &amp; load models</button>
         <span class="settings-test-result" data-custom-provider-populate-result></span>
       </div>
     </div>
@@ -3884,35 +4259,56 @@ async function populateSettingsCustomProvider(btn) {
   const row = btn.closest('.settings-custom-provider');
   const out = row.querySelector('[data-custom-provider-populate-result]');
   const v = _settingsReadCustomRow(row);
-  if (!v.url) { out.className = 'settings-test-result err'; out.textContent = 'url required'; return; }
-  btn.disabled = true; out.className = 'settings-test-result'; out.textContent = '…';
+  if (!v.url) { out.className = 'settings-test-result err'; out.textContent = 'base URL required'; return; }
+  if (!v.name) { out.className = 'settings-test-result err'; out.textContent = 'prefix required (e.g. "groq" — the first part of model IDs like groq/llama-3.3-70b)'; return; }
+  btn.disabled = true; out.className = 'settings-test-result'; out.textContent = 'testing…';
   try {
     const r = await fetch(API + '/api/providers/list-models', {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ kind: 'custom', baseUrl: v.url, apiKey: v.key, authHeader: v.authHeader }),
     });
     const d = await r.json();
-    if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    // Save detected ctx limits into _settingsKnownLimits so the model-row
-    // placeholders can auto-fill in the Routing section.
+    if (!d.ok) {
+      // Friendlier error surfacing
+      const raw = String(d.error || ('HTTP ' + r.status));
+      let msg = raw;
+      if (/401|unauthori[sz]ed|invalid[_ ]api/i.test(raw)) {
+        msg = 'API key rejected — double-check you copied the full key and the auth header matches the provider';
+      } else if (/404|not found/i.test(raw)) {
+        msg = "Couldn't find /models at this URL. Did you paste an Anthropic-shaped or non-OpenAI-compat URL?";
+      } else if (/timeout|ETIMEDOUT|ECONNREFUSED/i.test(raw)) {
+        msg = "Couldn't reach the host. If it's a tailnet-only URL, make sure Tailscale is connected.";
+      } else if (/getaddrinfo|ENOTFOUND|could not resolve/i.test(raw)) {
+        msg = "Host not resolvable. If it's a tailnet hostname, Tailscale needs to be connected first.";
+      }
+      throw new Error(msg);
+    }
     let withCtx = 0;
     for (const m of (d.models || [])) {
       if (!m?.id) continue;
       const ref = v.name ? `${v.name}/${m.id}` : m.id;
-      if (m.contextLength) {
-        _settingsKnownLimits[ref] = { contextLength: m.contextLength };
-        withCtx++;
-      }
+      // Always store the id (empty ctx is fine — powers the datalist even when
+      // the provider doesn't advertise context windows)
+      const prev = _settingsKnownLimits[ref];
+      _settingsKnownLimits[ref] = { contextLength: m.contextLength || prev?.contextLength || 0 };
+      if (m.contextLength) withCtx++;
     }
     out.className = 'settings-test-result ok';
-    out.textContent = `${d.models.length} models${withCtx ? ` · ${withCtx} with ctx` : ''}`;
-    // Trigger placeholder refresh on any model rows that use this provider.
+    const n = (d.models || []).length;
+    if (n === 0) {
+      out.textContent = 'auth OK, but provider listed 0 models — you can still enter model IDs manually in the Routing rows';
+    } else {
+      out.textContent = `✓ ${n} models${withCtx ? ` · ${withCtx} with ctx` : ''}`;
+    }
     if (typeof SETTINGS_MODEL_FIELDS !== 'undefined') {
-      for (const [key] of SETTINGS_MODEL_FIELDS) _settingsRefreshTierPlaceholders(key);
+      for (const [key] of SETTINGS_MODEL_FIELDS) {
+        _settingsRefreshTierModelList(key);
+        _settingsRefreshTierPlaceholders(key);
+      }
     }
   } catch (e) {
     out.className = 'settings-test-result err';
-    out.textContent = String(e.message || e).slice(0, 140);
+    out.textContent = String(e.message || e).slice(0, 180);
   } finally { btn.disabled = false; }
 }
 
@@ -4032,6 +4428,39 @@ function populateSettingsPanel(data) {
       providerSelect.value = providerValue;
     }
     if (modelInput) modelInput.value = modelData.model || '';
+    // Attach a <datalist> of known model ids to the model input — populated
+    // from _settingsKnownLimits (filled by provider-populate + auto-detect).
+    if (modelInput && providerSelect) {
+      const listId = `settings-model-${key}-datalist`;
+      if (!document.getElementById(listId)) {
+        const dl = document.createElement('datalist');
+        dl.id = listId;
+        modelInput.parentElement?.appendChild(dl);
+      }
+      modelInput.setAttribute('list', listId);
+      if (!modelInput.dataset.tierBound) {
+        modelInput.dataset.tierBound = '1';
+        modelInput.addEventListener('input', () => _settingsOnTierModelChange(key));
+      }
+      if (!providerSelect.dataset.tierBound) {
+        providerSelect.dataset.tierBound = '1';
+        providerSelect.addEventListener('change', () => {
+          // Clear the old model + ctx override when switching provider —
+          // otherwise a leftover value blocks the datalist typeahead and the
+          // stale ctx doesn't belong to the new provider's models anyway.
+          const mInp = document.getElementById(`settings-model-${key}-name`);
+          const cInp = document.getElementById(`settings-model-${key}-ctx`);
+          const cmpInp = document.getElementById(`settings-model-${key}-compact`);
+          if (mInp) mInp.value = '';
+          if (cInp) cInp.value = '';
+          if (cmpInp) cmpInp.value = '';
+          _settingsRefreshTierModelList(key);
+          _settingsOnTierModelChange(key);
+          mInp?.focus();
+        });
+      }
+      _settingsRefreshTierModelList(key);
+    }
 
     // Inject Max ctx + Compact-at inputs once per row, then populate from
     // data.modelLimits keyed by full model ref (provider/model).
@@ -4240,7 +4669,9 @@ function _applyRoleGatingToSettings() {
 async function _populateProfileSection() {
   const section = document.getElementById('settings-profile-section');
   if (!section) return;
-  if (_isCreatorRole()) { section.style.display = 'none'; return; }
+  // Show Your Profile (display name + change password) for every authenticated
+  // user, creator included — creators signed up with a password too and should
+  // be able to rotate it without editing webapp-users.json by hand.
   section.style.display = '';
   try {
     const r = await fetch(API + '/api/preferences', { headers: authHeaders() });
@@ -4326,6 +4757,52 @@ function _settingsRefreshTierPlaceholders(key) {
   }
 }
 
+// Rebuild the <datalist> of model suggestions for a tier row based on which
+// provider is currently selected for that tier. Called on provider-change and
+// whenever _settingsKnownLimits is updated by a "test connection" probe.
+function _settingsRefreshTierModelList(key) {
+  const dl = document.getElementById(`settings-model-${key}-datalist`);
+  if (!dl) return;
+  const provider = document.getElementById(`settings-model-${key}-provider`)?.value || '';
+  // For built-in providers (anthropic/openai/openrouter/gemini), ids in
+  // _settingsKnownLimits look like `openai/gpt-5.4`. For custom providers
+  // like "glm", they look like `glm/<model-id>`. Bare model ids (no slash)
+  // are treated as belonging to 'anthropic' by convention.
+  const entries = [];
+  for (const k of Object.keys(_settingsKnownLimits)) {
+    const slash = k.indexOf('/');
+    const pref = slash >= 0 ? k.slice(0, slash) : 'anthropic';
+    const id = slash >= 0 ? k.slice(slash + 1) : k;
+    if (pref !== provider) continue;
+    const ctx = _settingsKnownLimits[k]?.contextLength;
+    entries.push({ id, ctx: ctx || 0 });
+  }
+  entries.sort((a, b) => (b.ctx - a.ctx) || a.id.localeCompare(b.id));
+  dl.innerHTML = entries.map(e =>
+    `<option value="${_settingsEscapeHtml(e.id)}"${e.ctx ? ` label="${e.ctx.toLocaleString()} ctx"` : ''}></option>`
+  ).join('');
+}
+
+// When the model input matches a known model id, auto-populate the ctx field
+// (only if it's currently empty — we never overwrite an operator override).
+function _settingsOnTierModelChange(key) {
+  const providerSel = document.getElementById(`settings-model-${key}-provider`);
+  const nameInp = document.getElementById(`settings-model-${key}-name`);
+  const ctxInp = document.getElementById(`settings-model-${key}-ctx`);
+  if (!providerSel || !nameInp || !ctxInp) return;
+  const provider = providerSel.value;
+  const model = (nameInp.value || '').trim();
+  if (!model) return;
+  const limKey = (provider && provider !== 'anthropic') ? `${provider}/${model}` : model;
+  ctxInp.dataset.limKey = limKey;
+  const known = _settingsKnownLimits[limKey]?.contextLength;
+  if (known && !ctxInp.value) {
+    // Leave value empty so "auto-detected" still shows as placeholder — but
+    // refresh the placeholder so the operator sees the detected number.
+  }
+  _settingsRefreshTierPlaceholders(key);
+}
+
 async function _settingsAutoDetectModelLimits(data) {
   // For every configured custom provider, fetch its /models and cache ctx.
   const tasks = [];
@@ -4337,8 +4814,10 @@ async function _settingsAutoDetectModelLimits(data) {
     }).then(r => r.json()).then(d => {
       if (!d?.ok) return;
       for (const m of (d.models || [])) {
-        if (!m?.id || !m?.contextLength) continue;
-        _settingsKnownLimits[`${p.name}/${m.id}`] = { contextLength: m.contextLength };
+        if (!m?.id) continue;
+        const ref = `${p.name}/${m.id}`;
+        const prev = _settingsKnownLimits[ref];
+        _settingsKnownLimits[ref] = { contextLength: m.contextLength || prev?.contextLength || 0 };
       }
     }).catch(() => {}));
   }
@@ -4356,15 +4835,17 @@ async function _settingsAutoDetectModelLimits(data) {
     }).then(r => r.json()).then(d => {
       if (!d?.ok) return;
       for (const m of (d.models || [])) {
-        if (!m?.id || !m?.contextLength) continue;
+        if (!m?.id) continue;
         const ref = (kind === 'anthropic') ? m.id : `${kind}/${m.id}`;
-        _settingsKnownLimits[ref] = { contextLength: m.contextLength };
+        const prev = _settingsKnownLimits[ref];
+        _settingsKnownLimits[ref] = { contextLength: m.contextLength || prev?.contextLength || 0 };
       }
     }).catch(() => {}));
   }
   await Promise.allSettled(tasks);
-  // After all probes, refresh placeholders for every tier row that's already rendered.
+  // After all probes, refresh placeholders + datalists for every tier row.
   for (const [key] of (typeof SETTINGS_MODEL_FIELDS !== 'undefined' ? SETTINGS_MODEL_FIELDS : [])) {
+    _settingsRefreshTierModelList(key);
     _settingsRefreshTierPlaceholders(key);
   }
 }
@@ -4418,6 +4899,87 @@ function _bindAcornButtons() {
   });
 }
 
+// ── Settings tabs ────────────────────────────────────────────────────
+// Each settings-section carries data-target-tab="<id>". On panel open we
+// reparent sections into the right tab pane, render a role-filtered tab
+// bar, and activate either the last-active tab or the first allowed one.
+// Lazy refresh hooks run on tab switch so live state (backup list,
+// janitor bin, tailscale status, etc.) stays fresh without blocking open.
+const SETTINGS_TABS = [
+  { id: 'profile',      label: 'Profile',       forAll: true  },
+  { id: 'providers',    label: 'Providers',     forAll: false },
+  { id: 'agent',        label: 'Agent',         forAll: false },
+  { id: 'graph-memory', label: 'Graph & Memory', forAll: false },
+  { id: 'backups',      label: 'Backups',       forAll: false },
+  { id: 'cluster',      label: 'Cluster',       forAll: false },
+  { id: 'tools',        label: 'Tools',         forAll: false },
+  { id: 'users',        label: 'Users',         forAll: false },
+  { id: 'advanced',     label: 'Advanced',      forAll: false },
+];
+const _SETTINGS_TAB_REFRESHERS = {
+  'graph-memory': () => {
+    try { if (typeof _maintRefreshStatus === 'function') _maintRefreshStatus(); } catch {}
+    try { if (typeof _janRefreshStatus === 'function') _janRefreshStatus(); } catch {}
+    try { if (typeof _janLoadBin === 'function') _janLoadBin(); } catch {}
+  },
+  'backups': () => {
+    try { if (typeof _bkLoadStatus === 'function') _bkLoadStatus(); } catch {}
+    try { if (typeof _bkLoadList === 'function') _bkLoadList(); } catch {}
+  },
+  'cluster': () => {
+    try { if (typeof _tsRefreshStatus === 'function') _tsRefreshStatus(); } catch {}
+    try { if (typeof _clLoadSettings === 'function') _clLoadSettings(); } catch {}
+    try { if (typeof _clRefreshKeyStatus === 'function') _clRefreshKeyStatus(); } catch {}
+  },
+};
+
+function _reparentSettingsSections() {
+  // Move every [data-target-tab] section into its matching pane. Idempotent.
+  const sections = document.querySelectorAll('#settings-pane [data-target-tab]');
+  sections.forEach(sec => {
+    const tab = sec.getAttribute('data-target-tab');
+    const pane = document.querySelector(`#settings-panes [data-tab="${tab}"]`);
+    if (pane && sec.parentElement !== pane) pane.appendChild(sec);
+  });
+}
+
+function _renderSettingsTabs() {
+  const tabBar = document.getElementById('settings-tabs');
+  if (!tabBar) return;
+  const isCreator = (typeof _isCreatorRole === 'function') ? _isCreatorRole() : (_userRole === 'creator' || _userRole === 'admin');
+  // Empty tabs get auto-hidden (e.g. Users tab when no user mgmt is configured)
+  const nonEmpty = new Set(
+    Array.from(document.querySelectorAll('#settings-panes .settings-tab-pane'))
+      .filter(p => p.children.length > 0)
+      .map(p => p.getAttribute('data-tab'))
+  );
+  const allowed = SETTINGS_TABS.filter(t => (isCreator || t.forAll) && nonEmpty.has(t.id));
+  tabBar.innerHTML = allowed.map(t =>
+    `<button class="settings-tab" type="button" data-tab="${t.id}">${t.label}</button>`
+  ).join('');
+}
+
+function _settingsSwitchTab(tabId) {
+  const panes = document.querySelectorAll('#settings-panes .settings-tab-pane');
+  const buttons = document.querySelectorAll('#settings-tabs .settings-tab');
+  let resolved = tabId;
+  // Fall back to first visible tab if requested isn't available to this user
+  const visibleTabIds = Array.from(buttons).map(b => b.getAttribute('data-tab'));
+  if (!visibleTabIds.includes(resolved)) resolved = visibleTabIds[0] || 'profile';
+  panes.forEach(p => p.classList.toggle('active', p.getAttribute('data-tab') === resolved));
+  buttons.forEach(b => b.classList.toggle('active', b.getAttribute('data-tab') === resolved));
+  try { localStorage.setItem('spore-settings-tab', resolved); } catch {}
+  const refresh = _SETTINGS_TAB_REFRESHERS[resolved];
+  if (refresh) refresh();
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (t && t.classList?.contains('settings-tab') && t.hasAttribute('data-tab')) {
+    _settingsSwitchTab(t.getAttribute('data-tab'));
+  }
+});
+
 async function openSettingsPanel() {
   const { overlay, themeSelect } = getSettingsEls();
   if (!overlay) {
@@ -4443,10 +5005,14 @@ async function openSettingsPanel() {
     if (!r.ok) throw new Error(data?.error || 'Failed to load settings');
     populateSettingsPanel(data);
     renderSettingsGraphsList();
+    // Re-parent settings-sections into their tab panes, render the tab bar,
+    // and activate either the remembered tab or the first available one.
+    _reparentSettingsSections();
+    _renderSettingsTabs();
+    let lastTab = 'profile';
+    try { lastTab = localStorage.getItem('spore-settings-tab') || 'profile'; } catch {}
+    _settingsSwitchTab(lastTab);
     setSettingsBusy(false, '');
-    // Fire-and-forget background detection of model context limits from each
-    // configured provider's /models endpoint. Refreshes placeholders inline
-    // once results land — no spinner, no reload.
     _settingsAutoDetectModelLimits(data);
   } catch (e) {
     setSettingsBusy(false, e?.message || 'Failed to load settings');
@@ -7187,6 +7753,15 @@ function handleWsMessage(msg) {
     } else if (s === 'heartbeat') {
       const label = msg.phase === 'thinking' ? 'thinking deeply' : msg.phase === 'generating' ? 'responding' : msg.phase === 'tool_call' ? (msg.toolName ? 'using ' + msg.toolName : 'calling tool') : msg.phase;
       setActivity(label + '... (' + msg.elapsed + 's)');
+    } else if (s === 'interjected') {
+      // Gateway acknowledging we queued the user's follow-up into an in-flight run.
+      setActivity('interjection queued — the agent will address it next iteration');
+      addChatMessage('system', '\u21bb Follow-up queued — the agent is still working, will fold this into its reply.');
+    } else if (s === 'interjection') {
+      // Loop picked up the interjection at the next iteration boundary.
+      const n = msg.count || 1;
+      setActivity(`interjecting${n > 1 ? ` (${n} message${n === 1 ? '' : 's'})` : ''}... the agent is reading the follow-up now`);
+      addChatMessage('system', `\u27f3 Agent is now folding your follow-up${n > 1 ? `s (${n})` : ''} into its response.`);
     }
   } else if (msg.type === 'chat:chunk') {
     streamChunks.push(msg.text);
@@ -9424,8 +9999,8 @@ function base64ToBlob(b64, mime) {
 }
 
 // ── Real-time Graph Events ──
-const recentEvents = [];
-const MAX_FEED_ITEMS = 6;
+// (The legacy fade-out feed was replaced by #event-log — see addEventToFeed
+// below. recentEvents / MAX_FEED_ITEMS are no longer used.)
 
 function handleGraphEvent(evt) {
   addEventToFeed(evt);
@@ -9585,7 +10160,12 @@ function mergeGraph(newData, anims) {
   const forceWidth = forceCanvasEl?.clientWidth || window.innerWidth;
   const forceHeight = forceCanvasEl?.clientHeight || window.innerHeight;
   simulation.force('charge').strength(profile.chargeStrength).theta(profile.chargeTheta).distanceMax(profile.chargeMaxDist);
-  simulation.force('link').distance(profile.linkDistance).strength(profile.linkStrength);
+  // parent_of edges (created by drop-on-node "Move under as child") are
+  // "sticky" — short distance + high strength so the child visually clings to
+  // the parent. Everything else uses the profile defaults.
+  simulation.force('link')
+    .distance(l => l.type === 'parent_of' ? 28 : profile.linkDistance)
+    .strength(l => l.type === 'parent_of' ? 0.95 : profile.linkStrength);
   // Label-box collision force; reinitialize is implicit when nodes change.
   // Rebuild per-node anchor accessors with current type distribution.
   const _typeAnchors2 = _typeClusterAnchors(graphData.nodes, forceWidth, forceHeight);
@@ -9686,6 +10266,47 @@ function updateStats() {
   });
 }
 
+// Localized resettlement after a drop — run the simulation briefly, but pin
+// every node outside `radius` of (cx, cy) so only the neighbours adjust.
+// Far-away clusters stay frozen; no global pulsating.
+//
+// Timeline:
+//   0   → active phase at targetAlpha (local motion has energy)
+//   40% → alphaTarget(0); sim decays naturally → smooth slowdown
+//   100%→ stop() + unpin far nodes → everything goes still, no global winch
+function _localResettle(cx, cy, radius = 220, duration = 1400, targetAlpha = 0.09) {
+  if (!simulation || !graphData?.nodes) return;
+  const r2 = radius * radius;
+  const tempPinned = [];
+  for (const n of graphData.nodes) {
+    if (n.fx != null || n.fy != null) continue;
+    const dx = (n.x ?? 0) - cx;
+    const dy = (n.y ?? 0) - cy;
+    if (dx * dx + dy * dy > r2) {
+      n.fx = n.x;
+      n.fy = n.y;
+      tempPinned.push(n);
+    }
+  }
+  if (_dragRestartTimer) { clearTimeout(_dragRestartTimer); _dragRestartTimer = null; }
+  if (_dragDecayTimer) { clearTimeout(_dragDecayTimer); _dragDecayTimer = null; }
+  simulation.alphaTarget(targetAlpha).restart();
+  // Let the sim decay smoothly from ~40% through the window — creates a
+  // gentle wind-down instead of a sudden stop.
+  _dragDecayTimer = setTimeout(() => {
+    if (simulation) simulation.alphaTarget(0);
+    _dragDecayTimer = null;
+  }, Math.round(duration * 0.4));
+  // Hard stop + unpin at the end. Far nodes stay frozen through the decay
+  // tail, so even the tiny residual alpha can't yank them.
+  _dragRestartTimer = setTimeout(() => {
+    if (simulation) simulation.stop();
+    for (const n of tempPinned) { n.fx = null; n.fy = null; }
+    _scheduleTickRender();
+    _dragRestartTimer = null;
+  }, duration);
+}
+
 function _nodeDragBehavior() {
   return d3.drag()
     .filter(e => e.button === 0 && !_isMarqueeGesture(e))
@@ -9694,54 +10315,536 @@ function _nodeDragBehavior() {
     .on('end', _dragEnd);
 }
 
+// Drag state — used by the hit-test + drop-menu logic below.
+let _dragSourceId = null;
+let _dragTargetId = null;
+let _dragIsLifted = false;
+let _dragRestartTimer = null;
+let _dragDecayTimer = null;
+let _dragMoved = false;   // set true on first real drag motion; clicks stay false
+
 function _dragStart(e, d) {
   if (!simulation) return;
-  if (!e.active) simulation.alphaTarget(_graphForceProfile(graphData?.nodes?.length || 0).dragAlpha).restart();
-  d.fx = d.x;
-  d.fy = d.y;
+  // Don't stop the sim yet and don't mark as lifted — a pure click also fires
+  // start+end with no drag motion in between. If we freeze the sim or add the
+  // pointer-events:none class here, we'd swallow the click (mouseup never
+  // lands on the node → no click event → node menu never opens).
+  _dragSourceId = d?.id || null;
+  _dragTargetId = null;
+  _dragMoved = false;
+  _dragIsLifted = false;
 }
 function _dragging(e, d) {
+  // First-motion transition: promote this gesture from "maybe a click" to a
+  // real drag. Freeze the sim, pin the node, add the lifted visuals.
+  if (!_dragIsLifted) {
+    simulation.stop();
+    _dragIsLifted = true;
+    _dragMoved = true;
+    d.fx = d.x;
+    d.fy = d.y;
+    try {
+      document.querySelectorAll('.node-dragging').forEach(n => n.classList.remove('node-dragging'));
+      const host = _nodeDomFromId(_dragSourceId);
+      if (host) host.classList.add('node-dragging');
+    } catch {}
+  }
+  // Sim is stopped, so no tick copies fx→x. _renderTick reads d.x/d.y for the
+  // node transform, so we must write both — otherwise the node doesn't move
+  // visibly during drag.
   d.fx = e.x;
   d.fy = e.y;
+  d.x = e.x;
+  d.y = e.y;
+  _scheduleTickRender();
+  // Hit-test: which node (if any) is under the cursor right now?
+  // Walk ALL elements at the point (elementsFromPoint) and pick the first
+  // graph-node that isn't the one being dragged. pointer-events:none on the
+  // dragged node (CSS) usually means it isn't in the stack at all, but this
+  // is belt-and-suspenders for older behaviour / stacking quirks.
+  try {
+    const clientX = e.sourceEvent?.clientX;
+    const clientY = e.sourceEvent?.clientY;
+    if (clientX == null || clientY == null) return;
+    const stack = (typeof document.elementsFromPoint === 'function')
+      ? document.elementsFromPoint(clientX, clientY)
+      : [document.elementFromPoint(clientX, clientY)];
+    let targetId = null;
+    for (const el of stack) {
+      const hitId = _nodeIdFromDomElement(el);
+      if (hitId && hitId !== _dragSourceId) { targetId = hitId; break; }
+    }
+    if (targetId !== _dragTargetId) _setDragTargetId(targetId);
+    // Update the dashed connector line from source → target (or source → cursor)
+    _updateDragConnector(d, targetId, e);
+  } catch {}
 }
 function _dragEnd(e, d) {
   if (!simulation) return;
-  if (!e.active) simulation.alphaTarget(0);
-  d.fx = null;
-  d.fy = null;
-  _scheduleLabelLayout(true);
+  const hadTarget = !!_dragTargetId;
+  const targetId = _dragTargetId;
+  const sourceId = _dragSourceId;
+  const moved = _dragMoved;
+  // Clear drag visuals regardless of outcome.
+  try { document.querySelectorAll('.node-dragging').forEach(n => n.classList.remove('node-dragging')); } catch {}
+  _setDragTargetId(null);
+  _hideDragConnector();
+
+  // Pure click (no motion): don't touch the simulation. The d3 click handler
+  // on the node group will fire next and open the node menu.
+  if (!moved) {
+    _dragIsLifted = false;
+    _dragSourceId = null;
+    _dragMoved = false;
+    return;
+  }
+
+  if (hadTarget && sourceId && sourceId !== targetId) {
+    // Keep the dragged node pinned at its drop coords while the menu is open.
+    // Menu actions (or Cancel) decide whether to release it.
+    const clientX = e.sourceEvent?.clientX ?? 0;
+    const clientY = e.sourceEvent?.clientY ?? 0;
+    _showDropMenu(clientX, clientY, { source: sourceId, target: targetId, draggedNode: d });
+  } else {
+    // No drop target — release the pin and run a *localized* resettle so
+    // only nodes near the drop position adjust. Far-away nodes stay frozen
+    // (we pin them for the duration of the settle, then unpin).
+    const cx = d.x, cy = d.y;
+    d.fx = null;
+    d.fy = null;
+    _localResettle(cx, cy);
+    _scheduleLabelLayout(true);
+  }
+
+  _dragIsLifted = false;
+  _dragSourceId = null;
+  _dragMoved = false;
+  // _dragTargetId already null after _setDragTargetId(null)
+}
+
+function _nodeDomFromId(id) {
+  if (!id) return null;
+  // <g class="graph-node" data-node-id="..."> wrapper set at render time.
+  const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(id) : String(id).replace(/"/g, '\\"');
+  return document.querySelector(`g.graph-node[data-node-id="${esc}"]`);
+}
+
+function _nodeIdFromDomElement(el) {
+  if (!el) return null;
+  let n = el;
+  while (n && n !== document) {
+    if (n.classList && n.classList.contains('graph-node') && n.dataset?.nodeId) return n.dataset.nodeId;
+    n = n.parentNode;
+  }
+  return null;
+}
+
+function _setDragTargetId(id) {
+  if (_dragTargetId === id) return;
+  // Strip highlight from previous target
+  if (_dragTargetId) {
+    const prev = _nodeDomFromId(_dragTargetId);
+    if (prev) prev.classList.remove('node-drag-target');
+  }
+  _dragTargetId = id;
+  if (id) {
+    const next = _nodeDomFromId(id);
+    if (next) next.classList.add('node-drag-target');
+  }
+}
+
+let _dragConnectorLine = null;
+function _updateDragConnector(sourceNode, targetId, e) {
+  try {
+    // Append inside the zoomed <g> (parent of gLinks) so the connector shares
+    // the same pan/zoom transform as the nodes — otherwise its coords are off
+    // by the current zoom offset.
+    const parentG = gLinks?.node()?.parentNode;
+    if (!parentG) return;
+    if (!_dragConnectorLine) {
+      const ns = 'http://www.w3.org/2000/svg';
+      _dragConnectorLine = document.createElementNS(ns, 'line');
+      _dragConnectorLine.setAttribute('stroke', 'var(--accent)');
+      _dragConnectorLine.setAttribute('stroke-width', '1.5');
+      _dragConnectorLine.setAttribute('stroke-dasharray', '4 3');
+      _dragConnectorLine.setAttribute('pointer-events', 'none');
+      _dragConnectorLine.setAttribute('opacity', '0');
+      parentG.appendChild(_dragConnectorLine);
+    }
+    // Compute graph coords from the source node + target node (or cursor).
+    const sx = sourceNode.x ?? 0;
+    const sy = sourceNode.y ?? 0;
+    let tx, ty;
+    if (targetId) {
+      const t = (graphData?.nodes || []).find(n => n.id === targetId);
+      if (!t) return;
+      tx = t.x ?? 0; ty = t.y ?? 0;
+    } else {
+      tx = e.x; ty = e.y;
+    }
+    _dragConnectorLine.setAttribute('x1', sx);
+    _dragConnectorLine.setAttribute('y1', sy);
+    _dragConnectorLine.setAttribute('x2', tx);
+    _dragConnectorLine.setAttribute('y2', ty);
+    _dragConnectorLine.setAttribute('opacity', targetId ? '0.95' : '0.4');
+  } catch {}
+}
+function _hideDragConnector() {
+  if (_dragConnectorLine) {
+    try { _dragConnectorLine.remove(); } catch {}
+    _dragConnectorLine = null;
+  }
+}
+
+// ── Drop menu ────────────────────────────────────────────────────────
+// Shown after a drag ends on top of another node. Actions either mutate the
+// graph server-side (fast path: link/child) or kick off an agent loop that
+// performs a semantic merge (merge).
+let _dropMenuState = null;   // { source, target, draggedNode }
+
+function _showDropMenu(clientX, clientY, state) {
+  const menu = document.getElementById('graph-drop-menu');
+  if (!menu || !state?.source || !state?.target) return;
+  _dropMenuState = state;
+  const srcEl = menu.querySelector('[data-drop-source]');
+  const tgtEl = menu.querySelector('[data-drop-target]');
+  if (srcEl) srcEl.textContent = state.source;
+  if (tgtEl) tgtEl.textContent = state.target;
+  // Position at cursor, clamped to viewport.
+  const pad = 10;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  menu.style.left = Math.min(clientX, vw - 260) + 'px';
+  menu.style.top = Math.min(clientY, vh - 220) + 'px';
+  menu.classList.add('open');
+  // Defer the outside-click listener so the mouseup that ended the drag
+  // doesn't immediately close the menu.
+  setTimeout(() => {
+    document.addEventListener('click', _dropMenuOutsideClick, true);
+    document.addEventListener('keydown', _dropMenuKey, true);
+  }, 0);
+}
+
+function _hideDropMenu(releasePinnedNode = true) {
+  const menu = document.getElementById('graph-drop-menu');
+  if (menu) menu.classList.remove('open');
+  document.removeEventListener('click', _dropMenuOutsideClick, true);
+  document.removeEventListener('keydown', _dropMenuKey, true);
+  if (releasePinnedNode && _dropMenuState?.draggedNode) {
+    const d = _dropMenuState.draggedNode;
+    d.fx = null;
+    d.fy = null;
+    _scheduleTickRender();
+  }
+  _dropMenuState = null;
+}
+
+function _dropMenuOutsideClick(e) {
+  const menu = document.getElementById('graph-drop-menu');
+  if (menu && !menu.contains(e.target)) _hideDropMenu(true);
+}
+function _dropMenuKey(e) {
+  if (e.key === 'Escape') _hideDropMenu(true);
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!(t instanceof Element)) return;
+  const action = t.getAttribute?.('data-drop-action');
+  if (!action) return;
+  const state = _dropMenuState;
+  if (!state) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (action === 'cancel') { _hideDropMenu(true); return; }
+  _executeDropAction(action, state);
+});
+
+async function _executeDropAction(action, state) {
+  const { source, target } = state;
+  if (action === 'merge') {
+    // Pin the source node at drop coords (already pinned); don't release yet.
+    // Agent will actually delete it when merge completes. If it fails, the
+    // node stays where it was — the operator can drag it back.
+    toast(`Merging ${source} into ${target} — agent is working`);
+    _hideDropMenu(false);
+    try {
+      const r = await fetch(API + '/api/graph/merge', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceNodeId: source, targetNodeId: target, mode: 'merge' }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      // Agent will emit graphEvents as it mutates; viewer updates live.
+    } catch (e) {
+      toast('Merge kickoff failed: ' + (e.message || e), true);
+      // Release the pin and do a localized resettle around the drop point.
+      if (state.draggedNode) {
+        const cx = state.draggedNode.x, cy = state.draggedNode.y;
+        state.draggedNode.fx = null;
+        state.draggedNode.fy = null;
+        _localResettle(cx, cy);
+      }
+    }
+    return;
+  }
+  if (action === 'link' || action === 'child') {
+    _hideDropMenu(false); // release pin manually below
+    // 'link' now routes through the agent (it decides relationship type or
+    // declines if unrelated); 'child' is still a fast-path parent_of edge.
+    if (action === 'link') {
+      toast(`Asking the agent how ${source} relates to ${target}…`);
+    }
+    try {
+      const body = action === 'child'
+        ? { sourceNodeId: source, targetNodeId: target, mode: 'child' }
+        : { sourceNodeId: source, targetNodeId: target, mode: 'link' };
+      const r = await fetch(API + '/api/graph/merge', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      if (action === 'child') toast(`Moved ${source} under ${target}`);
+    } catch (e) {
+      toast((action === 'child' ? 'Child link' : 'Link') + ' failed: ' + (e.message || e), true);
+    }
+    // Release the pin. For 'child', snap the dragged node right next to its
+    // new parent so they're visibly stuck together. For 'link', leave it
+    // where dropped. Either way, run a localized resettle so neighbours
+    // adjust but the far-away graph stays still.
+    if (state.draggedNode) {
+      if (action === 'child') {
+        const parent = (graphData?.nodes || []).find(n => n.id === target);
+        if (parent && typeof parent.x === 'number') {
+          const pr = parent.radius || 16;
+          const cr = state.draggedNode.radius || 16;
+          state.draggedNode.x = parent.x + pr + cr + 6;
+          state.draggedNode.y = parent.y;
+        }
+      }
+      const cx = state.draggedNode.x, cy = state.draggedNode.y;
+      state.draggedNode.fx = null;
+      state.draggedNode.fy = null;
+      _localResettle(cx, cy);
+    }
+  }
+}
+
+// Event log widget — persistent history, clickable to expand.
+// Replaces the old fade-out toast feed. addEventToFeed() keeps the same
+// signature so every existing caller works unchanged.
+const EVENT_LOG_MAX = 200;
+const EVENT_LOG_STORAGE_KEY = 'spore-event-log';
+const _eventLog = [];           // { ts, op, detail, source, html }
+let _eventLogIdleTimer = null;
+let _eventLogSaveTimer = null;
+
+function _eventLogPersist() {
+  // Debounced — bursts of 50 events don't hammer localStorage.
+  if (_eventLogSaveTimer) return;
+  _eventLogSaveTimer = setTimeout(() => {
+    _eventLogSaveTimer = null;
+    try {
+      const plain = _eventLog.map(e => ({ ts: e.ts, op: e.op, detail: e.detail, source: e.source }));
+      localStorage.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(plain));
+    } catch {}
+  }, 400);
+}
+
+function _eventLogRestore() {
+  try {
+    const raw = localStorage.getItem(EVENT_LOG_STORAGE_KEY);
+    if (!raw) return;
+    const entries = JSON.parse(raw);
+    if (!Array.isArray(entries)) return;
+    for (const e of entries) {
+      if (!e || typeof e !== 'object') continue;
+      _eventLog.push({
+        ts: Number(e.ts) || Date.now(),
+        op: String(e.op || 'event'),
+        detail: String(e.detail || ''),
+        source: String(e.source || ''),
+        html: null,
+      });
+    }
+    while (_eventLog.length > EVENT_LOG_MAX) _eventLog.shift();
+  } catch {}
+}
+
+function _eventLogFormat(evt) {
+  const op = String(evt?.op || 'event');
+  const source = String(evt?.source || '');
+  let detail = '';
+  if (evt?.node?.id) detail = evt.node.id;
+  else if (evt?.nodeId) detail = evt.nodeId;
+  else if (evt?.edge) detail = `${evt.edge.source} → ${evt.edge.target}`;
+  else if (evt?.tool) detail = evt.tool;
+  else if (evt?.attributeId) detail = `attr#${evt.attributeId}`;
+  return { op, detail, source };
+}
+
+// Live stack state — shows up to STACK_MAX rows when events are coming in
+// quickly. After STACK_COLLAPSE_MS of quiet it contracts back to the single
+// most-recent row so the dock stays compact.
+const EVENT_LOG_STACK_MAX = 5;
+const EVENT_LOG_COLLAPSE_MS = 3500;
+const _eventLogStack = []; // newest last
+
+function _eventLogRowHtml(entry, asIdle = false) {
+  if (asIdle) return `<div class="event-log-row idle">idle</div>`;
+  const bits = [`<span class="ev-op">${esc(entry.op)}</span>`];
+  if (entry.detail) bits.push(`<span class="ev-detail">${esc(entry.detail)}</span>`);
+  if (entry.source) bits.push(`<span class="ev-src">${esc(entry.source)}</span>`);
+  return `<div class="event-log-row">${bits.join(' ')}</div>`;
+}
+
+function _eventLogRenderStack() {
+  const stack = document.getElementById('event-log-stack');
+  if (!stack) return;
+  if (!_eventLogStack.length) {
+    stack.innerHTML = _eventLogRowHtml(null, true);
+    stack.style.setProperty('--row-count', '1');
+    return;
+  }
+  stack.innerHTML = _eventLogStack.map(e => _eventLogRowHtml(e)).join('');
+  // Drive the container's max-height transition via the row count so the
+  // stack grows/shrinks smoothly when events fire and when it collapses.
+  stack.style.setProperty('--row-count', String(_eventLogStack.length));
+}
+
+function _eventLogBumpStack(entry) {
+  _eventLogStack.push(entry);
+  while (_eventLogStack.length > EVENT_LOG_STACK_MAX) _eventLogStack.shift();
+  _eventLogRenderStack();
+  const widget = document.getElementById('event-log');
+  if (widget) widget.classList.add('has-activity');
+  if (_eventLogIdleTimer) clearTimeout(_eventLogIdleTimer);
+  _eventLogIdleTimer = setTimeout(() => {
+    // Collapse back to just the most recent row + drop the edge animation.
+    if (_eventLogStack.length > 1) {
+      _eventLogStack.splice(0, _eventLogStack.length - 1);
+      _eventLogRenderStack();
+    }
+    const w = document.getElementById('event-log');
+    if (w) w.classList.remove('has-activity');
+  }, EVENT_LOG_COLLAPSE_MS);
+}
+
+function _eventLogRenderTicker(entry) {
+  // Legacy name kept for _eventLogBootstrap. Non-bump render: just set
+  // the stack to the single entry (used on initial restore from storage).
+  if (!entry) { _eventLogStack.length = 0; _eventLogRenderStack(); return; }
+  _eventLogStack.length = 0;
+  _eventLogStack.push({ op: entry.op, detail: entry.detail, source: entry.source });
+  _eventLogRenderStack();
+}
+
+function _eventLogRenderPanel() {
+  const list = document.getElementById('event-log-list');
+  if (!list) return;
+  if (!_eventLog.length) {
+    list.innerHTML = '<div class="event-item" style="opacity:.5">(no events yet)</div>';
+    return;
+  }
+  // Newest first. Also memoize the HTML per entry to avoid re-escaping.
+  const rows = [];
+  for (let i = _eventLog.length - 1; i >= 0; i--) {
+    const e = _eventLog[i];
+    if (!e.html) {
+      const hhmmss = new Date(e.ts).toLocaleTimeString(undefined, { hour12: false });
+      e.html = `<div class="event-item" title="${esc(JSON.stringify(e))}">
+        <span class="ev-time">${hhmmss}</span>
+        <span class="ev-op">${esc(e.op)}</span>
+        ${esc(e.detail)}
+        ${e.source ? `<span class="ev-src">${esc(e.source)}</span>` : ''}
+      </div>`;
+    }
+    rows.push(e.html);
+  }
+  list.innerHTML = rows.join('');
 }
 
 function addEventToFeed(evt) {
-  const feed = document.getElementById('event-feed');
-  const el = document.createElement('div');
-  el.className = 'event-item';
-  const opLabel = evt.op || 'event';
-  const srcLabel = evt.source || '';
-  let detail = '';
-  if (evt.node?.id) detail = evt.node.id;
-  else if (evt.nodeId) detail = evt.nodeId;
-  else if (evt.edge) detail = `${evt.edge.source} → ${evt.edge.target}`;
-  else if (evt.tool) detail = evt.tool;
-  el.innerHTML = `<span class="ev-op">${opLabel}</span> ${esc(detail)} <span class="ev-src">${srcLabel}</span>`;
-  feed.appendChild(el);
-  recentEvents.push(el);
-
-  while (recentEvents.length > MAX_FEED_ITEMS) {
-    const old = recentEvents.shift();
-    old.classList.add('fading');
-    setTimeout(() => old.remove(), 500);
-  }
-
-  setTimeout(() => {
-    el.classList.add('fading');
-    setTimeout(() => {
-      el.remove();
-      const idx = recentEvents.indexOf(el);
-      if (idx >= 0) recentEvents.splice(idx, 1);
-    }, 500);
-  }, 5000);
+  const formatted = _eventLogFormat(evt);
+  const entry = {
+    ts: Date.now(),
+    op: formatted.op,
+    detail: formatted.detail,
+    source: formatted.source,
+    html: null,
+  };
+  _eventLog.push(entry);
+  while (_eventLog.length > EVENT_LOG_MAX) _eventLog.shift();
+  _eventLogBumpStack({ op: formatted.op, detail: formatted.detail, source: formatted.source });
+  const widget = document.getElementById('event-log');
+  if (widget?.classList.contains('open')) _eventLogRenderPanel();
+  _eventLogPersist();
 }
+
+function _eventLogOpen() {
+  const widget = document.getElementById('event-log');
+  if (!widget) return;
+  widget.classList.add('open');
+  widget.setAttribute('aria-expanded', 'true');
+  _eventLogRenderPanel();
+  document.addEventListener('click', _eventLogOutsideClick, true);
+}
+function _eventLogClose() {
+  const widget = document.getElementById('event-log');
+  if (!widget) return;
+  widget.classList.remove('open');
+  widget.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', _eventLogOutsideClick, true);
+}
+function _eventLogOutsideClick(e) {
+  const widget = document.getElementById('event-log');
+  if (widget && !widget.contains(e.target)) _eventLogClose();
+}
+function _eventLogClear() {
+  _eventLog.length = 0;
+  _eventLogRenderTicker(null);
+  _eventLogRenderPanel();
+  try { localStorage.removeItem(EVENT_LOG_STORAGE_KEY); } catch {}
+}
+
+// Restore persisted log on first evaluation of this block so the ticker
+// shows the last known event + the expand-panel has history. Runs right
+// after DOM is ready (this script block lives after the elements).
+(function _eventLogBootstrap() {
+  _eventLogRestore();
+  const tick = () => {
+    const last = _eventLog[_eventLog.length - 1];
+    if (last) _eventLogRenderTicker({ op: last.op, detail: last.detail, source: last.source });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', tick, { once: true });
+  } else {
+    tick();
+  }
+})();
+
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!(t instanceof Element)) return;
+  if (t.closest('#event-log-close')) { _eventLogClose(); e.stopPropagation(); return; }
+  if (t.closest('#event-log-clear')) { _eventLogClear(); e.stopPropagation(); return; }
+  const clickedStack = t.closest('#event-log-stack');
+  const widget = document.getElementById('event-log');
+  if (clickedStack && widget) {
+    if (widget.classList.contains('open')) _eventLogClose();
+    else _eventLogOpen();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const widget = document.getElementById('event-log');
+  if (document.activeElement !== widget) return;
+  e.preventDefault();
+  if (widget.classList.contains('open')) _eventLogClose();
+  else _eventLogOpen();
+});
 
 // ── Graph Performance Helpers ──
 function _scheduleTickRender() {
@@ -9912,7 +11015,9 @@ function initGraph(data) {
   simulation = d3.forceSimulation(data.nodes)
     // Weak link strength so cross-type edges don't drag nodes out of their
     // treemap rect. Edges are still drawn; they just don't dominate layout.
-    .force('link', d3.forceLink(simLinks).id(d => d.id).distance(profile.linkDistance).strength(profile.linkStrength))
+    .force('link', d3.forceLink(simLinks).id(d => d.id)
+      .distance(l => l.type === 'parent_of' ? 28 : profile.linkDistance)
+      .strength(l => l.type === 'parent_of' ? 0.95 : profile.linkStrength))
     // Charge limited to local range so a far-away node never throws another
     // node out of its cluster. Without distanceMax, a 300-node graph means
     // every node feels every other → instant scattering of pre-seeded clusters.
@@ -9945,6 +11050,7 @@ function initGraph(data) {
 
   const nodeG = gNodes.selectAll('g').data(data.nodes, d => d.id).join('g')
     .classed('graph-node', true)
+    .attr('data-node-id', d => d.id)
     .call(_nodeDragBehavior())
     .on('click', (e, d) => {
       e.stopPropagation();
@@ -11073,6 +12179,10 @@ document.addEventListener('click', (e) => {
     _bkRestore(t.dataset.backupRestore);
   } else if (t.dataset?.backupDelete) {
     _bkDelete(t.dataset.backupDelete);
+  } else if (t.id === 'settings-graph-export') {
+    _graphExportDownload();
+  } else if (t.id === 'settings-graph-import') {
+    document.getElementById('settings-graph-import-file')?.click();
   } else if (t.id === 'settings-tailscale-login') {
     _tsTriggerLogin();
   } else if (t.id === 'settings-tailscale-logout') {
@@ -11081,6 +12191,37 @@ document.addEventListener('click', (e) => {
     _clSaveSettings();
   } else if (t.id === 'settings-cluster-test') {
     _clTestSsh();
+  } else if (t.id === 'settings-email-save') {
+    _emailSaveSettings();
+  } else if (t.id === 'settings-email-test') {
+    _emailSelfTest();
+  } else if (t.id === 'settings-cluster-hosts-add') {
+    _clHostsAddRow();
+  } else if (t.id === 'settings-cluster-hosts-save') {
+    _clHostsSave();
+  } else if (t.dataset?.clusterHostRm !== undefined) {
+    t.closest('[data-cluster-row]')?.remove();
+  } else if (t.dataset?.clusterHostTest !== undefined) {
+    _clHostsTestRow(t.closest('[data-cluster-row]'));
+  } else if (t.id === 'settings-cluster-gen-key') {
+    _clGenerateKey();
+  } else if (t.id === 'settings-cluster-upload-key') {
+    document.getElementById('settings-cluster-upload-key-file')?.click();
+  } else if (t.id === 'settings-cluster-paste-key') {
+    const m = document.getElementById('settings-cluster-paste-modal');
+    if (m) m.style.display = '';
+    const ta = document.getElementById('settings-cluster-paste-text');
+    if (ta) { ta.value = ''; setTimeout(() => ta.focus(), 50); }
+  } else if (t.id === 'settings-cluster-paste-cancel') {
+    const m = document.getElementById('settings-cluster-paste-modal');
+    if (m) m.style.display = 'none';
+  } else if (t.id === 'settings-cluster-paste-save') {
+    _clSavePastedKey();
+  } else if (t.id === 'settings-cluster-del-key') {
+    _clDeleteKey();
+  } else if (t.id === 'settings-cluster-copypub') {
+    const ta = document.getElementById('settings-cluster-pubkey');
+    if (ta) { ta.select(); try { navigator.clipboard.writeText(ta.value); t.textContent = 'copied ✓'; setTimeout(() => { t.textContent = 'Copy public key'; }, 1500); } catch { document.execCommand('copy'); } }
   } else if (t.dataset?.providerTest) {
     runProviderTest(t.dataset.providerTest);
   } else if (t.dataset?.modelTest) {
@@ -11503,6 +12644,149 @@ async function _bkRestore(filename) {
   } catch (e) { alert('Restore error: ' + e.message); }
 }
 
+// ── Graph / settings / providers export + import ───────────────────
+async function _graphExportDownload() {
+  const btn = document.getElementById('settings-graph-export');
+  const el = document.getElementById('settings-graph-port-status');
+  const wantGraph = document.getElementById('settings-export-graph')?.checked !== false;
+  const wantSettings = document.getElementById('settings-export-settings')?.checked !== false;
+  const wantProviders = !!document.getElementById('settings-export-providers')?.checked;
+  const wantSecrets = wantProviders && !!document.getElementById('settings-export-secrets')?.checked;
+  if (wantProviders && wantSecrets) {
+    if (!confirm('Including API keys in the export makes the file sensitive — anyone who opens it can authenticate to your providers. Continue?')) return;
+  }
+  if (btn) btn.disabled = true;
+  if (el) { el.textContent = 'exporting…'; el.style.color = 'var(--accent2)'; }
+  try {
+    const qs = new URLSearchParams({
+      graph: wantGraph ? '1' : '0',
+      settings: wantSettings ? '1' : '0',
+      providers: wantProviders ? '1' : '0',
+      secrets: wantSecrets ? '1' : '0',
+    }).toString();
+    const r = await fetch(API + '/api/graph/export?' + qs, { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    let filename = 'spore-export.json';
+    const cd = r.headers.get('content-disposition');
+    if (cd) { const m = cd.match(/filename="?([^"]+)"?/); if (m) filename = m[1]; }
+    const a = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+    try {
+      const text = await blob.text();
+      const data = JSON.parse(text);
+      const parts = [];
+      if (data.graph?.stats) parts.push(`${data.graph.stats.exportedNodes || 0} nodes + ${data.graph.stats.exportedEdges || 0} edges`);
+      if (data.providers) parts.push(`${Object.keys(data.providers).filter(k => k !== 'custom').length + Object.keys(data.providers.custom || {}).length} providers${data.includesSecrets ? ' (with keys)' : ' (redacted)'}`);
+      if (data.settings) parts.push(`${Object.keys(data.settings).length} settings`);
+      parts.push(`${(blob.size/1024).toFixed(1)} KB`);
+      if (el) { el.textContent = 'exported: ' + parts.join(' · '); el.style.color = 'var(--text-dim)'; }
+    } catch {}
+  } catch (e) {
+    if (el) { el.textContent = 'export failed: ' + e.message; el.style.color = 'var(--danger)'; }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function _graphImportUpload(file) {
+  const el = document.getElementById('settings-graph-port-status');
+  if (!file) return;
+  if (el) { el.textContent = `reading ${file.name}…`; el.style.color = 'var(--accent2)'; }
+  try {
+    const text = await file.text();
+    let preview;
+    try { preview = JSON.parse(text); } catch (e) {
+      if (el) { el.textContent = 'not valid JSON: ' + e.message; el.style.color = 'var(--danger)'; }
+      return;
+    }
+
+    // Detect format — v2 bundle ('spore-export') or v1 ('spore-graph-export') or raw graph
+    const isBundle = preview.format === 'spore-export';
+    const hasGraph = isBundle ? !!preview.graph : preview.format === 'spore-graph-export';
+    const hasProviders = isBundle && !!preview.providers;
+    const hasSettings = isBundle && !!preview.settings;
+    if (!hasGraph && !hasProviders && !hasSettings) {
+      if (el) { el.textContent = `file doesn't look like a spore export (format=${preview.format || 'missing'})`; el.style.color = 'var(--danger)'; }
+      return;
+    }
+
+    // Summarise and ask what to apply
+    const parts = [];
+    if (hasGraph) {
+      const s = (isBundle ? preview.graph.stats : preview.stats) || {};
+      parts.push(`graph: ${s.exportedNodes || 0} nodes + ${s.exportedEdges || 0} edges`);
+    }
+    if (hasProviders) {
+      const custom = Object.keys(preview.providers.custom || {}).length;
+      const builtIn = Object.keys(preview.providers).filter(k => k !== 'custom').length;
+      parts.push(`providers: ${builtIn + custom} (${preview.includesSecrets ? 'with API keys' : 'redacted'})`);
+    }
+    if (hasSettings) {
+      parts.push(`settings: ${Object.keys(preview.settings).length} keys`);
+    }
+
+    let msg = `Import from "${file.name}"?\n\nContents:\n  ${parts.join('\n  ')}`;
+    if (hasGraph) msg += `\n\nImporting applies the knowledge graph (nodes, aspects, edges).`;
+    if (hasProviders) msg += `\nImporting providers ${preview.includesSecrets ? 'WILL overwrite your current API keys and URLs' : 'will set URLs / model selections but NOT overwrite existing keys (values were redacted in the export)'}.`;
+    if (hasSettings) msg += `\nImporting settings will update display name, model tiers, janitor/backup knobs, cluster config, etc.`;
+    msg += `\n\nA pre-import backup of the graph will be taken. Continue?`;
+    if (!confirm(msg)) {
+      if (el) { el.textContent = 'import cancelled'; el.style.color = 'var(--text-dim)'; }
+      return;
+    }
+
+    const qs = new URLSearchParams({
+      apply_graph: hasGraph ? '1' : '0',
+      apply_providers: hasProviders ? '1' : '0',
+      apply_settings: hasSettings ? '1' : '0',
+    }).toString();
+
+    const r = await fetch(API + '/api/graph/import?' + qs, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: text,
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) {
+      if (el) { el.textContent = 'import failed: ' + (d.error || 'HTTP ' + r.status); el.style.color = 'var(--danger)'; }
+      return;
+    }
+    const rep = d.report || {};
+    const lines = [];
+    if (rep.graph) {
+      const g = rep.graph;
+      if (g.error) {
+        lines.push(`graph: ${g.error}`);
+      } else {
+        lines.push(`graph: ${g.nodesImported || 0} nodes · ${g.aspectsImported || 0} aspects · ${g.attributesImported || 0} attrs · ${g.edgesImported || 0} edges · skipped ${(g.nodesSkipped || []).length} nodes + ${(g.edgesSkipped || []).length} edges`);
+      }
+    }
+    if (rep.providers) {
+      lines.push(`providers: applied ${rep.providers.applied.length}${rep.providers.skipped.length ? ' · redacted ' + rep.providers.skipped.length : ''}`);
+    }
+    if (rep.settings) {
+      lines.push(`settings: applied ${rep.settings.applied.length}`);
+    }
+    if (el) { el.textContent = lines.join('\n') || 'imported (no changes)'; el.style.color = 'var(--text)'; }
+    try { if (typeof loadGraph === 'function') loadGraph(); } catch {}
+  } catch (e) {
+    if (el) { el.textContent = 'import error: ' + e.message; el.style.color = 'var(--danger)'; }
+  }
+}
+
+// Hook the hidden file input
+document.addEventListener('change', (e) => {
+  const t = e.target;
+  if (t && t.id === 'settings-graph-import-file' && t.files?.[0]) {
+    const f = t.files[0];
+    t.value = ''; // reset so re-selecting the same file still triggers change
+    _graphImportUpload(f);
+  }
+});
+
 async function _bkDelete(filename) {
   if (!confirm(`Permanently delete "${filename}"?`)) return;
   try {
@@ -11565,9 +12849,23 @@ async function _tsTriggerLogin() {
   const btn = document.getElementById('settings-tailscale-login');
   const urlBox = document.getElementById('settings-tailscale-authurl');
   const urlLink = document.getElementById('settings-tailscale-authurl-link');
+  const statusLine = document.getElementById('settings-tailscale-line');
   if (btn) btn.disabled = true;
+  if (statusLine) { statusLine.textContent = 'requesting login URL…'; statusLine.style.color = 'var(--accent2)'; }
   try {
-    const r = await fetch(API + '/api/tailscale/login', { method: 'POST', headers: authHeaders() });
+    const r = await fetch(API + '/api/tailscale/login', {
+      method: 'POST',
+      headers: authHeaders(),
+      credentials: 'include',
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      let msg = `HTTP ${r.status}`;
+      try { const j = JSON.parse(txt); if (j.error) msg = j.error; } catch {}
+      if (statusLine) { statusLine.textContent = 'login failed: ' + msg; statusLine.style.color = 'var(--danger)'; }
+      alert('Tailscale login failed: ' + msg);
+      return;
+    }
     const d = await r.json();
     if (d.status === 'already-connected') {
       _tsRefreshStatus();
@@ -11577,12 +12875,18 @@ async function _tsTriggerLogin() {
       urlBox.style.display = '';
       urlLink.href = d.authUrl;
       urlLink.textContent = d.authUrl;
+      if (statusLine) { statusLine.textContent = 'open the link above to complete SSO'; statusLine.style.color = 'var(--accent2)'; }
       try { window.open(d.authUrl, '_blank', 'noopener'); } catch {}
+    } else if (d.status === 'no-url-yet') {
+      if (statusLine) { statusLine.textContent = 'tailscale up running — polling for login URL…'; statusLine.style.color = 'var(--accent2)'; }
+    } else {
+      if (statusLine) { statusLine.textContent = 'login started — polling…'; statusLine.style.color = 'var(--accent2)'; }
     }
     if (_tsPollTimer) clearInterval(_tsPollTimer);
     _tsPollTimer = setInterval(_tsRefreshStatus, 2000);
   } catch (e) {
-    alert('Login failed: ' + e.message);
+    if (statusLine) { statusLine.textContent = 'login error: ' + e.message; statusLine.style.color = 'var(--danger)'; }
+    alert('Tailscale login error: ' + e.message);
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -11605,9 +12909,9 @@ async function _clLoadSettings() {
     const setVal = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v || ''; };
     setVal('settings-cluster-username', d.clusterUsername);
     setVal('settings-cluster-login-host', d.clusterLoginHost);
-    setVal('settings-cluster-partition', d.clusterDefaultPartition);
     setVal('settings-cluster-tmux-prefix', d.clusterTmuxPrefix || 'spore');
     setVal('settings-tailscale-hostname', d.tailscaleHostname);
+    _clHostsRender(d.clusterHosts || []);
   } catch {}
 }
 
@@ -11618,7 +12922,6 @@ async function _clSaveSettings() {
     const body = {
       clusterUsername: document.getElementById('settings-cluster-username')?.value || '',
       clusterLoginHost: document.getElementById('settings-cluster-login-host')?.value || '',
-      clusterDefaultPartition: document.getElementById('settings-cluster-partition')?.value || '',
       clusterTmuxPrefix: document.getElementById('settings-cluster-tmux-prefix')?.value || '',
       tailscaleHostname: document.getElementById('settings-tailscale-hostname')?.value || '',
     };
@@ -11645,7 +12948,7 @@ async function _clTestSsh() {
     const d = await r.json();
     if (el) {
       if (d.ok) {
-        el.textContent = 'OK:\n' + (d.output || '');
+        el.textContent = 'OK' + (d.usedKey ? ` (key: ${d.usedKey})` : ' (no key — using default ssh-agent)') + ':\n' + (d.output || '');
         el.style.color = 'var(--text)';
       } else {
         el.textContent = `FAILED (code=${d.code}):\n${d.stderr || d.error || '(no stderr)'}${d.hint ? '\n\nHint: ' + d.hint : ''}`;
@@ -11655,6 +12958,321 @@ async function _clTestSsh() {
   } catch (e) {
     if (el) { el.textContent = 'error: ' + e.message; el.style.color = 'var(--danger)'; }
   } finally { if (btn) btn.disabled = false; }
+}
+
+function _clHostsRender(hosts) {
+  const host = document.getElementById('settings-cluster-hosts-list');
+  if (!host) return;
+  host.innerHTML = '';
+  const arr = Array.isArray(hosts) ? hosts : [];
+  if (!arr.length) {
+    host.innerHTML = '<div style="padding:8px 10px;color:var(--text-dim);font-size:.66rem">None yet. Click + Add cluster.</div>';
+    return;
+  }
+  for (const h of arr) _clHostsAddRow(h);
+}
+
+function _clHostsAddRow(preset) {
+  const host = document.getElementById('settings-cluster-hosts-list');
+  if (!host) return;
+  // Clear the "None yet" placeholder if present
+  if (host.querySelector('[data-empty]') || (host.children.length === 1 && !host.querySelector('[data-cluster-row]'))) {
+    host.innerHTML = '';
+  }
+  const row = document.createElement('div');
+  row.setAttribute('data-cluster-row', '');
+  row.style.cssText = 'display:grid;grid-template-columns:1fr 1.8fr 1.2fr auto auto;gap:6px;align-items:center;padding:6px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px';
+  const inp = (placeholder, value) => {
+    const i = document.createElement('input');
+    i.type = 'text';
+    i.placeholder = placeholder;
+    i.value = value || '';
+    i.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--text);padding:3px 6px;font-size:.66rem;border-radius:3px;min-width:0';
+    return i;
+  };
+  const nameI = inp('label (e.g. gb200)', preset?.name);
+  nameI.dataset.field = 'name';
+  const hostI = inp('magic-dns hostname', preset?.host);
+  hostI.dataset.field = 'host';
+  const userI = inp('username (blank = primary)', preset?.username);
+  userI.dataset.field = 'username';
+  const testBtn = document.createElement('button');
+  testBtn.className = 'settings-btn-secondary';
+  testBtn.type = 'button';
+  testBtn.dataset.clusterHostTest = '';
+  testBtn.style.cssText = 'font-size:.6rem;padding:2px 6px';
+  testBtn.textContent = 'test';
+  const rmBtn = document.createElement('button');
+  rmBtn.className = 'settings-btn-secondary';
+  rmBtn.type = 'button';
+  rmBtn.dataset.clusterHostRm = '';
+  rmBtn.style.cssText = 'font-size:.6rem;padding:2px 6px;color:var(--danger)';
+  rmBtn.textContent = '×';
+  row.appendChild(nameI);
+  row.appendChild(hostI);
+  row.appendChild(userI);
+  row.appendChild(testBtn);
+  row.appendChild(rmBtn);
+  host.appendChild(row);
+}
+
+function _clHostsCollect() {
+  const rows = document.querySelectorAll('#settings-cluster-hosts-list [data-cluster-row]');
+  const hosts = [];
+  rows.forEach(r => {
+    const get = f => r.querySelector(`input[data-field="${f}"]`)?.value?.trim() || '';
+    const entry = { name: get('name'), host: get('host'), username: get('username') };
+    if (entry.host) hosts.push(entry);
+  });
+  return hosts;
+}
+
+async function _clHostsSave() {
+  const el = document.getElementById('settings-cluster-hosts-status');
+  const btn = document.getElementById('settings-cluster-hosts-save');
+  if (btn) btn.disabled = true;
+  if (el) { el.textContent = 'saving…'; el.style.color = 'var(--accent2)'; }
+  try {
+    const hosts = _clHostsCollect();
+    const r = await fetch(API + '/api/cluster/hosts', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hosts }),
+    });
+    const d = await r.json();
+    if (!d.ok) { alert('Save failed: ' + (d.error || 'unknown')); return; }
+    if (el) { el.textContent = `saved ${d.hosts.length} cluster(s)`; el.style.color = 'var(--text-dim)'; }
+  } catch (e) { alert('Save error: ' + e.message); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+async function _clHostsTestRow(row) {
+  if (!row) return;
+  const el = document.getElementById('settings-cluster-hosts-status');
+  const user = row.querySelector('input[data-field="username"]')?.value?.trim() || '';
+  const host = row.querySelector('input[data-field="host"]')?.value?.trim() || '';
+  const name = row.querySelector('input[data-field="name"]')?.value?.trim() || host;
+  if (!host) { alert('Enter a hostname first'); return; }
+  if (el) { el.textContent = `testing ${name}…`; el.style.color = 'var(--accent2)'; }
+  try {
+    const r = await fetch(API + '/api/cluster/test-ssh', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, host }),
+    });
+    const d = await r.json();
+    if (el) {
+      if (d.ok) { el.textContent = `[${name}] OK:\n${(d.output || '').slice(0, 300)}`; el.style.color = 'var(--text)'; }
+      else { el.textContent = `[${name}] FAILED (code=${d.code}):\n${(d.stderr || d.error || '').slice(0, 300)}${d.hint ? '\n' + d.hint : ''}`; el.style.color = 'var(--danger)'; }
+    }
+  } catch (e) {
+    if (el) { el.textContent = `[${name}] error: ${e.message}`; el.style.color = 'var(--danger)'; }
+  }
+}
+
+// ── Email ─────────────────────────────────────────────────────────
+const EMAIL_PROVIDER_DEFAULTS = {
+  proton: { smtpHost: 'smtp.protonmail.ch', smtpPort: 587, smtpSecure: false, imapHost: 'imap.protonmail.ch', imapPort: 993, imapSecure: true, keyHint: 'Proton → Settings → IMAP/SMTP → generate an SMTP token. Requires Proton Mail Plus or higher.' },
+  google: { smtpHost: 'smtp.gmail.com', smtpPort: 587, smtpSecure: false, imapHost: 'imap.gmail.com', imapPort: 993, imapSecure: true, keyHint: 'Google account → Security → 2-Step Verification → App passwords. Enable IMAP under Gmail → Settings → Forwarding and POP/IMAP.' },
+};
+
+async function _emailLoadSettings() {
+  try {
+    const r = await fetch(API + '/api/email/settings', { headers: authHeaders() });
+    const d = await r.json();
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v == null ? '' : String(v); };
+    const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+    setVal('settings-email-provider', d.emailProvider || '');
+    setVal('settings-email-address', d.emailAddress || '');
+    setVal('settings-email-smtp-host', d.emailSmtpHost || '');
+    setVal('settings-email-smtp-port', d.emailSmtpPort || '');
+    setChk('settings-email-smtp-secure', d.emailSmtpSecure);
+    setVal('settings-email-smtp-username', d.emailSmtpUsername || '');
+    setVal('settings-email-imap-host', d.emailImapHost || '');
+    setVal('settings-email-imap-port', d.emailImapPort || '');
+    setChk('settings-email-imap-secure', d.emailImapSecure !== false);
+    const pwStatus = document.getElementById('settings-email-pw-status');
+    if (pwStatus) pwStatus.textContent = d.hasPassword ? 'Password set — leave blank to keep current.' : 'No password set yet.';
+  } catch (e) {}
+}
+
+function _emailApplyProviderDefaults() {
+  const sel = document.getElementById('settings-email-provider');
+  if (!sel) return;
+  const preset = EMAIL_PROVIDER_DEFAULTS[sel.value];
+  if (!preset) return;
+  const setIfEmpty = (id, v) => { const el = document.getElementById(id); if (el && !el.value) el.value = v; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  setIfEmpty('settings-email-smtp-host', preset.smtpHost);
+  setIfEmpty('settings-email-smtp-port', preset.smtpPort);
+  setChk('settings-email-smtp-secure', preset.smtpSecure);
+  setIfEmpty('settings-email-imap-host', preset.imapHost);
+  setIfEmpty('settings-email-imap-port', preset.imapPort);
+  setChk('settings-email-imap-secure', preset.imapSecure);
+  const pwStatus = document.getElementById('settings-email-pw-status');
+  if (pwStatus) pwStatus.textContent = preset.keyHint;
+}
+document.addEventListener('change', (e) => {
+  if (e.target?.id === 'settings-email-provider') _emailApplyProviderDefaults();
+});
+
+async function _emailSaveSettings() {
+  const btn = document.getElementById('settings-email-save');
+  const out = document.getElementById('settings-email-test-result');
+  if (btn) btn.disabled = true;
+  if (out) { out.textContent = 'saving…'; out.className = 'settings-status-line warn'; }
+  try {
+    const body = {
+      emailProvider: document.getElementById('settings-email-provider')?.value || '',
+      emailAddress: document.getElementById('settings-email-address')?.value || '',
+      emailSmtpHost: document.getElementById('settings-email-smtp-host')?.value || '',
+      emailSmtpPort: Number(document.getElementById('settings-email-smtp-port')?.value) || 587,
+      emailSmtpSecure: !!document.getElementById('settings-email-smtp-secure')?.checked,
+      emailSmtpUsername: document.getElementById('settings-email-smtp-username')?.value || '',
+      emailImapHost: document.getElementById('settings-email-imap-host')?.value || '',
+      emailImapPort: Number(document.getElementById('settings-email-imap-port')?.value) || 993,
+      emailImapSecure: !!document.getElementById('settings-email-imap-secure')?.checked,
+      emailSmtpPassword: document.getElementById('settings-email-smtp-password')?.value || '',
+    };
+    const r = await fetch(API + '/api/email/settings', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'save failed');
+    if (out) { out.textContent = 'saved. Click "Send self-test" to verify.'; out.className = 'settings-status-line ok'; }
+    const pwInput = document.getElementById('settings-email-smtp-password');
+    if (pwInput) pwInput.value = '';
+    _emailLoadSettings();
+  } catch (e) {
+    if (out) { out.textContent = 'save error: ' + (e.message || e); out.className = 'settings-status-line err'; }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function _emailSelfTest() {
+  const btn = document.getElementById('settings-email-test');
+  const out = document.getElementById('settings-email-test-result');
+  if (btn) btn.disabled = true;
+  if (out) { out.textContent = 'sending self-test (SMTP) then checking IMAP…'; out.className = 'settings-status-line warn'; }
+  try {
+    const r = await fetch(API + '/api/email/test', { method: 'POST', headers: authHeaders() });
+    const d = await r.json();
+    if (d.ok) {
+      if (out) { out.textContent = `SMTP ✓ sent, IMAP ✓ connected. Check your inbox for the self-test.`; out.className = 'settings-status-line ok'; }
+    } else if (d.stage === 'smtp') {
+      if (out) { out.textContent = `SMTP failed: ${d.error}`; out.className = 'settings-status-line err'; }
+    } else if (d.stage === 'imap') {
+      if (out) { out.textContent = `SMTP ${d.smtp || 'ok'}; IMAP failed: ${d.error}`; out.className = 'settings-status-line err'; }
+    } else {
+      if (out) { out.textContent = `test failed: ${d.error || 'unknown'}`; out.className = 'settings-status-line err'; }
+    }
+  } catch (e) {
+    if (out) { out.textContent = 'test error: ' + (e.message || e); out.className = 'settings-status-line err'; }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function _clRefreshKeyStatus() {
+  const status = document.getElementById('settings-cluster-key-status');
+  const pubWrap = document.getElementById('settings-cluster-pubkey-wrap');
+  const pubTa = document.getElementById('settings-cluster-pubkey');
+  const delBtn = document.getElementById('settings-cluster-del-key');
+  if (!status) return;
+  try {
+    const r = await fetch(API + '/api/cluster/ssh-key', { headers: authHeaders() });
+    const d = await r.json();
+    if (d.hasPrivate) {
+      status.textContent = 'key installed · ' + (d.fingerprint || '(fingerprint unavailable)');
+      status.style.color = 'var(--text)';
+      if (d.publicKey && pubWrap && pubTa) {
+        pubWrap.style.display = '';
+        pubTa.value = d.publicKey;
+      }
+      if (delBtn) delBtn.style.display = '';
+    } else {
+      status.textContent = 'no SSH key installed';
+      status.style.color = 'var(--text-dim)';
+      if (pubWrap) pubWrap.style.display = 'none';
+      if (delBtn) delBtn.style.display = 'none';
+    }
+  } catch (e) { status.textContent = 'status unavailable: ' + e.message; status.style.color = 'var(--danger)'; }
+}
+
+async function _clGenerateKey() {
+  if (!confirm('Generate a new ed25519 SSH key at /data/.ssh/id_cluster? Any existing key will be replaced — you will need to reinstall the public key on the cluster.')) return;
+  const btn = document.getElementById('settings-cluster-gen-key');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(API + '/api/cluster/ssh-key/generate', { method: 'POST', headers: authHeaders() });
+    const d = await r.json();
+    if (!d.ok) { alert('Generate failed: ' + (d.error || 'unknown')); return; }
+    _clRefreshKeyStatus();
+  } catch (e) { alert('Generate error: ' + e.message); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+async function _clSavePastedKey() {
+  const ta = document.getElementById('settings-cluster-paste-text');
+  const modal = document.getElementById('settings-cluster-paste-modal');
+  if (!ta) return;
+  const key = ta.value.trim();
+  if (!key) { alert('Paste a private key first.'); return; }
+  try {
+    const r = await fetch(API + '/api/cluster/ssh-key', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privateKey: key }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { alert('Save failed: ' + (d.error || 'unknown')); return; }
+    if (modal) modal.style.display = 'none';
+    ta.value = '';
+    _clRefreshKeyStatus();
+  } catch (e) { alert('Save error: ' + e.message); }
+}
+
+async function _clUploadKeyFile(file) {
+  if (!file) return;
+  if (file.size > 32 * 1024) { alert('Key file too large (>32KB). Is this really a private key?'); return; }
+  try {
+    const text = (await file.text()).trim();
+    if (!text.startsWith('-----BEGIN') || !text.includes('PRIVATE KEY-----')) {
+      alert(`"${file.name}" doesn't look like an SSH private key — it should start with -----BEGIN ... PRIVATE KEY-----. If you picked the public key (.pub) by mistake, pick the matching file without the .pub suffix.`);
+      return;
+    }
+    if (/ENCRYPTED/i.test(text) || /Proc-Type:.*ENCRYPTED/i.test(text)) {
+      alert(`"${file.name}" is passphrase-encrypted. Decrypt it first (ssh-keygen -p -f <keyfile>) and try again — the server can't unlock it.`);
+      return;
+    }
+    if (!confirm(`Install "${file.name}" as the cluster SSH private key? Any existing key will be replaced.`)) return;
+    const r = await fetch(API + '/api/cluster/ssh-key', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privateKey: text }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { alert('Upload failed: ' + (d.error || 'HTTP ' + r.status)); return; }
+    _clRefreshKeyStatus();
+  } catch (e) { alert('Upload error: ' + e.message); }
+}
+
+document.addEventListener('change', (e) => {
+  const t = e.target;
+  if (t && t.id === 'settings-cluster-upload-key-file' && t.files?.[0]) {
+    const f = t.files[0];
+    t.value = '';
+    _clUploadKeyFile(f);
+  }
+});
+
+async function _clDeleteKey() {
+  if (!confirm('Remove the cluster SSH private key from this deployment?')) return;
+  try {
+    const r = await fetch(API + '/api/cluster/ssh-key', { method: 'DELETE', headers: authHeaders() });
+    const d = await r.json();
+    if (!d.ok) { alert('Delete failed: ' + (d.error || 'unknown')); return; }
+    _clRefreshKeyStatus();
+  } catch (e) { alert('Delete error: ' + e.message); }
 }
 
 // Refresh status whenever the settings pane is opened
@@ -11670,6 +13288,8 @@ if (_origOpenSettings && !window.__maintStatusHooked) {
     _bkLoadList();
     _tsRefreshStatus();
     _clLoadSettings();
+    _clRefreshKeyStatus();
+    _emailLoadSettings();
     return r;
   };
   window.openSettingsPanel = _wrap;
@@ -15025,26 +16645,43 @@ build/
   </div>
   <div class="floating-pane-body">
     <div class="settings-body">
-      <div class="settings-section">
+      <div class="settings-tabs" id="settings-tabs"></div>
+      <div class="settings-panes" id="settings-panes">
+        <div class="settings-tab-pane" data-tab="profile"></div>
+        <div class="settings-tab-pane" data-tab="providers"></div>
+        <div class="settings-tab-pane" data-tab="agent"></div>
+        <div class="settings-tab-pane" data-tab="graph-memory"></div>
+        <div class="settings-tab-pane" data-tab="backups"></div>
+        <div class="settings-tab-pane" data-tab="cluster"></div>
+        <div class="settings-tab-pane" data-tab="tools"></div>
+        <div class="settings-tab-pane" data-tab="users"></div>
+        <div class="settings-tab-pane" data-tab="advanced"></div>
+      </div>
+      <!-- Existing sections below are re-parented into the panes at init.
+           data-target-tab on each section maps it to a tab. -->
+      <div class="settings-section" data-target-tab="profile">
         <h4>Appearance</h4>
         <label for="settings-theme">Theme</label>
         <select id="settings-theme"></select>
         <div class="settings-note">Theme is saved per user. The sections below are agent-level settings.</div>
       </div>
 
-      <div class="settings-section">
+      <div class="settings-section wide" data-target-tab="graph-memory">
         <h4>Knowledge Graph</h4>
         <div id="settings-graphs-list" class="settings-graphs-list"></div>
         <button class="settings-btn-secondary" id="settings-new-graph">+ New graph</button>
         <div class="settings-note">Switch the active knowledge graph for this agent. Each graph has its own nodes, edges, and memory.</div>
       </div>
 
-      <div class="settings-section">
-        <h4>Tools</h4>
+      <div class="settings-section wide" data-target-tab="tools">
+        <h4>Benchmarks</h4>
         <button class="settings-btn-secondary" id="settings-launch-lme">Run LongMemEval benchmark</button>
         <div class="settings-note">Launches the LongMemEval HUD. Requires Enhanced Recall for best results.</div>
+      </div>
 
-        <div style="margin-top:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <div class="settings-section wide" data-target-tab="graph-memory">
+        <h4>Maintenance &amp; Janitor</h4>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <button class="settings-btn-secondary" id="settings-maintainer-run">Run maintenance cycle</button>
           <span id="settings-maintainer-status" style="font-family:'Geist Mono',monospace;font-size:.62rem;color:var(--text-dim);opacity:.75"></span>
         </div>
@@ -15074,14 +16711,16 @@ build/
           </div>
         </div>
 
-        <div style="margin-top:22px;padding-top:14px;border-top:1px solid var(--border)">
-          <div style="font-size:.78rem;font-weight:600">Compute cluster</div>
-          <div class="settings-note" style="margin-top:4px">Tailscale + SLURM cluster access. Log in once via SSO; the state persists across container restarts.</div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="cluster">
+        <h4>Compute cluster</h4>
+        <div class="settings-note" style="margin-top:4px">Tailscale + SLURM cluster access. Log in once via SSO; the state persists across container restarts.</div>
           <div id="settings-tailscale-status" style="margin-top:8px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;font-size:.72rem;display:flex;align-items:center;justify-content:space-between;gap:8px">
             <span id="settings-tailscale-line">loading…</span>
             <span style="display:flex;gap:4px">
-              <button class="settings-btn-secondary" id="settings-tailscale-login" style="font-size:.66rem;padding:3px 8px;display:none">Log in to Tailscale</button>
-              <button class="settings-btn-secondary" id="settings-tailscale-logout" style="font-size:.66rem;padding:3px 8px;display:none">Logout</button>
+              <button class="settings-btn-secondary" id="settings-tailscale-login" type="button" style="font-size:.66rem;padding:3px 8px">Log in to Tailscale</button>
+              <button class="settings-btn-secondary" id="settings-tailscale-logout" type="button" style="font-size:.66rem;padding:3px 8px;display:none">Logout</button>
             </span>
           </div>
           <div id="settings-tailscale-authurl" style="display:none;margin-top:8px;padding:10px;background:var(--bg-2);border:1px dashed var(--accent2);border-radius:4px;font-size:.7rem">
@@ -15097,9 +16736,6 @@ build/
             <label style="font-size:.7rem">Login host (MagicDNS)
               <input id="settings-cluster-login-host" type="text" autocomplete="off" placeholder="login.tailnet.ts.net" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
             </label>
-            <label style="font-size:.7rem">Default SLURM partition
-              <input id="settings-cluster-partition" type="text" autocomplete="off" placeholder="gpu / cpu / main" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-            </label>
             <label style="font-size:.7rem">tmux session prefix
               <input id="settings-cluster-tmux-prefix" type="text" autocomplete="off" placeholder="spore" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
             </label>
@@ -15108,14 +16744,76 @@ build/
             </label>
           </div>
           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="settings-btn-secondary" id="settings-cluster-save" style="font-size:.68rem;padding:3px 8px">Save cluster settings</button>
-            <button class="settings-btn-secondary" id="settings-cluster-test" style="font-size:.68rem;padding:3px 8px">Test SSH to login host</button>
+            <button class="settings-btn-secondary" id="settings-cluster-save" style="font-size:.68rem;padding:3px 8px">Save primary cluster</button>
+            <button class="settings-btn-secondary" id="settings-cluster-test" style="font-size:.68rem;padding:3px 8px">Test SSH (primary)</button>
           </div>
           <div id="settings-cluster-test-result" style="margin-top:6px;font-family:'Geist Mono',monospace;font-size:.64rem;color:var(--text-dim);white-space:pre-wrap"></div>
+
+          <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border)">
+            <div style="font-size:.72rem;font-weight:600;display:flex;justify-content:space-between;align-items:center">
+              <span>Additional clusters</span>
+              <button class="settings-btn-secondary" id="settings-cluster-hosts-add" type="button" style="font-size:.62rem;padding:2px 6px">+ Add cluster</button>
+            </div>
+            <div class="settings-note" style="margin-top:2px">Extra SLURM clusters reachable over the same tailnet. The agent sees them all in its live state and can pick the right one when you tell it which cluster to use. Username falls back to the primary cluster's if left blank.</div>
+            <div id="settings-cluster-hosts-list" style="margin-top:8px;display:flex;flex-direction:column;gap:6px"></div>
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="settings-btn-secondary" id="settings-cluster-hosts-save" type="button" style="font-size:.68rem;padding:3px 8px">Save additional clusters</button>
+            </div>
+            <div id="settings-cluster-hosts-status" style="margin-top:4px;font-family:'Geist Mono',monospace;font-size:.62rem;color:var(--text-dim)"></div>
+          </div>
+
+          <div style="margin-top:16px;padding-top:10px;border-top:1px dashed var(--border)">
+            <div style="font-size:.72rem;font-weight:600">Cluster SSH key</div>
+            <div class="settings-note" style="margin-top:2px">Stored at <code>/data/.ssh/id_cluster</code> (0600, owned by spore). Used by Test SSH and by the agent's cluster tools. Either generate a fresh keypair here and install the public key on the cluster, or paste an existing private key you use.</div>
+            <div id="settings-cluster-key-status" style="margin-top:6px;font-family:'Geist Mono',monospace;font-size:.64rem;color:var(--text-dim)">loading…</div>
+            <div id="settings-cluster-pubkey-wrap" style="display:none;margin-top:6px">
+              <div style="font-size:.66rem;color:var(--text-dim)">Public key (install on the cluster: <code>~/.ssh/authorized_keys</code>):</div>
+              <textarea id="settings-cluster-pubkey" readonly rows="2" style="display:block;width:100%;margin-top:3px;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-family:'Geist Mono',monospace;font-size:.62rem;border-radius:4px;resize:vertical;word-break:break-all"></textarea>
+              <button class="settings-btn-secondary" id="settings-cluster-copypub" type="button" style="margin-top:4px;font-size:.62rem;padding:2px 6px">Copy public key</button>
+            </div>
+            <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+              <button class="settings-btn-secondary" id="settings-cluster-gen-key" type="button" style="font-size:.66rem;padding:3px 8px">Generate new ed25519 key</button>
+              <button class="settings-btn-secondary" id="settings-cluster-upload-key" type="button" style="font-size:.66rem;padding:3px 8px">Upload key file…</button>
+              <button class="settings-btn-secondary" id="settings-cluster-paste-key" type="button" style="font-size:.66rem;padding:3px 8px">Paste private key…</button>
+              <button class="settings-btn-secondary" id="settings-cluster-del-key" type="button" style="font-size:.66rem;padding:3px 8px;color:var(--danger);display:none">Remove key</button>
+              <input type="file" id="settings-cluster-upload-key-file" accept=".pem,.key,id_rsa,id_ed25519,id_ecdsa,*" style="display:none">
+            </div>
+          </div>
+      </div>
+
+        <!-- Hidden modal-ish textarea for pasting private key -->
+        <div id="settings-cluster-paste-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9999;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px;width:min(640px,90vw);box-shadow:0 4px 24px rgba(0,0,0,0.5)">
+          <div style="font-size:.78rem;font-weight:600;margin-bottom:6px">Paste private SSH key</div>
+          <div class="settings-note" style="margin-bottom:6px">Unencrypted OpenSSH or PEM private key. Must include the BEGIN/END lines. Stored at /data/.ssh/id_cluster with 0600.</div>
+          <textarea id="settings-cluster-paste-text" rows="12" style="width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px;font-family:'Geist Mono',monospace;font-size:.66rem;border-radius:4px;resize:vertical"
+            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+          <div style="margin-top:8px;display:flex;gap:6px;justify-content:flex-end">
+            <button class="settings-btn-secondary" id="settings-cluster-paste-cancel" type="button" style="font-size:.68rem;padding:3px 8px">Cancel</button>
+            <button class="settings-btn-secondary" id="settings-cluster-paste-save" type="button" style="font-size:.68rem;padding:3px 8px">Save</button>
+          </div>
         </div>
 
-        <div style="margin-top:22px;padding-top:14px;border-top:1px solid var(--border)">
-          <div style="font-size:.78rem;font-weight:600">Graph backups</div>
+      <div class="settings-section wide" data-target-tab="graph-memory">
+        <h4>Export / import</h4>
+          <div class="settings-note" style="margin-top:4px">Export this deployment's knowledge graph, general settings, and (optionally) provider configuration to carry to another Spore. Reference + agent self nodes are excluded from the graph; edges re-wire on import. Import takes a pre-import backup first.</div>
+
+          <div class="settings-hint" style="margin-top:10px">What to include in the export:</div>
+          <div class="settings-export-options">
+            <label class="settings-check-row"><input type="checkbox" id="settings-export-graph" checked><span>Knowledge graph</span></label>
+            <label class="settings-check-row"><input type="checkbox" id="settings-export-settings" checked><span>General settings</span></label>
+            <label class="settings-check-row"><input type="checkbox" id="settings-export-providers"><span>Providers <span class="settings-hint-inline">(URL + auth; keys redacted unless below is checked)</span></span></label>
+            <label class="settings-check-row" id="settings-export-secrets-wrap"><input type="checkbox" id="settings-export-secrets"><span>Include API keys <span class="settings-danger-inline">⚠ sensitive</span></span></label>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="settings-btn-secondary" id="settings-graph-export" style="font-size:.68rem;padding:3px 8px">Export</button>
+            <button class="settings-btn-secondary" id="settings-graph-import" style="font-size:.68rem;padding:3px 8px">Import…</button>
+            <input type="file" id="settings-graph-import-file" accept=".json,application/json" style="display:none">
+          </div>
+          <div id="settings-graph-port-status" style="margin-top:6px;font-family:'Geist Mono',monospace;font-size:.62rem;color:var(--text-dim);white-space:pre-wrap"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="backups">
+        <h4>Graph backups</h4>
           <div class="settings-note" style="margin-top:4px">Periodic snapshots of the full graph DB via <code>VACUUM INTO</code>. Rolling retention; oldest snapshot is rotated out when the cap is hit.</div>
           <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:380px">
             <label style="font-size:.7rem">Interval (minutes)
@@ -15142,10 +16840,9 @@ build/
               <div style="padding:10px;color:var(--text-dim);font-size:.66rem">(open this panel to load list)</div>
             </div>
           </div>
-        </div>
       </div>
 
-      <div class="settings-section">
+      <div class="settings-section" data-target-tab="agent">
         <h4>Identity</h4>
         <label for="settings-display-name">Display Name</label>
         <input id="settings-display-name" type="text" placeholder="SPORE">
@@ -15154,14 +16851,73 @@ build/
         <div class="settings-note" id="settings-identity-note"></div>
       </div>
 
-      <div class="settings-section" id="settings-users-section">
+      <div class="settings-section wide" data-target-tab="agent">
+        <h4>Email</h4>
+        <div class="settings-hint" style="margin-top:4px">Give the agent its own mailbox for sending and reading mail. Pick a provider and the SMTP/IMAP defaults fill in; you'll need a per-app password or SMTP token from that provider. Credentials are stored in <code>/app/.env</code>.</div>
+        <div style="margin-top:10px;display:grid;grid-template-columns:1fr 2fr;gap:10px">
+          <label style="font-size:.72rem">Provider
+            <select id="settings-email-provider" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+              <option value="">(disabled)</option>
+              <option value="proton">Proton Mail</option>
+              <option value="google">Google (Gmail / Workspace)</option>
+            </select>
+          </label>
+          <label style="font-size:.72rem">Email address
+            <input id="settings-email-address" type="email" autocomplete="off" placeholder="you@proton.me" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+          </label>
+        </div>
+
+        <div style="margin-top:10px;display:grid;grid-template-columns:3fr 1fr 1fr;gap:10px">
+          <label style="font-size:.72rem">SMTP host
+            <input id="settings-email-smtp-host" type="text" autocomplete="off" placeholder="smtp.protonmail.ch" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+          </label>
+          <label style="font-size:.72rem">Port
+            <input id="settings-email-smtp-port" type="number" min="1" max="65535" step="1" placeholder="587" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+          </label>
+          <label style="font-size:.72rem;display:flex;align-items:end;gap:6px;padding-bottom:7px">
+            <input id="settings-email-smtp-secure" type="checkbox">
+            <span>Implicit TLS</span>
+          </label>
+        </div>
+
+        <div style="margin-top:10px;display:grid;grid-template-columns:3fr 1fr 1fr;gap:10px">
+          <label style="font-size:.72rem">IMAP host
+            <input id="settings-email-imap-host" type="text" autocomplete="off" placeholder="imap.protonmail.ch" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+          </label>
+          <label style="font-size:.72rem">Port
+            <input id="settings-email-imap-port" type="number" min="1" max="65535" step="1" placeholder="993" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+          </label>
+          <label style="font-size:.72rem;display:flex;align-items:end;gap:6px;padding-bottom:7px">
+            <input id="settings-email-imap-secure" type="checkbox" checked>
+            <span>Implicit TLS</span>
+          </label>
+        </div>
+
+        <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <label style="font-size:.72rem">Username
+            <input id="settings-email-smtp-username" type="text" autocomplete="off" placeholder="(blank = use email address)" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+          </label>
+          <label style="font-size:.72rem">Password / SMTP token
+            <input id="settings-email-smtp-password" type="password" autocomplete="off" placeholder="(leave blank to keep current)" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
+          </label>
+        </div>
+        <div id="settings-email-pw-status" class="settings-hint" style="margin-top:4px"></div>
+
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="settings-btn-secondary" id="settings-email-save" type="button" style="font-size:.68rem;padding:4px 10px">Save email settings</button>
+          <button class="settings-btn-secondary" id="settings-email-test" type="button" style="font-size:.68rem;padding:4px 10px">Send self-test</button>
+        </div>
+        <div id="settings-email-test-result" class="settings-status-line"></div>
+      </div>
+
+      <div class="settings-section wide" id="settings-users-section" data-target-tab="users">
         <h4>Users</h4>
         <div class="settings-note">Manage who can access this instance. Changes take effect immediately and active sessions are dropped.</div>
         <div id="settings-users-list" class="settings-users-list"></div>
         <div class="settings-note" id="settings-users-status"></div>
       </div>
 
-      <div class="settings-section" id="settings-profile-section" style="display:none">
+      <div class="settings-section" id="settings-profile-section" data-target-tab="profile">
         <h4>Your Profile</h4>
         <label for="settings-profile-displayname">What should the agent call you?</label>
         <input id="settings-profile-displayname" type="text" placeholder="">
@@ -15177,7 +16933,7 @@ build/
         </div>
       </div>
 
-      <div class="settings-section">
+      <div class="settings-section" data-target-tab="agent">
         <h4>Memory</h4>
         <div class="settings-check">
           <input id="settings-enhanced-recall" type="checkbox">
@@ -15186,7 +16942,7 @@ build/
         <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session retrieval.</div>
       </div>
 
-      <div class="settings-section">
+      <div class="settings-section" data-target-tab="agent">
         <h4>Proactive</h4>
         <div class="settings-check">
           <input id="settings-proactive-enabled" type="checkbox">
@@ -15207,7 +16963,7 @@ build/
         <div class="settings-note" id="settings-proactive-note"></div>
       </div>
 
-      <div class="settings-section">
+      <div class="settings-section" data-target-tab="agent">
         <h4>Voice</h4>
         <div class="settings-check">
           <input id="settings-voice-enabled" type="checkbox">
@@ -15246,7 +17002,7 @@ build/
         <div class="settings-note" id="settings-voice-note"></div>
       </div>
 
-      <div class="settings-section wide">
+      <div class="settings-section wide" data-target-tab="advanced">
         <h4>Runtime</h4>
         <label for="settings-runtime-public-url-input">Public URL</label>
         <input id="settings-runtime-public-url-input" type="text" placeholder="https://spore.example.com (or https://host.tld/path)">
@@ -15257,7 +17013,7 @@ build/
         <div class="settings-kv"><span>Data Dir</span><code id="settings-runtime-data-dir"></code></div>
       </div>
 
-      <div class="settings-section wide">
+      <div class="settings-section wide" data-target-tab="providers">
         <h4>Model Routing</h4>
         <div class="settings-model-grid">
           <div class="settings-model-row">
@@ -15352,7 +17108,7 @@ build/
         <div class="settings-note" id="settings-routing-note"></div>
       </div>
 
-      <div class="settings-section wide">
+      <div class="settings-section wide" data-target-tab="providers">
         <h4>Providers</h4>
         <div class="settings-provider-block">
           <div class="settings-provider-group">
@@ -15443,7 +17199,7 @@ build/
         <div class="settings-note" id="settings-provider-note"></div>
       </div>
 
-      <div class="settings-section">
+      <div class="settings-section wide" data-target-tab="advanced">
         <h4>Acorn</h4>
         <div class="settings-check">
           <input id="settings-acorn-enabled" type="checkbox">
@@ -15459,7 +17215,7 @@ build/
         <div class="settings-note" id="settings-acorn-note">Tick to enable; on save a key is auto-generated and shown here. Existing CLI users will need the new key if you regen.</div>
       </div>
 
-      <div class="settings-section">
+      <div class="settings-section wide" data-target-tab="tools">
         <h4>Browser</h4>
         <label for="settings-browser-backend">Default Browser Backend</label>
         <select id="settings-browser-backend">
@@ -15469,7 +17225,7 @@ build/
         <div class="settings-note" id="settings-browser-note"></div>
       </div>
 
-      <div class="settings-section wide">
+      <div class="settings-section wide" data-target-tab="tools">
         <h4>Web Search</h4>
         <div class="settings-provider-block">
           <div class="settings-provider-group">

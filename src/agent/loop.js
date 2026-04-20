@@ -441,21 +441,30 @@ class AgentLoop {
         if (interjections && interjections.length > 0) {
           this._pendingInterjections.delete(sessionKey);
           this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
-          // Ensure messages end with an assistant turn so we can add a fresh user message
+          // Ensure messages end with an assistant turn so we can add a fresh
+          // user message. Whether there are tool_results still pending or not,
+          // we prepend an assistant ack that reminds the model to KEEP doing
+          // what it was doing AND fold in the new input.
           const lastMsg = messages[messages.length - 1];
           if (lastMsg?.role === 'user') {
-            messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Acknowledged — the user has sent follow-up messages while I was working. I will address all of them along with my original task.]' }] });
+            messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Interjection received. I will finish the task I was in the middle of and address the follow-up message(s) together in my next reply. I am NOT abandoning the original request.]' }] });
           }
-          // Frame the interjections so the model addresses everything
-          const userContent = interjections.length === 1
+          // Build the user turn: raw message(s) + an explicit reminder so the
+          // model does not drop the original task context. Without this the
+          // model often answers only the latest user message and forgets the
+          // in-flight work.
+          const raw = interjections.length === 1
             ? interjections[0]
-            : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n') + '\n\nAddress all of the above along with any results you already have from my original request.';
-          messages.push({ role: 'user', content: userContent });
-          // Persist each interjection to session history
+            : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n\n');
+          const framed = `${raw}\n\n---\n[reminder: keep working on the original request too. Your final reply should cover BOTH the in-flight task's results and a response to this follow-up, in one coherent message.]`;
+          messages.push({ role: 'user', content: framed });
+          // Persist each interjection to session history (raw, no framing)
           for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
           // Give the agent headroom to respond
           iterations = Math.max(0, iterations - 4);
-          if (opts.onStatus) { try { opts.onStatus({ type: 'interjection' }); } catch { } }
+          if (opts.onStatus) {
+            try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { }
+          }
         }
 
         const iterStart = Date.now();

@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim nano \
     tmux screen \
     openssh-client \
+    netcat-openbsd \
     mosh \
     parallel \
     slurm-client \
@@ -84,11 +85,13 @@ COPY static/ ./static/
 COPY plugins/ ./plugins/
 COPY lib/ ./lib/
 COPY reference-nodes.sql ./
+COPY migrate-ref-tailscale-cluster.sql ./
+COPY migrate-ref-email.sql ./
 
 RUN groupadd -g 2000 spore && useradd -r -u 2000 -g 2000 spore \
     && mkdir -p /data /workspace /app/tools \
     && chown -R spore:spore /app /data /workspace /opt/pw-browsers \
-    && echo 'spore ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg, /usr/sbin/cron' > /etc/sudoers.d/spore-apt \
+    && echo 'spore ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg, /usr/sbin/cron, /usr/bin/tailscale' > /etc/sudoers.d/spore-apt \
     && chmod 0440 /etc/sudoers.d/spore-apt
 
 COPY entrypoint.sh ./entrypoint.sh

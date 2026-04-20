@@ -670,7 +670,79 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       ...this._getCommunicationToolDefinitions(),
       ...(this.config.superAgent ? this._getSuperAgentToolDefinitions() : []),
       ...this._getRemoteToolDefinitions(),
+      ...this._getEmailToolDefinitions(),
       ...this._getSkillToolDefinitions(),
+    ];
+  }
+
+  _getEmailToolDefinitions() {
+    // Only exposes tools when the operator has configured an email provider
+    // + SMTP password — otherwise the agent has nothing to connect to.
+    const c = this.config || {};
+    if (!c.emailProvider || !c.emailSmtpPassword) return [];
+    const addr = c.emailAddress || '(unset)';
+    return [
+      {
+        name: 'email_send',
+        description: `Send an email from ${addr} (${c.emailProvider}). Supports plain text or HTML. Use sparingly and confirm with the operator before sending anything high-stakes (external recipients, commitments, money).`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            to: { type: 'string', description: 'Recipient(s), comma-separated' },
+            subject: { type: 'string', description: 'Subject line' },
+            body: { type: 'string', description: 'Message body (plain text unless isHtml=true)' },
+            isHtml: { type: 'boolean', description: 'Treat body as HTML (default false)' },
+            cc: { type: 'string', description: 'Cc recipient(s), comma-separated (optional)' },
+            bcc: { type: 'string', description: 'Bcc recipient(s), comma-separated (optional)' },
+          },
+          required: ['to', 'subject', 'body'],
+        },
+      },
+      {
+        name: 'email_list',
+        description: `List recent messages in an email mailbox via IMAP. Default folder INBOX. Returns {uid, from, to, subject, date, preview} per message.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            folder: { type: 'string', description: 'IMAP folder (default: INBOX)' },
+            limit: { type: 'number', description: 'Max messages to return (default 20, max 100)' },
+            unreadOnly: { type: 'boolean', description: 'Only return unread messages (default false)' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'email_read',
+        description: `Fetch the full body + headers of a single message by UID. Folder defaults to INBOX.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            uid: { type: 'number', description: 'Message UID returned by email_list' },
+            folder: { type: 'string', description: 'IMAP folder (default: INBOX)' },
+            markSeen: { type: 'boolean', description: 'Mark as read after fetching (default true)' },
+          },
+          required: ['uid'],
+        },
+      },
+      {
+        name: 'email_search',
+        description: `Search the mailbox via IMAP. Filters combine with AND. Returns summaries like email_list.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            folder: { type: 'string', description: 'IMAP folder (default: INBOX)' },
+            from: { type: 'string', description: 'Match sender address/name (substring)' },
+            to: { type: 'string', description: 'Match recipient' },
+            subject: { type: 'string', description: 'Match subject (substring)' },
+            body: { type: 'string', description: 'Match message body (substring)' },
+            since: { type: 'string', description: 'Return messages since date (YYYY-MM-DD)' },
+            before: { type: 'string', description: 'Return messages before date (YYYY-MM-DD)' },
+            unreadOnly: { type: 'boolean', description: 'Only unread (default false)' },
+            limit: { type: 'number', description: 'Max results (default 30, max 200)' },
+          },
+          required: [],
+        },
+      },
     ];
   }
 
@@ -1073,6 +1145,15 @@ Set wait:false when you've submitted a long background job and just want to retu
           return await this._dataPollerTool(input);
         case 'webapp_request':
           return await this._webappRequestTool(input);
+
+        case 'email_send':
+          return await this._emailSendTool(input);
+        case 'email_list':
+          return await this._emailListTool(input);
+        case 'email_read':
+          return await this._emailReadTool(input);
+        case 'email_search':
+          return await this._emailSearchTool(input);
 
         case 'skill_lookup':
           return this._skillLookupTool(input);
@@ -1793,6 +1874,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   _normalizeNodeId(raw) {
     return raw.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
+  }
+
+  _isProtectedNode(id) {
+    if (!id) return false;
+    // Reference + agent identity nodes are the backbone of the agent's own
+    // capabilities and self-concept — refuse to delete them via tool calls.
+    // Everything else (people, concepts, sessions, etc.) is fair game.
+    return /^(ref-|agent-identity|agent-self|agent-core)/.test(String(id));
   }
 
   _modelMaxOutputTokens(model) {
@@ -4387,6 +4476,189 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     } catch (e) {
       return { error: e.message, tmux_session: session };
     }
+  }
+
+  // ── Email (Proton/Google via SMTP + IMAP) ─────────────────────────────
+
+  _emailConfigResolved() {
+    const c = this.config || {};
+    if (!c.emailProvider || !c.emailSmtpPassword) return { ok: false, error: 'Email not configured. Ask the operator to fill in Settings → Agent → Email.' };
+    if (!c.emailAddress) return { ok: false, error: 'Email address not set in settings.' };
+    // Provider-specific defaults for the common hosts.
+    const defaults = {
+      proton: { smtpHost: 'smtp.protonmail.ch', smtpPort: 587, smtpSecure: false, imapHost: 'imap.protonmail.ch', imapPort: 993, imapSecure: true },
+      google: { smtpHost: 'smtp.gmail.com', smtpPort: 587, smtpSecure: false, imapHost: 'imap.gmail.com', imapPort: 993, imapSecure: true },
+    }[c.emailProvider] || {};
+    return {
+      ok: true,
+      provider: c.emailProvider,
+      address: c.emailAddress,
+      username: c.emailSmtpUsername || c.emailAddress,
+      password: c.emailSmtpPassword,
+      smtpHost: c.emailSmtpHost || defaults.smtpHost,
+      smtpPort: c.emailSmtpPort || defaults.smtpPort || 587,
+      smtpSecure: c.emailSmtpSecure === true,
+      imapHost: c.emailImapHost || defaults.imapHost,
+      imapPort: c.emailImapPort || defaults.imapPort || 993,
+      imapSecure: c.emailImapSecure !== false,
+    };
+  }
+
+  async _emailSendTool(input) {
+    const { to, subject, body, isHtml, cc, bcc } = input;
+    if (!to || !subject || !body) return { error: 'to, subject, and body are required' };
+    const cfg = this._emailConfigResolved();
+    if (!cfg.ok) return { error: cfg.error };
+    let nodemailer;
+    try { nodemailer = require('nodemailer'); } catch { return { error: 'nodemailer not installed — run npm install nodemailer and restart the container' }; }
+    try {
+      const transporter = nodemailer.createTransport({
+        host: cfg.smtpHost, port: cfg.smtpPort, secure: cfg.smtpSecure,
+        auth: { user: cfg.username, pass: cfg.password },
+        connectionTimeout: 15000,
+      });
+      const info = await transporter.sendMail({
+        from: cfg.address,
+        to, subject,
+        cc: cc || undefined,
+        bcc: bcc || undefined,
+        text: isHtml ? undefined : String(body),
+        html: isHtml ? String(body) : undefined,
+      });
+      this.log?.info?.(`[email_send] ${cfg.address} → ${to} — ${info.messageId || 'sent'}`);
+      return { ok: true, messageId: info.messageId || null, accepted: info.accepted || [], rejected: info.rejected || [] };
+    } catch (e) {
+      return { error: 'send failed: ' + (e.message || String(e)).slice(0, 300) };
+    }
+  }
+
+  async _emailImapConnect() {
+    const cfg = this._emailConfigResolved();
+    if (!cfg.ok) return { error: cfg.error };
+    let ImapFlow;
+    try { ImapFlow = require('imapflow').ImapFlow; } catch { return { error: 'imapflow not installed — run npm install imapflow and restart' }; }
+    const client = new ImapFlow({
+      host: cfg.imapHost, port: cfg.imapPort, secure: cfg.imapSecure,
+      auth: { user: cfg.username, pass: cfg.password },
+      logger: false,
+      emitLogs: false,
+    });
+    try { await client.connect(); } catch (e) { return { error: 'imap connect failed: ' + (e.message || String(e)).slice(0, 300) }; }
+    return { ok: true, client };
+  }
+
+  _emailSummarize(parsed, envelope, uid) {
+    const from = (envelope?.from || []).map(a => a.address || a.name).filter(Boolean).join(', ');
+    const to = (envelope?.to || []).map(a => a.address || a.name).filter(Boolean).join(', ');
+    const text = String(parsed?.text || parsed?.html || '').replace(/\s+/g, ' ').slice(0, 180);
+    return {
+      uid,
+      from,
+      to,
+      subject: envelope?.subject || '',
+      date: envelope?.date || null,
+      preview: text,
+    };
+  }
+
+  async _emailListTool(input) {
+    const folder = String(input?.folder || 'INBOX');
+    const limit = Math.max(1, Math.min(100, Number(input?.limit) || 20));
+    const unreadOnly = !!input?.unreadOnly;
+    const conn = await this._emailImapConnect();
+    if (!conn.ok) return { error: conn.error };
+    const client = conn.client;
+    const results = [];
+    try {
+      await client.mailboxOpen(folder);
+      const search = unreadOnly ? { seen: false } : { all: true };
+      const uids = await client.search(search, { uid: true });
+      const latest = uids.slice(-limit).reverse();
+      for (const uid of latest) {
+        const msg = await client.fetchOne(uid, { envelope: true, source: true }, { uid: true });
+        if (!msg) continue;
+        let parsed = null;
+        try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch {}
+        results.push(this._emailSummarize(parsed, msg.envelope, uid));
+      }
+    } catch (e) {
+      await client.logout().catch(() => {});
+      return { error: 'list failed: ' + (e.message || String(e)).slice(0, 300) };
+    }
+    await client.logout().catch(() => {});
+    return { folder, count: results.length, messages: results };
+  }
+
+  async _emailReadTool(input) {
+    const uid = Number(input?.uid);
+    if (!Number.isFinite(uid)) return { error: 'uid required' };
+    const folder = String(input?.folder || 'INBOX');
+    const markSeen = input?.markSeen !== false;
+    const conn = await this._emailImapConnect();
+    if (!conn.ok) return { error: conn.error };
+    const client = conn.client;
+    try {
+      await client.mailboxOpen(folder);
+      const msg = await client.fetchOne(uid, { envelope: true, source: true, flags: true }, { uid: true });
+      if (!msg) { await client.logout().catch(() => {}); return { error: `No message with uid ${uid} in ${folder}` }; }
+      let parsed = {};
+      try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch {}
+      if (markSeen && msg.flags && !msg.flags.has?.('\\Seen')) {
+        try { await client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true }); } catch {}
+      }
+      const out = {
+        uid,
+        folder,
+        from: (msg.envelope?.from || []).map(a => a.address || a.name).filter(Boolean).join(', '),
+        to: (msg.envelope?.to || []).map(a => a.address || a.name).filter(Boolean).join(', '),
+        cc: (msg.envelope?.cc || []).map(a => a.address || a.name).filter(Boolean).join(', '),
+        subject: msg.envelope?.subject || '',
+        date: msg.envelope?.date || null,
+        text: String(parsed.text || '').slice(0, 20000),
+        html: parsed.html ? String(parsed.html).slice(0, 20000) : null,
+        attachments: (parsed.attachments || []).map(a => ({ filename: a.filename, contentType: a.contentType, size: a.size })),
+      };
+      await client.logout().catch(() => {});
+      return out;
+    } catch (e) {
+      await client.logout().catch(() => {});
+      return { error: 'read failed: ' + (e.message || String(e)).slice(0, 300) };
+    }
+  }
+
+  async _emailSearchTool(input) {
+    const folder = String(input?.folder || 'INBOX');
+    const limit = Math.max(1, Math.min(200, Number(input?.limit) || 30));
+    const q = {};
+    if (input?.from) q.from = String(input.from);
+    if (input?.to) q.to = String(input.to);
+    if (input?.subject) q.subject = String(input.subject);
+    if (input?.body) q.body = String(input.body);
+    if (input?.since) q.since = new Date(input.since);
+    if (input?.before) q.before = new Date(input.before);
+    if (input?.unreadOnly) q.seen = false;
+    if (!Object.keys(q).length) return { error: 'at least one search filter required (from / to / subject / body / since / before / unreadOnly)' };
+    const conn = await this._emailImapConnect();
+    if (!conn.ok) return { error: conn.error };
+    const client = conn.client;
+    const results = [];
+    try {
+      await client.mailboxOpen(folder);
+      const uids = await client.search(q, { uid: true });
+      const latest = uids.slice(-limit).reverse();
+      for (const uid of latest) {
+        const msg = await client.fetchOne(uid, { envelope: true, source: true }, { uid: true });
+        if (!msg) continue;
+        let parsed = null;
+        try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch {}
+        results.push(this._emailSummarize(parsed, msg.envelope, uid));
+      }
+    } catch (e) {
+      await client.logout().catch(() => {});
+      return { error: 'search failed: ' + (e.message || String(e)).slice(0, 300) };
+    }
+    await client.logout().catch(() => {});
+    return { folder, count: results.length, messages: results };
   }
 
   async _remoteReadFileTool(input) {

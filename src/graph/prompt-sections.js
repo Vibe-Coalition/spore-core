@@ -832,6 +832,115 @@ function applyPromptSectionsMixin(GraphContext) {
     return lines;
   };
 
+  /**
+   * Dynamic snapshot of cluster access so the agent knows what's actually
+   * wired up on THIS deployment without having to query tools. Pulled fresh
+   * at every prompt assembly: tailscale state, cluster SSH config, whether
+   * the cluster private key exists. Returns null when nothing is configured
+   * (avoids prompt clutter on deployments that don't use the cluster).
+   */
+  proto._buildClusterAccessSection = function _buildClusterAccessSection() {
+    const c = this.config || {};
+    const anyClusterConfig = c.clusterUsername || c.clusterLoginHost || (Array.isArray(c.clusterHosts) && c.clusterHosts.length);
+    const tailscaleLikelyOn = c.tailscaleEnabled === true;
+    if (!anyClusterConfig && !tailscaleLikelyOn) return null;
+
+    const lines = ['## Cluster access (live state)'];
+
+    // Tailscale — query live via the local socket; best-effort, short timeout
+    let tsState = 'unknown';
+    let tsSelfIp = null;
+    let tsPeerCount = null;
+    let tsOnlineCount = null;
+    try {
+      const { execFileSync } = require('child_process');
+      const raw = execFileSync('tailscale', ['--socket', '/data/tailscale/ts.sock', 'status', '--json'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const j = JSON.parse(raw);
+      tsState = j.BackendState || 'unknown';
+      tsSelfIp = (j.Self?.TailscaleIPs || [])[0] || null;
+      if (j.Peer) {
+        tsPeerCount = Object.keys(j.Peer).length;
+        tsOnlineCount = Object.values(j.Peer).filter(p => p.Online).length;
+      }
+    } catch {
+      tsState = 'daemon-unreachable';
+    }
+    if (tsState === 'Running') {
+      lines.push(`- **Tailscale**: connected · self ${tsSelfIp || '?'} · ${tsOnlineCount ?? '?'}/${tsPeerCount ?? '?'} peers online. MagicDNS names (short hostnames) resolve against the tailnet.`);
+    } else if (tsState === 'NeedsLogin') {
+      lines.push('- **Tailscale**: daemon running but not logged in. Tell the operator to visit Settings → Compute Cluster → Log in to Tailscale. Do NOT attempt cluster commands until this is Running.');
+    } else if (tsState === 'daemon-unreachable') {
+      lines.push('- **Tailscale**: daemon not running or socket unreachable. Enable via SPORE_TAILSCALE_ENABLED=true and restart, or this deployment doesn\'t use the cluster.');
+    } else {
+      lines.push(`- **Tailscale**: state=${tsState}.`);
+    }
+
+    // Primary cluster + any additional clusters the operator has configured.
+    const clusters = [];
+    if (c.clusterLoginHost || c.clusterUsername) {
+      clusters.push({
+        name: c.clusterLoginHost ? c.clusterLoginHost.split('.')[0] : '(primary)',
+        host: c.clusterLoginHost || null,
+        username: c.clusterUsername || null,
+        primary: true,
+      });
+    }
+    if (Array.isArray(c.clusterHosts)) {
+      for (const h of c.clusterHosts) {
+        if (!h || !h.host) continue;
+        clusters.push({
+          name: h.name || h.host,
+          host: h.host,
+          username: h.username || c.clusterUsername || null,
+          primary: false,
+        });
+      }
+    }
+    if (!clusters.length) {
+      lines.push('- **Clusters**: none configured. Operator needs to fill in Settings → Compute Cluster before any cluster work.');
+    } else {
+      lines.push(`- **Clusters configured** (${clusters.length}):`);
+      for (const cl of clusters) {
+        const bits = [];
+        bits.push(`\`${cl.name}\`${cl.primary ? ' *(primary)*' : ''}`);
+        if (cl.username && cl.host) bits.push(`→ \`${cl.username}@${cl.host}\``);
+        else if (cl.host) bits.push(`→ \`${cl.host}\``);
+        lines.push(`  - ${bits.join(' · ')}`);
+      }
+      lines.push('  All clusters are login nodes; partitions/GPU allocations are decided per-job at sbatch/srun time (ask the operator which partition to use if unclear). Pass the target cluster explicitly in remote_exec when you have more than one.');
+    }
+    if (c.clusterTmuxPrefix) lines.push(`- **tmux session prefix**: \`${c.clusterTmuxPrefix}-\` (every remote_exec tmux_session gets this applied)`);
+
+    // SSH key presence (no content, just yes/no + fingerprint)
+    try {
+      const fsm = require('fs');
+      const KEY_PATH = '/data/.ssh/id_cluster';
+      if (fsm.existsSync(KEY_PATH)) {
+        let fp = '';
+        try {
+          const { execFileSync } = require('child_process');
+          fp = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { timeout: 2000, encoding: 'utf8' }).trim();
+        } catch {}
+        lines.push(`- **Cluster SSH key**: installed at /data/.ssh/id_cluster${fp ? ` (\`${fp.split(' ').slice(0, 2).join(' ')}\`)` : ''}. Used automatically by remote_exec and the cluster test endpoint.`);
+      } else {
+        lines.push('- **Cluster SSH key**: *not installed*. Operator needs to paste/upload/generate one in Settings → Compute Cluster → Cluster SSH key and install the public half on the login node\'s ~/.ssh/authorized_keys.');
+      }
+    } catch {}
+
+    // Pointer into graph for workflow details
+    lines.push('- For SLURM + tmux workflows, read `ref-compute-cluster`. For tailscale CLI + troubleshooting, read `ref-tailscale`. Both connect to your self-node via `documents` edges.');
+
+    // Email — live state lets the agent know whether it has a mailbox + which
+    // one, without round-tripping a tool call.
+    if (c.emailProvider && c.emailSmtpPassword) {
+      const addr = c.emailAddress || '(unset)';
+      lines.push(`- **Email**: configured · \`${addr}\` via ${c.emailProvider}. Tools: email_send / email_list / email_read / email_search. See \`ref-email\` for the usage rules (confirm external recipients first, never attach secrets).`);
+    } else if (c.emailProvider || c.emailAddress) {
+      lines.push('- **Email**: half-configured. Tell the operator to finish Settings → Agent → Email (missing password or provider).');
+    }
+    return lines.join('\n');
+  };
+
   proto._buildRuntimeSection = function _buildRuntimeSection(opts) {
     const now = new Date();
     const parts = [

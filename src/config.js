@@ -59,10 +59,22 @@ const DEFAULTS = {
   graphBackupOnChangeOnly: true,     // skip snapshot if DB hasn't changed (row-count hash)
 
   // Compute cluster + tailscale
-  clusterUsername: null,             // SPORE_CLUSTER_USERNAME — SSH user for the cluster
-  clusterLoginHost: null,            // SPORE_CLUSTER_LOGIN_HOST — tailnet hostname of login node
-  clusterDefaultPartition: null,     // SPORE_CLUSTER_PARTITION — default SLURM partition
+  clusterUsername: null,             // SPORE_CLUSTER_USERNAME — SSH user for the primary cluster
+  clusterLoginHost: null,            // SPORE_CLUSTER_LOGIN_HOST — tailnet hostname of primary login node
   clusterTmuxPrefix: 'spore',        // SPORE_CLUSTER_TMUX_PREFIX — namespace for tmux sessions
+  clusterHosts: [],                  // SPORE_CLUSTER_HOSTS (JSON array) — additional clusters [{name, host, username}]
+
+  // Email (sending via SMTP + reading via IMAP)
+  emailProvider: null,               // 'proton' | 'google' | null
+  emailAddress: null,                // e.g. you@proton.me
+  emailSmtpHost: null,               // default depends on provider
+  emailSmtpPort: 587,
+  emailSmtpSecure: false,            // true = implicit TLS (port 465); false = STARTTLS (port 587)
+  emailImapHost: null,
+  emailImapPort: 993,
+  emailImapSecure: true,             // IMAP is almost always TLS
+  emailSmtpPassword: null,           // SECRET — Proton SMTP token or Bridge password
+  emailSmtpUsername: null,           // blank = use emailAddress
   tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscaled at boot
   tailscaleHostname: null,           // SPORE_TAILSCALE_HOSTNAME — default: spore-<agentId>
   hostReadPaths: [],        // SPORE_HOST_READ_PATHS — host paths mounted at /host/<path>
@@ -396,8 +408,32 @@ function loadConfigFresh() {
   if (process.env.SPORE_BACKUP_ON_CHANGE_ONLY === 'false') config.graphBackupOnChangeOnly = false;
   if (process.env.SPORE_CLUSTER_USERNAME) config.clusterUsername = process.env.SPORE_CLUSTER_USERNAME.trim();
   if (process.env.SPORE_CLUSTER_LOGIN_HOST) config.clusterLoginHost = process.env.SPORE_CLUSTER_LOGIN_HOST.trim();
-  if (process.env.SPORE_CLUSTER_PARTITION) config.clusterDefaultPartition = process.env.SPORE_CLUSTER_PARTITION.trim();
   if (process.env.SPORE_CLUSTER_TMUX_PREFIX) config.clusterTmuxPrefix = process.env.SPORE_CLUSTER_TMUX_PREFIX.trim();
+  if (process.env.SPORE_EMAIL_PROVIDER) config.emailProvider = process.env.SPORE_EMAIL_PROVIDER.trim().toLowerCase();
+  if (process.env.SPORE_EMAIL_ADDRESS) config.emailAddress = process.env.SPORE_EMAIL_ADDRESS.trim();
+  if (process.env.SPORE_EMAIL_SMTP_HOST) config.emailSmtpHost = process.env.SPORE_EMAIL_SMTP_HOST.trim();
+  if (process.env.SPORE_EMAIL_SMTP_PORT) {
+    const n = Number(process.env.SPORE_EMAIL_SMTP_PORT);
+    if (Number.isFinite(n) && n > 0) config.emailSmtpPort = n;
+  }
+  if (process.env.SPORE_EMAIL_SMTP_SECURE === 'true') config.emailSmtpSecure = true;
+  if (process.env.SPORE_EMAIL_IMAP_HOST) config.emailImapHost = process.env.SPORE_EMAIL_IMAP_HOST.trim();
+  if (process.env.SPORE_EMAIL_IMAP_PORT) {
+    const n = Number(process.env.SPORE_EMAIL_IMAP_PORT);
+    if (Number.isFinite(n) && n > 0) config.emailImapPort = n;
+  }
+  if (process.env.SPORE_EMAIL_IMAP_SECURE === 'false') config.emailImapSecure = false;
+  if (process.env.SPORE_EMAIL_SMTP_PASSWORD) config.emailSmtpPassword = process.env.SPORE_EMAIL_SMTP_PASSWORD;
+  if (process.env.SPORE_EMAIL_SMTP_USERNAME) config.emailSmtpUsername = process.env.SPORE_EMAIL_SMTP_USERNAME.trim();
+
+  if (process.env.SPORE_CLUSTER_HOSTS) {
+    try {
+      const parsed = JSON.parse(process.env.SPORE_CLUSTER_HOSTS);
+      if (Array.isArray(parsed)) config.clusterHosts = parsed;
+    } catch (e) {
+      console.warn('[config] SPORE_CLUSTER_HOSTS is not valid JSON:', e.message);
+    }
+  }
   if (process.env.SPORE_TAILSCALE_ENABLED === 'true') config.tailscaleEnabled = true;
   if (process.env.SPORE_TAILSCALE_HOSTNAME) config.tailscaleHostname = process.env.SPORE_TAILSCALE_HOSTNAME.trim();
   if (!config.tailscaleHostname) config.tailscaleHostname = `spore-${config.agentId || 'agent'}`;

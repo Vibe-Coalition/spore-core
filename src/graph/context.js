@@ -56,10 +56,10 @@ class GraphContext {
   static DROP_ORDER = ['gaps', 'anti', 'selfknowledge', 'plugin', 'feed', 'tooling', 'runtime', 'reflections', 'derived', 'episodes'];
 
   static PROMPT_MODES = {
-    full: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'relevant', 'episodes', 'anti', 'feed', 'tooling', 'behavior', 'reflections', 'gaps', 'runtime'],
-    chat: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'episodes', 'behavior'],
+    full: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'relevant', 'episodes', 'anti', 'feed', 'tooling', 'behavior', 'reflections', 'gaps', 'runtime', 'cluster'],
+    chat: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'episodes', 'behavior', 'cluster'],
     recall: ['persona', 'identity', 'relevant', 'episodes', 'derived', 'reflections', 'person'],
-    minimal: ['identity', 'rules', 'tooling', 'runtime'],
+    minimal: ['identity', 'rules', 'tooling', 'runtime', 'cluster'],
     none: ['identity'],
   };
 
@@ -351,6 +351,7 @@ class GraphContext {
       inc('feed') ? this._truncateToTokenBudget(this._buildCrossSessionSection(opts), B.feed) : null,
       inc('behavior') ? this._truncateToTokenBudget(this._buildConversationBehavior(opts), B.behavior) : null,
       inc('runtime') ? this._truncateToTokenBudget(this._buildRuntimeSection(opts), B.runtime) : null,
+      inc('runtime') ? this._buildClusterAccessSection() : null,
     ].filter(Boolean);
     return parts.join('\n\n');
   }
@@ -664,6 +665,7 @@ class GraphContext {
         this._buildConversationBehavior(opts), B.behavior) : null,
       runtime: allowedKeys.has('runtime') ? this._truncateToTokenBudget(
         this._buildRuntimeSection(opts), B.runtime) : null,
+      cluster: allowedKeys.has('runtime') ? this._buildClusterAccessSection() : null,
       reflections: allowedKeys.has('reflections') ? this._truncateToTokenBudget(
         this._buildReflectionsSection(), B.reflections) : null,
       derived: allowedKeys.has('derived') ? this._truncateToTokenBudget(

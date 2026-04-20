@@ -158,7 +158,12 @@ function migrateReferenceNodes(db, log) {
     const staleMarker = db.prepare(
       "SELECT a.id FROM aspects a JOIN attributes at ON at.aspect_id = a.id WHERE a.node_id = 'ref-api-keys' AND a.name = 'access_patterns' AND at.content LIKE '%/data/.env%' LIMIT 1"
     ).get();
-    if (!staleMarker) return;
+    if (!staleMarker) {
+      // Skip the stale-content cleanup below (nothing to clean), but still
+      // fall through to the idempotent ref-node migrations at the end of the
+      // function that need to run on every boot.
+      throw new Error('__skip_stale__');
+    }
 
     log.info('[boot] Migrating stale reference nodes to vault/web_serve backend...');
 
@@ -184,7 +189,47 @@ function migrateReferenceNodes(db, log) {
 
     log.info('[boot] Reference nodes migrated successfully');
   } catch (e) {
-    log.warn(`[boot] Reference node migration failed: ${e.message}`);
+    if (e && e.message === '__skip_stale__') {
+      // expected: stale content already cleaned up, keep going
+    } else {
+      log.warn(`[boot] Reference node migration failed: ${e.message}`);
+    }
+  }
+
+  // Idempotently ensure the Tailscale + SLURM-cluster reference nodes exist
+  // on every boot. Old installs predate these refs; the migration uses
+  // explicit WHERE NOT EXISTS guards so re-running is a no-op.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-tailscale-cluster.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(
+        "SELECT (SELECT COUNT(*) FROM nodes WHERE id IN ('ref-tailscale','ref-compute-cluster')) AS nodes_present, (SELECT COUNT(*) FROM aspects WHERE node_id IN ('ref-tailscale','ref-compute-cluster')) AS aspects_present"
+      ).get();
+      db.exec(sql);
+      const after = db.prepare(
+        "SELECT (SELECT COUNT(*) FROM nodes WHERE id IN ('ref-tailscale','ref-compute-cluster')) AS nodes_present, (SELECT COUNT(*) FROM aspects WHERE node_id IN ('ref-tailscale','ref-compute-cluster')) AS aspects_present"
+      ).get();
+      if (after.nodes_present > before.nodes_present || after.aspects_present > before.aspects_present) {
+        log.info(`[boot] Tailscale/cluster refs migrated: +${after.nodes_present - before.nodes_present} nodes, +${after.aspects_present - before.aspects_present} aspects`);
+      }
+    }
+  } catch (e) {
+    log.warn(`[boot] Tailscale/cluster ref migration failed: ${e.message}`);
+  }
+
+  // Email ref node (idempotent; runs every boot).
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-email.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-email'").get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-email'").get()?.c || 0;
+      if (after > before) log.info(`[boot] Email ref migrated: +${after - before} aspects`);
+    }
+  } catch (e) {
+    log.warn(`[boot] Email ref migration failed: ${e.message}`);
   }
 }
 

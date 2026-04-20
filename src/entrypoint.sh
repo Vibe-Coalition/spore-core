@@ -210,6 +210,16 @@ if [ "${SPORE_TAILSCALE_ENABLED:-false}" = "true" ] || [ -d /data/tailscale ]; t
       done
       chown "$SPORE_UID:$SPORE_GID" "$TS_DIR/ts.sock" 2>/dev/null || true
       chmod 660 "$TS_DIR/ts.sock" 2>/dev/null || true
+      # Persist operator=spore so the spore user can run `tailscale up`
+      # (which triggers SSO login) without sudo. This only has to happen
+      # once per daemon lifetime; repeated calls are idempotent.
+      for i in 1 2 3 4 5; do
+        if tailscale --socket "$TS_DIR/ts.sock" set --operator=spore 2>/dev/null; then
+          echo "[entrypoint] tailscale operator set to spore"
+          break
+        fi
+        sleep 0.4
+      done
     fi
   else
     echo "[entrypoint] tailscaled not installed — skipping"
