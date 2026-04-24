@@ -272,6 +272,11 @@ class Maintainer {
         WHERE n.importance >= 5
           AND n.type NOT IN ('tool')
           AND (n.provenance = 'self' OR n.provenance IS NULL)
+          -- ref-* nodes are seed-managed (reference-nodes.sql + migrate-ref-*.sql)
+          -- and don't accept maintainer writes per the persist guard. Skip
+          -- them at detection time too so we don't burn LLM calls on
+          -- gap-questions whose answers will just be discarded.
+          AND n.id NOT LIKE 'ref-%'
           AND (SELECT COUNT(*) FROM gaps WHERE node_id = n.id AND status = 'open') < 10
         ORDER BY n.importance DESC, n.updated DESC
         LIMIT 15
@@ -467,6 +472,17 @@ Return ONLY JSON: {"answer":"your answer or UNKNOWN","confidence":"high|medium|l
   }
 
   _persistAnswerToGraph(nodeId, question, answer) {
+    // Reference-node guard. The `ref-*` nodes are seeded operational
+    // knowledge managed by reference-nodes.sql + migrate-ref-*.sql.
+    // The maintainer's gap-fill flow was attaching "learned_facts"
+    // attributes to nodes like ref-search-tools — clobbering the seed
+    // contract with session-derived noise. Ref nodes do not accept
+    // gap-fill writes; if a question is interesting enough to record,
+    // it belongs on a non-ref node.
+    if (typeof nodeId === 'string' && nodeId.startsWith('ref-')) {
+      this.log.debug(`[maintainer] Skipped gap persist on ref-* node: ${nodeId} (ref nodes are seed-managed)`);
+      return;
+    }
     try {
       const aspectName = 'learned_facts';
       let aspect = this.db.prepare(

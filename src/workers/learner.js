@@ -1058,6 +1058,18 @@ The JSON schema for updates becomes:
           continue;
         }
 
+        // Reference-node guard. The `ref-*` nodes are seeded operational
+        // knowledge (API shapes, sandbox rules, infrastructure facts)
+        // managed by reference-nodes.sql + migrate-ref-*.sql. Letting the
+        // learner accumulate session-derived facts on them was producing
+        // noise like "user prefers x" attached to ref-bfl-api. Nothing
+        // the learner ever wants to write belongs on a ref-* node — link
+        // via an edge instead if relationship matters.
+        if (nodeId.startsWith('ref-')) {
+          this.log.warn(`[learner] Rejected write to ref-* node: ${nodeId}/${asp.name} (${(asp.attributes || []).length} attrs dropped — ref nodes are seed-managed)`);
+          continue;
+        }
+
         let aspectRow = targetDb.prepare(
           'SELECT id FROM aspects WHERE node_id = ? AND name = ?'
         ).get(nodeId, asp.name);
@@ -1165,6 +1177,14 @@ The JSON schema for updates becomes:
         if (!updIsShared && nodeExists.type === 'person'
             && speakerNodeId && nodeId !== speakerNodeId && nodeId !== _agentId) {
           this.log.warn(`[learner] Rejected cross-user person update: speaker=${speakerNodeId} → target=${nodeId}/${upd.aspectName}`);
+          continue;
+        }
+
+        // Reference-node guard — same reason as the aspects-loop guard.
+        // ref-* nodes are seed-managed; the learner has no business
+        // updating their attributes.
+        if (nodeId.startsWith('ref-')) {
+          this.log.warn(`[learner] Rejected update to ref-* node: ${nodeId}/${upd.aspectName} (ref nodes are seed-managed)`);
           continue;
         }
 
