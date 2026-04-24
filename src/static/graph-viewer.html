@@ -4538,6 +4538,12 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-runtime-workspace').textContent = _settingsValue(data.runtime?.workspacePath);
   document.getElementById('settings-runtime-data-dir').textContent = _settingsValue(data.runtime?.dataDir);
 
+  // System-prompt budgets — headline knobs (runtime + total) plus the
+  // collapsed all-sections grid. Inputs left blank when the current
+  // value matches the default; defaults shown next to the label so
+  // the user can see what they'd be overriding.
+  _populateBudgetInputs(data.budgets);
+
   updateErBadge(!!data.memory?.enhancedRecall);
   _applyRoleGatingToSettings();
   _populateProfileSection();
@@ -5125,6 +5131,80 @@ async function renderSettingsGraphsList() {
   }
 }
 
+function _populateBudgetInputs(budgets) {
+  if (!budgets) return;
+  const sectionDefaults = budgets.sectionDefaults || {};
+  const sections = budgets.sections || {};
+
+  // Headline runtime + total knobs
+  const runtimeInput = document.getElementById('settings-budget-runtime');
+  const runtimeDef = document.getElementById('settings-budget-runtime-default');
+  if (runtimeInput) {
+    const defVal = sectionDefaults.runtime;
+    const curVal = sections.runtime;
+    runtimeInput.value = (curVal != null && curVal !== defVal) ? curVal : '';
+    runtimeInput.placeholder = `default: ${defVal ?? '?'}`;
+  }
+  if (runtimeDef && sectionDefaults.runtime != null) {
+    runtimeDef.textContent = `(default ${sectionDefaults.runtime})`;
+  }
+
+  const totalInput = document.getElementById('settings-budget-total');
+  const totalDef = document.getElementById('settings-budget-total-default');
+  if (totalInput) {
+    const defVal = budgets.totalDefault;
+    const curVal = budgets.total;
+    totalInput.value = (curVal != null && curVal !== defVal) ? curVal : '';
+    totalInput.placeholder = `default: ${defVal ?? '?'}`;
+  }
+  if (totalDef && budgets.totalDefault != null) {
+    totalDef.textContent = `(default ${budgets.totalDefault})`;
+  }
+
+  // Per-section grid — render lazily so the DOM only carries 18 inputs
+  // when the user opens the <details>. Keep input ids predictable so
+  // saveSettingsPanel can read them by key.
+  const grid = document.getElementById('settings-budget-sections-grid');
+  if (!grid) return;
+  if (grid.dataset.rendered === '1') return;
+  const orderedKeys = Object.keys(sectionDefaults).sort();
+  grid.innerHTML = orderedKeys.map(k => {
+    const defVal = sectionDefaults[k];
+    const curVal = sections[k];
+    const overridden = (curVal != null && curVal !== defVal);
+    return `
+      <div class="settings-budget-row" style="display:flex;flex-direction:column;gap:2px">
+        <label for="settings-budget-section-${k}" style="font-size:0.85em">${k} <span style="opacity:0.55;font-weight:normal">(default ${defVal})</span></label>
+        <input id="settings-budget-section-${k}" data-budget-section="${k}" type="number" min="100" step="100" placeholder="${defVal}" value="${overridden ? curVal : ''}">
+      </div>
+    `;
+  }).join('');
+  grid.dataset.rendered = '1';
+}
+
+// Collect non-empty per-section overrides + headline runtime + total
+// into the budgets payload sent to /api/settings. Inputs left blank
+// fall back to the in-source default (no override sent for that key).
+function _collectBudgetsPayload() {
+  const sections = {};
+  document.querySelectorAll('#settings-budget-sections-grid input[data-budget-section]').forEach(el => {
+    const key = el.getAttribute('data-budget-section');
+    const raw = (el.value || '').trim();
+    if (!raw) return;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0) return;
+    sections[key] = n;
+  });
+  const runtimeRaw = (document.getElementById('settings-budget-runtime')?.value || '').trim();
+  const runtime = runtimeRaw ? parseInt(runtimeRaw, 10) : null;
+  if (Number.isFinite(runtime) && runtime > 0) sections.runtime = runtime;
+  const totalRaw = (document.getElementById('settings-budget-total')?.value || '').trim();
+  const total = totalRaw ? parseInt(totalRaw, 10) : null;
+  const out = { sections };
+  if (Number.isFinite(total) && total > 0) out.total = total;
+  return out;
+}
+
 async function saveSettingsPanel() {
   const { themeSelect } = getSettingsEls();
   const theme = themeSelect?.value || _currentTheme;
@@ -5221,6 +5301,7 @@ async function saveSettingsPanel() {
       backend: document.getElementById('settings-browser-backend').value,
     },
     publicUrl: document.getElementById('settings-runtime-public-url-input')?.value.trim() || '',
+    budgets: _collectBudgetsPayload(),
     webSearch: {
       searxngUrl: document.getElementById('settings-websearch-searxng-url').value.trim(),
       searxngApiKey: document.getElementById('settings-websearch-searxng-key').value.trim(),
@@ -17305,6 +17386,25 @@ build/
           <button type="button" class="settings-test-btn" id="settings-acorn-key-regen" title="Generate a new key (invalidates the old one)">regen</button>
         </div>
         <div class="settings-note" id="settings-acorn-note">Tick to enable; on save a key is auto-generated and shown here. Existing CLI users will need the new key if you regen.</div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="advanced">
+        <h4>System Prompt Budgets</h4>
+        <div class="settings-note">Token caps applied when assembling the agent's system prompt. Sections that exceed their cap are silently truncated from the END — leave defaults unless the plan-mode verification logs report missing markers (<code>docker logs ... | grep '[plan-mode]'</code>). Changes apply on the next turn — no restart needed.</div>
+
+        <label for="settings-budget-runtime">Runtime section <span class="settings-budget-default" id="settings-budget-runtime-default" style="opacity:0.6;font-weight:normal"></span></label>
+        <input id="settings-budget-runtime" type="number" min="100" step="100" placeholder="leave blank to use default">
+        <div class="settings-note">Carries project context, sandbox rules, plan-mode block (PHASE 1-5 + QUESTIONS protocol + tooling-question list + RULES). Bump this when you've added prompt content and the agent stops following late-block instructions.</div>
+
+        <label for="settings-budget-total" style="margin-top:14px">Total prompt budget <span class="settings-budget-default" id="settings-budget-total-default" style="opacity:0.6;font-weight:normal"></span></label>
+        <input id="settings-budget-total" type="number" min="1000" step="1000" placeholder="leave blank to use default">
+        <div class="settings-note">Hard cap on total system prompt size in tokens. The DROP_ORDER list (gaps → anti → selfknowledge → plugin → feed → tooling → runtime → reflections → derived → episodes) trims sections from least-important first when the total exceeds this.</div>
+
+        <details style="margin-top:14px">
+          <summary style="cursor:pointer;font-weight:500">Per-section budgets (advanced — 18 sections)</summary>
+          <div id="settings-budget-sections-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px"></div>
+          <div class="settings-note">Override individual sections — leave any field blank to use the default. Unknown keys and non-positive values are silently ignored at boot.</div>
+        </details>
       </div>
 
       <div class="settings-section wide" data-target-tab="tools">

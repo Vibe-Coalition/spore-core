@@ -768,6 +768,25 @@ class WebGateway {
         braveApiKeySet: !!this.config.braveApiKey,
       },
       modelLimits: this.config.modelLimits || {},
+      budgets: (() => {
+        // System-prompt section budgets (graph/context.js GraphContext).
+        // Surface the current effective values + class defaults so the UI
+        // can show "default: N" alongside each input. The UI exposes
+        // runtime + total as headline knobs; an "all 18 sections"
+        // expander uses sections + sectionDefaults.
+        const G = this.graph?.constructor;
+        const sectionDefaults = G ? { ...G.SECTION_BUDGETS } : {};
+        const totalDefault = G ? G.TOTAL_BUDGET : 40000;
+        const sections = this.graph?._sectionBudgets ? { ...this.graph._sectionBudgets } : { ...sectionDefaults };
+        const total = this.graph?._totalBudget ?? totalDefault;
+        return {
+          runtime: sections.runtime ?? sectionDefaults.runtime ?? null,
+          total,
+          sections,
+          sectionDefaults,
+          totalDefault,
+        };
+      })(),
       browser: {
         backend: this.config.browserBackend || 'zendriver',
         availableBackends: ['zendriver', 'playwright'],
@@ -1061,6 +1080,54 @@ class WebGateway {
       runtimePatch.modelLimits = cleaned;
     }
 
+    if (body.budgets && typeof body.budgets === 'object') {
+      // System-prompt budget overrides — persist to spore.json +
+      // SPORE_SECTION_BUDGETS / SPORE_TOTAL_BUDGET env, AND mutate the
+      // live GraphContext so the change takes effect on the very next
+      // turn (no restart). Validation mirrors the constructor: only
+      // known keys, only positive integers; everything else dropped.
+      const G = this.graph?.constructor;
+      const knownSectionKeys = new Set(G ? Object.keys(G.SECTION_BUDGETS) : []);
+      let sectionsCleaned = null;
+      if (body.budgets.sections && typeof body.budgets.sections === 'object') {
+        sectionsCleaned = {};
+        for (const [k, v] of Object.entries(body.budgets.sections)) {
+          if (!knownSectionKeys.has(k)) continue;
+          const n = Number(v);
+          if (!Number.isFinite(n) || n <= 0) continue;
+          sectionsCleaned[k] = Math.floor(n);
+        }
+      }
+      // Headline runtime knob — merge into sectionsCleaned if provided
+      // separately. Lets the UI send just {runtime: N} without echoing
+      // the entire 18-section map back.
+      if (Object.prototype.hasOwnProperty.call(body.budgets, 'runtime')) {
+        const n = Number(body.budgets.runtime);
+        if (Number.isFinite(n) && n > 0) {
+          sectionsCleaned = sectionsCleaned || {};
+          sectionsCleaned.runtime = Math.floor(n);
+        }
+      }
+      if (sectionsCleaned !== null) {
+        const json = Object.keys(sectionsCleaned).length ? JSON.stringify(sectionsCleaned) : null;
+        envUpdates.SPORE_SECTION_BUDGETS = json;
+        nextConfig.sectionBudgets = Object.keys(sectionsCleaned).length ? sectionsCleaned : undefined;
+        runtimePatch.sectionBudgets = sectionsCleaned;
+      }
+      if (Object.prototype.hasOwnProperty.call(body.budgets, 'total')) {
+        const n = Number(body.budgets.total);
+        if (Number.isFinite(n) && n > 0) {
+          envUpdates.SPORE_TOTAL_BUDGET = String(Math.floor(n));
+          nextConfig.totalPromptBudget = Math.floor(n);
+          runtimePatch.totalPromptBudget = Math.floor(n);
+        } else {
+          envUpdates.SPORE_TOTAL_BUDGET = null;
+          delete nextConfig.totalPromptBudget;
+          runtimePatch.totalPromptBudget = null;
+        }
+      }
+    }
+
     if (body.webSearch && typeof body.webSearch === 'object') {
       if (Object.prototype.hasOwnProperty.call(body.webSearch, 'searxngUrl')) {
         const u = String(body.webSearch.searxngUrl || '').trim();
@@ -1122,6 +1189,24 @@ class WebGateway {
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngApiKey')) this.config.searxngApiKey = runtimePatch.searxngApiKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'braveApiKey')) this.config.braveApiKey = runtimePatch.braveApiKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'modelLimits')) this.config.modelLimits = runtimePatch.modelLimits;
+    // Live-apply budget overrides to the running GraphContext so the
+    // next assembled system prompt picks them up without a restart.
+    // Falls back to class defaults when the override is empty/null
+    // (matches what GraphContext's constructor does).
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'sectionBudgets')) {
+      this.config.sectionBudgets = runtimePatch.sectionBudgets || {};
+      const G = this.graph?.constructor;
+      if (this.graph && G) {
+        this.graph._sectionBudgets = { ...G.SECTION_BUDGETS, ...(runtimePatch.sectionBudgets || {}) };
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'totalPromptBudget')) {
+      this.config.totalPromptBudget = runtimePatch.totalPromptBudget;
+      const G = this.graph?.constructor;
+      if (this.graph && G) {
+        this.graph._totalBudget = runtimePatch.totalPromptBudget || G.TOTAL_BUDGET;
+      }
+    }
     this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
     this.config._isOAuth = !!(this.config.anthropicApiKey && String(this.config.anthropicApiKey).includes('sk-ant-oat'));
     if (voiceTouched) this._voicePipeline = null;
