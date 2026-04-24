@@ -343,12 +343,17 @@ class Learner {
     const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId };
 
     if (this._running || this._llmBusy) {
+      const reason = this._running ? 'already-running' : 'llm-busy';
       if (this._queue.length >= this._maxQueue) {
         this.stats.skipped++;
+        this.log.info(`[learner] Extraction dropped — ${reason}, queue full (${this._queue.length}/${this._maxQueue})`);
+        graphEvents.emit('change', { op: 'learner:skip', reason: `${reason}-queue-full`, source: 'learner' });
         return;
       }
       this._queue.push({ batch: [entry] });
       this.stats.queued++;
+      this.log.info(`[learner] Extraction queued — ${reason} (queue depth ${this._queue.length}/${this._maxQueue})`);
+      graphEvents.emit('change', { op: 'learner:queue', reason, queueDepth: this._queue.length, source: 'learner' });
       return;
     }
 
@@ -358,6 +363,14 @@ class Learner {
 
   async _processBatchExtraction(batch) {
     this._running = true;
+    // Surface the extraction kickoff so operators know the learner is
+    // actually running — previously the only signal was the final
+    // "Extracted: NeN..." line AFTER the LLM call returned, which made
+    // idle/stalled states invisible.
+    const startedAt = Date.now();
+    const sessionId = batch[batch.length - 1]?.opts?.channelName || batch[batch.length - 1]?.opts?.userId || 'conversation';
+    this.log.info(`[learner] Extraction started (batch of ${batch.length}, session=${String(sessionId).slice(-30)})`);
+    graphEvents.emit('change', { op: 'learner:start', sessionKey: sessionId, batchSize: batch.length, source: 'learner' });
 
     try {
       let combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
@@ -406,11 +419,19 @@ class Learner {
         system,
         messages: [{ role: 'user', content: combinedExchange }],
       }), 'learner-extract');
-      if (!response) return;
+      if (!response) {
+        this.log.warn(`[learner] Extraction aborted — LLM returned no response (${Date.now() - startedAt}ms)`);
+        graphEvents.emit('change', { op: 'learner:done', sessionKey: sessionId, error: 'no-response', elapsedMs: Date.now() - startedAt, source: 'learner' });
+        return;
+      }
 
       const text = response.content.find(b => b.type === 'text')?.text || '';
       const extraction = this._parseExtraction(text);
-      if (!extraction) return;
+      if (!extraction) {
+        this.log.warn(`[learner] Extraction aborted — LLM output not parseable as JSON (${Date.now() - startedAt}ms, ${(response.usage?.input_tokens) || 0}in/${(response.usage?.output_tokens) || 0}out)`);
+        graphEvents.emit('change', { op: 'learner:done', sessionKey: sessionId, error: 'parse-fail', elapsedMs: Date.now() - startedAt, source: 'learner' });
+        return;
+      }
 
       const lastEpisodeId = batch[batch.length - 1].episodeId;
 
@@ -425,10 +446,28 @@ class Learner {
 
       const inTok = response.usage?.input_tokens || 0;
       const outTok = response.usage?.output_tokens || 0;
+      const elapsed = Date.now() - startedAt;
 
+      // Always log the outcome, even when empty — a silent learner
+      // pass used to look identical to "learner not running" in the
+      // live logs. The empty case is useful signal: "the LLM saw the
+      // turn and decided nothing new was worth capturing."
       if (wrote.total > 0) {
-        this.log.info(`[learner] Extracted (batch of ${batch.length}): ${wrote.entities}e ${wrote.aspects}a ${wrote.updates || 0}u ${wrote.edges}r ${wrote.gaps || 0}g (${inTok}/${outTok} tokens)`);
+        this.log.info(`[learner] Extracted (batch of ${batch.length}): ${wrote.entities}e ${wrote.aspects}a ${wrote.updates || 0}u ${wrote.edges}r ${wrote.gaps || 0}g (${inTok}/${outTok} tokens, ${elapsed}ms)`);
+      } else {
+        this.log.info(`[learner] Extraction empty (batch of ${batch.length}, ${inTok}/${outTok} tokens, ${elapsed}ms) — nothing new worth capturing`);
       }
+      graphEvents.emit('change', {
+        op: 'learner:done',
+        sessionKey: sessionId,
+        entities: wrote.entities || 0,
+        aspects: wrote.aspects || 0,
+        updates: wrote.updates || 0,
+        edges: wrote.edges || 0,
+        gaps: wrote.gaps || 0,
+        elapsedMs: elapsed,
+        source: 'learner',
+      });
 
       // Verification pass
       try {
