@@ -2225,7 +2225,19 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       // back, picks winners (promotes by clearing ttl), and recycles the
       // rest. Without a session ctx the discovery is permanent — same
       // shape as a non-acorn note_discovery call.
-      const extraJson = sessionId
+      //
+      // Post-distill race guard — if the session already distilled,
+      // tagging would create an orphan temp (distill won't re-run).
+      let sessionAlreadyDistilled = false;
+      if (sessionId) {
+        try {
+          const sessRow = db.prepare(
+            "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+          ).get('session-' + String(sessionId));
+          sessionAlreadyDistilled = !!sessRow?.distilled;
+        } catch {}
+      }
+      const extraJson = (sessionId && !sessionAlreadyDistilled)
         ? JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() })
         : '{}';
       db.prepare(
@@ -2378,16 +2390,27 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const acornSessionId = (ctx.platform === 'cli' || this._currentPlatform === 'cli')
           ? (ctx.channelId || this._currentChannelId)
           : null;
+        // Post-distill race guard — same as _noteDiscoveryTool.
+        let sessionAlreadyDistilled = false;
+        if (acornSessionId) {
+          try {
+            const sessRow = db.prepare(
+              "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+            ).get('session-' + String(acornSessionId));
+            sessionAlreadyDistilled = !!sessRow?.distilled;
+          } catch {}
+        }
+        const effectiveSessionId = sessionAlreadyDistilled ? null : acornSessionId;
         let extraObj;
         if (setTemp) {
           extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
-          if (acornSessionId) extraObj.sessionId = acornSessionId;
+          if (effectiveSessionId) extraObj.sessionId = effectiveSessionId;
         } else if (clearTemp) {
           extraObj = {};
-        } else if (acornSessionId) {
+        } else if (effectiveSessionId) {
           // Default for an acorn session: born temp, tied to sessionId.
           // Distillation at session-end picks winners.
-          extraObj = { ttl: 'temp', sessionId: acornSessionId, tempCreated: new Date().toISOString() };
+          extraObj = { ttl: 'temp', sessionId: effectiveSessionId, tempCreated: new Date().toISOString() };
         } else {
           extraObj = {};
         }

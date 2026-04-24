@@ -454,8 +454,21 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     // Strip optional markdown fences in case the LLM ignored the rule
     const jsonText = respText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
     let parsed;
-    try { parsed = JSON.parse(jsonText); } catch (e) {
-      throw new Error(`distillation LLM returned non-JSON: ${e.message}; raw: ${respText.slice(0, 300)}`);
+    if (!jsonText) {
+      // Empty LLM response — don't abort the whole distillation. The
+      // right semantic here is "LLM had no opinion" → no promotions, no
+      // creations, no appendNotes, and the regular soft-delete sweep
+      // runs on every untouched temp. Beats leaving temps stranded
+      // because the LLM blinked.
+      if (log) log.warn(`[distill] ${id} LLM returned empty — proceeding with no promotions, soft-deleting all temps`);
+      parsed = { promote: [], createNodes: [], appendNotes: [] };
+    } else {
+      try { parsed = JSON.parse(jsonText); } catch (e) {
+        // Malformed JSON same treatment — don't strand temps. Log what
+        // we got so we can tune the prompt if this becomes a pattern.
+        if (log) log.warn(`[distill] ${id} non-JSON response — proceeding with no promotions. raw: ${respText.slice(0, 200)}`);
+        parsed = { promote: [], createNodes: [], appendNotes: [] };
+      }
     }
 
     const promoteList = Array.isArray(parsed.promote) ? parsed.promote : [];
@@ -539,13 +552,22 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         // For simplicity: if target exists, leave it; just delete the temp's ttl after the merge step below.
         const exists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(targetId);
         if (!exists) {
-          // Rename via UPDATE — sqlite allows changing PRIMARY KEY, FK CASCADE handles aspects/edges.
+          // PRAGMA defer_foreign_keys lets us reorder the updates
+          // inside a transaction without the interim state
+          // (aspects/edges pointing to a renamed-but-not-yet-renamed id)
+          // tripping the FK check. Previously the nodes UPDATE would
+          // FK-fail immediately when any edge pointed at the temp,
+          // and we'd fall back to the original id with no rename.
           try {
+            db.exec('BEGIN IMMEDIATE');
+            db.exec('PRAGMA defer_foreign_keys = 1');
             db.prepare('UPDATE nodes SET id = ? WHERE id = ?').run(targetId, tempId);
             db.prepare('UPDATE aspects SET node_id = ? WHERE node_id = ?').run(targetId, tempId);
             db.prepare('UPDATE edges SET source = ? WHERE source = ?').run(targetId, tempId);
             db.prepare('UPDATE edges SET target = ? WHERE target = ?').run(targetId, tempId);
+            db.exec('COMMIT');
           } catch (e) {
+            try { db.exec('ROLLBACK'); } catch {}
             if (log) log.warn(`[distill] rename ${tempId} → ${targetId} failed: ${e.message} (keeping original id)`);
           }
         }

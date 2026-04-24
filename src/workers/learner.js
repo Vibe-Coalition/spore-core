@@ -1024,8 +1024,26 @@ The JSON schema for updates becomes:
             (opts.userId && id === String(opts.userId).toLowerCase()) ||
             (opts.userName && id === String(opts.userName).toLowerCase());
 
+          // Post-distill race guard — if the learner extraction was
+          // queued DURING the session but is running AFTER its
+          // distillation finished, we cannot rely on distill to clean
+          // up temps any more. Tagging with the stale sessionId
+          // creates an orphan that sits temp until the 48h janitor.
+          // Detection: look up session-<id>'s extra.distilled_at. If
+          // set, the session is closed — skip the temp tag so this
+          // late-arriving node lands as permanent.
+          let sessionAlreadyDistilled = false;
+          if (opts.sessionId) {
+            try {
+              const sessRow = this.db.prepare(
+                "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+              ).get('session-' + String(opts.sessionId));
+              sessionAlreadyDistilled = !!sessRow?.distilled;
+            } catch {}
+          }
+
           let extraObj;
-          if (opts.sessionId && !isIdentityNode) {
+          if (opts.sessionId && !isIdentityNode && !sessionAlreadyDistilled) {
             extraObj = { ttl: 'temp', sessionId: opts.sessionId, tempCreated: new Date().toISOString() };
           } else if (ent.ephemeral === true) {
             extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
