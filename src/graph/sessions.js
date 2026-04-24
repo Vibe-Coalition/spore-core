@@ -431,7 +431,8 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '',
       'Heuristics:',
       '  PROMOTE: durable discoveries, failure→fix pairs, workflows that worked, configuration values that worked, discoveries linked to project identity.',
-      '  CREATE_NODES: every tool/library/framework/service USED. If the session touched `npm`, `expo`, `qrcode`, `powershell`, `node`, `git` — create a node for each that doesn\'t already exist. Keep descriptions factual and small; put session-specific quirks in a `gotchas` aspect on the created node.',
+      '  CREATE_NODES: external tools/libraries/frameworks/services the project uses. Think `npm`, `expo`, `qrcode-terminal`, `react-native`, `docker`, `postgres`, `vite`, `tailwind`, `pnpm`, `pytest`. Keep descriptions factual and small; put session-specific quirks on a `gotchas` aspect.',
+      '  DO NOT create nodes for the agent\'s own built-in tools — those are always available, so nodes for them are graph noise. Skip: exec, sleep, read_file, write_file, edit_file, glob, grep, graph_query, graph_update, graph_delete, note_discovery, web_search, web_fetch, ask_user, message_send, delegate_task, schedule_wakeup, save_tool, browser_*, terminal_*, ssh_*, email_*, voice_*, notify_user. These are SPORE tools the agent already has, not things learned during the session.',
       '  APPEND_NOTES: version-specific gotchas, "X is deprecated, use Y", configuration tips discovered by trial-and-error.',
       '  DROP: error log dumps, intermediate debug captures, half-formed thoughts, generic concepts already well-covered in the graph.',
       '',
@@ -503,9 +504,27 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     // tools/frameworks/libraries USED this session but not already in
     // the graph. These don't need to have been temp candidates; the
     // LLM identifies them from the round breadcrumbs + summary.
+    // SPORE built-in tools the agent always has — hard-reject
+    // createNode attempts for these so the graph doesn't fill up with
+    // "tool: exec", "tool: sleep", "tool: read_file" nodes that tell
+    // future sessions nothing new.
+    const BUILTIN_TOOLS = new Set([
+      'exec', 'sleep', 'read_file', 'write_file', 'edit_file',
+      'glob', 'grep', 'graph_query', 'graph_update', 'graph_delete',
+      'note_discovery', 'web_search', 'web_fetch', 'ask_user',
+      'message_send', 'delegate_task', 'schedule_wakeup', 'save_tool',
+      'browser_control', 'terminal_open', 'ssh_connect', 'email_read',
+      'voice_chat', 'notify_user', 'log_watch', 'task_create',
+      'task_update', 'web_serve', 'env_manage', 'data_poller',
+      'analyze_media',
+    ]);
     for (const c of createList) {
       const newId = String(c?.nodeId || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
       if (!newId) continue;
+      if (BUILTIN_TOOLS.has(newId)) {
+        if (log) log.info(`[distill] skipped createNode ${newId} — SPORE built-in tool, not distillation material`);
+        continue;
+      }
       const label = String(c?.label || newId).slice(0, 120);
       const nodeType = String(c?.type || 'tool').toLowerCase().replace(/[^a-z_]/g, '_').slice(0, 20) || 'tool';
       const description = String(c?.description || '').slice(0, 500);
