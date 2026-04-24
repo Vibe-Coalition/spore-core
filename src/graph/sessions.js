@@ -185,8 +185,18 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
   if (!learner?.db || !llmClient || !sessionId) return;
   const id = sessionNodeId(sessionId);
   const db = learner.db;
-  const node = db.prepare('SELECT id, label FROM nodes WHERE id = ?').get(id);
+  const node = db.prepare('SELECT id, label, extra FROM nodes WHERE id = ?').get(id);
   if (!node) return; // session never started
+
+  // Idempotency: graceful close calls this from session:end, then
+  // ws.on('close') chains it again. Mark on first success so the
+  // second call short-circuits instead of repeating the LLM call.
+  let extraObj = {};
+  try { extraObj = node.extra ? JSON.parse(node.extra) : {}; } catch {}
+  if (extraObj.summarized_at) {
+    if (log) log.info(`[graphcorn] summary already written for ${id} at ${extraObj.summarized_at}, skipping`);
+    return;
+  }
 
   // Pull the round breadcrumbs — chronological from oldest to newest.
   const rows = db.prepare(
@@ -242,10 +252,275 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     db.prepare(
       "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 8, 'session-end', 'graphcorn')"
     ).run(asp.id, text);
+    extraObj.summarized_at = new Date().toISOString();
+    db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(JSON.stringify(extraObj), id);
     if (log) log.info(`[graphcorn] session ${id} summary written (${text.length} chars, ${rows.length} rounds, model=${model})`);
   } catch (e) {
     if (log) log.warn(`[graphcorn] summary for ${id} failed: ${e.message}`);
   }
 }
 
-module.exports = { sessionNodeId, upsertSessionNode, finalizeSessionNode, bumpTurnCount, summarizeSessionNode };
+// distillSession — Phase 8 (extends Phase 7).
+//
+// Background: every node born inside an acorn session is now stamped
+// extra.ttl='temp' + extra.sessionId. That covers note_discovery, the
+// learner, and graph_update calls made by the agent. Without this
+// distillation step they'd auto-clean in 48h via the existing janitor —
+// which loses signal. Distillation runs on session close (graceful or
+// not) and:
+//
+//   1. Pulls every session-temp node + its aspects/attributes/edges.
+//   2. Asks a small LLM: which of these belong in the permanent graph,
+//      and what should we add to existing permanent nodes (e.g. append
+//      "learned in session X: ..." to the framework's gotchas).
+//   3. PROMOTES the winners by clearing their temp flag.
+//   4. APPENDS the agent's "what we learned" notes onto target nodes
+//      (which may be permanent nodes that already existed before this
+//      session — that's the merge case).
+//   5. SOFT-DELETES everything else into recycle_bin with a 7-day
+//      expiry. The existing janitor housekeeping pass cleans the bin.
+//
+// Idempotent via extra.distilled_at on the session node — a second call
+// (e.g. session:end frame followed by ws.on('close')) is a no-op.
+//
+// Failure mode: distillation never throws to the caller; the session
+// node gets extra.distill_error set so we can spot trouble. Temps stay
+// temp and the existing 48h janitor is the safety net.
+async function distillSession(learner, llmClient, config, sessionId, log) {
+  if (!learner?.db || !llmClient || !sessionId) return { skipped: 'missing-deps' };
+  const db = learner.db;
+  const id = sessionNodeId(sessionId);
+  const node = db.prepare('SELECT id, extra FROM nodes WHERE id = ?').get(id);
+  if (!node) {
+    if (log) log.info(`[distill] ${id} session node missing — nothing to distill`);
+    return { skipped: 'no-session-node' };
+  }
+  let extraObj = {};
+  try { extraObj = node.extra ? JSON.parse(node.extra) : {}; } catch {}
+  if (extraObj.distilled_at) {
+    if (log) log.info(`[distill] ${id} already distilled at ${extraObj.distilled_at}, skipping`);
+    return { skipped: 'already-distilled' };
+  }
+  if (extraObj.distilling) {
+    if (log) log.info(`[distill] ${id} distillation in progress (concurrent call), skipping`);
+    return { skipped: 'in-progress' };
+  }
+
+  // Race lock — both session:end frame and ws.on('close') can fire.
+  // Setting `distilling` makes the second caller bail at the check above.
+  extraObj.distilling = true;
+  db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+    .run(JSON.stringify(extraObj), id);
+
+  try {
+    const tempRows = db.prepare(
+      "SELECT id, label, type, description, extra FROM nodes WHERE json_extract(extra, '$.sessionId') = ? AND json_extract(extra, '$.ttl') = 'temp'"
+    ).all(sessionId);
+
+    if (tempRows.length === 0) {
+      extraObj.distilled_at = new Date().toISOString();
+      extraObj.distilled_promoted = 0;
+      extraObj.distilled_dropped = 0;
+      delete extraObj.distilling;
+      db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(JSON.stringify(extraObj), id);
+      if (log) log.info(`[distill] ${id} no session-temp nodes — marked complete`);
+      return { promoted: 0, dropped: 0 };
+    }
+
+    // Build a per-node digest the LLM can read. Cap aspects/attrs to
+    // keep the prompt bounded.
+    const aspStmt = db.prepare(
+      "SELECT asp.name AS aspect_name, a.content AS attr FROM aspects asp LEFT JOIN attributes a ON a.aspect_id = asp.id WHERE asp.node_id = ? ORDER BY asp.id, a.id LIMIT 60"
+    );
+    const edgeStmt = db.prepare(
+      "SELECT target, type FROM edges WHERE source = ? LIMIT 10"
+    );
+    const digests = tempRows.map(n => {
+      const aspects = aspStmt.all(n.id);
+      const grouped = {};
+      for (const r of aspects) {
+        if (!grouped[r.aspect_name]) grouped[r.aspect_name] = [];
+        if (r.attr) grouped[r.aspect_name].push(r.attr);
+      }
+      return {
+        id: n.id,
+        label: n.label,
+        type: n.type,
+        description: (n.description || '').slice(0, 300),
+        aspects: grouped,
+        edges: edgeStmt.all(n.id),
+      };
+    });
+
+    // Pull session summary + a few rounds for context (so the LLM sees
+    // what the user was actually working on).
+    const summaryRow = db.prepare(
+      "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='summary' ORDER BY a.id DESC LIMIT 1"
+    ).get(id);
+    const sessionSummary = summaryRow?.content || '(no summary; distillation running before session summarizer or agent declined to summarize)';
+    const roundRows = db.prepare(
+      "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='rounds' ORDER BY a.id DESC LIMIT 10"
+    ).all(id);
+    const recentRounds = roundRows.reverse().map(r => '  ' + r.content).join('\n');
+
+    const promptText = [
+      'You are distilling an acorn coding session into permanent graph knowledge. Your job is to keep the SIGNAL and drop the NOISE.',
+      '',
+      `Session: ${id}`,
+      'Session summary:',
+      sessionSummary,
+      '',
+      `Recent rounds (last 10):\n${recentRounds || '  (no rounds recorded)'}`,
+      '',
+      `${tempRows.length} temporary nodes were created during this session. For each, decide:`,
+      '  • PROMOTE — keep as a permanent node (the user/future sessions will benefit from this)',
+      '  • DROP — let it be recycled (one-off scratch, redundant, no lasting value)',
+      '',
+      'Heuristics:',
+      '  PROMOTE: tools, libraries, frameworks (with version-specific quirks discovered THIS session), people, projects, durable workflows, failure→fix pairs, learned best practices, configuration values that worked.',
+      '  DROP: error log dumps, intermediate debug captures, half-formed thoughts, generic concepts already well-covered in the graph.',
+      '',
+      'For PROMOTE, you may also append a single "learned this session" line on a `gotchas` aspect of the SAME node OR on an OTHER existing permanent node (e.g. add "Learned in session: expo router 4.x changed the typed-routes default to true" to the existing `expo-router` node\'s gotchas).',
+      '',
+      'Temporary nodes from this session:',
+      JSON.stringify(digests, null, 2),
+      '',
+      'Output VALID JSON only — no prose, no markdown fences. Schema:',
+      '{',
+      '  "promote": [',
+      '    { "nodeId": "<existing temp id from the list>", "renameTo": "<optional better permanent id, e.g. \\"expo-router\\" instead of \\"discovery-...\\"; omit to keep current id>" }',
+      '  ],',
+      '  "appendNotes": [',
+      '    { "targetNodeId": "<existing permanent or just-promoted node id>", "aspect": "gotchas", "content": "Learned in session: <specific lesson>" }',
+      '  ]',
+      '}',
+      'Anything not in `promote` will be soft-deleted (recycle_bin, 7-day retention). Keep `promote` tight — quality over quantity.',
+    ].join('\n');
+
+    const model = config?.casualModel || config?.normalModel || config?.model;
+    const resp = await llmClient.messages.create({
+      model,
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: promptText }],
+    });
+    const respText = ((resp?.content || []).find(b => b.type === 'text')?.text || '').trim();
+
+    // Strip optional markdown fences in case the LLM ignored the rule
+    const jsonText = respText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(jsonText); } catch (e) {
+      throw new Error(`distillation LLM returned non-JSON: ${e.message}; raw: ${respText.slice(0, 300)}`);
+    }
+
+    const promoteList = Array.isArray(parsed.promote) ? parsed.promote : [];
+    const appendList = Array.isArray(parsed.appendNotes) ? parsed.appendNotes : [];
+    const tempIdSet = new Set(tempRows.map(n => n.id));
+    const promotedIds = new Set();
+
+    for (const p of promoteList) {
+      const tempId = String(p?.nodeId || '');
+      if (!tempIdSet.has(tempId)) continue;
+      const targetId = (p?.renameTo && String(p.renameTo).trim()) || tempId;
+      if (targetId !== tempId) {
+        // Rename: copy aspects/attributes/edges from temp → new permanent id (if not already there), drop temp.
+        // For simplicity: if target exists, leave it; just delete the temp's ttl after the merge step below.
+        const exists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(targetId);
+        if (!exists) {
+          // Rename via UPDATE — sqlite allows changing PRIMARY KEY, FK CASCADE handles aspects/edges.
+          try {
+            db.prepare('UPDATE nodes SET id = ? WHERE id = ?').run(targetId, tempId);
+            db.prepare('UPDATE aspects SET node_id = ? WHERE node_id = ?').run(targetId, tempId);
+            db.prepare('UPDATE edges SET source = ? WHERE source = ?').run(targetId, tempId);
+            db.prepare('UPDATE edges SET target = ? WHERE target = ?').run(targetId, tempId);
+          } catch (e) {
+            if (log) log.warn(`[distill] rename ${tempId} → ${targetId} failed: ${e.message} (keeping original id)`);
+          }
+        }
+        // else: target already exists; keep both (merge would risk dupe attributes — leave as-is for safety)
+      }
+      // Clear temp flag on the (possibly renamed) node — this is the "promote" step.
+      const nodeRow = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(targetId === tempId ? tempId : targetId);
+      if (nodeRow) {
+        let ext = {};
+        try { ext = nodeRow.extra ? JSON.parse(nodeRow.extra) : {}; } catch {}
+        delete ext.ttl;
+        delete ext.tempCreated;
+        delete ext.sessionId;
+        ext.distilled_from = sessionId;
+        ext.distilled_at = new Date().toISOString();
+        db.prepare('UPDATE nodes SET extra = ?, importance = MAX(importance, 6), updated = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(JSON.stringify(ext), targetId);
+        promotedIds.add(tempId);
+      }
+    }
+
+    // Append notes — adds attributes to a `gotchas` (or specified) aspect.
+    let notesAppended = 0;
+    for (const a of appendList) {
+      const tgt = String(a?.targetNodeId || '');
+      const aspectName = String(a?.aspect || 'gotchas').replace(/[^a-z0-9_]/gi, '_').slice(0, 40) || 'gotchas';
+      const content = String(a?.content || '').trim();
+      if (!tgt || !content) continue;
+      if (!db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(tgt)) continue;
+      let asp = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(tgt, aspectName);
+      if (!asp) {
+        db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, 7, 'graphcorn-distill')").run(tgt, aspectName);
+        asp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+      }
+      const dup = db.prepare('SELECT 1 FROM attributes WHERE aspect_id = ? AND content = ?').get(asp.id, content);
+      if (!dup) {
+        db.prepare(
+          "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn-distill', 'graphcorn-distill')"
+        ).run(asp.id, content);
+        notesAppended++;
+      }
+    }
+
+    // Soft-delete every session-temp NOT promoted → recycle_bin, 7-day expiry.
+    let dropped = 0;
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const insBin = db.prepare(
+      "INSERT INTO recycle_bin (item_type, item_id, label, payload, deleted_by, reason, confidence, expires_at) VALUES ('node', ?, ?, ?, 'graphcorn-distill', ?, 1.0, ?)"
+    );
+    for (const t of tempRows) {
+      if (promotedIds.has(t.id)) continue;
+      // Double-check the node still exists at this id (rename case)
+      const stillThere = db.prepare('SELECT id, label, type, description, extra FROM nodes WHERE id = ?').get(t.id);
+      if (!stillThere) continue;
+      const aspects = aspStmt.all(t.id);
+      const edges = edgeStmt.all(t.id);
+      const payload = JSON.stringify({ node: stillThere, aspects, edges });
+      try {
+        insBin.run(t.id, t.label, payload, `session ${sessionId} not promoted`, expiresAt);
+        db.prepare('DELETE FROM nodes WHERE id = ?').run(t.id);
+        dropped++;
+      } catch (e) {
+        if (log) log.warn(`[distill] failed to recycle ${t.id}: ${e.message}`);
+      }
+    }
+
+    extraObj.distilled_at = new Date().toISOString();
+    extraObj.distilled_promoted = promotedIds.size;
+    extraObj.distilled_dropped = dropped;
+    extraObj.distilled_notes_appended = notesAppended;
+    delete extraObj.distilling;
+    db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(JSON.stringify(extraObj), id);
+
+    if (log) log.info(`[distill] ${id} done: promoted=${promotedIds.size} dropped=${dropped} notes=${notesAppended} model=${model}`);
+    return { promoted: promotedIds.size, dropped, notesAppended };
+  } catch (e) {
+    extraObj.distilling = false;
+    extraObj.distill_error = e.message;
+    extraObj.distill_error_at = new Date().toISOString();
+    try {
+      db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), id);
+    } catch {}
+    if (log) log.warn(`[distill] ${id} failed: ${e.message} (temps left in place; janitor will clean in 48h)`);
+    return { error: e.message };
+  }
+}
+
+module.exports = { sessionNodeId, upsertSessionNode, finalizeSessionNode, bumpTurnCount, summarizeSessionNode, distillSession };

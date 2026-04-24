@@ -2220,10 +2220,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     let isNew = false;
     if (!existing) {
       isNew = true;
+      // graphcorn: in an acorn session, every new node is born temp +
+      // tagged with the sessionId. Session-end distillation reads these
+      // back, picks winners (promotes by clearing ttl), and recycles the
+      // rest. Without a session ctx the discovery is permanent — same
+      // shape as a non-acorn note_discovery call.
+      const extraJson = sessionId
+        ? JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() })
+        : '{}';
       db.prepare(
-        'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at) ' +
-        'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)'
-      ).run(id, label, 'discovery', text, 7, 'graphcorn', 'note_discovery', new Date().toISOString());
+        'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
+        'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
+      ).run(id, label, 'discovery', text, 7, 'graphcorn', 'note_discovery', new Date().toISOString(), extraJson);
     } else {
       db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
     }
@@ -2361,9 +2369,29 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             .run(JSON.stringify(extraObj), id);
         }
       } else {
-        const extraJson = setTemp
-          ? JSON.stringify({ ttl: 'temp', tempCreated: new Date().toISOString() })
-          : '{}';
+        // graphcorn: when graph_update is called inside an acorn session
+        // ctx, default any NEW node to session-temp + tag with sessionId.
+        // Agent can override by passing temp:false explicitly. Existing
+        // explicit temp:true stays temp the same way. Outside an acorn
+        // ctx (web/discord/cron), behavior is unchanged.
+        const ctx = _execContext.getStore() || {};
+        const acornSessionId = (ctx.platform === 'cli' || this._currentPlatform === 'cli')
+          ? (ctx.channelId || this._currentChannelId)
+          : null;
+        let extraObj;
+        if (setTemp) {
+          extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
+          if (acornSessionId) extraObj.sessionId = acornSessionId;
+        } else if (clearTemp) {
+          extraObj = {};
+        } else if (acornSessionId) {
+          // Default for an acorn session: born temp, tied to sessionId.
+          // Distillation at session-end picks winners.
+          extraObj = { ttl: 'temp', sessionId: acornSessionId, tempCreated: new Date().toISOString() };
+        } else {
+          extraObj = {};
+        }
+        const extraJson = JSON.stringify(extraObj);
         db.prepare(
           'INSERT INTO nodes (id, label, type, description, importance, mentions, extracted_with, extracted_at, provenance, extra) VALUES (?, ?, ?, ?, 5, 1, ?, ?, ?, ?)'
         ).run(id, label, type, description || '', 'spore-tool', new Date().toISOString(), 'self', extraJson);

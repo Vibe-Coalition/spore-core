@@ -997,9 +997,19 @@ The JSON schema for updates becomes:
             } catch {}
           }
         } else {
-          const extraJson = (ent.ephemeral === true)
-            ? JSON.stringify({ ttl: 'temp', tempCreated: new Date().toISOString() })
-            : '{}';
+          // graphcorn: when called inside an acorn session, every new
+          // learner-extracted node is born temp + tagged with sessionId
+          // so session-end distillation can pick winners. Without a
+          // sessionId we fall back to the existing ent.ephemeral path.
+          let extraObj;
+          if (opts.sessionId) {
+            extraObj = { ttl: 'temp', sessionId: opts.sessionId, tempCreated: new Date().toISOString() };
+          } else if (ent.ephemeral === true) {
+            extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
+          } else {
+            extraObj = {};
+          }
+          const extraJson = JSON.stringify(extraObj);
           this.db.prepare(
             'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
           ).run(id, ent.label, ent.type, ent.description || '', 5, 'self', 'spore-learner', new Date().toISOString(), extraJson);

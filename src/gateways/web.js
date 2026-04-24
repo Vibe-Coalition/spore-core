@@ -4283,15 +4283,16 @@ class WebGateway {
             const sessions = require('../graph/sessions');
             sessions.finalizeSessionNode(this.tools?.learner, msg.sessionId, { endedAt: msg.endedAt });
             this.log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
-            // Phase 7: fire-and-forget summarizer. Pulls the round
-            // breadcrumbs already written to the session node and asks
-            // a small LLM to recap them. Result lands as a `summary`
-            // aspect on the session node, NOT echoed to chat. Doesn't
-            // block the WS close.
+            // Phase 7 + 8: chain summarize → distill. Both fire-and-forget
+            // so they don't block the WS close. distillSession is
+            // idempotent (extra.distilled_at marker), so if the WS
+            // ALSO drops and re-fires distillation from the close
+            // handler below, the second call is a no-op.
             const llmClient = this.tools?.anthropicClient;
             if (llmClient) {
               sessions.summarizeSessionNode(this.tools.learner, llmClient, this.config, msg.sessionId, this.log)
-                .catch(e => this.log.warn(`[graphcorn] summary error: ${e.message}`));
+                .then(() => sessions.distillSession(this.tools.learner, llmClient, this.config, msg.sessionId, this.log))
+                .catch(e => this.log.warn(`[graphcorn] summary/distill error: ${e.message}`));
             }
           } catch (e) {
             this.log.warn(`[graphcorn] session:end failed: ${e.message}`);
@@ -5111,6 +5112,41 @@ class WebGateway {
             }
           }
         }
+
+        // graphcorn Phase 8: ungraceful close also triggers distillation.
+        // The graceful path (session:end frame) sets distilled_at first;
+        // distillSession's idempotency guard makes the close-side call a
+        // no-op when graceful already ran. For network drop / SIGKILL /
+        // alt-tab-and-leave-it, the session:end never arrives and this
+        // is the only chance to distill before the 48h janitor sweep.
+        if (ws._role === 'acorn') {
+          const acornSessionIds = new Set();
+          for (const [sid, clients] of this._sessionClients) {
+            for (const entry of clients) {
+              if (entry.ws === ws) acornSessionIds.add(sid);
+            }
+          }
+          if (acornSessionIds.size > 0) {
+            const sessions = require('../graph/sessions');
+            const llmClient = this.tools?.anthropicClient;
+            for (const sid of acornSessionIds) {
+              try {
+                sessions.finalizeSessionNode(this.tools?.learner, sid, { endedAt: new Date().toISOString() });
+                if (llmClient) {
+                  // Same chain as the graceful path — summarize, then
+                  // distill. Both functions short-circuit if the prior
+                  // session:end already ran them.
+                  sessions.summarizeSessionNode(this.tools.learner, llmClient, this.config, sid, this.log)
+                    .then(() => sessions.distillSession(this.tools.learner, llmClient, this.config, sid, this.log))
+                    .catch(e => this.log.warn(`[graphcorn] ws-close distill error: ${e.message}`));
+                }
+              } catch (e) {
+                this.log.warn(`[graphcorn] ws-close finalize failed: ${e.message}`);
+              }
+            }
+          }
+        }
+
         this._removeClientFromAllSessions(ws);
         if (onGraphEvent) graphEvents.off('change', onGraphEvent);
         if (ws._terminals) {

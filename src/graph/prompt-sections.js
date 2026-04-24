@@ -1111,6 +1111,7 @@ function applyPromptSectionsMixin(GraphContext) {
           parts.push("- `note_discovery` kinds: `fact` (plain knowledge), `gotcha` (non-obvious behavior), `workflow` (a procedure that worked), `config` (a setting/value), `failure_fix` (problem→solution pair).");
           parts.push("- Use `graph_update` directly when you want full schema control (custom node type, multiple aspects, explicit edges to specific nodes). Use `note_discovery` for casual one-line saves — way less boilerplate.");
           parts.push("- Every entity the LEARNER picks up from this conversation also auto-links to the session node via `discovered_in`. So even passive captures are anchored — no orphans.");
+          parts.push("- **Born temporary, distilled at session-end.** Every node you create this session (note_discovery, graph_update, learner-extracted) is born `temp` and tagged with this session id. When the session closes (graceful or ungraceful), a small LLM looks at all of them and **PROMOTES** the keepers to permanent (tools, libraries, frameworks, people, projects, durable workflows, failure→fix pairs), **APPENDS** session-specific lessons onto existing permanent nodes' `gotchas`, and soft-deletes the rest into `recycle_bin` (7-day restore window). So: capture aggressively, don't agonize over signal-vs-noise — distillation is the filter. If you really want a node permanent immediately (rare — only for things you're CERTAIN matter beyond this session), pass `temp: false` to `graph_update`.");
         }
       }
 
