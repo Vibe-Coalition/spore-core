@@ -56,12 +56,17 @@ function upsertSessionNode(learner, opts = {}) {
 
   // Always make sure the project node exists too — gives us the edge
   // target (and matches the user-cwd convention for the edge below).
+  // Pass sessionId so the project node is born temp + session-tagged
+  // ONLY if it's freshly created in this session. Returning users hit
+  // an already-permanent project node; upsertProject leaves its extra
+  // alone in that case.
   let projectId = null;
   if (cwd) {
     const projRes = projects.upsertProject(learner, userId || 'anon', {
       cwd, project: opts.project, gitBranch: opts.gitBranch, gitHash: opts.gitHash,
       projectType: opts.projectType, acornMd: opts.acornMd, tree: opts.tree,
       tools: opts.tools, os: opts.os, arch: opts.arch,
+      sessionId,
     });
     projectId = projRes?.id || null;
   }
@@ -77,10 +82,15 @@ function upsertSessionNode(learner, opts = {}) {
       (userName ? ' by ' + userName : '') +
       (cwd ? ' in ' + cwd : '') +
       (startedAt ? ' (started ' + startedAt + ')' : '');
+    // Born temp + tagged with self sessionId so the existing 48h
+    // janitor reaps the session node 48h after creation if nothing
+    // promotes it. Distillation sets extra.distilled_at on this node
+    // for idempotency; that flag survives the temp tagging.
+    const extraJson = JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() });
     db.prepare(
-      'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at) ' +
-      'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)'
-    ).run(id, label, 'session', description, 6, 'graphcorn', 'session-start', new Date().toISOString());
+      'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
+      'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
+    ).run(id, label, 'session', description, 6, 'graphcorn', 'session-start', new Date().toISOString(), extraJson);
   } else {
     db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
   }
@@ -314,9 +324,14 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     .run(JSON.stringify(extraObj), id);
 
   try {
+    // Exclude the session node itself from the candidate list — it
+    // holds extra.distilled_at for idempotency, so the LLM can't promote
+    // or drop it. The existing 48h janitor still reaps it from
+    // tempCreated, just like any other unloved temp node, so the
+    // "session leaves no permanent trace" semantic is preserved.
     const tempRows = db.prepare(
-      "SELECT id, label, type, description, extra FROM nodes WHERE json_extract(extra, '$.sessionId') = ? AND json_extract(extra, '$.ttl') = 'temp'"
-    ).all(sessionId);
+      "SELECT id, label, type, description, extra FROM nodes WHERE json_extract(extra, '$.sessionId') = ? AND json_extract(extra, '$.ttl') = 'temp' AND id != ?"
+    ).all(sessionId, id);
 
     if (tempRows.length === 0) {
       extraObj.distilled_at = new Date().toISOString();

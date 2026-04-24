@@ -360,7 +360,21 @@ class Learner {
     this._running = true;
 
     try {
-      const combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
+      let combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
+      // Trailing-token cap. Long acorn turns (lots of tool calls + big
+      // file dumps) made per-turn extraction take many seconds and
+      // burn input tokens on stuff the model already saw. The most
+      // recent ~4k tokens (16k chars) is what matters for THIS turn's
+      // extraction; older context lives in earlier extractions and in
+      // the agent's own running message history. Anything beyond that
+      // is dropped from the head with a marker so the model knows.
+      const COMBINED_CHAR_CAP = 16000;
+      if (combinedExchange.length > COMBINED_CHAR_CAP) {
+        const dropped = combinedExchange.length - COMBINED_CHAR_CAP;
+        combinedExchange =
+          `[earlier ${dropped} chars truncated — extracting from trailing window only]\n` +
+          combinedExchange.slice(-COMBINED_CHAR_CAP);
+      }
       const lastObservedAt = batch[batch.length - 1].observedAt;
       const mergedOpts = batch[batch.length - 1].opts;
 

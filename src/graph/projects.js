@@ -54,6 +54,13 @@ function upsertProject(learner, userId, pc) {
     const desc = pc.projectType
       ? `${pc.projectType} project at ${pc.cwd}`
       : `Project at ${pc.cwd}`;
+    // graphcorn: when a project node is freshly created INSIDE an acorn
+    // session, mark it temp + tag with sessionId so distillation can
+    // promote it. Returning users hit the !existing=false branch and
+    // their already-permanent project node stays untouched.
+    const extraJson = pc.sessionId
+      ? JSON.stringify({ ttl: 'temp', sessionId: pc.sessionId, tempCreated: new Date().toISOString() })
+      : '{}';
     db.prepare(
       'INSERT INTO nodes (id, label, type, description, importance, mentions, extracted_with, extracted_at, provenance, extra) VALUES (?, ?, ?, ?, 6, 1, ?, ?, ?, ?)'
     ).run(
@@ -64,7 +71,7 @@ function upsertProject(learner, userId, pc) {
       'acorn-session',
       new Date().toISOString(),
       'acorn',
-      '{}',
+      extraJson,
     );
   } else {
     db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
