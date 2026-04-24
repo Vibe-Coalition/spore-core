@@ -305,6 +305,27 @@ function migrateReferenceNodes(db, log) {
   } catch (e) {
     log.warn(`[boot] Acorn-context tooling-questions migration failed: ${e.message}`);
   }
+
+  // Tool-usage directives on ref-acorn-context.client_routing —
+  // mirrors the runtime-prompt directives (USE THE TOOLS / no exec
+  // find / filter noise dirs) so they survive a graph reset and
+  // surface via graph_query.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-acorn-tool-usage.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='client_routing'"
+      ).get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='client_routing'"
+      ).get()?.c || 0;
+      if (after > before) log.info(`[boot] Acorn-context client_routing: +${after - before} tool-usage attributes`);
+    }
+  } catch (e) {
+    log.warn(`[boot] Acorn-context tool-usage migration failed: ${e.message}`);
+  }
 }
 
 async function boot() {

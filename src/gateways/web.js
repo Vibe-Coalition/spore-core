@@ -585,10 +585,29 @@ class WebGateway {
         try { db.exec(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`); } catch {}
       }
 
-      // Re-apply seeds: reference-nodes.sql + every migrate-ref-*.sql
-      // sorted (insertion order doesn't matter — each migration is
-      // idempotent and self-contained).
+      // Re-apply seeds in order:
+      //   1. seed-graph.sql — agent self-node + identity / voice / rules
+      //      (CREATE TABLE IF NOT EXISTS lines are no-ops since schema
+      //      survived the wipe). Templated with AGENT_ID / AGENT_NAME
+      //      placeholders the same way seedGraph() does at first boot.
+      //   2. reference-nodes.sql — operational ref-* nodes (FLUX, web
+      //      architecture, sandbox rules, etc.).
+      //   3. migrate-ref-*.sql — additive aspects on top of the refs.
+      // Order matters: seed-graph creates the agent node FIRST so any
+      // ref-* edge that targets it (added by future migrations) won't
+      // dangle.
       const appDir = path.resolve(__dirname, '..');
+      const seedGraphPath = path.join(appDir, 'seed-graph.sql');
+      if (fs.existsSync(seedGraphPath)) {
+        const agentId = this.config.agentId || 'spore';
+        const agentName = this.config.displayName ||
+          agentId.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        let sg = fs.readFileSync(seedGraphPath, 'utf8');
+        sg = sg.replace(/AGENT_ID/g, agentId).replace(/AGENT_NAME/g, agentName);
+        db.exec(sg);
+      } else {
+        this.log.warn('[reset-graph] seed-graph.sql missing — agent self-node will not be restored');
+      }
       const sqls = [path.join(appDir, 'reference-nodes.sql')];
       for (const f of fs.readdirSync(appDir).filter(x => x.startsWith('migrate-ref-') && x.endsWith('.sql')).sort()) {
         sqls.push(path.join(appDir, f));
