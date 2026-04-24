@@ -69,7 +69,16 @@ class GraphContext {
     feed: 600,
     tooling: 800,
     behavior: 400,
-    runtime: 500,
+    // runtime carries _buildRuntimeSection — project context, sandbox
+    // rules, plan-mode block (with PHASE 1-5 + QUESTIONS protocol +
+    // tooling-question list + RULES), and assorted server hints. The
+    // plan-mode block alone is ~1400 tokens; the old 500-token cap
+    // silently truncated the END of the section, dropping RULES and
+    // any newly-added guidance (researcher delegation, tooling
+    // questions). 3000 fits the full block with headroom for future
+    // additions. Non-plan-mode turns use a much shorter runtime so
+    // the bigger budget only takes effect when the section needs it.
+    runtime: 3000,
     reflections: 500,
     derived: 800,
     gaps: 300,
