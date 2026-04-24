@@ -54,6 +54,37 @@ class GraphContext {
     this._staticPromptCache = null;
     this._sharedGraphs = [];
     this._sharedGraphsLastCheck = 0;
+
+    // Per-instance budgets — start from the static class defaults and
+    // overlay any operator overrides from config (spore.json:
+    // sectionBudgets / totalPromptBudget, or env vars
+    // SPORE_SECTION_BUDGETS / SPORE_TOTAL_BUDGET). Lets each instance
+    // tune section caps without editing source. Unknown keys in
+    // config.sectionBudgets are ignored to avoid silently growing the
+    // budget map with typos.
+    this._sectionBudgets = { ...GraphContext.SECTION_BUDGETS };
+    const overrides = (config && config.sectionBudgets) || {};
+    const adjusted = [];
+    for (const [k, v] of Object.entries(overrides)) {
+      if (!Object.prototype.hasOwnProperty.call(GraphContext.SECTION_BUDGETS, k)) {
+        if (this.log) this.log.warn(`[context] sectionBudgets: ignoring unknown key "${k}" — known: ${Object.keys(GraphContext.SECTION_BUDGETS).join(', ')}`);
+        continue;
+      }
+      const n = Number(v);
+      if (!Number.isFinite(n) || n <= 0) {
+        if (this.log) this.log.warn(`[context] sectionBudgets["${k}"]: ignoring non-positive value ${v}`);
+        continue;
+      }
+      this._sectionBudgets[k] = Math.floor(n);
+      adjusted.push(`${k}=${this._sectionBudgets[k]}`);
+    }
+    this._totalBudget = (config && Number.isFinite(Number(config.totalPromptBudget)) && Number(config.totalPromptBudget) > 0)
+      ? Math.floor(Number(config.totalPromptBudget))
+      : GraphContext.TOTAL_BUDGET;
+    if (adjusted.length || this._totalBudget !== GraphContext.TOTAL_BUDGET) {
+      const totalNote = this._totalBudget !== GraphContext.TOTAL_BUDGET ? ` total=${this._totalBudget}` : '';
+      if (this.log) this.log.info(`[context] budget overrides: ${adjusted.join(', ') || '(none per-section)'}${totalNote}`);
+    }
   }
 
   static SECTION_BUDGETS = {
@@ -340,7 +371,7 @@ class GraphContext {
 
   buildStaticPrompt(mode = 'full') {
     this._refreshCacheIfNeeded();
-    const B = GraphContext.SECTION_BUDGETS;
+    const B = this._sectionBudgets;
     const orderedKeys = GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full;
 
     const cacheKey = mode;
@@ -373,7 +404,7 @@ class GraphContext {
 
   buildDynamicContext(opts = {}) {
     this._refreshCacheIfNeeded();
-    const B = GraphContext.SECTION_BUDGETS;
+    const B = this._sectionBudgets;
     const allowed = opts.promptMode ? (GraphContext.PROMPT_MODES[opts.promptMode] || GraphContext.PROMPT_MODES.full) : null;
     const inc = (key) => !allowed || allowed.includes(key);
     const parts = [
@@ -680,7 +711,7 @@ class GraphContext {
 
     this._refreshSharedGraphs();
     this._refreshCacheIfNeeded();
-    const B = { ...GraphContext.SECTION_BUDGETS };
+    const B = { ...this._sectionBudgets };
     const allowedKeys = new Set(GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full);
 
     if (mode === 'recall') {
@@ -733,8 +764,8 @@ class GraphContext {
     const orderedKeys = GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full;
 
     const totalBudget = (mode === 'recall' && opts._queryParams)
-      ? Math.max(GraphContext.TOTAL_BUDGET, opts._queryParams.relevantBudget + opts._queryParams.episodeBudget + 1000)
-      : GraphContext.TOTAL_BUDGET;
+      ? Math.max(this._totalBudget, opts._queryParams.relevantBudget + opts._queryParams.episodeBudget + 1000)
+      : this._totalBudget;
 
     let totalTokens = orderedKeys.reduce((sum, k) => sum + this._estimateTokens(sectionMap[k]), 0);
 

@@ -149,6 +149,18 @@ const DEFAULTS = {
   intermediateTextThrottleSeconds: 30,
   dmMaxIterations: 75,
   tokenBudgetPressure: 120000,
+  // System-prompt section budgets (graph/context.js GraphContext.SECTION_BUDGETS).
+  // Empty object keeps the in-source defaults; overlay any number of section
+  // keys to tune per-instance. Set via spore.json `sectionBudgets: {...}` or
+  // env var SPORE_SECTION_BUDGETS=`{"runtime":3000,"rules":1200}` (JSON).
+  // Unknown keys are warned and ignored. Known keys: persona, identity, voice,
+  // rules, selfknowledge, channel, person, relevant, anti, feed, tooling,
+  // behavior, runtime, reflections, derived, gaps, plugin, episodes.
+  sectionBudgets: {},
+  // Total system-prompt token budget (graph/context.js GraphContext.TOTAL_BUDGET).
+  // null = use the in-source default (40000). Override with spore.json
+  // `totalPromptBudget: <int>` or env var SPORE_TOTAL_BUDGET=<int>.
+  totalPromptBudget: null,
   maxConcurrent: 6,
   maxSubagentChildren: 8,
   subagentMaxIter: 100,
@@ -250,6 +262,20 @@ function loadConfigFresh() {
   if (process.env.SPORE_MODEL_LIMITS) {
     try { config.modelLimits = JSON.parse(process.env.SPORE_MODEL_LIMITS); }
     catch { /* keep defaults */ }
+  }
+  // Section-budget overrides — JSON map of `<sectionKey>: <tokens>`. Merged
+  // with anything already provided in spore.json. Validation (unknown-key
+  // warning, non-positive rejection) happens in GraphContext's constructor
+  // so the same rules apply whether overrides came from JSON file or env.
+  if (process.env.SPORE_SECTION_BUDGETS) {
+    try {
+      const fromEnv = JSON.parse(process.env.SPORE_SECTION_BUDGETS);
+      config.sectionBudgets = { ...(config.sectionBudgets || {}), ...fromEnv };
+    } catch { /* malformed — keep file value */ }
+  }
+  if (process.env.SPORE_TOTAL_BUDGET) {
+    const n = parseInt(process.env.SPORE_TOTAL_BUDGET, 10);
+    if (Number.isFinite(n) && n > 0) config.totalPromptBudget = n;
   }
   if (process.env.TELEGRAM_BOT_TOKEN) config.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 
