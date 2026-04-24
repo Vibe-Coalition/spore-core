@@ -5020,6 +5020,7 @@ async function openSettingsPanel() {
   overlay.classList.add('settings-pane-open');
   _initSettingsFloatingPane();
   _bindAcornButtons();
+  _bindResetGraphButton();
   if (typeof _focusFloatingWindow === 'function') _focusFloatingWindow('settings-pane');
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
 
@@ -5129,6 +5130,62 @@ async function renderSettingsGraphsList() {
   } catch (e) {
     container.innerHTML = `<div style="opacity:.5;font-size:.66rem;padding:6px;color:var(--danger)">Failed: ${esc(e.message)}</div>`;
   }
+}
+
+// Reset Graph button — gates on the user typing the literal RESET into
+// the confirm input, then POSTs /api/admin/reset-graph. On success
+// shows the before/after counts + backup path inline. The endpoint
+// itself also requires {confirm: "RESET"} as a second guard. Idempotent
+// rebind — refreshes button state if the settings pane is opened/closed
+// multiple times in one session.
+let _resetGraphBound = false;
+function _bindResetGraphButton() {
+  if (_resetGraphBound) return;
+  const input = document.getElementById('settings-reset-confirm');
+  const btn = document.getElementById('settings-reset-btn');
+  const result = document.getElementById('settings-reset-result');
+  if (!input || !btn) return;
+  _resetGraphBound = true;
+
+  const updateBtn = () => {
+    const ok = input.value === 'RESET';
+    btn.disabled = !ok;
+    btn.style.cursor = ok ? 'pointer' : 'not-allowed';
+    btn.style.opacity = ok ? '1' : '0.5';
+  };
+  input.addEventListener('input', updateBtn);
+
+  btn.addEventListener('click', async () => {
+    if (input.value !== 'RESET') return;
+    btn.disabled = true;
+    btn.textContent = 'Resetting…';
+    if (result) {
+      result.style.display = 'block';
+      result.textContent = 'Wiping graph + reseeding refs…';
+    }
+    try {
+      const r = await fetch(API + '/api/admin/reset-graph', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: 'RESET' }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data?.error || 'reset failed');
+      const b = data.before || {};
+      const a = data.after || {};
+      const summary = `Graph reset OK. before: nodes=${b.nodes} aspects=${b.aspects} attrs=${b.attrs} edges=${b.edges} episodes=${b.episodes}. after: nodes=${a.nodes} aspects=${a.aspects} attrs=${a.attrs} edges=${a.edges} episodes=${a.episodes}. backup at ${data.backup}.`;
+      if (result) result.textContent = summary;
+      if (typeof toast === 'function') toast('Graph reset to seeds');
+    } catch (e) {
+      if (result) result.textContent = 'Failed: ' + (e?.message || e);
+      if (typeof toast === 'function') toast('Reset failed: ' + (e?.message || e), true);
+    } finally {
+      input.value = '';
+      updateBtn();
+      btn.textContent = 'Reset graph';
+    }
+  });
+  updateBtn();
 }
 
 function _populateBudgetInputs(budgets) {
@@ -17405,6 +17462,19 @@ build/
           <div id="settings-budget-sections-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px"></div>
           <div class="settings-note">Override individual sections — leave any field blank to use the default. Unknown keys and non-positive values are silently ignored at boot.</div>
         </details>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="advanced">
+        <h4 style="color:var(--danger,#ff5566)">Reset Graph</h4>
+        <div class="settings-note">
+          <strong>Destructive.</strong> Wipes <em>everything</em> in this agent's graph DB — every node, aspect, attribute, edge, episode, gap, reflection — and re-applies the seeded reference nodes from <code>/app/reference-nodes.sql</code> + every <code>migrate-ref-*.sql</code>. Use this when you want to start the agent's memory from scratch (dev testing, changed your mind about training, suspected corruption, etc.). The DB file is backed up to <code>&lt;path&gt;.pre-reset.&lt;ts&gt;</code> before the wipe so the action is recoverable.
+        </div>
+        <div class="settings-note" style="margin-top:8px">Type <code>RESET</code> in the box below to enable the button. Effect is immediate, no restart needed — the live graph handle is mutated in place.</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <input id="settings-reset-confirm" type="text" placeholder="type RESET to confirm" style="flex:1" autocomplete="off">
+          <button type="button" id="settings-reset-btn" disabled style="background:var(--danger,#ff5566);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:not-allowed;opacity:0.5">Reset graph</button>
+        </div>
+        <div class="settings-note" id="settings-reset-result" style="margin-top:8px;display:none"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="tools">

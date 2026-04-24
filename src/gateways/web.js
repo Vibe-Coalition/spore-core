@@ -527,6 +527,97 @@ class WebGateway {
     return path.resolve(__dirname, '..', '.env');
   }
 
+  // Wipes all user-data tables in the graph DB, then re-applies the
+  // seeded reference nodes. Synchronous-ish — runs inside one BEGIN
+  // / COMMIT on the live db handle. Always backs up first; backup
+  // path is returned to the caller. Throws on any failure (the API
+  // wrapper turns that into a 500 + ROLLBACK has already happened).
+  //
+  // Tables wiped: all tables that hold user-derived state (nodes,
+  // aspects, attributes, edges, gaps, episodes, hints, derived facts,
+  // reflections, audit/recycle data, FTS shadows). The schema stays —
+  // only data is deleted. After wipe we re-apply
+  // /app/reference-nodes.sql + every /app/migrate-ref-*.sql so the
+  // ref-* nodes come back fresh per the seed contract.
+  async _resetGraphToSeeds() {
+    const db = this.graph?.db;
+    if (!db) throw new Error('graph db not initialized');
+    const dbPath = this.config.graphDbPath;
+    if (!dbPath || !fs.existsSync(dbPath)) throw new Error('graph db path missing on disk');
+
+    // Backup first so the action is recoverable.
+    const ts = new Date().toISOString().replace(/[:T]/g, '-').replace(/\..+/, '').slice(0, 19);
+    const backup = dbPath + '.pre-reset.' + ts;
+    fs.copyFileSync(dbPath, backup);
+
+    const before = {
+      nodes:    db.prepare('SELECT COUNT(*) c FROM nodes').get().c,
+      aspects:  db.prepare('SELECT COUNT(*) c FROM aspects').get().c,
+      attrs:    db.prepare('SELECT COUNT(*) c FROM attributes').get().c,
+      edges:    db.prepare('SELECT COUNT(*) c FROM edges').get().c,
+      episodes: db.prepare('SELECT COUNT(*) c FROM episodes').get().c,
+    };
+
+    // Tables that hold user state. Order doesn't matter with FKs off
+    // but we list children first as a sanity-check shape. Wrapped in
+    // try so a missing table on an older schema doesn't abort the
+    // whole reset — e.g. derived_facts didn't exist in early builds.
+    const userTables = [
+      'edges', 'attribute_history', 'attributes', 'aspects', 'gaps',
+      'hints', 'derived_facts', 'reflections', 'quality_audits',
+      'recycle_bin', 'node_sources', 'edge_sources', 'aliases',
+      'node_group_members', 'node_groups', 'episodes', 'meta',
+      'nodes',
+    ];
+    const ftsTables = ['attr_fts', 'episodes_fts', 'hints_fts'];
+
+    db.exec('PRAGMA foreign_keys=OFF');
+    db.exec('BEGIN TRANSACTION');
+    try {
+      for (const t of userTables) {
+        try { db.exec(`DELETE FROM ${t}`); } catch (e) { this.log.debug(`[reset-graph] skipping ${t}: ${e.message}`); }
+      }
+      // Rebuild FTS indexes — they're contentless tables linked to
+      // their content tables; after we delete the content rows the
+      // FTS shadow has stale index entries until we tell it to
+      // rebuild.
+      for (const fts of ftsTables) {
+        try { db.exec(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`); } catch {}
+      }
+
+      // Re-apply seeds: reference-nodes.sql + every migrate-ref-*.sql
+      // sorted (insertion order doesn't matter — each migration is
+      // idempotent and self-contained).
+      const appDir = path.resolve(__dirname, '..');
+      const sqls = [path.join(appDir, 'reference-nodes.sql')];
+      for (const f of fs.readdirSync(appDir).filter(x => x.startsWith('migrate-ref-') && x.endsWith('.sql')).sort()) {
+        sqls.push(path.join(appDir, f));
+      }
+      for (const f of sqls) {
+        if (!fs.existsSync(f)) continue;
+        db.exec(fs.readFileSync(f, 'utf8'));
+      }
+
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      db.exec('PRAGMA foreign_keys=ON');
+      throw e;
+    }
+    db.exec('PRAGMA foreign_keys=ON');
+
+    const after = {
+      nodes:    db.prepare('SELECT COUNT(*) c FROM nodes').get().c,
+      aspects:  db.prepare('SELECT COUNT(*) c FROM aspects').get().c,
+      attrs:    db.prepare('SELECT COUNT(*) c FROM attributes').get().c,
+      edges:    db.prepare('SELECT COUNT(*) c FROM edges').get().c,
+      episodes: db.prepare('SELECT COUNT(*) c FROM episodes').get().c,
+    };
+
+    this.log.warn(`[reset-graph] graph reset complete; backup at ${backup}; before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+    return { backup, before, after };
+  }
+
   _readSettingsConfigFile() {
     const filePath = this._settingsConfigPath();
     try {
@@ -3200,6 +3291,45 @@ class WebGateway {
           }
           return;
         }
+      }
+
+      // ── Reset graph (creator only, destructive) ──────────────────
+      // Wipes every user-data table in the graph DB and re-applies the
+      // seeded reference nodes from /app/reference-nodes.sql plus every
+      // /app/migrate-ref-*.sql. Designed for "I want to start fresh"
+      // moments — operator changed their mind about the agent, dev
+      // testing, etc. Always backs up the DB first to
+      // <dbPath>.pre-reset.<ts> so the action is recoverable.
+      //
+      // Body: { confirm: "RESET" } — typed-string guard so a stray
+      // POST can't trash the graph. Returns before/after counts +
+      // backup path on success.
+      if (urlPath === '/api/admin/reset-graph') {
+        if (!(await checkAuth(req, res))) return;
+        if (req.method !== 'POST') {
+          res.writeHead(405, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'POST only' }));
+          return;
+        }
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        let parsed = {};
+        try { parsed = body ? JSON.parse(body) : {}; } catch {}
+        if (parsed.confirm !== 'RESET') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'confirm must be the literal string "RESET"' }));
+          return;
+        }
+        try {
+          const result = await this._resetGraphToSeeds();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (e) {
+          this.log.error('[reset-graph] failed:', e?.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e?.message || 'reset failed' }));
+        }
+        return;
       }
 
       // Read-only probe endpoints accept any authenticated session (webapp or creator),
