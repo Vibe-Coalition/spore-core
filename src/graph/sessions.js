@@ -277,13 +277,14 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
 
   try {
     const model = config?.casualModel || config?.normalModel || config?.model;
-    // Bumped 500 → 1500 to give reasoning models room for thinking
-    // tokens + the 200-word recap. GLM/Kimi often spend 300-800 tokens
-    // thinking before producing text; a 500-cap was forcing them to
-    // truncate mid-think and return empty text blocks.
+    // 8k — reasoning models (GLM-5.1, Kimi K2.6) routinely use
+    // thousands of thinking tokens before producing the text block.
+    // 500 was aggressively small; 1500 was better but still risked
+    // truncation on long sessions. 8k gives comfortable headroom
+    // while staying well inside model context.
     const text = (await _callLlmStreaming(llmClient, {
       model,
-      max_tokens: 1500,
+      max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }],
     }, log, 'graphcorn-summary')).trim();
     if (!text) {
@@ -495,10 +496,11 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     // opinion" and soft-delete every temp.
     const respText = (await _callLlmStreaming(llmClient, {
       model,
-      // Bumped 2000 → 4000 because createNodes adds 100-300 tokens
-      // per node and a busy session can spawn 5-10 tool/framework
-      // nodes; 2000 cap was truncating JSON mid-structure.
-      max_tokens: 4000,
+      // 8k — reasoning models burn heavy thinking tokens before the
+      // JSON body, plus createNodes can spawn 5-10 rich tool nodes
+      // (200-400 tokens each). 4000 was still getting truncated
+      // mid-JSON for the distill LLM on dense sessions.
+      max_tokens: 8000,
       messages: [{ role: 'user', content: promptText }],
     }, log, 'graphcorn-distill')).trim();
 
