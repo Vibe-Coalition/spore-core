@@ -40,6 +40,33 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 
 
 -- ═══════════════════════════════════════════════════════════════
+-- NODE: Local Search Tools (grep + glob)
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-search-tools', 'Local Search Tools (grep + glob)', 'reference',
+  'Native grep and glob tools for code search — preferred over exec+grep/find.', 8, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-search-tools', 'when_to_use', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'PREFER grep over exec+grep/awk/sed for any code search — returns structured {file, line, text} hits, no shell quoting pitfalls', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'PREFER glob over exec+find/ls for filename lookups — returns paths relative to the search root', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'For acorn (CLI) sessions both tools execute on the user''s machine via the CLI; for web/telegram/etc. they run server-side over /workspace', 7, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-search-tools', 'caps_and_filters', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'grep result cap: 200 hits, line text truncated at 200 chars. If truncated, narrow the pattern or set a glob.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'glob result cap: 500 paths. Tighten the pattern or use a deeper path if hit.', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Both tools auto-skip noise dirs: .git, node_modules, dist, build, __pycache__, .venv, venv, target, .next, .cache. Hidden dirs (any starting with .) are also skipped.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'grep: pattern uses RE2 syntax (no lookahead/backrefs). glob param filters which filenames are scanned (e.g. glob:"*.go"). -i:true for case-insensitive.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-search-tools', 'workflow_pattern', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Start broad (e.g. "late|delay(ed)?"), look at the {file, line, text} hits, then refine with a glob filter or tighter pattern instead of paginating.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Pair with read_file: grep to find the relevant file:line, then read_file with offset/limit to inspect surrounding context.', 8, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
 -- NODE: FLUX Image Generation
 -- ═══════════════════════════════════════════════════════════════
 

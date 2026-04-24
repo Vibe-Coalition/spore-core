@@ -231,6 +231,22 @@ function migrateReferenceNodes(db, log) {
   } catch (e) {
     log.warn(`[boot] Email ref migration failed: ${e.message}`);
   }
+
+  // Local search tools ref node (idempotent; runs every boot). Tells the
+  // agent that grep + glob exist as native tools so it stops shelling out
+  // to exec+grep/find. New as of the grep/glob tool catalog addition.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-search-tools.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-search-tools'").get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-search-tools'").get()?.c || 0;
+      if (after > before) log.info(`[boot] Search-tools ref migrated: +${after - before} aspects`);
+    }
+  } catch (e) {
+    log.warn(`[boot] Search-tools ref migration failed: ${e.message}`);
+  }
 }
 
 async function boot() {
