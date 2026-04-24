@@ -261,6 +261,48 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
   const ctxLines = ctxRows.map(r => `${r.aspect}: ${r.attr}`).join('\n');
 
   const roundLines = rows.slice(-50).map(r => '  ' + r.content).join('\n');
+
+  // Pull the actual user/assistant exchanges from the episodes table
+  // for this session's time window. The rounds aspect gives the LLM
+  // a tool-use breadcrumb but nothing about WHAT was said; episodes
+  // have the full conversation. Filter by started_at..ended_at
+  // (fallback to wide window if lifecycle attrs are missing). Cap
+  // per-episode content so the prompt stays reasonable.
+  let episodesBlock = '';
+  try {
+    const startedRow = db.prepare("SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'started_at:%' LIMIT 1").get(id);
+    const endedRow = db.prepare("SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'ended_at:%' LIMIT 1").get(id);
+    const startedAt = startedRow?.content?.replace(/^started_at:\s*/, '').trim() || null;
+    const endedAt = endedRow?.content?.replace(/^ended_at:\s*/, '').trim() || new Date().toISOString();
+
+    // Episode session_id for acorn sessions is the shared channel name
+    // like `acorn:<user>`, not the per-launch sessionId. We pick the
+    // user name from the session description ("acorn session by <user>
+    // in <cwd>"), fall back to matching any episode row whose
+    // observed_at falls in the session window.
+    const userName = (node.label && node.description) ? null : null;
+    let rows2 = [];
+    if (startedAt) {
+      rows2 = db.prepare(
+        "SELECT content, observed_at FROM episodes WHERE observed_at >= ? AND observed_at <= ? ORDER BY id ASC"
+      ).all(startedAt, endedAt);
+    }
+    if (rows2.length) {
+      const EPISODE_CAP = 2400;
+      const pieces = rows2.map((r, i) => {
+        const body = String(r.content || '').trim();
+        const capped = body.length > EPISODE_CAP ? body.slice(0, EPISODE_CAP) + '\n  …[truncated]' : body;
+        return `--- episode ${i + 1} (${r.observed_at}) ---\n${capped}`;
+      });
+      // Overall cap on the episodes block to prevent runaway prompts.
+      let joined = pieces.join('\n\n');
+      if (joined.length > 24000) joined = joined.slice(0, 24000) + '\n…[trimmed for budget]';
+      episodesBlock = joined;
+    }
+  } catch (e) {
+    if (log) log.debug?.(`[graphcorn] episode fetch for summary failed: ${e.message}`);
+  }
+
   const prompt = [
     'You are summarizing an acorn coding session for graph-side persistence.',
     'The summary will be stored on the session node as a `summary` aspect — future agents on this project will retrieve it via graph_query and use it to remember what happened.',
@@ -268,12 +310,15 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     `Session: ${node.label} (${id})`,
     ctxLines,
     '',
-    'Rounds (chronological, "turn N | tools used | files touched | first sentence of agent reply"):',
+    'Rounds (chronological, "turn N | user prompt | tools used | files touched | exec[N, failed] | reply preview"):',
     roundLines,
     '',
-    'Write a concise recap (≤200 words) covering: (1) what the user worked on, (2) key decisions/discoveries, (3) blockers or open issues, (4) which graph nodes (if any) future sessions should reference.',
-    'Plain prose, no markdown headers. Speak as if writing notes to your future self.',
-  ].join('\n');
+    episodesBlock ? 'Full conversation turns (from the episodes table — actual user/assistant text; use this for specifics the breadcrumbs glossed over):' : '',
+    episodesBlock,
+    '',
+    'Write a concise recap (≤200 words) covering: (1) what the user asked for, (2) specific tools/libraries/frameworks used + key commands + key files, (3) what worked, what failed + why, (4) any durable lessons or configurations worth remembering, (5) unfinished work or open threads.',
+    'Plain prose, no markdown headers. Speak as if writing notes to your future self. Concrete over abstract — prefer "used `qrcode-terminal` to render exp:// QR on LAN 192.168.1.191:8081" over "generated a QR code".',
+  ].filter(s => s !== '').join('\n');
 
   try {
     const model = config?.casualModel || config?.normalModel || config?.model;

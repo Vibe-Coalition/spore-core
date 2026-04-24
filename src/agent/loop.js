@@ -1193,24 +1193,38 @@ class AgentLoop {
             this.learner.db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'rounds', 7, 'graphcorn')").run(sessId);
             asp = { id: this.learner.db.prepare('SELECT last_insert_rowid() AS id').get().id };
           }
-          // Build the breadcrumb. Tools = unique tool names; files =
-          // unique file paths from read_file/write_file/edit_file inputs.
+          // Build a richer breadcrumb. The old format was just
+          // "tools | files | first sentence" which gave the summarizer
+          // almost nothing to work with. Now we also capture:
+          //   - the user's prompt (truncated) so the summarizer knows
+          //     what was asked, not just what was done
+          //   - exec commands attempted (first ~80 chars each)
+          //   - files touched (already had basenames; now full paths)
+          //   - non-zero exec outcomes (error hint for "what failed")
+          //   - a bigger assistant reply preview (~300 chars)
           const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
           const fileSet = new Set();
+          const execCmds = [];
+          let failedExecs = 0;
           for (const t of toolLog) {
             if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
               const p = t.input?.path;
               if (typeof p === 'string') fileSet.add(p.split(/[\\/]/).pop());
             }
+            if (t.tool === 'exec') {
+              const cmd = (typeof t.input === 'string' ? (() => { try { return JSON.parse(t.input)?.command; } catch { return null; } })() : t.input?.command) || '';
+              if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 100));
+              if (t.succeeded === false) failedExecs++;
+            }
           }
-          const files = fileSet.size ? [...fileSet].slice(0, 5).join(',') : 'none';
-          // First sentence of assistant reply, or first 100 chars if
-          // no sentence boundary appears.
-          let snippet = (finalText || '').replace(/\s+/g, ' ').trim();
-          const dot = snippet.search(/[.!?](\s|$)/);
-          if (dot > 0 && dot < 200) snippet = snippet.slice(0, dot + 1);
-          else if (snippet.length > 120) snippet = snippet.slice(0, 117) + '…';
-          const content = `turn ${turn} | tools: ${toolNames} | files: ${files} | "${snippet || '(no text)'}"`;
+          const files = fileSet.size ? [...fileSet].slice(0, 8).join(',') : 'none';
+          const execPart = execCmds.length
+            ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 3).join(' ; ')}${execCmds.length > 3 ? ' …' : ''}`
+            : '';
+          const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+          const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
+          const replyPreview = replySnip.length > 300 ? replySnip.slice(0, 297) + '…' : replySnip;
+          const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
           this.learner.db.prepare(
             "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
           ).run(asp.id, content);
