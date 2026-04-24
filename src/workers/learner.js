@@ -999,11 +999,21 @@ The JSON schema for updates becomes:
           }
           // If the LLM re-extracts an existing temp node as non-ephemeral
           // (worth keeping long-term), promote it by clearing the ttl marker.
+          //
+          // EXCEPTION: graphcorn-owned nodes (extra.sessionId set) are
+          // governed by session-end distillation — the learner must NOT
+          // clear their ttl mid-session or they'll escape distill's
+          // candidate sweep. Real impact: session T115505 had its own
+          // session node un-tempted here because the LLM re-extracted
+          // the session as an entity; every session-tagged temp the
+          // learner saw that session also got silently promoted, so
+          // distill found "no session-temp nodes" and the session's
+          // knowledge was lost.
           if (ent.ephemeral === false) {
             try {
               const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(resolved);
               let extraObj = {}; try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
-              if (extraObj.ttl === 'temp') {
+              if (extraObj.ttl === 'temp' && !extraObj.sessionId) {
                 delete extraObj.ttl; delete extraObj.tempCreated;
                 this.db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), resolved);
                 this.log.info(`[learner] Promoted temp node to permanent: ${resolved}`);

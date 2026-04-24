@@ -2390,17 +2390,28 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(id);
           let extraObj = {};
           try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
-          if (setTemp) {
-            if (extraObj.ttl !== 'temp') {
-              extraObj.ttl = 'temp';
-              extraObj.tempCreated = new Date().toISOString();
-            }
+          // Graphcorn-owned nodes: session-end distillation owns their
+          // ttl lifecycle. Refuse agent-driven set/clear-temp overrides
+          // when extra.sessionId is present OR the id matches the
+          // session anchor pattern — prevents accidental promotion /
+          // demotion of structural graphcorn state.
+          const isGraphcornManaged = !!extraObj.sessionId || String(id).startsWith('session-');
+          if (isGraphcornManaged) {
+            // Silently ignore the temp flag change for graphcorn nodes;
+            // description updates above still go through.
           } else {
-            delete extraObj.ttl;
-            delete extraObj.tempCreated;
+            if (setTemp) {
+              if (extraObj.ttl !== 'temp') {
+                extraObj.ttl = 'temp';
+                extraObj.tempCreated = new Date().toISOString();
+              }
+            } else {
+              delete extraObj.ttl;
+              delete extraObj.tempCreated;
+            }
+            db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+              .run(JSON.stringify(extraObj), id);
           }
-          db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
-            .run(JSON.stringify(extraObj), id);
         }
       } else {
         // graphcorn: when graph_update is called inside an acorn session
