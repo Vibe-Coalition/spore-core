@@ -1018,6 +1018,15 @@ function applyPromptSectionsMixin(GraphContext) {
       const cached = opts.cachedProjectNodeId && !opts.cachedProjectStale && !opts.cachedProjectIsNew;
       parts.push('');
       parts.push(`## Project Context — ${pc.project || 'project'}`);
+      // CRITICAL — drilled at the top because models keep defaulting to
+      // "I'm a remote AI, I can't access your machine" answers when the
+      // user asks about local processes / ports / files. Real captured
+      // case (Kimi K2.6, 2026-04-24): user asked "is the expo server
+      // here dead", model replied with "I don't have visibility, here's
+      // how YOU can check". The model HAD exec the entire time. This
+      // line tells it directly: when asked about local state, RUN THE
+      // TOOLS. Not optional, not a suggestion.
+      parts.push(`**You have direct shell + filesystem access on the user's machine via your tools (exec, read_file, write_file, edit_file, grep, glob).** When the user asks about local state — "is the dev server up", "what's in this file", "why is X slow", "did the build finish", "what does ls show", "is port N open" — RUN THE TOOLS and answer with the actual result. Do NOT respond as if you're a remote chatbot ("I can't see your machine, here's how you could check"). For acorn sessions you are effectively a coding agent on the user's box; behave like one.`);
       if (pc.cwd) parts.push(`- CWD: ${pc.cwd}`);
       if (pc.os || pc.arch) parts.push(`- Platform: ${pc.os || '?'}/${pc.arch || '?'}`);
       if (pc.projectType) parts.push(`- Project type: ${pc.projectType}`);
