@@ -646,6 +646,32 @@ class ToolSystem {
         },
       },
       {
+        name: 'grep',
+        description: `Recursively search files for lines matching a regex. Returns structured {file, line, text} hits — far cheaper and faster than chaining exec+grep/cat. Skips noise dirs (.git, node_modules, dist, build, .venv, target, .next, .cache, __pycache__) automatically. Capped at 200 hits, line text truncated to 200 chars. PREFERRED over exec for any code-search task.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Regex pattern (RE2 syntax — no lookahead/backrefs). Start broad ("late|delay(ed)?") and tighten if too noisy.' },
+            path: { type: 'string', description: 'Directory to search (default: current workspace).' },
+            glob: { type: 'string', description: 'Filename glob to limit which files are scanned, e.g. "*.go", "*.ts".' },
+            '-i': { type: 'boolean', description: 'Case-insensitive match.' },
+          },
+          required: ['pattern'],
+        },
+      },
+      {
+        name: 'glob',
+        description: `List files matching a filename glob under a directory. Returns up to 500 paths relative to the search root, skipping noise dirs (.git, node_modules, etc.). PREFERRED over exec+find/ls for file-name lookups.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Filename glob (e.g. "*.md", "Test*.tsx"). Matches against the file basename.' },
+            path: { type: 'string', description: 'Directory to search (default: current workspace).' },
+          },
+          required: ['pattern'],
+        },
+      },
+      {
         name: 'session_status',
         description: 'Get current session information: message count, uptime, active sessions, learner stats, model info.',
         input_schema: {
@@ -1283,6 +1309,10 @@ Set wait:false when you've submitted a long background job and just want to retu
           return this._writeFileTool(input);
         case 'edit_file':
           return this._editFileTool(input);
+        case 'grep':
+          return this._grepTool(input);
+        case 'glob':
+          return this._globTool(input);
         case 'session_status':
           return this._sessionStatusTool();
         case 'sessions_list':
@@ -3805,6 +3835,118 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     } catch (e) {
       return { error: `Edit failed: ${e.message}` };
     }
+  }
+
+  // ── Search tools (server-side fallback for non-CLI sessions) ──────
+  // For acorn sessions, the CLI claims grep+glob locally and runs them
+  // in Go (see acorn-cli/go/internal/tools/search.go). These handlers
+  // are the server-side path used when there's no CLI or the CLI is
+  // disconnected. Mirrors the Go implementation's caps and noise-dir
+  // skip list for predictable cross-session behavior.
+
+  _searchNoiseDirs() {
+    return new Set(['.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', '.cache', 'target']);
+  }
+
+  _grepTool(input) {
+    const pattern = (input.pattern || '').toString();
+    if (!pattern) return { error: 'pattern is required' };
+    const safe = this._safePath(input.path || (this.config.workspacePath || process.cwd()));
+    if (safe.error) return safe;
+    const root = safe.path;
+    const fileGlob = (input.glob || input.type || '').toString();
+    let re;
+    try {
+      const flags = input['-i'] ? 'i' : '';
+      re = new RegExp(pattern, flags);
+    } catch (e) {
+      return { error: `Invalid regex: ${e.message}` };
+    }
+    const noise = this._searchNoiseDirs();
+    const results = [];
+    let truncated = false;
+    const cap = 200;
+    const lineCap = 200;
+
+    const walk = (dir) => {
+      if (results.length >= cap) return;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const ent of entries) {
+        if (results.length >= cap) { truncated = true; return; }
+        const name = ent.name;
+        if (ent.isDirectory()) {
+          if (name.startsWith('.') || noise.has(name)) continue;
+          walk(path.join(dir, name));
+          continue;
+        }
+        if (!ent.isFile()) continue;
+        if (fileGlob) {
+          // Translate the glob to a RegExp the same way Go's
+          // filepath.Match does for basic *, ?, [abc].
+          const g = fileGlob.replace(/[.+^${}()|]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+          if (!new RegExp('^' + g + '$').test(name)) continue;
+        }
+        const full = path.join(dir, name);
+        const rel = path.relative(root, full);
+        let buf;
+        try {
+          const st = fs.statSync(full);
+          if (st.size > 4 * 1024 * 1024) continue; // skip huge files like Go's 4MB scanner buf
+          buf = fs.readFileSync(full);
+        } catch { continue; }
+        // Skip likely-binary
+        const sample = buf.subarray(0, Math.min(8192, buf.length));
+        if (sample.includes(0)) continue;
+        const text = buf.toString('utf8');
+        const lines = text.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (re.test(lines[i])) {
+            let t = lines[i];
+            if (t.length > lineCap) t = t.substring(0, lineCap);
+            results.push({ file: rel, line: i + 1, text: t });
+            if (results.length >= cap) { truncated = true; return; }
+          }
+        }
+      }
+    };
+    walk(root);
+    const out = { results, count: results.length };
+    if (truncated) out.truncated = true;
+    return out;
+  }
+
+  _globTool(input) {
+    const pattern = (input.pattern || '*').toString();
+    const safe = this._safePath(input.path || (this.config.workspacePath || process.cwd()));
+    if (safe.error) return safe;
+    const root = safe.path;
+    const noise = this._searchNoiseDirs();
+    // Same glob → regex translation as _grepTool. Match against either the
+    // basename or the path-relative-to-root, mirroring the Go impl.
+    const g = pattern.replace(/[.+^${}()|]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    const re = new RegExp('^' + g + '$');
+    const matches = [];
+    const cap = 500;
+    const walk = (dir) => {
+      if (matches.length >= cap) return;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const ent of entries) {
+        if (matches.length >= cap) return;
+        const name = ent.name;
+        if (ent.isDirectory()) {
+          if (name.startsWith('.') || noise.has(name)) continue;
+          walk(path.join(dir, name));
+          continue;
+        }
+        const full = path.join(dir, name);
+        const rel = path.relative(root, full);
+        if (re.test(rel) || re.test(name)) matches.push(rel);
+      }
+    };
+    walk(root);
+    return { matches, count: matches.length };
   }
 
   _isFrameworkFile(resolved) {
