@@ -2531,8 +2531,22 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const id = this._normalizeNodeId(nodeId);
         if (!id) return { error: 'Invalid nodeId' };
         if (this._isProtectedNode(id)) return { error: `Cannot delete protected node: ${id}` };
-        const existing = db.prepare('SELECT id, label, type FROM nodes WHERE id = ?').get(id);
+        const existing = db.prepare('SELECT id, label, type, extra FROM nodes WHERE id = ?').get(id);
         if (!existing) return { error: `Node not found: ${id}` };
+        // Distilled-knowledge guard — nodes that survived session-end
+        // distillation represent accumulated cross-session learnings.
+        // Deleting them wipes carefully-earned gotchas ("ANSI escape
+        // codes break QR terminal scans", "expo dev server defaults to
+        // 8081"). User hit this: agent called graph_delete({nodeId:
+        // "expo"}) during an unrelated cleanup and nuked all the expo
+        // gotchas from prior sessions. Require `force: true` to
+        // delete anything with extra.distilled_at set.
+        try {
+          const ext = existing.extra ? JSON.parse(existing.extra) : {};
+          if (ext.distilled_at && input?.force !== true) {
+            return { error: `Refusing to delete "${id}" — it carries distilled cross-session knowledge (distilled_at=${ext.distilled_at}). Pass force: true if you really want to delete it. Consider graph_update to remove specific stale attributes instead.` };
+          }
+        } catch {}
         const edges = db.prepare('SELECT source, target, type FROM edges WHERE source = ? OR target = ?').all(id, id);
         db.prepare('DELETE FROM attributes WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = ?)').run(id);
         db.prepare('DELETE FROM aspects WHERE node_id = ?').run(id);

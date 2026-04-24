@@ -1173,10 +1173,18 @@ class AgentLoop {
     // (full history still in episodes table). Also bumps the
     // turn_count attribute on lifecycle. Only for acorn turns where
     // the session node exists.
+    // Trace condition — user observed sessions (T123901) where the
+    // round checkpoint silently didn't fire despite the conditions
+    // appearing to match. Logging the entry + condition values so we
+    // can catch whatever path is skipping it.
+    try {
+      this.log.info(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
+    } catch {}
     if (opts.platform === 'cli' && opts.channelId && this.learner?.db) {
       try {
         const sessions = require('../graph/sessions');
         const turn = sessions.bumpTurnCount(this.learner, opts.channelId);
+        this.log.info(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
         const sessId = 'session-' + opts.channelId;
         const sessExists = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
         if (sessExists) {

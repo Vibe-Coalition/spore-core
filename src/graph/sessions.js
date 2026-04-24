@@ -552,22 +552,26 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         // For simplicity: if target exists, leave it; just delete the temp's ttl after the merge step below.
         const exists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(targetId);
         if (!exists) {
-          // PRAGMA defer_foreign_keys lets us reorder the updates
-          // inside a transaction without the interim state
-          // (aspects/edges pointing to a renamed-but-not-yet-renamed id)
-          // tripping the FK check. Previously the nodes UPDATE would
-          // FK-fail immediately when any edge pointed at the temp,
-          // and we'd fall back to the original id with no rename.
+          // Temporarily disable FK to rewrite the id. defer_foreign_keys
+          // proved insufficient in testing (node-sqlite + concurrent
+          // learner writes were still tripping the FK check at commit
+          // time). We KNOW this rename is safe — we update every
+          // FK-holding row before re-enabling. PRAGMA foreign_keys
+          // toggles are connection-wide but our DB singleton is used
+          // by one process, and the remaining updates inside the txn
+          // leave all FKs valid.
           try {
-            db.exec('BEGIN IMMEDIATE');
-            db.exec('PRAGMA defer_foreign_keys = 1');
+            db.exec('PRAGMA foreign_keys = OFF');
             db.prepare('UPDATE nodes SET id = ? WHERE id = ?').run(targetId, tempId);
             db.prepare('UPDATE aspects SET node_id = ? WHERE node_id = ?').run(targetId, tempId);
             db.prepare('UPDATE edges SET source = ? WHERE source = ?').run(targetId, tempId);
             db.prepare('UPDATE edges SET target = ? WHERE target = ?').run(targetId, tempId);
-            db.exec('COMMIT');
+            db.exec('PRAGMA foreign_keys = ON');
+            if (log) log.info(`[distill] renamed ${tempId} → ${targetId}`);
           } catch (e) {
-            try { db.exec('ROLLBACK'); } catch {}
+            // Re-enable FKs on failure so we don't leave the connection
+            // in an unsafe state.
+            try { db.exec('PRAGMA foreign_keys = ON'); } catch {}
             if (log) log.warn(`[distill] rename ${tempId} → ${targetId} failed: ${e.message} (keeping original id)`);
           }
         }
@@ -626,9 +630,15 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     );
     for (const t of tempRows) {
       if (promotedIds.has(t.id)) continue;
-      // Identity-node safety check — never recycle a person node
-      // (especially the user's own), even if the learner mis-tagged it.
-      if (t.type === 'person') {
+      // Identity-node safety: never recycle person OR project nodes.
+      // These are structural anchors for the agent's long-term memory —
+      // person = who, project = where. User hit this: session T123420's
+      // LLM returned promote(rename) for the project node, the rename
+      // FK-failed (defer_foreign_keys doesn't always catch it), the
+      // promote fell through without clearing ttl, and the project node
+      // ended up soft-deleted here. Next session had to recreate the
+      // project from scratch and lost all prior activity notes.
+      if (t.type === 'person' || t.type === 'project') {
         try {
           const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(t.id);
           if (row) {
@@ -639,7 +649,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
             db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(ext), t.id);
           }
         } catch {}
-        if (log) log.info(`[distill] skipped soft-delete of person node ${t.id} (identity guard)`);
+        if (log) log.info(`[distill] skipped soft-delete of ${t.type} node ${t.id} (identity guard, cleared temp flag)`);
         continue;
       }
       // Double-check the node still exists at this id (rename case)
