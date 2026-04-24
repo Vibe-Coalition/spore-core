@@ -1088,6 +1088,32 @@ function applyPromptSectionsMixin(GraphContext) {
         }
       }
 
+      // graphcorn: Session block. When opts.platform === 'cli' and we
+      // have a session id (sessionId == channelId for acorn), tell the
+      // agent it has a session-anchored graph it can write to via
+      // note_discovery. Capability-gated by the channelId existing AND
+      // the session-<id> node being present in the graph (cheap check
+      // — fail-soft if no graphcorn-server on the other side).
+      if (opts.platform === 'cli' && opts.channelId) {
+        const sessNodeId = 'session-' + String(opts.channelId);
+        let sessionExists = false;
+        try {
+          sessionExists = !!this.db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessNodeId);
+        } catch {}
+        if (sessionExists) {
+          parts.push('');
+          parts.push('## This Session');
+          parts.push(`- Session node: \`${sessNodeId}\` — anchor for everything captured this conversation`);
+          if (opts.cachedProjectNodeId) {
+            parts.push(`- Project node: \`${opts.cachedProjectNodeId}\` — sibling anchor for cross-session memory in the same project`);
+          }
+          parts.push("- **Persist what you learn here.** When you discover something durable — a config that worked, a tool quirk, a fix for a tricky failure, a port number, a CLI flag — call `note_discovery({text: \"...\", kind: \"...\"})`. Don't wait for the learner; you know better what mattered. The discovery gets a `recorded_in` edge to this session AND a `learned_about` edge to the project, so future sessions on this project can find it via `graph_query`.");
+          parts.push("- `note_discovery` kinds: `fact` (plain knowledge), `gotcha` (non-obvious behavior), `workflow` (a procedure that worked), `config` (a setting/value), `failure_fix` (problem→solution pair).");
+          parts.push("- Use `graph_update` directly when you want full schema control (custom node type, multiple aspects, explicit edges to specific nodes). Use `note_discovery` for casual one-line saves — way less boilerplate.");
+          parts.push("- Every entity the LEARNER picks up from this conversation also auto-links to the session node via `discovered_in`. So even passive captures are anchored — no orphans.");
+        }
+      }
+
       parts.push('');
       if (pc.scope === 'expanded') {
         parts.push(`**Sandbox**: the user has run \`/scope expanded\`, lifting the cwd containment for this session. file operations may target any path on the user's machine — but the project root is still ${pc.cwd}, so write project files there unless the user has asked you to touch something elsewhere (shared dotfiles, a sibling repo, their home directory, etc.). Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart.`);

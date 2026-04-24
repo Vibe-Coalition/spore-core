@@ -4254,6 +4254,51 @@ class WebGateway {
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
 
+        // graphcorn: session:start fires once per acorn launch right
+        // after the WS handshake, before the first chat:submit. We
+        // create a session-<id> graph node + edge to the project node
+        // so everything captured during the conversation has a graph
+        // anchor. Idempotent — flaky reconnects re-firing this just
+        // bump mentions on the existing node.
+        if (msg.type === 'session:start' && msg.sessionId) {
+          try {
+            const sessions = require('../graph/sessions');
+            const r = sessions.upsertSessionNode(this.tools?.learner, {
+              sessionId: msg.sessionId,
+              userId:    ws._user || msg.userName || 'anon',
+              userName:  msg.userName,
+              cwd:       msg.cwd,
+              startedAt: msg.startedAt,
+              model:     this.config.normalModel || this.config.model,
+              ...(msg.projectContext || {}),
+            });
+            if (r) this.log.info(`[graphcorn] session:start → ${r.id}${r.isNew ? ' (new)' : ''}${r.projectId ? ' part_of ' + r.projectId : ''}`);
+          } catch (e) {
+            this.log.warn(`[graphcorn] session:start failed: ${e.message}`);
+          }
+          return;
+        }
+        if (msg.type === 'session:end' && msg.sessionId) {
+          try {
+            const sessions = require('../graph/sessions');
+            sessions.finalizeSessionNode(this.tools?.learner, msg.sessionId, { endedAt: msg.endedAt });
+            this.log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
+            // Phase 7: fire-and-forget summarizer. Pulls the round
+            // breadcrumbs already written to the session node and asks
+            // a small LLM to recap them. Result lands as a `summary`
+            // aspect on the session node, NOT echoed to chat. Doesn't
+            // block the WS close.
+            const llmClient = this.tools?.anthropicClient;
+            if (llmClient) {
+              sessions.summarizeSessionNode(this.tools.learner, llmClient, this.config, msg.sessionId, this.log)
+                .catch(e => this.log.warn(`[graphcorn] summary error: ${e.message}`));
+            }
+          } catch (e) {
+            this.log.warn(`[graphcorn] session:end failed: ${e.message}`);
+          }
+          return;
+        }
+
         if (msg.type === 'ping') {
           ws._missedPongs = 0;
           try { ws.send(JSON.stringify({ type: 'pong' })); } catch { }

@@ -326,6 +326,27 @@ function migrateReferenceNodes(db, log) {
   } catch (e) {
     log.warn(`[boot] Acorn-context tool-usage migration failed: ${e.message}`);
   }
+
+  // graphcorn — discovery_workflow aspect on ref-acorn-context. Tells
+  // the agent the session/project graph anchors exist and how to use
+  // note_discovery vs graph_update. New aspect with 4 attrs covering
+  // the workflow.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-graphcorn-discovery.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='discovery_workflow'"
+      ).get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='discovery_workflow'"
+      ).get()?.c || 0;
+      if (after > before) log.info(`[boot] Acorn-context discovery_workflow (graphcorn): +${after - before} attributes`);
+    }
+  } catch (e) {
+    log.warn(`[boot] graphcorn discovery_workflow migration failed: ${e.message}`);
+  }
 }
 
 async function boot() {

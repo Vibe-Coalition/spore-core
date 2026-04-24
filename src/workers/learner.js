@@ -1265,6 +1265,32 @@ The JSON schema for updates becomes:
         }
       }
 
+      // graphcorn: auto-link every newly-created entity to the
+      // session-<id> node via a `discovered_in` edge, so we can
+      // graph_query "what did session X teach us". Only fires when
+      // opts.sessionId was passed AND the session node exists in the
+      // graph (skip for non-cli platforms or first-turn races where
+      // session:start hasn't landed yet).
+      if (opts.sessionId && newNodeIds.size > 0) {
+        const sessId = 'session-' + String(opts.sessionId);
+        const sessExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
+        if (sessExists) {
+          const checkE = this.db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
+          const insE = this.db.prepare(
+            "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, 'discovered_in', 1, 'graphcorn-learner')"
+          );
+          for (const nid of newNodeIds) {
+            if (nid === sessId) continue; // shouldn't happen but cheap guard
+            if (!checkE.get(nid, sessId, 'discovered_in')) {
+              insE.run(nid, sessId);
+              wrote.edges++;
+              this.stats.edges++;
+              graphEvents.emit('change', { op: 'edge:create', edge: { source: nid, target: sessId, type: 'discovered_in' }, source: 'learner-graphcorn' });
+            }
+          }
+        }
+      }
+
       // Auto-link: connect newly created entities to the speaker to prevent orphans
       const speakerHint = opts.userId || opts.userName;
       if (speakerHint && newNodeIds.size > 0) {
