@@ -395,12 +395,13 @@ class ToolSystem {
       },
       {
         name: 'delegate_task',
-        description: 'Start a background sub-agent to perform a task asynchronously. Returns a taskId immediately. IMPORTANT: The result will be delivered to this channel AUTOMATICALLY when the task finishes — you do NOT need to call task_status or wait. Reply to the user with a brief acknowledgment and END YOUR TURN. You remain free to handle other messages while the task runs. The sub-agent has full file/web/graph access. Users can redirect a running task with task_update, check progress with task_status, or stop it with task_cancel. BEST PRACTICE: Give the sub-agent a clear, specific task description with the approach to take — not a vague goal. A focused plan reduces wasted tool calls.',
+        description: 'Start a background sub-agent to perform a task asynchronously. Returns a taskId immediately. IMPORTANT: The result will be delivered to this channel AUTOMATICALLY when the task finishes — you do NOT need to call task_status or wait. Reply to the user with a brief acknowledgment and END YOUR TURN. You remain free to handle other messages while the task runs. The sub-agent has full file/web/graph access by default; pass persona to scope it to a focused role. Users can redirect a running task with task_update, check progress with task_status, or stop it with task_cancel. BEST PRACTICE: Give the sub-agent a clear, specific task description with the approach to take — not a vague goal. A focused plan reduces wasted tool calls.',
         input_schema: {
           type: 'object',
           properties: {
             task: { type: 'string', description: 'Clear description of the task to delegate' },
             context: { type: 'string', description: 'Any context the sub-agent needs' },
+            persona: { type: 'string', enum: ['researcher'], description: 'Optional focused role. "researcher" = web_search + web_fetch only, returns a structured findings summary with citations. Cannot modify state. PREFERRED in plan mode for parallel web investigations (libraries, frameworks, best practices, current docs). Omit for general-purpose sub-agents with full tool access.' },
             model: { type: 'string', description: 'Model override (defaults to subagentModel or main model)' },
             timeoutSeconds: { type: 'number', description: 'Timeout in seconds (default 1200, max 1800)' },
             maxIterations: { type: 'number', description: 'Max iterations/tool-call rounds (default 100, max 200). Increase for complex multi-step tasks.' },
@@ -2478,8 +2479,55 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   async _delegateTask(input) {
-    const { task, context, model, timeoutSeconds, tools: enableTools = true } = input;
+    const { task, context, model, timeoutSeconds, tools: enableTools = true, persona } = input;
     if (!this.anthropicClient) return { error: 'Anthropic client not available' };
+
+    // Persona registry. Each persona overrides the sub-agent's system
+    // prompt + tool subset to keep the sub-agent focused. The default
+    // (no persona) keeps full tool access and the generic prompt
+    // assembled below — backward compatible.
+    //
+    // researcher: web research only. Used by plan-mode planners to
+    // delegate parallel investigations into libraries / frameworks /
+    // best practices without burning the planner's own turn budget.
+    // No file system access at all — sub-agents run server-side and
+    // don't have the WebSocket bridge back to the user's CLI anyway,
+    // so any read_file would just hit /workspace, not the user's repo.
+    const PERSONAS = {
+      researcher: {
+        toolNames: ['web_search', 'web_fetch'],
+        prompt: [
+          'You are a RESEARCH sub-agent. Your job is to investigate a question by searching the web and return a structured findings summary.',
+          '',
+          'PROCESS:',
+          '1. Use web_search broadly first ("how does Library X handle Y", "Y best practices 2026"). Look at the result snippets.',
+          '2. Use web_fetch for the 1-3 most promising URLs to read the actual content.',
+          '3. If a search returns nothing useful, retry with rephrased queries — do NOT give up after one search.',
+          '4. Stop researching when you have enough to answer the question concretely. Do NOT exhaust the iteration budget chasing tangentially related material.',
+          '',
+          'OUTPUT FORMAT — return your final answer in exactly this shape (markdown):',
+          '## Findings',
+          '- <key finding 1, concise>  (source: <url>)',
+          '- <key finding 2>  (source: <url>)',
+          '- ...',
+          '## Caveats',
+          '- <unknown / contradiction / version-dependency>',
+          '## Recommendation',
+          '<2-3 sentences summarizing what the parent agent should take from this>',
+          '',
+          'RULES:',
+          '- Cite a source URL for every factual claim. If you cannot cite, label it "(inference)".',
+          '- Prefer official docs / primary sources over blog posts.',
+          '- Do NOT call any tool other than web_search and web_fetch — your toolset is intentionally narrow.',
+          '- Do NOT modify state. You have no read_file / write_file / exec / graph_update access.',
+          '- 5-7 findings is a good target. More than 12 means you should narrow the question.',
+        ].join('\n'),
+      },
+    };
+    const personaSpec = persona ? PERSONAS[persona] : null;
+    if (persona && !personaSpec) {
+      return { error: `Unknown persona "${persona}". Valid: ${Object.keys(PERSONAS).join(', ')}` };
+    }
 
     // Concurrency: limit active subagents
     const maxChildren = this.config.maxSubagentChildren || 5;
@@ -2520,7 +2568,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         // Extract compact context from parent's knowledge graph
         const graphContext = this._buildSubagentGraphContext(taskEntry);
 
-        let basePrompt = [
+        let basePrompt = personaSpec ? [
+          personaSpec.prompt,
+          `Current date: ${nowISO.slice(0, 10)} (year ${currentYear}). For time-sensitive topics include "${currentYear}" in your queries.`,
+          context ? `Context from parent agent:\n${context}` : '',
+        ].filter(Boolean).join('\n\n') : [
           'You are a sub-agent performing a delegated task for an AI agent system.',
           `Current date: ${nowISO.slice(0, 10)} (year ${currentYear}). When searching the web, include "${currentYear}" in queries about recent topics. Do NOT rely on pre-trained knowledge for current facts — always use web_search.`,
           graphContext,
@@ -2550,23 +2602,25 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
         const allTools = this.getToolDefinitions();
         const findTool = (name) => allTools.find(t => t.name === name);
-        const subTools = enableTools ? [
-          findTool('exec'),
-          findTool('read_file'),
-          findTool('write_file'),
-          findTool('edit_file'),
-          findTool('graph_query'),
-          findTool('graph_update'),
-          findTool('graph_delete'),
-          findTool('web_search'),
-          findTool('web_fetch'),
-          findTool('web_serve'),
-          findTool('browser'),
-          findTool('message_send'),
-          findTool('save_tool'),
-          findTool('skill_lookup'),
-          findTool('skill_update'),
-        ].filter(Boolean) : [];
+        const subTools = personaSpec
+          ? personaSpec.toolNames.map(findTool).filter(Boolean)
+          : enableTools ? [
+              findTool('exec'),
+              findTool('read_file'),
+              findTool('write_file'),
+              findTool('edit_file'),
+              findTool('graph_query'),
+              findTool('graph_update'),
+              findTool('graph_delete'),
+              findTool('web_search'),
+              findTool('web_fetch'),
+              findTool('web_serve'),
+              findTool('browser'),
+              findTool('message_send'),
+              findTool('save_tool'),
+              findTool('skill_lookup'),
+              findTool('skill_update'),
+            ].filter(Boolean) : [];
 
         const toolNames = subTools.map(t => t.name).join(', ');
         basePrompt = basePrompt.replace('%%TOOLS%%', `Your tools: ${toolNames}.`);

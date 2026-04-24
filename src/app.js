@@ -265,6 +265,26 @@ function migrateReferenceNodes(db, log) {
   } catch (e) {
     log.warn(`[boot] Acorn-context ref migration failed: ${e.message}`);
   }
+
+  // Plan-mode persona attribute — appended to ref-acorn-context.mode so
+  // graph_query for "plan mode" surfaces the delegate_task researcher
+  // pattern. Cheap append, idempotent.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-acorn-personas.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
+      ).get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
+      ).get()?.c || 0;
+      if (after > before) log.info(`[boot] Acorn-context mode aspect: +${after - before} persona attributes`);
+    }
+  } catch (e) {
+    log.warn(`[boot] Acorn-context personas migration failed: ${e.message}`);
+  }
 }
 
 async function boot() {
