@@ -326,6 +326,24 @@ function migrateReferenceNodes(db, log) {
   } catch (e) {
     log.warn(`[boot] Acorn-context tool-usage migration failed: ${e.message}`);
   }
+
+  // Web search & fetch reference node — gives the agent a per-tool
+  // ref node for web_search/web_fetch (alongside ref-search-tools,
+  // ref-bfl-api, ref-elevenlabs-api, etc.) AND a cross-reference on
+  // ref-acorn-context.client_routing so acorn agents see "use
+  // web_search for current info" alongside the local-routing hints.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-web-search.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-web-search'").get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-web-search'").get()?.c || 0;
+      if (after > before) log.info(`[boot] ref-web-search migrated: +${after - before} aspects`);
+    }
+  } catch (e) {
+    log.warn(`[boot] ref-web-search migration failed: ${e.message}`);
+  }
 }
 
 async function boot() {
