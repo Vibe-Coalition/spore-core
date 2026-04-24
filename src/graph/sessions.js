@@ -247,7 +247,14 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     });
     const text = ((resp?.content || []).find(b => b.type === 'text')?.text || '').trim();
     if (!text) {
-      if (log) log.warn(`[graphcorn] summary for ${id} returned empty text`);
+      // Mark as "summarized" (empty) so repeat calls from the
+      // ws.on('close') chain don't re-call the LLM. Without this we
+      // double-charge on every ungraceful disconnect.
+      extraObj.summarized_at = new Date().toISOString();
+      extraObj.summarized_empty = true;
+      db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(JSON.stringify(extraObj), id);
+      if (log) log.warn(`[graphcorn] summary for ${id} returned empty text — marked to avoid retries`);
       return;
     }
     // Replace any prior summary aspect (if session ended twice on a
@@ -389,15 +396,17 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '',
       `Recent rounds (last 10):\n${recentRounds || '  (no rounds recorded)'}`,
       '',
-      `${tempRows.length} temporary nodes were created during this session. For each, decide:`,
-      '  • PROMOTE — keep as a permanent node (the user/future sessions will benefit from this)',
-      '  • DROP — let it be recycled (one-off scratch, redundant, no lasting value)',
+      `${tempRows.length} temporary nodes were created during this session. You have THREE operations — use all of them:`,
+      '  • PROMOTE — keep an existing temp node as permanent (the user/future sessions will benefit)',
+      '  • CREATE_NODES — mint FRESH permanent nodes for tools/frameworks/libraries/services the agent USED this session that are not already in the graph. Look at the rounds (tools: ..., files: ...) and the summary. Every non-trivial tool, framework, library, package, CLI, service the agent touched deserves its own node, even if it was "just used" without being deeply discussed. node types: "tool" (CLI binaries, commands), "library" (npm packages, imports), "framework" (expo, next, react-native), "service" (apis, databases), "concept" (design patterns, approaches).',
+      '  • APPEND_NOTES — attach session-specific lessons onto existing permanent nodes (e.g. add "Learned in session: expo router 4.x changed the typed-routes default to true" onto the existing `expo-router` node\'s gotchas aspect). Works on both pre-existing nodes and nodes you just created via `createNodes`.',
+      '  • DROP (implicit) — anything not in `promote` will be soft-deleted',
       '',
       'Heuristics:',
-      '  PROMOTE: tools, libraries, frameworks (with version-specific quirks discovered THIS session), people, projects, durable workflows, failure→fix pairs, learned best practices, configuration values that worked.',
+      '  PROMOTE: durable discoveries, failure→fix pairs, workflows that worked, configuration values that worked, discoveries linked to project identity.',
+      '  CREATE_NODES: every tool/library/framework/service USED. If the session touched `npm`, `expo`, `qrcode`, `powershell`, `node`, `git` — create a node for each that doesn\'t already exist. Keep descriptions factual and small; put session-specific quirks in a `gotchas` aspect on the created node.',
+      '  APPEND_NOTES: version-specific gotchas, "X is deprecated, use Y", configuration tips discovered by trial-and-error.',
       '  DROP: error log dumps, intermediate debug captures, half-formed thoughts, generic concepts already well-covered in the graph.',
-      '',
-      'For PROMOTE, you may also append a single "learned this session" line on a `gotchas` aspect of the SAME node OR on an OTHER existing permanent node (e.g. add "Learned in session: expo router 4.x changed the typed-routes default to true" to the existing `expo-router` node\'s gotchas).',
       '',
       'Temporary nodes from this session:',
       JSON.stringify(digests, null, 2),
@@ -407,17 +416,23 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '  "promote": [',
       '    { "nodeId": "<existing temp id from the list>", "renameTo": "<optional better permanent id, e.g. \\"expo-router\\" instead of \\"discovery-...\\"; omit to keep current id>" }',
       '  ],',
+      '  "createNodes": [',
+      '    { "nodeId": "expo", "label": "Expo", "type": "framework", "description": "React Native toolchain for mobile apps", "aspects": [{ "name": "overview", "attributes": ["Used for dev server + QR code bundling"] }, { "name": "gotchas", "attributes": ["Dev server defaults to port 8081; use --port to override"] }] }',
+      '  ],',
       '  "appendNotes": [',
-      '    { "targetNodeId": "<existing permanent or just-promoted node id>", "aspect": "gotchas", "content": "Learned in session: <specific lesson>" }',
+      '    { "targetNodeId": "<existing permanent or just-created node id>", "aspect": "gotchas", "content": "Learned in session: <specific lesson>" }',
       '  ]',
       '}',
-      'Anything not in `promote` will be soft-deleted (recycle_bin, 7-day retention). Keep `promote` tight — quality over quantity.',
+      'Anything not in `promote` will be soft-deleted (recycle_bin, 7-day retention). Keep `promote` tight — quality over quantity. Be generous with `createNodes` — every tool/framework/library the agent USED should get a node.',
     ].join('\n');
 
     const model = config?.casualModel || config?.normalModel || config?.model;
     const resp = await llmClient.messages.create({
       model,
-      max_tokens: 2000,
+      // Bumped 2000 → 4000 because createNodes adds 100-300 tokens
+      // per node and a busy session can spawn 5-10 tool/framework
+      // nodes; 2000 cap was truncating JSON mid-structure.
+      max_tokens: 4000,
       messages: [{ role: 'user', content: promptText }],
     });
     const respText = ((resp?.content || []).find(b => b.type === 'text')?.text || '').trim();
@@ -431,8 +446,68 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
 
     const promoteList = Array.isArray(parsed.promote) ? parsed.promote : [];
     const appendList = Array.isArray(parsed.appendNotes) ? parsed.appendNotes : [];
+    const createList = Array.isArray(parsed.createNodes) ? parsed.createNodes : [];
     const tempIdSet = new Set(tempRows.map(n => n.id));
     const promotedIds = new Set();
+    const createdCount = { value: 0 };
+
+    // Project node for edges — every created node should link to the
+    // project where this session ran. Pulled from the session's own
+    // part_of edge so distillation is self-contained.
+    const projectRow = db.prepare(
+      "SELECT target FROM edges WHERE source = ? AND type = 'part_of' LIMIT 1"
+    ).get(id);
+    const projectIdForEdges = projectRow?.target || null;
+
+    // createNodes — the LLM can mint new permanent nodes for
+    // tools/frameworks/libraries USED this session but not already in
+    // the graph. These don't need to have been temp candidates; the
+    // LLM identifies them from the round breadcrumbs + summary.
+    for (const c of createList) {
+      const newId = String(c?.nodeId || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+      if (!newId) continue;
+      const label = String(c?.label || newId).slice(0, 120);
+      const nodeType = String(c?.type || 'tool').toLowerCase().replace(/[^a-z_]/g, '_').slice(0, 20) || 'tool';
+      const description = String(c?.description || '').slice(0, 500);
+      // Skip if already exists — append notes to it instead via the
+      // appendNotes mechanism the LLM also sees.
+      if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(newId)) continue;
+      const extraNew = JSON.stringify({ distilled_from: sessionId, distilled_at: new Date().toISOString() });
+      try {
+        db.prepare(
+          'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) VALUES (?, ?, ?, ?, 6, 1, ?, ?, ?, ?)'
+        ).run(newId, label, nodeType, description, 'graphcorn-distill', 'graphcorn-distill', new Date().toISOString(), extraNew);
+
+        // Optional aspects: overview + gotchas. Input shape:
+        // { nodeId, label, type, description, aspects: [{name, attributes: ["..."]}] }
+        if (Array.isArray(c?.aspects)) {
+          for (const asp of c.aspects) {
+            const aspectName = String(asp?.name || '').replace(/[^a-z0-9_]/gi, '_').slice(0, 40);
+            if (!aspectName) continue;
+            const attrs = Array.isArray(asp?.attributes) ? asp.attributes : [];
+            if (attrs.length === 0) continue;
+            db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, 7, 'graphcorn-distill')").run(newId, aspectName);
+            const aspId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+            const insAttr = db.prepare(
+              "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn-distill', 'graphcorn-distill')"
+            );
+            for (const a of attrs) {
+              const t = String(a || '').trim();
+              if (t) insAttr.run(aspId, t);
+            }
+          }
+        }
+        // Edge: created → project (uses) + created → session (first_seen_in)
+        const insE = db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 1, 'graphcorn-distill')");
+        if (projectIdForEdges) {
+          try { insE.run(newId, projectIdForEdges, 'uses'); } catch {}
+        }
+        try { insE.run(newId, id, 'first_seen_in'); } catch {}
+        createdCount.value++;
+      } catch (e) {
+        if (log) log.warn(`[distill] createNode ${newId} failed: ${e.message}`);
+      }
+    }
 
     for (const p of promoteList) {
       const tempId = String(p?.nodeId || '');
@@ -494,6 +569,11 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     }
 
     // Soft-delete every session-temp NOT promoted → recycle_bin, 7-day expiry.
+    // FK constraint: edges.source / edges.target reference nodes.id with no
+    // CASCADE, so we must clear the node's edges BEFORE DELETE FROM nodes
+    // (aspects/attributes DO cascade). Skip identity nodes defensively —
+    // if the learner-side guard was bypassed somehow, the distiller is the
+    // last line of defense before we FK-fail on an important node.
     let dropped = 0;
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
     const insBin = db.prepare(
@@ -501,6 +581,22 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     );
     for (const t of tempRows) {
       if (promotedIds.has(t.id)) continue;
+      // Identity-node safety check — never recycle a person node
+      // (especially the user's own), even if the learner mis-tagged it.
+      if (t.type === 'person') {
+        try {
+          const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(t.id);
+          if (row) {
+            let ext = {}; try { ext = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+            delete ext.ttl;
+            delete ext.tempCreated;
+            delete ext.sessionId;
+            db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(ext), t.id);
+          }
+        } catch {}
+        if (log) log.info(`[distill] skipped soft-delete of person node ${t.id} (identity guard)`);
+        continue;
+      }
       // Double-check the node still exists at this id (rename case)
       const stillThere = db.prepare('SELECT id, label, type, description, extra FROM nodes WHERE id = ?').get(t.id);
       if (!stillThere) continue;
@@ -509,6 +605,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       const payload = JSON.stringify({ node: stillThere, aspects, edges });
       try {
         insBin.run(t.id, t.label, payload, `session ${sessionId} not promoted`, expiresAt);
+        db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(t.id, t.id);
         db.prepare('DELETE FROM nodes WHERE id = ?').run(t.id);
         dropped++;
       } catch (e) {
@@ -518,14 +615,15 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
 
     extraObj.distilled_at = new Date().toISOString();
     extraObj.distilled_promoted = promotedIds.size;
+    extraObj.distilled_created = createdCount.value;
     extraObj.distilled_dropped = dropped;
     extraObj.distilled_notes_appended = notesAppended;
     delete extraObj.distilling;
     db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
       .run(JSON.stringify(extraObj), id);
 
-    if (log) log.info(`[distill] ${id} done: promoted=${promotedIds.size} dropped=${dropped} notes=${notesAppended} model=${model}`);
-    return { promoted: promotedIds.size, dropped, notesAppended };
+    if (log) log.info(`[distill] ${id} done: promoted=${promotedIds.size} created=${createdCount.value} dropped=${dropped} notes=${notesAppended} model=${model}`);
+    return { promoted: promotedIds.size, created: createdCount.value, dropped, notesAppended };
   } catch (e) {
     extraObj.distilling = false;
     extraObj.distill_error = e.message;

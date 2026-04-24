@@ -1011,12 +1011,21 @@ The JSON schema for updates becomes:
             } catch {}
           }
         } else {
-          // graphcorn: when called inside an acorn session, every new
-          // learner-extracted node is born temp + tagged with sessionId
-          // so session-end distillation can pick winners. Without a
-          // sessionId we fall back to the existing ent.ephemeral path.
+          // graphcorn: when called inside an acorn session, most new
+          // learner-extracted nodes are born temp + tagged with
+          // sessionId so session-end distillation can pick winners.
+          // EXCEPT identity nodes — people (especially the user) and
+          // the agent's self-node are global identity and must NOT be
+          // sacrificed to distillation. Session #1 created "yam" as
+          // type=person and the distiller nuked it (FK'd on edges).
+          const isIdentityNode =
+            ent.type === 'person' ||
+            id === (this.config.agentId || 'spore') ||
+            (opts.userId && id === String(opts.userId).toLowerCase()) ||
+            (opts.userName && id === String(opts.userName).toLowerCase());
+
           let extraObj;
-          if (opts.sessionId) {
+          if (opts.sessionId && !isIdentityNode) {
             extraObj = { ttl: 'temp', sessionId: opts.sessionId, tempCreated: new Date().toISOString() };
           } else if (ent.ephemeral === true) {
             extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
