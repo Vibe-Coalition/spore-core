@@ -285,6 +285,26 @@ function migrateReferenceNodes(db, log) {
   } catch (e) {
     log.warn(`[boot] Acorn-context personas migration failed: ${e.message}`);
   }
+
+  // Tooling-questions attribute — also on ref-acorn-context.mode. Tells
+  // the planner to surface tool/framework choices as questions in plan
+  // mode rather than picking silently.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-acorn-tooling-questions.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
+      ).get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
+      ).get()?.c || 0;
+      if (after > before) log.info(`[boot] Acorn-context mode aspect: +${after - before} tooling-question attributes`);
+    }
+  } catch (e) {
+    log.warn(`[boot] Acorn-context tooling-questions migration failed: ${e.message}`);
+  }
 }
 
 async function boot() {
