@@ -1042,6 +1042,31 @@ function applyPromptSectionsMixin(GraphContext) {
         parts.push(`- Tools available: ${pc.tools.join(', ')}`);
       }
 
+      // Hardware — sub-block when acorn detected machine specs.
+      // Optional; older acorns don't send pc.hardware. Lets the agent
+      // reason about model sizing, GPU acceleration, RAM budgets,
+      // disk-vs-cloud trade-offs, etc.
+      if (pc.hardware) {
+        const h = pc.hardware;
+        const machineLines = [];
+        if (h.kernel) machineLines.push(`  - Kernel: ${h.kernel}`);
+        const cpu = [h.cpuModel, h.cpuCores ? `${h.cpuCores} cores` : null].filter(Boolean).join(', ');
+        if (cpu) machineLines.push(`  - CPU: ${cpu}`);
+        if (h.ramGi) machineLines.push(`  - RAM: ${h.ramGi} GiB`);
+        if (Array.isArray(h.gpu) && h.gpu.length) {
+          machineLines.push('  - GPU:');
+          for (const g of h.gpu) machineLines.push(`      ${g}`);
+        } else if (h.gpu === undefined || h.gpu === null) {
+          // sent but empty == no GPU detected; surface so the agent
+          // doesn't keep suggesting CUDA-accelerated tools blindly.
+          machineLines.push('  - GPU: none detected');
+        }
+        if (machineLines.length) {
+          parts.push('- Machine:');
+          for (const l of machineLines) parts.push(l);
+        }
+      }
+
       if (cached) {
         // Cached hit — short reference, agent can pull more from graph.
         parts.push(`- Project memory: graph node \`${opts.cachedProjectNodeId}\` (cached — gitHash unchanged since last session). Use \`graph_query({ query: "...", nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve file tree, ACORN.md, prior decisions, and recent activity from past sessions.`);
