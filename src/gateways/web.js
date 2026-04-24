@@ -587,15 +587,24 @@ class WebGateway {
 
       // Re-apply seeds in order:
       //   1. seed-graph.sql — agent self-node + identity / voice / rules
-      //      (CREATE TABLE IF NOT EXISTS lines are no-ops since schema
-      //      survived the wipe). Templated with AGENT_ID / AGENT_NAME
-      //      placeholders the same way seedGraph() does at first boot.
-      //   2. reference-nodes.sql — operational ref-* nodes (FLUX, web
-      //      architecture, sandbox rules, etc.).
-      //   3. migrate-ref-*.sql — additive aspects on top of the refs.
-      // Order matters: seed-graph creates the agent node FIRST so any
-      // ref-* edge that targets it (added by future migrations) won't
-      // dangle.
+      //      AND the original ref-* nodes from the install era (FLUX,
+      //      ElevenLabs, web architecture, etc.). Templated with the
+      //      AGENT_ID / AGENT_NAME placeholders the same way
+      //      seedGraph() does at first boot.
+      //   2. migrate-ref-*.sql — newer ref nodes (ssh, tailscale,
+      //      cluster, search-tools, email) + additive aspects on
+      //      existing refs. All idempotent (WHERE NOT EXISTS guards)
+      //      so re-running is safe.
+      //
+      // Notably we do NOT apply reference-nodes.sql here even though
+      // it exists on disk. It's a near-duplicate of the ref-* sections
+      // already inside seed-graph.sql; applying both creates duplicate
+      // attributes (the INSERTs in those files lack OR IGNORE because
+      // attributes have no unique constraint to defer to). The janitor
+      // catches the dupes eventually but that's wasteful — better to
+      // not create them in the first place. seed-graph.sql is the
+      // canonical seed; reference-nodes.sql sits as a historical
+      // alternate that no boot path actually reads.
       const appDir = path.resolve(__dirname, '..');
       const seedGraphPath = path.join(appDir, 'seed-graph.sql');
       if (fs.existsSync(seedGraphPath)) {
@@ -608,13 +617,9 @@ class WebGateway {
       } else {
         this.log.warn('[reset-graph] seed-graph.sql missing — agent self-node will not be restored');
       }
-      const sqls = [path.join(appDir, 'reference-nodes.sql')];
       for (const f of fs.readdirSync(appDir).filter(x => x.startsWith('migrate-ref-') && x.endsWith('.sql')).sort()) {
-        sqls.push(path.join(appDir, f));
-      }
-      for (const f of sqls) {
-        if (!fs.existsSync(f)) continue;
-        db.exec(fs.readFileSync(f, 'utf8'));
+        const fp = path.join(appDir, f);
+        if (fs.existsSync(fp)) db.exec(fs.readFileSync(fp, 'utf8'));
       }
 
       db.exec('COMMIT');
