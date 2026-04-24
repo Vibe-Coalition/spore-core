@@ -353,7 +353,20 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       "SELECT id, label, type, description, extra FROM nodes WHERE json_extract(extra, '$.sessionId') = ? AND json_extract(extra, '$.ttl') = 'temp' AND id != ?"
     ).all(sessionId, id);
 
-    if (tempRows.length === 0) {
+    // Check if we have ANY rounds recorded. Distillation can still
+    // produce value even with zero session-temps as long as the rounds
+    // aspect gives the LLM something to reason about — e.g. agent
+    // solved the task by using specific tools/frameworks that deserve
+    // permanent nodes even though nothing was temped mid-session.
+    // User hit this: T190612 succeeded at an Expo QR workflow but
+    // nothing got captured because the agent never called graph_update
+    // and the learner only added attributes to the existing project
+    // node. Result: permanent loss of "how we made the QR code work".
+    const hasRounds = db.prepare(
+      "SELECT 1 FROM aspects WHERE node_id = ? AND name = 'rounds' LIMIT 1"
+    ).get(id) != null;
+
+    if (tempRows.length === 0 && !hasRounds) {
       extraObj.distilled_at = new Date().toISOString();
       extraObj.distilled_promoted = 0;
       extraObj.distilled_dropped = 0;
@@ -361,7 +374,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(extraObj), id);
       graphEvents.emit('change', { op: 'session:distill-done', nodeId: id, promoted: 0, created: 0, dropped: 0, notesAppended: 0, empty: true, source: 'graphcorn' });
-      if (log) log.info(`[distill] ${id} no session-temp nodes — marked complete`);
+      if (log) log.info(`[distill] ${id} no temps and no rounds — marked complete`);
       return { promoted: 0, dropped: 0 };
     }
 
@@ -410,7 +423,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '',
       `Recent rounds (last 10):\n${recentRounds || '  (no rounds recorded)'}`,
       '',
-      `${tempRows.length} temporary nodes were created during this session. You have THREE operations — use all of them:`,
+      `${tempRows.length === 0 ? 'NO temporary nodes were created during this session — but the rounds above show real tool activity. Your job here is entirely `createNodes` / `appendNotes`: look at the tools used and files touched, and mint permanent nodes for the frameworks/libraries/services the agent successfully used. This is ESPECIALLY important when nothing else will capture the success — without createNodes, next session starts from zero on whatever worked here.' : `${tempRows.length} temporary nodes were created during this session.`} You have THREE operations — use all of them:`,
       '  • PROMOTE — keep an existing temp node as permanent (the user/future sessions will benefit)',
       '  • CREATE_NODES — mint FRESH permanent nodes for tools/frameworks/libraries/services the agent USED this session that are not already in the graph. Look at the rounds (tools: ..., files: ...) and the summary. Every non-trivial tool, framework, library, package, CLI, service the agent touched deserves its own node, even if it was "just used" without being deeply discussed. node types: "tool" (CLI binaries, commands), "library" (npm packages, imports), "framework" (expo, next, react-native), "service" (apis, databases), "concept" (design patterns, approaches).',
       '  • APPEND_NOTES — attach session-specific lessons onto existing permanent nodes (e.g. add "Learned in session: expo router 4.x changed the typed-routes default to true" onto the existing `expo-router` node\'s gotchas aspect). Works on both pre-existing nodes and nodes you just created via `createNodes`.',
