@@ -288,7 +288,12 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
       ).all(startedAt, endedAt);
     }
     if (rows2.length) {
-      const EPISODE_CAP = 2400;
+      // Bumped 2400 → 6000 per-episode, 24k → 60k total. Summary
+      // quality correlates directly with how much real conversation
+      // the LLM gets to read. 60k input characters is ~15k tokens —
+      // well inside any reasoning model's context window, and worth
+      // it because the summary is written-once per session.
+      const EPISODE_CAP = 6000;
       const pieces = rows2.map((r, i) => {
         const body = String(r.content || '').trim();
         const capped = body.length > EPISODE_CAP ? body.slice(0, EPISODE_CAP) + '\n  …[truncated]' : body;
@@ -296,7 +301,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
       });
       // Overall cap on the episodes block to prevent runaway prompts.
       let joined = pieces.join('\n\n');
-      if (joined.length > 24000) joined = joined.slice(0, 24000) + '\n…[trimmed for budget]';
+      if (joined.length > 60000) joined = joined.slice(0, 60000) + '\n…[trimmed for budget]';
       episodesBlock = joined;
     }
   } catch (e) {

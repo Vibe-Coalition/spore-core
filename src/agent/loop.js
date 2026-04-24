@@ -1202,28 +1202,50 @@ class AgentLoop {
           //   - files touched (already had basenames; now full paths)
           //   - non-zero exec outcomes (error hint for "what failed")
           //   - a bigger assistant reply preview (~300 chars)
+          // toolLog entries store input as JSON.stringify(...).slice(0, 300)
+          // — a truncated STRING. Earlier checkpoint code was doing
+          // `t.input?.path` expecting an object, which always returned
+          // undefined → "files: none" even when write_file ran. Parse
+          // the string first; fall through on parse failure.
+          const parseInput = (t) => {
+            if (t == null || t.input == null) return null;
+            if (typeof t.input === 'object') return t.input;
+            try { return JSON.parse(t.input); } catch { return null; }
+          };
           const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
           const fileSet = new Set();
           const execCmds = [];
           let failedExecs = 0;
           for (const t of toolLog) {
             if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
-              const p = t.input?.path;
-              if (typeof p === 'string') fileSet.add(p.split(/[\\/]/).pop());
+              const inp = parseInput(t);
+              const p = inp?.path;
+              // Store FULL path (not just basename) so the summarizer
+              // can see .acorn/scratch/ vs project-root pollution.
+              if (typeof p === 'string') fileSet.add(p);
             }
             if (t.tool === 'exec') {
-              const cmd = (typeof t.input === 'string' ? (() => { try { return JSON.parse(t.input)?.command; } catch { return null; } })() : t.input?.command) || '';
-              if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 100));
+              const inp = parseInput(t);
+              const cmd = inp?.command || '';
+              // Bumped per-command preview from 100 → 200. The prior
+              // cap was chopping multi-part commands mid-flag and
+              // losing the "what was actually run" context.
+              if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
               if (t.succeeded === false) failedExecs++;
             }
           }
-          const files = fileSet.size ? [...fileSet].slice(0, 8).join(',') : 'none';
+          const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
+          // Show up to 6 exec commands (was 3) so full workflows
+          // survive to the summary.
           const execPart = execCmds.length
-            ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 3).join(' ; ')}${execCmds.length > 3 ? ' …' : ''}`
+            ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 6).join(' ; ')}${execCmds.length > 6 ? ' …' : ''}`
             : '';
-          const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+          const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 250);
           const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
-          const replyPreview = replySnip.length > 300 ? replySnip.slice(0, 297) + '…' : replySnip;
+          // Bumped reply cap 300 → 800. A 300-char window cut off most
+          // multi-part replies right when they got to the substantive
+          // content (post-preamble). 800 captures a solid paragraph.
+          const replyPreview = replySnip.length > 800 ? replySnip.slice(0, 797) + '…' : replySnip;
           const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
           this.learner.db.prepare(
             "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
