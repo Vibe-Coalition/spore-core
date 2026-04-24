@@ -434,7 +434,7 @@ class ToolSystem {
       },
       {
         name: 'task_status',
-        description: 'Quick non-blocking check on a background task. Only use this if the user explicitly asks about task progress. Results are delivered automatically — you do NOT need to poll.',
+        description: 'Quick non-blocking check on a background task. ONLY use this if the user explicitly asks "where are we on that task?" or similar. **DO NOT POLL.** Task results are delivered AUTOMATICALLY as a new user message when complete (via task_complete trigger). If you have delegated tasks running and no other work, END YOUR TURN — do not call task_status + sleep in a loop. This tool exists solely to answer the operator\'s direct "how\'s it going" questions.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2608,11 +2608,36 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     const elapsed = Math.round((now - task.startedAt) / 1000);
 
+    // Polling-detection. The agent frequently falls into a
+    // task_status → sleep → task_status loop instead of ending the
+    // turn and waiting for the push (task_complete trigger). Count
+    // consecutive calls per session and escalate the hint into a
+    // prominent warning from the 2nd call onward. Counter resets if
+    // >60s elapses between polls (fresh conversation).
+    if (!this._taskStatusPollState) this._taskStatusPollState = new Map();
+    const sessionKey = this._ctxSessionKey() || '_global';
+    const prev = this._taskStatusPollState.get(sessionKey);
+    let pollCount = 1;
+    if (prev && (now - prev.lastAt) < 60000) pollCount = prev.count + 1;
+    this._taskStatusPollState.set(sessionKey, { count: pollCount, lastAt: now });
+
     if (task.status !== 'running') {
+      // Clear the poll counter on any terminal status — agent got its
+      // answer, polling has ended.
+      this._taskStatusPollState.delete(sessionKey);
       return { status: task.status, taskId, result: task.result, elapsed_seconds: Math.round((task.completedAt - task.startedAt) / 1000) };
     }
 
-    return { status: 'running', taskId, elapsed_seconds: elapsed, hint: 'Task is still running. Results will be delivered automatically when complete.' };
+    const response = { status: 'running', taskId, elapsed_seconds: elapsed };
+    if (pollCount >= 2) {
+      // Escalated: the agent is polling. Put the warning at the TOP
+      // of the response as an unambiguous, forceful string.
+      response._warning = `STOP POLLING. You have called task_status ${pollCount} times in a row for this session. The task_complete event will re-enter this loop AUTOMATICALLY when the task finishes. END YOUR TURN now. task_status+sleep loops are not how the harness works — they just burn tokens.`;
+      response.hint = 'END YOUR TURN — the result will be pushed.';
+    } else {
+      response.hint = 'Task is still running. Results will be delivered automatically when complete — you do NOT need to poll. END your turn and the harness will wake you when the result arrives.';
+    }
+    return response;
   }
 
   _taskCancelTool({ taskId }) {
@@ -6011,6 +6036,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     } catch (e) {
       return { error: `Failed to create: ${e.message}` };
     }
+    // Broadcast so clients (acorn CLI in particular) can render a
+    // live task-list side panel. sessionKey lets old/unscoped clients
+    // filter — the acorn CLI listens for task:* frames and only
+    // renders rows tagged with its own session.
+    try {
+      this.broadcast({
+        type: 'task:create',
+        id: slug,
+        subject: subj,
+        description: String(description || '').slice(0, 500),
+        status: 'pending',
+        priority: Number.isFinite(priority) ? priority : 3,
+        blockedBy: Array.isArray(blockedBy) ? blockedBy : [],
+        sessionKey: this._ctxSessionKey() || null,
+        channelId: ctx.channelId || null,
+      });
+    } catch {}
     return { ok: true, id: slug };
   }
 
@@ -6034,6 +6076,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       sessions.db.prepare('INSERT INTO task_comments (task_id, author, body, created) VALUES (?, ?, ?, ?)')
         .run(id, 'agent', String(note).slice(0, 4000), now);
     }
+    // Broadcast a task:update frame. Payload mirrors the task:create
+    // shape so the client can update its row in place. sessionKey
+    // carried from the task row (not ctx) since task_progress can be
+    // called for tasks created in a different context.
+    try {
+      this.broadcast({
+        type: 'task:update',
+        id,
+        subject: row.subject,
+        status: status || row.status,
+        note: note ? String(note).slice(0, 500) : undefined,
+        result: (result != null) ? String(result).slice(0, 500) : undefined,
+        priority: Number.isFinite(priority) ? priority : row.priority,
+        sessionKey: row.session_key || this._ctxSessionKey() || null,
+        channelId: row.channel_id || null,
+      });
+    } catch {}
     // Cascade: if status flipped to done, unblock dependents whose remaining
     // blockers are all done. Cheap even on large task tables — we filter by
     // LIKE on the json column then re-check each candidate in JS.

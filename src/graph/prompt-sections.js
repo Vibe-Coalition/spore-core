@@ -504,6 +504,7 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('  ```');
     lines.push('  Single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, open-ended has no brackets. Answers come back as a follow-up user message.');
     lines.push('- **schedule_wakeup** when you need to check back after a known wait (a deploy settling, a SLURM job starting, a rate-limit cooling). Releases the session immediately and re-enters with your chosen prompt after 60-3600s. Much better than a tight `sleep` loop.');
+    lines.push('- **NEVER poll delegated tasks with `task_status` + `sleep`.** When you have delegated tasks running and no other work pending, END YOUR TURN. The harness re-enters this loop automatically when any delegated task finishes (via a `task_complete` trigger injecting the result as a user message). Calling `task_status` then `sleep` then `task_status` again burns tokens, clutters the UI with noise, and gives you zero info the push delivery doesn\'t already provide. `task_status` is for "the user asked me where we are on the delegated task" — not a wait loop.');
     lines.push('- **task_create / task_progress / task_list** for anything spanning more than one back-and-forth. Commit to a task when you agree to a multi-step job; update it as you finish each step; read back later to pick up where you left off. Tasks survive restarts, so the operator can return a day later and you still know where you stopped. Use `blockedBy` to express dependencies — a task with open blockers is hidden from the default list until its blockers flip to done.');
     lines.push('- **log_watch** (local paths only) when you need continuous visibility into a log file while something runs (training loss, deploy output, startup). Matches arrive as interjections mid-turn. Use tight regex — every match becomes a message. Prefer over repeated `remote_tail` calls. For remote logs, pair `remote_exec` with `tmux_session` + `remote_tail`.');
     lines.push('- **Plan mode** behaves differently per session:');
@@ -1216,15 +1217,28 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push("If you have questions, output ONLY the QUESTIONS: block and STOP — do NOT include PLAN_READY in the same response. Wait for answers before presenting the plan.");
       parts.push('');
       parts.push('PHASE 5 — PLAN:');
-      parts.push('Only after questions are answered (or if you have none), present a detailed plan with prerequisites, step-by-step changes with file paths, new files vs existing files to modify, dependencies to install, commands to run, and how to verify it works.');
+      parts.push('Only after questions are answered (or if you have none), present a detailed plan with prerequisites, step-by-step changes with file paths, new files vs existing files to modify, dependencies to install, and commands to run. Structure the plan as a numbered list of discrete steps — each step should be small enough to task_create as its own checklist row at execution time (see PHASE 6 + the Execution Checklist rule below).');
+      parts.push('');
+      parts.push('PHASE 6 — VERIFICATION:');
+      parts.push('Every plan MUST end with a **VERIFICATION** section listing 2–5 concrete, runnable checks that confirm the change actually works. Each check is a specific command or observation with a pass criterion, e.g.:');
+      parts.push('  - `bun test src/foo.test.ts` should exit 0, 3 tests passing');
+      parts.push('  - `curl -s http://localhost:3000/api/health` should return `{"ok":true}`');
+      parts.push('  - `read_file config.ts` — `port` should be `8081`, not `8080`');
+      parts.push('  - `ls .acorn/scratch/` — `gen-qr.js` should be present');
+      parts.push('Pick checks that use existing project tooling (tests, curl, read_file) and have an unambiguous pass signal. Avoid "it should feel better" or "make sure it looks right" — those are not verifications. If the project has no test runner and no live endpoint, fall back to targeted `read_file` / `exec --version` checks that prove the expected state.');
+      parts.push('');
+      parts.push('Format the VERIFICATION section as a bulleted list under a `## Verification` heading inside the plan. The user will review it alongside the steps before accepting.');
       parts.push('');
       parts.push('RULES (these are HARD constraints, not suggestions):');
       parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT create directories. The user has explicitly chosen plan mode to PREVIEW your approach before any changes land.');
       parts.push('- Do NOT call exec for anything destructive or modifying — no `mkdir`, `npm init`, `git init`, `touch`, `>`, `>>`, `mv`, `cp`, `rm`, `chmod`, `chown`, package installs, or builds. Read-only inspection only.');
       parts.push('- You MAY use: read_file, glob, grep, web_search, web_fetch, delegate_task (persona="researcher" preferred), graph_query, exec (READ-ONLY commands only — `ls`, `cat`, `which`, `--version`, `git status`, `git log`, etc).');
       parts.push('- Do NOT put questions and PLAN_READY in the same response — ask first, then plan after answers.');
+      parts.push('- Do NOT emit PLAN_READY without a `## Verification` section. A plan without verification is incomplete.');
       parts.push("- End your plan with \"PLAN_READY\" on its own line — that's the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.");
       parts.push("- After the user clicks Execute, the SAME plan is replayed as a NEW turn with mode=execute — that's when you actually run write_file etc. Do not pre-emptively try to skip plan mode by writing now.]");
+      parts.push('');
+      parts.push('**Execution Checklist (the execute-mode rule):** When the plan is replayed for execution, your FIRST set of tool calls MUST be `task_create` — one per plan step AND one per verification check. Use short `subject` strings (5–10 words) copied from the plan\'s step headers. As you complete each step, call `task_progress({id, status: "done"})` IMMEDIATELY — do not batch updates at the end. Before starting a step, call `task_progress({id, status: "in_progress"})` so the user can see which one you\'re on. If a step fails, `task_progress({id, status: "error", note: "<what failed>"})` and either propose a fix or ask the user. After all implementation steps are `done`, run the verification checks in order, updating each to `done` or `error`. You may only declare the work complete once every task in the checklist (impl + verification) is `done`. The user watches this checklist to see progress — skipping updates means they can\'t tell where you are.');
       parts.push('');
     }
 
