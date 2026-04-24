@@ -2154,7 +2154,29 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _normalizeNodeId(raw) {
-    return raw.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
+    if (raw == null) return '';
+    // Exact-match passthrough — acorn session nodes, discovery nodes,
+    // and some event/service nodes legitimately use `:`, `@`, `_`, `.`
+    // in their IDs (e.g. `session-cli:yam@acorn-companion-...`,
+    // `qr_script_execution`, `expo.dev`). The legacy strict normalizer
+    // stripped all of those away, making such IDs unreachable from
+    // any tool that calls _normalizeNodeId. If the raw string already
+    // corresponds to an existing node, use it verbatim.
+    try {
+      if (this.learner?.db) {
+        const hit = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(String(raw));
+        if (hit) return hit.id;
+      }
+    } catch {}
+    // Otherwise sanitize, but keep the broader set of characters that
+    // real node IDs use. Whitespace → hyphen, strip disallowed chars,
+    // collapse runs of hyphens, trim leading/trailing hyphens.
+    return String(raw)
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9:@._-]/g, '')
+      .replace(/-{2,}/g, '-')
+      .replace(/^-|-$/g, '');
   }
 
   _isProtectedNode(id) {
