@@ -38,6 +38,36 @@ const projects = require('./projects');
 // from the viewer's POV; a fresh node appears only after manual refresh.
 const graphEvents = require('./events');
 
+// Shared helper — uses the same streaming pattern as maintainer.js
+// to avoid nginx 60s idle timeouts on slow reasoning models (GLM 5.1,
+// Kimi K2.6). Non-streaming .create() was returning empty text in
+// every session that took >60s to think, which is most of them.
+// Returns the response text (possibly empty) or rethrows on error.
+async function _callLlmStreaming(llmClient, params, log, label) {
+  let text = '';
+  try {
+    const stream = llmClient.messages.stream(params);
+    if (stream && typeof stream.finalMessage === 'function') {
+      const result = await stream.finalMessage();
+      text = (result?.content || []).find(b => b.type === 'text')?.text || '';
+    } else if (stream && typeof stream.on === 'function') {
+      await new Promise((resolve, reject) => {
+        stream.on('text', chunk => { text += chunk; });
+        stream.on('end', resolve);
+        stream.on('error', reject);
+      });
+    } else {
+      const response = await llmClient.messages.create(params);
+      text = (response?.content || []).find(b => b.type === 'text')?.text || '';
+    }
+  } catch (e) {
+    if (log) log.debug?.(`[${label}] stream failed (${e?.message}), falling back to non-streaming`);
+    const response = await llmClient.messages.create(params);
+    text = (response?.content || []).find(b => b.type === 'text')?.text || '';
+  }
+  return text;
+}
+
 function sessionNodeId(sessionId) {
   return 'session-' + String(sessionId || '').replace(/[^a-zA-Z0-9_:@.-]/g, '_').slice(0, 200);
 }
@@ -247,12 +277,15 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
 
   try {
     const model = config?.casualModel || config?.normalModel || config?.model;
-    const resp = await llmClient.messages.create({
+    // Bumped 500 → 1500 to give reasoning models room for thinking
+    // tokens + the 200-word recap. GLM/Kimi often spend 300-800 tokens
+    // thinking before producing text; a 500-cap was forcing them to
+    // truncate mid-think and return empty text blocks.
+    const text = (await _callLlmStreaming(llmClient, {
       model,
-      max_tokens: 500,
+      max_tokens: 1500,
       messages: [{ role: 'user', content: prompt }],
-    });
-    const text = ((resp?.content || []).find(b => b.type === 'text')?.text || '').trim();
+    }, log, 'graphcorn-summary')).trim();
     if (!text) {
       // Mark as "summarized" (empty) so repeat calls from the
       // ws.on('close') chain don't re-call the LLM. Without this we
@@ -455,15 +488,19 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     ].join('\n');
 
     const model = config?.casualModel || config?.normalModel || config?.model;
-    const resp = await llmClient.messages.create({
+    // Streaming to keep the HTTP connection alive on slow reasoning
+    // models (GLM/Kimi spend 30-60s thinking on distill-size inputs).
+    // Non-streaming was hitting nginx's 60s idle timeout and returning
+    // empty text, which caused distill to treat the LLM as having "no
+    // opinion" and soft-delete every temp.
+    const respText = (await _callLlmStreaming(llmClient, {
       model,
       // Bumped 2000 → 4000 because createNodes adds 100-300 tokens
       // per node and a busy session can spawn 5-10 tool/framework
       // nodes; 2000 cap was truncating JSON mid-structure.
       max_tokens: 4000,
       messages: [{ role: 'user', content: promptText }],
-    });
-    const respText = ((resp?.content || []).find(b => b.type === 'text')?.text || '').trim();
+    }, log, 'graphcorn-distill')).trim();
 
     // Strip optional markdown fences in case the LLM ignored the rule
     const jsonText = respText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
