@@ -167,8 +167,14 @@ const CANONICAL_ASPECTS = [
   { pattern: /^technical/, canonical: 'technical' },
   { pattern: /^communication/, canonical: 'communication_style' },
 ];
-const MAX_ATTRS_PER_ASPECT = 30;
-const MAX_ATTR_LENGTH = 300;
+// Storage caps — bumped 2026-04-23. Originals (30 / 300) shipped when
+// graphs were tiny and Claude context was tight. Modern conversations
+// produce far more durable attrs per aspect, and 300-char attrs can't
+// hold a single useful URL + caption. Doubled both.
+const MAX_ATTRS_PER_ASPECT = 60;
+const MAX_ATTR_LENGTH = 600;
+// Importance is a QUALITY threshold (LLM scores 1-10), not a truncation
+// limit — leave it alone. Lower = noisier, higher = misses real facts.
 const MIN_IMPORTANCE = 5;
 
 class Learner {
@@ -379,7 +385,10 @@ class Learner {
 
       const response = await this._callWithRetry(() => this.client.messages.create({
         model: this.config.learnerModel || this.config.casualModel || this.config.model,
-        max_tokens: 4096,
+        // Bumped 4096 → 8192 (2026-04-23). Extraction can return many
+        // entities + aspects + attributes from a single rich turn; 4k
+        // truncated mid-JSON often enough to be a real loss.
+        max_tokens: 8192,
         system,
         messages: [{ role: 'user', content: combinedExchange }],
       }), 'learner-extract');
@@ -508,7 +517,9 @@ Return ONLY valid JSON (same schema as extraction):
 
     const response = await this._callWithRetry(() => this.client.messages.create({
       model: this.config.learnerModel || this.config.casualModel || this.config.model,
-      max_tokens: 2048,
+      // Bumped 2048 → 4096 (2026-04-23). Verification pass shouldn't be
+      // tighter than half of extraction; was producing truncated retries.
+      max_tokens: 4096,
       system,
       messages: [{ role: 'user', content: exchange }],
     }), 'learner-verify');
@@ -639,7 +650,10 @@ The JSON schema for updates becomes:
     const parts = [];
     if (observedAtIso) parts.push(`Observation time (UTC): ${observedAtIso}`);
     if (opts.userName) parts.push(`[${opts.userName} in #${opts.channelName || 'dm'}]`);
-    const cappedUser = typeof userMsg === 'string' && userMsg.length > 12000 ? userMsg.substring(0, 12000) + '...[truncated]' : userMsg;
+    // Per-side conversation excerpt cap. Bumped 12000 → 24000 chars
+    // (2026-04-23, ~6k tokens per side) — long acorn turns with code
+    // pastes / tool dumps were losing facts in the tail.
+    const cappedUser = typeof userMsg === 'string' && userMsg.length > 24000 ? userMsg.substring(0, 24000) + '...[truncated]' : userMsg;
     parts.push(`User: ${cappedUser}`);
     if (opts.toolCalls && opts.toolCalls.length > 0) {
       const toolSummary = opts.toolCalls.map(t => {
@@ -649,7 +663,8 @@ The JSON schema for updates becomes:
       }).join('\n');
       parts.push(`Tools used:\n${toolSummary}`);
     }
-    const cappedAssistant = typeof assistantMsg === 'string' && assistantMsg.length > 12000 ? assistantMsg.substring(0, 12000) + '...[truncated]' : assistantMsg;
+    // Same 24k cap as the user side — see comment above.
+    const cappedAssistant = typeof assistantMsg === 'string' && assistantMsg.length > 24000 ? assistantMsg.substring(0, 24000) + '...[truncated]' : assistantMsg;
     if (cappedAssistant) parts.push(`Assistant: ${cappedAssistant}`);
     return parts.join('\n');
   }
@@ -1743,7 +1758,9 @@ ${structuredTemplate}`;
 
     const response = await this._callWithRetry(() => this.client.messages.create({
       model: this.config.learnerModel || this.config.casualModel || this.config.model,
-      max_tokens: 2048,
+      // Bumped 2048 → 4096 (2026-04-23) — skill JSON now also includes
+      // longer step summaries and 4k headroom matches extraction tier.
+      max_tokens: 4096,
       system,
       messages: [{ role: 'user', content: userContent }],
     }), 'learner-skill');
