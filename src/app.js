@@ -247,6 +247,24 @@ function migrateReferenceNodes(db, log) {
   } catch (e) {
     log.warn(`[boot] Search-tools ref migration failed: ${e.message}`);
   }
+
+  // Acorn-context refresh — projectContext shape, plan/execute mode,
+  // QUESTIONS protocol, /scope opt-out, client-side tool routing. Patches
+  // the misleading "paths outside project are rejected" attribute and
+  // adds three new aspects (project_context, mode, client_routing) that
+  // didn't exist when the original ref node was seeded.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-acorn-context.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-acorn-context'").get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-acorn-context'").get()?.c || 0;
+      if (after > before) log.info(`[boot] Acorn-context ref migrated: +${after - before} aspects`);
+    }
+  } catch (e) {
+    log.warn(`[boot] Acorn-context ref migration failed: ${e.message}`);
+  }
 }
 
 async function boot() {
