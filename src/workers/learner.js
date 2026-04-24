@@ -42,6 +42,7 @@ Extract every durable fact, preference, plan, relationship, opinion, or event. O
 **NOT worth extracting:** greetings, small talk, filler ("ok", "thanks", "got it"), anything already in the graph (even rephrased). Note: DO extract the *outcomes* and *knowledge gained* from tool usage even though the tool mechanics themselves aren't worth storing.
 
 ## Rules
+- **SPEAKER ATTRIBUTION (CRITICAL — DO NOT VIOLATE):** The conversation is prefixed with \`[<speaker> in #<channel>]\`. The speaker IS the human user whose first-person statements drive this turn. Attributes (preferences, opinions, dev environment, location, biographical facts, personality, communication style, current state) belong ONLY on the speaker's own person node — NEVER on a third party the speaker merely mentions. If yam is talking about tim, "yam runs Linux" is a yam attribute; "tim uses Photoshop" must NOT be written as a tim attribute unless tim is the speaker reporting it about himself. To record that the speaker said something about a third party, use an EDGE (\`mentioned\`, \`knows\`, \`works_with\`, etc.) — never an attribute on the third party's node. Third-party person attributes will be REJECTED by a downstream guard, so emitting them just wastes a call.
 - Create a person entity for new users. Use username as ID (lowercase-hyphenated). Even casual exchanges justify remembering the person.
 - Create entities for significant nouns: people, places, products, projects, events, organizations. An entity mentioned with 2+ facts deserves its own node.
 - **DEDUP (CRITICAL):** Before creating ANY entity, check the graph context above for an existing node that refers to the same real-world thing — even under a different name, abbreviation, or partial label. "Sasa Beauty" and "SASA San Francisco" and "Sasa Japanese Restaurant" are the SAME place — use the existing ID. When in doubt, REUSE the existing node rather than creating a new one. Duplicates are extremely costly to clean up.
@@ -929,6 +930,21 @@ The JSON schema for updates becomes:
     const idRemap = {};
     const newNodeIds = new Set();
 
+    // Speaker scoping — used to reject person-attribute writes to anyone
+    // other than the human currently talking. Without this, a yam→tim
+    // conversation lets the LLM attach yam's facts (Windows path, OS,
+    // preferences, etc.) onto tim's person node. Mirrors the auto-link
+    // resolution further down. agentId is also allowed since assistant
+    // turns legitimately learn things about the agent itself.
+    const _agentId = (this.config.agentId || 'spore').toLowerCase();
+    let speakerNodeId = null;
+    if (opts.userId || opts.userName) {
+      const hint = (opts.userId || opts.userName).toLowerCase().replace(/\s+/g, '-');
+      try {
+        speakerNodeId = this._resolveNodeId(hint, opts.userName) || hint;
+      } catch { speakerNodeId = hint; }
+    }
+
     try {
       for (const ent of extraction.entities) {
         if (!ent.id || !ent.label || !ent.type) continue;
@@ -1003,7 +1019,7 @@ The JSON schema for updates becomes:
           continue;
         }
 
-        const nodeExists = targetDb.prepare('SELECT id FROM nodes WHERE id = ?').get(nodeId);
+        const nodeExists = targetDb.prepare('SELECT id, type FROM nodes WHERE id = ?').get(nodeId);
         if (!nodeExists) {
           if (isShared) {
             targetDb.prepare(
@@ -1015,6 +1031,16 @@ The JSON schema for updates becomes:
           } else {
             continue;
           }
+        }
+
+        // Cross-user contamination guard. If the LLM tried to attach an
+        // aspect to a person node that is NOT the current speaker (and
+        // not the agent itself), drop it. The auto-link block below will
+        // still record a `mentioned` edge so the relationship survives.
+        if (!isShared && nodeExists && nodeExists.type === 'person'
+            && speakerNodeId && nodeId !== speakerNodeId && nodeId !== _agentId) {
+          this.log.warn(`[learner] Rejected cross-user person attribute: speaker=${speakerNodeId} → target=${nodeId}/${asp.name} (${(asp.attributes || []).length} attrs dropped)`);
+          continue;
         }
 
         let aspectRow = targetDb.prepare(
@@ -1116,8 +1142,16 @@ The JSON schema for updates becomes:
         const nodeId = updIsShared
           ? (updDb.prepare('SELECT id FROM nodes WHERE id = ?').get(rawNodeId)?.id || rawNodeId)
           : (idRemap[rawNodeId] || this._resolveNodeId(rawNodeId, null) || rawNodeId);
-        const nodeExists = updDb.prepare('SELECT id FROM nodes WHERE id = ?').get(nodeId);
+        const nodeExists = updDb.prepare('SELECT id, type FROM nodes WHERE id = ?').get(nodeId);
         if (!nodeExists) continue;
+
+        // Same cross-user guard as the aspects loop — never let yam's
+        // turn UPDATE an attribute on tim's person node.
+        if (!updIsShared && nodeExists.type === 'person'
+            && speakerNodeId && nodeId !== speakerNodeId && nodeId !== _agentId) {
+          this.log.warn(`[learner] Rejected cross-user person update: speaker=${speakerNodeId} → target=${nodeId}/${upd.aspectName}`);
+          continue;
+        }
 
         let aspectName = upd.aspectName;
         if (!updIsShared && nodeId === (this.config.agentId || 'spore')) {
