@@ -2827,6 +2827,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       userId: this._currentUserId || 'operator',
       originalUserMessage: this._currentUserMessage || task,
       originalUserName: this._currentUserName || null,
+      // Snapshot so the completion-delivery turn (see
+      // _deliverTaskResult) can re-feed the same acorn project
+      // context to processMessage. Without this the wake-up turn
+      // wouldn't know the cwd/tools/tree the user was working in.
+      projectContext: this._currentProjectContext || null,
       abortCtrl,
     });
 
@@ -3416,8 +3421,15 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const { channelId, platform, userId: taskUserId } = taskEntry;
       if (!channelId) return;
 
-      // Web panel: broadcast result over WebSocket, then trigger agent to summarize
-      if (platform === 'web') {
+      // Web panel AND acorn CLI both deliver via the same WebSocket
+      // gateway — channelId = sessionId (per-(user,cwd) for acorn,
+      // "web:control-panel" for web), broadcast frames go to all
+      // connected clients (acorn filters by its active sessionId).
+      // Previously CLI fell through to platformManager.getGateway('cli')
+      // which returns null (no CLI gateway exists), so the push
+      // silently dropped and the agent never got woken up.
+      if (platform === 'web' || platform === 'cli') {
+        const isAcorn = platform === 'cli';
         const deliveryUserId = taskUserId || 'operator';
         const elapsed = Math.round((taskEntry.completedAt - taskEntry.startedAt) / 1000);
         const status = taskEntry.status === 'done' ? 'completed' : 'failed';
@@ -3443,7 +3455,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // Queue delivery to prevent concurrent deliveries from interleaving
           if (!this._deliveryQueue) this._deliveryQueue = Promise.resolve();
           this._deliveryQueue = this._deliveryQueue.then(async () => {
-            // Wait for any active session run to finish before attempting delivery
+            // Wait for any active session run to finish before attempting delivery.
+            // For acorn the sessionKey uses the session:false (non-DM) branch
+            // because acorn treats each launch as its own channel — isDm for
+            // session key purposes is just "deliverable independently".
             const sessionKey = this._agent.sessions?.constructor?.buildKey?.(channelId, true, deliveryUserId) || `dm:${deliveryUserId}`;
             const MAX_WAIT = 120000;
             const waitStart = Date.now();
@@ -3463,12 +3478,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               const result = await this._agent.processMessage({
                 content,
                 channelId,
-                channelName: 'control-panel',
+                channelName: isAcorn ? `acorn:${deliveryUserId}` : 'control-panel',
                 userId: deliveryUserId,
                 userName: taskEntry.originalUserName || 'System',
                 trigger: 'task_complete',
-                platform: 'web',
-                isDm: true,
+                platform: isAcorn ? 'cli' : 'web',
+                isDm: !isAcorn, // acorn sessions aren't DM — preserves per-session isolation
+                projectContext: taskEntry.projectContext || null,
                 onTextDelta: (delta) => {
                   this.broadcast({ type: 'chat:delta', text: delta });
                 },
@@ -3490,7 +3506,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                 });
               }
             } catch (e) {
-              this.log.warn(`[subagent:${taskId}] Web result delivery failed: ${e.message}`);
+              this.log.warn(`[subagent:${taskId}] ${isAcorn ? 'CLI' : 'Web'} result delivery failed: ${e.message}`);
               this._agent.sessions?.addMessage(sessionKey, 'user', content);
               if (chatStartSent) this.broadcast({ type: 'chat:done', text: `Background task finished but delivery failed. Send a message to see results.` });
             }

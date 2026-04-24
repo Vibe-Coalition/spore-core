@@ -218,6 +218,11 @@ class AgentLoop {
     this.tools._currentUserId = opts.userId || null;
     this.tools._currentUserRole = opts.userRole || null;
     this.tools._currentSessionToken = opts.sessionToken || null;
+    // Capture so delegate_task can stash it onto the _delegatedTasks
+    // entry; when the subagent finishes, _deliverTaskResult re-feeds
+    // it into processMessage so the wake-up turn has the same acorn
+    // project context (cwd, tools, tree) the agent saw at delegation.
+    this.tools._currentProjectContext = opts.projectContext || null;
     this.tools._abortSignal = opts._abortSignal || null;
 
     const dynamicOpts = {
