@@ -527,7 +527,39 @@ function fromOAIResponse(oaiResp) {
   const msg = choice.message;
   const content = [];
 
-  const text = msg.content || msg.reasoning_content || msg.reasoning || '';
+  // Reasoning field name varies by provider:
+  //   DeepSeek / GLM → msg.reasoning_content
+  //   Qwen → msg.reasoning
+  //   Kimi (Moonshot) → msg.thinking (or msg.reasoning_content, version-dependent)
+  let reasoningText = msg.reasoning_content || msg.reasoning || msg.thinking || '';
+  let text = msg.content || '';
+
+  // Some providers wrap reasoning inline in <think>...</think> tags inside
+  // content. Split those out so reasoning ends up in a thinking block rather
+  // than polluting the visible response.
+  if (text) {
+    const thinkRe = /<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi;
+    let m;
+    while ((m = thinkRe.exec(text)) !== null) {
+      reasoningText += (reasoningText ? '\n' : '') + m[1].trim();
+    }
+    text = text.replace(thinkRe, '').trim();
+    // Orphan opening tag (model cut off mid-thought)
+    const openOnly = text.match(/<think(?:ing)?>([\s\S]*)$/i);
+    if (openOnly) {
+      reasoningText += (reasoningText ? '\n' : '') + openOnly[1].trim();
+      text = text.replace(/<think(?:ing)?>[\s\S]*$/i, '').trim();
+    }
+  }
+
+  // Kimi K2.6 / some vLLM configs emit the entire output on the reasoning
+  // channel and leave content null/empty. If we have no text but reasoning
+  // is populated and the model finished normally, treat the reasoning as
+  // the final answer.
+  if (!text && reasoningText && choice.finish_reason !== 'length') {
+    text = reasoningText;
+    reasoningText = '';
+  }
 
   if (msg.tool_calls && msg.tool_calls.length > 0) {
     if (text) content.push({ type: 'text', text });
@@ -549,6 +581,8 @@ function fromOAIResponse(oaiResp) {
       content.push({ type: 'text', text });
     }
   }
+
+  if (reasoningText) content.push({ type: 'thinking', thinking: reasoningText });
 
   if (content.length === 0) content.push({ type: 'text', text: '' });
 
@@ -727,6 +761,7 @@ class OAICompatClient {
           inactivityTimer = setTimeout(() => abortCtrl.abort(), timeout);
         };
         let fullText = '';
+        let reasoningText = '';   // accumulated thinking/reasoning content
         let toolCalls = {};
         let usage = { input_tokens: 0, output_tokens: 0 };
         let stopReason = 'end_turn';
@@ -798,9 +833,13 @@ class OAICompatClient {
               const delta = chunk.choices?.[0]?.delta;
               if (!delta) continue;
 
-              // Thinking tokens (Qwen: delta.reasoning, others: delta.reasoning_content)
-              const reasoning = delta.reasoning || delta.reasoning_content || '';
+              // Thinking tokens — field name varies by provider:
+              //   Qwen → delta.reasoning
+              //   DeepSeek / GLM → delta.reasoning_content
+              //   Kimi (Moonshot) → delta.thinking (or .reasoning_content, version-dependent)
+              const reasoning = delta.reasoning || delta.reasoning_content || delta.thinking || '';
               if (reasoning) {
+                reasoningText += reasoning;
                 if (!sentThinkingStart) {
                   emit('event', { type: 'content_block_start', content_block: { type: 'thinking' } });
                   sentThinkingStart = true;
@@ -872,6 +911,41 @@ class OAICompatClient {
           clearTimeout(inactivityTimer);
         }
 
+        // Some providers (Kimi K2 Thinking, some DeepSeek flavors) emit the
+        // reasoning inline in content wrapped in <think>...</think> instead of
+        // via a separate reasoning_content field. Split that out so downstream
+        // code sees the real final answer as `text` and the chain-of-thought
+        // as `thinking`.
+        {
+          const thinkRe = /<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi;
+          let m;
+          let stripped = fullText;
+          while ((m = thinkRe.exec(fullText)) !== null) {
+            reasoningText += (reasoningText ? '\n' : '') + m[1].trim();
+          }
+          stripped = fullText.replace(thinkRe, '').trim();
+          // If there's a lone opening <think> with no closing tag (model was
+          // cut off mid-thought), treat everything from <think> onward as
+          // reasoning and leave no final text.
+          const openOnly = stripped.match(/<think(?:ing)?>([\s\S]*)$/i);
+          if (openOnly) {
+            reasoningText += (reasoningText ? '\n' : '') + openOnly[1].trim();
+            stripped = stripped.replace(/<think(?:ing)?>[\s\S]*$/i, '').trim();
+          }
+          fullText = stripped;
+        }
+
+        // Misconfigured vLLM tunnels (observed on Kimi K2.6 and a few DeepSeek
+        // variants) emit the entire output — reasoning AND the final answer —
+        // on the `reasoning` channel, leaving `content` null/empty. If the
+        // stream finished normally (not truncated) with no text but reasoning
+        // filled, treat the reasoning as the final answer so the model is
+        // actually usable.
+        if (!fullText && reasoningText && stopReason === 'end_turn') {
+          fullText = reasoningText;
+          reasoningText = '';
+        }
+
         const content = [];
         const serverToolCalls = Object.values(toolCalls);
 
@@ -901,6 +975,11 @@ class OAICompatClient {
             content.push({ type: 'text', text: fullText });
           }
         }
+
+        // Surface accumulated reasoning as a thinking block. The probe checks
+        // for this as a fallback when text is empty, and preserving it keeps
+        // the non-stream parser + streaming parser in sync for reasoning models.
+        if (reasoningText) content.push({ type: 'thinking', thinking: reasoningText });
 
         if (content.length === 0) content.push({ type: 'text', text: '' });
         if (streamBody.tools?.length && self.onCapability) self.onCapability(params.model, 'tools', true);

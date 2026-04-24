@@ -19,6 +19,27 @@ const { embedNodeAsync } = require('../graph');
 const graphEvents = require('../graph/events');
 const SkillsManager = require('./skills');
 const { parseInstallCommand, vetPackages, RISK_LEVEL } = require('./package-vet');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
+
+// Per-tool-call async context. Replaces any notion of a "global current
+// session" — carries sessionKey + userId + channelId + platform through the
+// async callstack. Each executeTool invocation wraps its handler in
+// `_execContext.run(ctx, () => ...)` so concurrent sessions never step on
+// each other.
+const _execContext = new AsyncLocalStorage();
+
+// Tools that mutate persistent state. Plan-mode gates these through a
+// proposal queue instead of executing directly. Read-only tools (queries,
+// fetches, list operations) never appear here so planning runs unimpeded.
+const MUTATING_TOOLS = new Set([
+  'graph_update', 'graph_delete',
+  'web_serve', 'exec', 'remote_exec',
+  'write_file', 'edit_file', 'remote_write_file',
+  'email_send', 'message_send', 'message_edit', 'message_react',
+  'notify_user', 'env_manage', 'save_tool',
+]);
 
 class ToolSystem {
   constructor(config, logger, discordClient, graphContext, anthropicClient) {
@@ -420,6 +441,140 @@ class ToolSystem {
             message: { type: 'string', description: 'New instructions or feedback for the sub-agent' },
           },
           required: ['taskId', 'message'],
+        },
+      },
+      {
+        name: 'schedule_wakeup',
+        description: 'Defer a follow-up by asking the harness to re-enter this session with your chosen prompt after N seconds. Use when you need to check back on something after a known wait (a deploy finishing, a SLURM job starting, a rate-limit resetting). Releases this session immediately — do NOT loop with `sleep`. Minimum 60s, maximum 3600s.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            delaySeconds: { type: 'integer', minimum: 60, maximum: 3600, description: 'Seconds from now to fire' },
+            prompt: { type: 'string', description: 'What next-turn-you should see as the user message when it wakes' },
+            reason: { type: 'string', description: 'Short label for logs and list display' },
+          },
+          required: ['delaySeconds', 'prompt'],
+        },
+      },
+      {
+        name: 'list_wakeups',
+        description: 'List pending wakeups for this session.',
+        input_schema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'cancel_wakeup',
+        description: 'Cancel a pending wakeup by id.',
+        input_schema: {
+          type: 'object',
+          properties: { wakeupId: { type: 'integer' } },
+          required: ['wakeupId'],
+        },
+      },
+      {
+        name: 'task_create',
+        description: 'Create a persistent task in the shared task list. Use for work that spans more than one back-and-forth, especially multi-step plans where you want to track progress across sessions. Tasks persist across restarts; the operator can come back later and you still know where you left off. Use blockedBy to express dependencies.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            subject: { type: 'string', description: 'Short title (1 line)' },
+            description: { type: 'string', description: 'Full details of what needs doing' },
+            blockedBy: { type: 'array', items: { type: 'string' }, description: 'Task ids that must be done first' },
+            priority: { type: 'integer', description: '1 (urgent) to 5 (someday); default 3' },
+            id: { type: 'string', description: 'Optional explicit id (slug). Auto-generated if omitted.' },
+          },
+          required: ['subject'],
+        },
+      },
+      {
+        name: 'task_progress',
+        description: 'Update a task in the persistent list: change status, record result, add a progress note, adjust blocked_by or priority. Use as you finish each step.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'blocked', 'cancelled', 'error'] },
+            result: { type: 'string', description: 'Final result / summary when marking done' },
+            note: { type: 'string', description: 'Appends a comment to the task timeline' },
+            blockedBy: { type: 'array', items: { type: 'string' } },
+            priority: { type: 'integer' },
+          },
+          required: ['id'],
+        },
+      },
+      {
+        name: 'task_list',
+        description: 'List tasks with optional status filter. sessionScope: "session" (this session only, default), "owned" (any task you own), "all" (creator only).',
+        input_schema: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', description: 'Filter by status, or omit for "not done and not cancelled"' },
+            sessionScope: { type: 'string', enum: ['session', 'owned', 'all'] },
+            limit: { type: 'integer', description: 'Max rows (default 50)' },
+          },
+        },
+      },
+      {
+        name: 'task_get',
+        description: 'Read a single task with all its comments.',
+        input_schema: {
+          type: 'object',
+          properties: { id: { type: 'string' } },
+          required: ['id'],
+        },
+      },
+      {
+        name: 'log_watch',
+        description: 'Monitor a log file or command output and inject matching lines into this session as they arrive. Use when you need to watch a running job (training loss, deploy log, job startup). Matching lines arrive as interjections mid-turn. Burst-coalesced to avoid noise. Prefer this over calling `remote_tail` repeatedly — it is continuous.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Local absolute path, or ssh://host/absolute/path' },
+            match: { type: 'string', description: 'Regex (ripgrep -E syntax). Keep it tight — matches become interjections.' },
+            tag: { type: 'string', description: 'Short label shown in injected messages' },
+            maxMatches: { type: 'integer', description: 'Auto-stop after N matches (default 200)' },
+            idleKillMs: { type: 'integer', description: 'Kill if no matches in this long (default 300000)' },
+            timeoutMs: { type: 'integer', description: 'Hard kill after this (default 3600000)' },
+          },
+          required: ['path', 'match'],
+        },
+      },
+      {
+        name: 'log_watch_list',
+        description: 'List active log watches for this session.',
+        input_schema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'log_watch_stop',
+        description: 'Stop a specific log watch by id.',
+        input_schema: {
+          type: 'object',
+          properties: { watchId: { type: 'string' } },
+          required: ['watchId'],
+        },
+      },
+      {
+        name: 'ask_user',
+        description: 'Pause and ask the operator a structured multi-choice question. The chat shows a picker card with 2–5 options; the operator clicks one and the answer flows back to you as this tool\'s result. Use only when you genuinely need a decision you cannot infer from context (merge survivor, provider selection). Do NOT use for rhetorical questions or information-gathering.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            question: { type: 'string' },
+            options: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  label: { type: 'string', description: 'Short button text (1-5 words)' },
+                  description: { type: 'string', description: 'Explanation of what choosing this means' },
+                },
+                required: ['label'],
+              },
+              minItems: 2,
+              maxItems: 5,
+            },
+            timeoutMs: { type: 'integer', description: 'Give up after this long (default 300000 / 5 min)' },
+          },
+          required: ['question', 'options'],
         },
       },
       {
@@ -1037,12 +1192,53 @@ Set wait:false when you've submitted a long background job and just want to retu
    * @param {Object} input - Tool input parameters
    * @returns {Promise<Object>} Tool result
    */
-  async executeTool(name, input) {
+  async executeTool(name, input, ctx = null) {
     const normalizedName = name === 'graph'
       ? 'graph_update'
       : name === 'analyze'
         ? 'analyze_media'
         : name;
+    // Run the handler inside an AsyncLocalStorage context. If the caller
+    // didn't pass ctx (plugin path, legacy callers), fall back to the
+    // `_sessionContexts` map + `_lastSessionKey` hint so tools still behave.
+    const resolvedCtx = ctx || _execContext.getStore() || this._resolveFallbackCtx();
+    return await _execContext.run(resolvedCtx || {}, async () => {
+      const sessionKey = resolvedCtx?.sessionKey || null;
+      const platform = resolvedCtx?.platform;
+      // Plan-mode gate only applies to web sessions. Acorn CLI has its own
+      // PLAN_READY/plan:decided prose-based plan-approval flow (see
+      // acorn-cli/acorn/handlers/plan.py + plan_approval.py). Routing acorn's
+      // tool calls through the queue would break that flow by swallowing the
+      // tool calls the agent would otherwise execute under acorn's plan mode.
+      if (sessionKey && MUTATING_TOOLS.has(normalizedName) && platform !== 'cli') {
+        try {
+          const row = this._sessions?.db?.prepare('SELECT plan_mode FROM sessions WHERE key=?').get(sessionKey);
+          if (row?.plan_mode === 1) {
+            return this._queuePlanProposal(sessionKey, normalizedName, input);
+          }
+        } catch {}
+      }
+      return await this._executeToolDirect(normalizedName, input);
+    });
+  }
+
+  _resolveFallbackCtx() {
+    // Best-effort context when the caller didn't supply one. Prefers the
+    // last session the loop touched; otherwise the most-recently-created
+    // session_context. Returns null if neither exists — tools that need it
+    // will then bail with 'No active session'.
+    if (this._sessionContexts && this._sessionContexts.size === 1) {
+      const [[key, ctx]] = this._sessionContexts;
+      return { sessionKey: key, ...ctx };
+    }
+    return null;
+  }
+
+  // Tools that previously read `this._ctxSessionKey()` now go through this.
+  _ctx() { return _execContext.getStore() || {}; }
+  _ctxSessionKey() { return _execContext.getStore()?.sessionKey || null; }
+
+  async _executeToolDirect(normalizedName, input) {
     this.log.debug(`Executing tool: ${normalizedName}`, JSON.stringify(input).substring(0, 200));
     // Abort guard: refuse destructive tools if the user already hit stop.
     const DESTRUCTIVE = new Set(['write_file', 'edit_file', 'exec', 'save_tool', 'web_serve']);
@@ -1117,6 +1313,36 @@ Set wait:false when you've submitted a long background job and just want to retu
         }
         case 'notify_user':
           return await this._notifyUserTool(input);
+
+        // Self-scheduling
+        case 'schedule_wakeup':
+          return this._scheduleWakeupTool(input);
+        case 'list_wakeups':
+          return this._listWakeupsTool(input);
+        case 'cancel_wakeup':
+          return this._cancelWakeupTool(input);
+
+        // Persistent task list
+        case 'task_create':
+          return this._tasklistCreateTool(input);
+        case 'task_progress':
+          return this._tasklistProgressTool(input);
+        case 'task_list':
+          return this._tasklistListTool(input);
+        case 'task_get':
+          return this._tasklistGetTool(input);
+
+        // Log monitoring
+        case 'log_watch':
+          return await this._logWatchTool(input);
+        case 'log_watch_list':
+          return this._logWatchListTool();
+        case 'log_watch_stop':
+          return this._logWatchStopTool(input);
+
+        // Structured question to the operator
+        case 'ask_user':
+          return await this._askUserTool(input);
 
         case 'anima_list':
           return await this._animaListTool(input);
@@ -5218,6 +5444,504 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         return { error: `Unknown action: ${action}. Use: health, tokens, logs, restart, update_env, update_config` };
     }
   }
+
+  // ── Phase 1: schedule_wakeup ──────────────────────────────────────
+  _scheduleWakeupTool({ delaySeconds, prompt, reason }) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'Session manager not available' };
+    if (!this._ctxSessionKey()) return { error: 'No active session to wake up' };
+    const ctx = this._ctx();
+    if (!ctx) return { error: 'No session context — cannot record wakeup' };
+    const secs = Math.max(60, Math.min(Number(delaySeconds) || 60, 3600));
+    const now = Date.now();
+    const fireAt = now + secs * 1000;
+    const p = String(prompt || '').trim();
+    if (!p) return { error: 'prompt is required' };
+    const info = sessions.db.prepare(
+      `INSERT INTO wakeups (session_key, channel_id, channel_name, user_id, user_name, platform, is_dm, fire_at, prompt, reason, created)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      this._ctxSessionKey(),
+      ctx.channelId || null, ctx.channelName || null,
+      ctx.userId || null, ctx.userName || null,
+      ctx.platform || 'web',
+      ctx.isDm !== false ? 1 : 0,
+      fireAt, p, String(reason || '').slice(0, 200), now,
+    );
+    this.log.info(`[wakeup] scheduled id=${info.lastInsertRowid} in ${secs}s for ${this._ctxSessionKey()}`);
+    return { ok: true, wakeupId: info.lastInsertRowid, fireAt, delaySeconds: secs };
+  }
+
+  _listWakeupsTool() {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'Session manager not available' };
+    const key = this._ctxSessionKey();
+    if (!key) return { error: 'No active session' };
+    const rows = sessions.db.prepare(
+      'SELECT id, fire_at, prompt, reason, fired, fired_at, failed, error FROM wakeups WHERE session_key = ? ORDER BY fire_at ASC LIMIT 50'
+    ).all(key);
+    return { wakeups: rows };
+  }
+
+  _cancelWakeupTool({ wakeupId }) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'Session manager not available' };
+    const id = Number(wakeupId);
+    if (!Number.isFinite(id)) return { error: 'wakeupId required' };
+    const row = sessions.db.prepare('SELECT session_key, fired FROM wakeups WHERE id=?').get(id);
+    if (!row) return { error: 'Wakeup not found' };
+    if (row.session_key !== this._ctxSessionKey()) return { error: 'Wakeup belongs to a different session' };
+    if (row.fired) return { ok: true, alreadyFired: true };
+    sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=?, error=? WHERE id=?')
+      .run(Date.now(), 'cancelled', id);
+    return { ok: true, cancelled: id };
+  }
+
+  // Called by app.js heartbeat. Fires due wakeups by either injecting into a
+  // running session or starting a new processMessage turn. Mark fired BEFORE
+  // invoking so a long processMessage can't cause double-fire on the next tick.
+  async sweepWakeups() {
+    const sessions = this._sessions;
+    const agent = this._agent;
+    if (!sessions?.db || !agent) return;
+    const now = Date.now();
+    const due = sessions.db.prepare(
+      'SELECT * FROM wakeups WHERE fired=0 AND fire_at<=? ORDER BY fire_at ASC LIMIT 20'
+    ).all(now);
+    for (const row of due) {
+      sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=?').run(now, row.id);
+      try {
+        const opts = {
+          content: row.prompt,
+          channelId: row.channel_id || 'web:control-panel',
+          channelName: row.channel_name || 'wakeup',
+          userId: row.user_id || 'operator',
+          userName: row.user_name || 'Wakeup',
+          trigger: 'wakeup',
+          platform: row.platform || 'web',
+          isDm: row.is_dm === 1,
+        };
+        const key = row.session_key;
+        if (agent.activeRuns?.has(key)) {
+          this.log.info(`[wakeup] injecting into running session ${key} (id=${row.id})`);
+          agent.interject(key, row.prompt);
+        } else {
+          this.log.info(`[wakeup] firing processMessage for ${key} (id=${row.id}, reason=${row.reason || ''})`);
+          agent.processMessage(opts).catch(e => {
+            sessions.db.prepare('UPDATE wakeups SET failed=1, error=? WHERE id=?')
+              .run(String(e.message || e).slice(0, 500), row.id);
+          });
+        }
+      } catch (e) {
+        sessions.db.prepare('UPDATE wakeups SET failed=1, error=? WHERE id=?')
+          .run(String(e.message || e).slice(0, 500), row.id);
+      }
+    }
+  }
+
+  // ── Phase 2: persistent task list ─────────────────────────────────
+  _tasklistCreateTool({ subject, description, blockedBy, priority, id }) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'Session manager not available' };
+    const subj = String(subject || '').trim();
+    if (!subj) return { error: 'subject required' };
+    const ctx = this._ctx() || {};
+    const slug = (id || crypto.randomUUID()).toString().slice(0, 64);
+    const now = Date.now();
+    try {
+      sessions.db.prepare(
+        `INSERT INTO tasks (id, subject, description, status, owner, blocked_by, channel_id, session_key, user_id, priority, created, updated)
+         VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        slug, subj, String(description || ''), 'agent',
+        JSON.stringify(Array.isArray(blockedBy) ? blockedBy : []),
+        ctx.channelId || null, this._ctxSessionKey() || null, ctx.userId || null,
+        Number.isFinite(priority) ? priority : 3,
+        now, now,
+      );
+    } catch (e) {
+      return { error: `Failed to create: ${e.message}` };
+    }
+    return { ok: true, id: slug };
+  }
+
+  _tasklistProgressTool({ id, status, result, note, blockedBy, priority }) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'Session manager not available' };
+    if (!id) return { error: 'id required' };
+    const row = sessions.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+    if (!row) return { error: `Task not found: ${id}` };
+    const fields = [];
+    const values = [];
+    const now = Date.now();
+    if (status) { fields.push('status=?'); values.push(status); if (['done', 'cancelled', 'error'].includes(status)) { fields.push('completed=?'); values.push(now); } }
+    if (result != null) { fields.push('result=?'); values.push(String(result).slice(0, 8000)); }
+    if (Array.isArray(blockedBy)) { fields.push('blocked_by=?'); values.push(JSON.stringify(blockedBy)); }
+    if (Number.isFinite(priority)) { fields.push('priority=?'); values.push(priority); }
+    fields.push('updated=?'); values.push(now);
+    values.push(id);
+    sessions.db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id=?`).run(...values);
+    if (note) {
+      sessions.db.prepare('INSERT INTO task_comments (task_id, author, body, created) VALUES (?, ?, ?, ?)')
+        .run(id, 'agent', String(note).slice(0, 4000), now);
+    }
+    // Cascade: if status flipped to done, unblock dependents whose remaining
+    // blockers are all done. Cheap even on large task tables — we filter by
+    // LIKE on the json column then re-check each candidate in JS.
+    if (status === 'done') {
+      const candidates = sessions.db.prepare(
+        "SELECT id, blocked_by FROM tasks WHERE status='blocked' AND blocked_by LIKE ?"
+      ).all(`%"${id}"%`);
+      for (const cand of candidates) {
+        try {
+          const deps = JSON.parse(cand.blocked_by || '[]');
+          if (!deps.length) continue;
+          const q = sessions.db.prepare(`SELECT id, status FROM tasks WHERE id IN (${deps.map(() => '?').join(',')})`).all(...deps);
+          if (q.every(r => r.status === 'done')) {
+            sessions.db.prepare("UPDATE tasks SET status='pending', updated=? WHERE id=?").run(now, cand.id);
+          }
+        } catch {}
+      }
+    }
+    return { ok: true };
+  }
+
+  _tasklistListTool({ status, sessionScope = 'session', limit = 50 } = {}) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'Session manager not available' };
+    const clauses = [];
+    const values = [];
+    if (status) { clauses.push('status=?'); values.push(status); }
+    else { clauses.push("status NOT IN ('done','cancelled')"); }
+    if (sessionScope === 'session' && this._ctxSessionKey()) {
+      clauses.push('session_key=?'); values.push(this._ctxSessionKey());
+    } else if (sessionScope === 'owned') {
+      const ctx = this._ctx() || {};
+      if (ctx.userId) { clauses.push('user_id=?'); values.push(ctx.userId); }
+    }
+    const sql = `SELECT id, subject, status, owner, blocked_by, priority, created, updated, completed FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY priority ASC, created ASC LIMIT ?`;
+    values.push(Math.max(1, Math.min(limit, 500)));
+    const rows = sessions.db.prepare(sql).all(...values);
+    // Compute blocked flag per row
+    for (const r of rows) {
+      try {
+        const deps = JSON.parse(r.blocked_by || '[]');
+        if (deps.length) {
+          const placeholders = deps.map(() => '?').join(',');
+          const others = sessions.db.prepare(`SELECT status FROM tasks WHERE id IN (${placeholders})`).all(...deps);
+          r.blocked = others.some(o => o.status !== 'done');
+        } else {
+          r.blocked = false;
+        }
+      } catch { r.blocked = false; }
+    }
+    return { tasks: rows, count: rows.length };
+  }
+
+  _tasklistGetTool({ id }) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'Session manager not available' };
+    if (!id) return { error: 'id required' };
+    const row = sessions.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+    if (!row) return { error: `Task not found: ${id}` };
+    const comments = sessions.db.prepare('SELECT author, body, created FROM task_comments WHERE task_id=? ORDER BY created ASC').all(id);
+    try { row.blocked_by = JSON.parse(row.blocked_by || '[]'); } catch { row.blocked_by = []; }
+    return { task: row, comments };
+  }
+
+  // ── Phase 3: log_watch ────────────────────────────────────────────
+  async _logWatchTool({ path: logPath, match, tag, maxMatches, idleKillMs, timeoutMs }) {
+    if (!this._ctxSessionKey()) return { error: 'No active session' };
+    if (!logPath || !match) return { error: 'path and match required' };
+    if (!this._activeLogWatches) this._activeLogWatches = new Map();
+    const watchId = `lw_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const sessionKey = this._ctxSessionKey();
+    const opts = {
+      maxMatches: Math.max(1, Math.min(Number(maxMatches) || 200, 5000)),
+      idleKillMs: Math.max(10_000, Math.min(Number(idleKillMs) || 300_000, 24 * 3600 * 1000)),
+      timeoutMs: Math.max(30_000, Math.min(Number(timeoutMs) || 3_600_000, 24 * 3600 * 1000)),
+    };
+    if (logPath.startsWith('ssh://')) {
+      return { error: 'Remote (ssh://) log_watch is not implemented yet. For remote tails, pair remote_exec (with tmux_session) + remote_tail.' };
+    }
+    const cmd = `tail -n 0 -F -- ${_shellEscape(logPath)} | grep -E --line-buffered -- ${_shellEscape(match)}`;
+    const child = spawn('sh', ['-c', cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const entry = {
+      child, path: logPath, match, tag: String(tag || '').slice(0, 40),
+      sessionKey, startedAt: Date.now(), matchCount: 0, lastMatchAt: null,
+      pendingBatch: [], batchTimer: null,
+      idleTimer: null, hardTimer: null, alive: true,
+      maxMatches: opts.maxMatches, idleKillMs: opts.idleKillMs,
+    };
+    this._activeLogWatches.set(watchId, entry);
+    const flushBatch = () => {
+      if (!entry.pendingBatch.length) return;
+      const lines = entry.pendingBatch;
+      entry.pendingBatch = [];
+      entry.batchTimer = null;
+      const tagStr = entry.tag || entry.path;
+      const body = lines.slice(0, 30).map(l => String(l).slice(0, 400)).join('\n');
+      const extra = lines.length > 30 ? `\n…(+${lines.length - 30} more)` : '';
+      const msg = `[log_watch ${tagStr}] ${lines.length} line(s):\n${body}${extra}`;
+      try { this._agent?.interject?.(sessionKey, msg); } catch {}
+    };
+    const resetIdleTimer = () => {
+      if (entry.idleTimer) clearTimeout(entry.idleTimer);
+      entry.idleTimer = setTimeout(() => this.stopLogWatch(watchId, 'idle'), entry.idleKillMs);
+    };
+    resetIdleTimer();
+    entry.hardTimer = setTimeout(() => this.stopLogWatch(watchId, 'timeout'), opts.timeoutMs);
+    let buf = '';
+    child.stdout.on('data', (data) => {
+      buf += data.toString();
+      const parts = buf.split('\n');
+      buf = parts.pop() || '';
+      for (const line of parts) {
+        if (!line) continue;
+        entry.matchCount++;
+        entry.lastMatchAt = Date.now();
+        entry.pendingBatch.push(line);
+        if (!entry.batchTimer) entry.batchTimer = setTimeout(flushBatch, 200);
+        if (entry.matchCount >= entry.maxMatches) {
+          this.stopLogWatch(watchId, 'max-matches');
+          return;
+        }
+      }
+      resetIdleTimer();
+    });
+    child.stderr.on('data', (d) => this.log.debug(`[log_watch ${watchId}] stderr: ${d.toString().slice(0, 200)}`));
+    child.on('exit', (code) => {
+      entry.alive = false;
+      flushBatch();
+      if (entry.idleTimer) clearTimeout(entry.idleTimer);
+      if (entry.hardTimer) clearTimeout(entry.hardTimer);
+      try { this._agent?.interject?.(sessionKey, `[log_watch ${entry.tag || entry.path}] watch ended (exit ${code}, matches=${entry.matchCount}).`); } catch {}
+      this._activeLogWatches.delete(watchId);
+    });
+    this.log.info(`[log_watch] started id=${watchId} path=${logPath} match=${match}`);
+    return { ok: true, watchId, path: logPath, match };
+  }
+
+  _logWatchListTool() {
+    if (!this._activeLogWatches) return { watches: [] };
+    const out = [];
+    for (const [id, e] of this._activeLogWatches) {
+      if (e.sessionKey !== this._ctxSessionKey()) continue;
+      out.push({
+        watchId: id, path: e.path, match: e.match, tag: e.tag,
+        startedAt: e.startedAt, matchCount: e.matchCount, lastMatchAt: e.lastMatchAt,
+        alive: e.alive,
+      });
+    }
+    return { watches: out };
+  }
+
+  _logWatchStopTool({ watchId }) {
+    if (!this._activeLogWatches?.has(watchId)) return { error: 'Unknown watchId' };
+    this.stopLogWatch(watchId, 'stopped-by-tool');
+    return { ok: true };
+  }
+
+  stopLogWatch(watchId, reason = 'stopped') {
+    const entry = this._activeLogWatches?.get(watchId);
+    if (!entry) return;
+    entry.alive = false;
+    try { entry.child.kill('SIGTERM'); } catch {}
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    if (entry.hardTimer) clearTimeout(entry.hardTimer);
+    this.log.info(`[log_watch] stop id=${watchId} reason=${reason} matches=${entry.matchCount}`);
+    // Let the 'exit' handler do final cleanup; just nudge removal in case it hangs
+    setTimeout(() => { if (this._activeLogWatches?.get(watchId) === entry) this._activeLogWatches.delete(watchId); }, 2000);
+  }
+
+  killSessionLogWatches(sessionKey) {
+    if (!this._activeLogWatches) return;
+    for (const [id, e] of this._activeLogWatches) {
+      if (e.sessionKey === sessionKey) this.stopLogWatch(id, 'session-ended');
+    }
+  }
+
+  // ── Phase 4: ask_user ─────────────────────────────────────────────
+  async _askUserTool({ question, options, timeoutMs }) {
+    const sessionKey = this._ctxSessionKey();
+    if (!sessionKey) return { error: 'No active session' };
+    const ctx = this._ctx();
+    // Picker UI is web-only. On Acorn CLI or other platforms, ask in prose
+    // instead — the tool result tells the agent to restate the question.
+    if (ctx.platform && ctx.platform !== 'web') {
+      return {
+        error: 'ask_user is only available in web sessions. Ask the question in your reply text and wait for the user\'s free-form answer.',
+        platform: ctx.platform,
+      };
+    }
+    if (!question || !Array.isArray(options) || options.length < 2 || options.length > 5) {
+      return { error: 'question + 2-5 options required' };
+    }
+    if (!this._pendingQuestions) this._pendingQuestions = new Map();
+    const qid = `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const timeout = Math.max(30_000, Math.min(Number(timeoutMs) || 300_000, 3_600_000));
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this._pendingQuestions?.has(qid)) {
+          this._pendingQuestions.delete(qid);
+          resolve({ timedOut: true, question });
+        }
+      }, timeout);
+      this._pendingQuestions.set(qid, { resolve, sessionKey, channelId: ctx.channelId, timer, options, question, createdAt: Date.now() });
+      try {
+        if (typeof this._wsBroadcast === 'function') {
+          this._wsBroadcast(sessionKey, { type: 'ask_user', qid, question, options });
+        } else {
+          this.log.warn('[ask_user] no WS broadcaster wired — answer will only arrive if UI already polls');
+        }
+      } catch (e) {
+        this.log.warn(`[ask_user] broadcast failed: ${e.message}`);
+      }
+    });
+  }
+
+  answerAskUser(qid, answer) {
+    const entry = this._pendingQuestions?.get(qid);
+    if (!entry) return false;
+    if (!entry.options.some(o => o.label === answer)) return false;
+    clearTimeout(entry.timer);
+    this._pendingQuestions.delete(qid);
+    entry.resolve({ answer });
+    return true;
+  }
+
+  cancelSessionAskUser(sessionKey) {
+    if (!this._pendingQuestions) return;
+    for (const [qid, entry] of this._pendingQuestions) {
+      if (entry.sessionKey === sessionKey) {
+        clearTimeout(entry.timer);
+        this._pendingQuestions.delete(qid);
+        entry.resolve({ timedOut: true, cancelled: true });
+      }
+    }
+  }
+
+  listPendingQuestions(sessionKey) {
+    if (!this._pendingQuestions) return [];
+    const out = [];
+    for (const [qid, entry] of this._pendingQuestions) {
+      if (entry.sessionKey === sessionKey) {
+        out.push({ qid, question: entry.question, options: entry.options, createdAt: entry.createdAt });
+      }
+    }
+    return out;
+  }
+
+  // ── Phase 5: plan-mode proposal queue ─────────────────────────────
+  _queuePlanProposal(sessionKey, toolName, input) {
+    const sessions = this._sessions;
+    if (!sessions?.db) {
+      return { error: 'Plan mode requires session DB; cannot queue proposal.' };
+    }
+    const summary = this._planModeSummary(toolName, input);
+    const seq = sessions.db.prepare(
+      'SELECT COALESCE(MAX(sequence), 0) + 1 AS n FROM plan_proposals WHERE session_key=?'
+    ).get(sessionKey).n;
+    const info = sessions.db.prepare(
+      `INSERT INTO plan_proposals (session_key, sequence, tool, input, summary, created) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(sessionKey, seq, toolName, JSON.stringify(input || {}), summary, Date.now());
+    try {
+      if (typeof this._wsBroadcast === 'function') {
+        this._wsBroadcast(sessionKey, { type: 'plan_proposal', proposalId: info.lastInsertRowid, tool: toolName, summary, sequence: seq });
+      }
+    } catch {}
+    return {
+      queued: true,
+      planMode: true,
+      proposalId: info.lastInsertRowid,
+      sequence: seq,
+      summary,
+      note: 'Execution deferred — awaiting operator approval.',
+    };
+  }
+
+  _planModeSummary(tool, input) {
+    try {
+      switch (tool) {
+        case 'graph_delete': return `Delete ${input?.nodeId ? 'node ' + input.nodeId : input?.aspectId ? 'aspect ' + input.aspectId : input?.attributeId ? 'attribute ' + input.attributeId : 'entity'}`;
+        case 'graph_update': return `Update/create node ${input?.nodeId || input?.label || '?'}`;
+        case 'exec': return `Shell: ${String(input?.command || '').slice(0, 120)}`;
+        case 'remote_exec': return `Remote shell (${input?.host || 'primary'}): ${String(input?.command || '').slice(0, 100)}`;
+        case 'write_file': return `Write ${input?.path || '?'}`;
+        case 'edit_file': return `Edit ${input?.path || '?'}`;
+        case 'email_send': return `Email to ${input?.to || '?'}: ${String(input?.subject || '').slice(0, 60)}`;
+        case 'message_send': return `Message to ${input?.target || '?'}`;
+        case 'web_serve': return `web_serve ${input?.action || 'start'} ${input?.name || ''}`;
+        case 'env_manage': return `env ${input?.action || '?'} ${input?.key || ''}`;
+        default: return `${tool}(${JSON.stringify(input || {}).slice(0, 80)})`;
+      }
+    } catch { return tool; }
+  }
+
+  async applyPlanProposals(sessionKey) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'No session DB' };
+    const rows = sessions.db.prepare(
+      "SELECT * FROM plan_proposals WHERE session_key=? AND status='pending' ORDER BY sequence ASC"
+    ).all(sessionKey);
+    const results = [];
+    const ctx = this._sessionContexts?.get(sessionKey) || { sessionKey };
+    for (const row of rows) {
+      let input;
+      try { input = JSON.parse(row.input); } catch { input = {}; }
+      try {
+        // Run inside the session's async context so any nested tool call
+        // (e.g. graph_update's dependencies) sees the right sessionKey.
+        const result = await _execContext.run(ctx, () => this._executeToolDirect(row.tool, input));
+        const ok = !(result && result.error);
+        sessions.db.prepare(
+          'UPDATE plan_proposals SET status=?, result=?, applied_at=? WHERE id=?'
+        ).run(ok ? 'applied' : 'failed', JSON.stringify(result || {}).slice(0, 8000), Date.now(), row.id);
+        results.push({ proposalId: row.id, tool: row.tool, ok, summary: row.summary });
+        if (!ok) break; // stop the batch on first failure
+      } catch (e) {
+        sessions.db.prepare('UPDATE plan_proposals SET status=?, error=?, applied_at=? WHERE id=?')
+          .run('failed', String(e.message || e).slice(0, 500), Date.now(), row.id);
+        results.push({ proposalId: row.id, tool: row.tool, ok: false, error: e.message });
+        break;
+      }
+    }
+    try {
+      if (typeof this._wsBroadcast === 'function') {
+        this._wsBroadcast(sessionKey, { type: 'plan_applied', results });
+      }
+    } catch {}
+    return { ok: true, applied: results.length, results };
+  }
+
+  rejectPlanProposals(sessionKey) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return { error: 'No session DB' };
+    const now = Date.now();
+    const info = sessions.db.prepare(
+      "UPDATE plan_proposals SET status='rejected', applied_at=? WHERE session_key=? AND status='pending'"
+    ).run(now, sessionKey);
+    try {
+      if (typeof this._wsBroadcast === 'function') {
+        this._wsBroadcast(sessionKey, { type: 'plan_rejected', count: info.changes });
+      }
+    } catch {}
+    return { ok: true, rejected: info.changes };
+  }
+
+  listPendingProposals(sessionKey) {
+    const sessions = this._sessions;
+    if (!sessions?.db) return [];
+    return sessions.db.prepare(
+      "SELECT id, sequence, tool, summary, created FROM plan_proposals WHERE session_key=? AND status='pending' ORDER BY sequence ASC"
+    ).all(sessionKey);
+  }
 }
 
-module.exports = { ToolSystem };
+function _shellEscape(s) {
+  // Single-quote with embedded '\'' escape — safe for use inside bash -c "…"
+  // after double-quotes have already opened the outer string.
+  return "'" + String(s).replace(/'/g, `'\\''`) + "'";
+}
+
+module.exports = { ToolSystem, MUTATING_TOOLS };

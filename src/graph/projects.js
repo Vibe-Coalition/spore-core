@@ -1,0 +1,215 @@
+// Project node persistence — caches per-(user, cwd) project metadata
+// in the SPORE graph so subsequent acorn sessions for the same project
+// can skip re-injecting the full file tree / ACORN.md / etc. and
+// instead reference the cached node by id.
+//
+// Schema (uses existing nodes/aspects/attributes/edges tables):
+//   nodes
+//     id          = `project-{userId}-{hash(cwd)}`
+//     label       = projectContext.project (basename of git root or cwd)
+//     type        = 'project'
+//     description = `${projectType} project at ${cwd}`
+//   aspects
+//     name='sandbox'        attributes: ["cwd: <path>", "os: linux/amd64"]
+//     name='manifest'       attributes: ["type: <Go|Node.js|...>",
+//                                        "git: <branch>@<hash>",
+//                                        "tools: node, go, git, ..."]
+//     name='conventions'    attributes: [<ACORN.md contents, capped 4 KB>]
+//     name='tree'           attributes: [<one path per attribute>] (capped)
+//     name='last_seen'      attributes: ["<ISO timestamp>"]
+//     name='recent_activity' attributes: ["<ISO ts> — <one-line summary>", ...]
+//
+// The agent can `graph_query({ query: "project memory" })` against this
+// node from inside a session to retrieve cross-session context.
+
+const crypto = require('crypto');
+
+function projectNodeId(userId, cwd) {
+  const u = (userId || 'anon').toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 32);
+  // 8-char hash of the absolute cwd — collision-resistant enough for the
+  // 'how many distinct projects does one user open' scale we're at.
+  const h = crypto.createHash('sha256').update(cwd || '').digest('hex').slice(0, 8);
+  return `project-${u}-${h}`;
+}
+
+// upsertProject is idempotent — call it on every chat:submit. The first
+// call for a given (userId, cwd) creates the node; subsequent calls
+// refresh aspects whose values changed (gitHash, last_seen) and leave
+// stable aspects (sandbox, conventions) alone unless the underlying
+// projectContext field actually changed.
+//
+// learner is the same object as graph/context.js (owns `db`).
+// Returns { id, isNew, gitHashChanged }.
+function upsertProject(learner, userId, pc) {
+  if (!learner?.db || !pc?.cwd) return null;
+  const db = learner.db;
+  const id = projectNodeId(userId, pc.cwd);
+
+  let isNew = false;
+  let gitHashChanged = false;
+  const existing = db.prepare('SELECT id, description FROM nodes WHERE id = ?').get(id);
+
+  if (!existing) {
+    isNew = true;
+    const desc = pc.projectType
+      ? `${pc.projectType} project at ${pc.cwd}`
+      : `Project at ${pc.cwd}`;
+    db.prepare(
+      'INSERT INTO nodes (id, label, type, description, importance, mentions, extracted_with, extracted_at, provenance, extra) VALUES (?, ?, ?, ?, 6, 1, ?, ?, ?, ?)'
+    ).run(
+      id,
+      pc.project || pc.cwd.split(/[\\/]/).pop() || 'project',
+      'project',
+      desc,
+      'acorn-session',
+      new Date().toISOString(),
+      'acorn',
+      '{}',
+    );
+  } else {
+    db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+  }
+
+  // Aspect helpers — mirror the pattern in tools.js:_graphUpdateTool
+  // (insert aspect if missing, then INSERT OR IGNORE attributes by content).
+  const ensureAspect = (name, importance = 5) => {
+    let row = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(id, name);
+    if (!row) {
+      db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, ?, ?)')
+        .run(id, name, importance, 'acorn-session');
+      row = { id: db.prepare('SELECT last_insert_rowid() as id').get().id };
+    }
+    return row.id;
+  };
+  const addAttr = (aspectId, content, importance = 5) => {
+    if (!content) return;
+    const exists = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? AND content = ?').get(aspectId, content);
+    if (!exists) {
+      db.prepare('INSERT INTO attributes (aspect_id, content, importance) VALUES (?, ?, ?)')
+        .run(aspectId, content, importance);
+    }
+  };
+  const replaceAttrs = (aspectName, attrs, importance = 5) => {
+    const aspId = ensureAspect(aspectName, importance);
+    db.prepare('DELETE FROM attributes WHERE aspect_id = ?').run(aspId);
+    for (const a of attrs) addAttr(aspId, a, importance);
+  };
+
+  // sandbox: stable per (cwd, os) — addAttr is fine, no need to rewrite.
+  const sandboxId = ensureAspect('sandbox', 8);
+  addAttr(sandboxId, `cwd: ${pc.cwd}`, 8);
+  if (pc.os) addAttr(sandboxId, `os: ${pc.os}/${pc.arch || '?'}`);
+
+  // manifest: gitBranch + gitHash + projectType + tools — refresh in
+  // place because gitHash changes often.
+  const manifestAttrs = [];
+  if (pc.projectType) manifestAttrs.push(`type: ${pc.projectType}`);
+  if (pc.gitBranch) manifestAttrs.push(`branch: ${pc.gitBranch}`);
+  if (pc.gitHash) manifestAttrs.push(`git: ${pc.gitHash}`);
+  if (pc.tools && pc.tools.length) manifestAttrs.push(`tools: ${pc.tools.join(', ')}`);
+
+  // gitHash compare to detect "tree may have changed" — drives the
+  // decision in context.js to either skip or re-inject the file tree.
+  if (pc.gitHash && existing) {
+    const prevGitRow = db.prepare(`
+      SELECT a.content FROM attributes a
+        JOIN aspects asp ON asp.id = a.aspect_id
+       WHERE asp.node_id = ? AND asp.name = 'manifest' AND a.content LIKE 'git: %'
+       LIMIT 1
+    `).get(id);
+    if (prevGitRow && prevGitRow.content !== `git: ${pc.gitHash}`) {
+      gitHashChanged = true;
+    }
+  }
+  if (manifestAttrs.length) replaceAttrs('manifest', manifestAttrs, 6);
+
+  // conventions: ACORN.md. Stable unless user edits the file. Replace
+  // wholesale — cheaper than diffing.
+  if (pc.acornMd) {
+    replaceAttrs('conventions', [pc.acornMd], 7);
+  }
+
+  // tree: one attribute per path. Skip on cached hits to keep writes
+  // cheap; re-write only when isNew or gitHashChanged.
+  if (pc.tree && pc.tree.length && (isNew || gitHashChanged)) {
+    const limited = pc.tree.slice(0, 200);
+    replaceAttrs('tree', limited, 4);
+  }
+
+  // last_seen: refresh every call. Used by the future cleanup pass to
+  // garbage-collect stale project nodes.
+  replaceAttrs('last_seen', [new Date().toISOString()], 3);
+
+  return { id, isNew, gitHashChanged };
+}
+
+// getProject hydrates the cached node for a (userId, cwd) lookup or
+// returns null when none exists. Returns { id, label, gitHash, aspects }
+// where aspects is { name: [attr, ...] } for compactness.
+function getProject(learner, userId, cwd) {
+  if (!learner?.db || !cwd) return null;
+  const db = learner.db;
+  const id = projectNodeId(userId, cwd);
+  const row = db.prepare('SELECT id, label, description FROM nodes WHERE id = ?').get(id);
+  if (!row) return null;
+
+  const aspectRows = db.prepare(`
+    SELECT asp.name, a.content
+      FROM aspects asp
+      JOIN attributes a ON a.aspect_id = asp.id
+     WHERE asp.node_id = ?
+     ORDER BY asp.name
+  `).all(id);
+
+  const aspects = {};
+  for (const r of aspectRows) {
+    if (!aspects[r.name]) aspects[r.name] = [];
+    aspects[r.name].push(r.content);
+  }
+
+  // Pull gitHash out of the manifest aspect for the caller's
+  // "is this still the same code state?" check.
+  let gitHash = null;
+  for (const m of aspects.manifest || []) {
+    if (m.startsWith('git: ')) { gitHash = m.slice(5).trim(); break; }
+  }
+
+  return { id, label: row.label, description: row.description, gitHash, aspects };
+}
+
+// noteProjectInteraction appends a one-line summary onto the project
+// node's recent_activity aspect. Capped at 50 entries (older are
+// trimmed) so a chatty session doesn't unbounded-grow the node.
+function noteProjectInteraction(learner, userId, cwd, summary) {
+  if (!learner?.db || !cwd || !summary) return;
+  const db = learner.db;
+  const id = projectNodeId(userId, cwd);
+  const node = db.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
+  if (!node) return;
+
+  let aspRow = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(id, 'recent_activity');
+  if (!aspRow) {
+    db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, ?, ?)')
+      .run(id, 'recent_activity', 4, 'acorn-session');
+    aspRow = { id: db.prepare('SELECT last_insert_rowid() as id').get().id };
+  }
+  const ts = new Date().toISOString();
+  const line = `${ts} — ${summary.slice(0, 200)}`;
+  db.prepare('INSERT INTO attributes (aspect_id, content, importance) VALUES (?, ?, ?)')
+    .run(aspRow.id, line, 4);
+
+  // Trim to the last 50 entries.
+  const all = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? ORDER BY id DESC').all(aspRow.id);
+  if (all.length > 50) {
+    const toDrop = all.slice(50).map(r => r.id);
+    const placeholders = toDrop.map(() => '?').join(',');
+    db.prepare(`DELETE FROM attributes WHERE id IN (${placeholders})`).run(...toDrop);
+  }
+}
+
+module.exports = {
+  projectNodeId,
+  upsertProject,
+  getProject,
+  noteProjectInteraction,
+};

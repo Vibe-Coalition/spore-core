@@ -494,6 +494,24 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('- Each tool call costs tokens and time. Fewer, targeted calls beat many speculative ones.');
 
     lines.push('');
+    lines.push('### Asking, Waiting, Tracking');
+    lines.push('- **ask_user** (web sessions) when you need the operator to pick between 2-5 concrete options and the answer is not inferrable from context. Typical cases: which of two duplicate nodes should survive a merge, which provider to configure first, whether to proceed with a destructive action. The chat shows a picker card. Web sessions only — returns `{error}` on CLI.');
+    lines.push('- **CLI sessions (platform=cli, Acorn)** don\'t support ask_user. Instead, embed a `QUESTIONS:` block at the end of your response. The CLI parses it and renders a picker:');
+    lines.push('  ```');
+    lines.push('  QUESTIONS:');
+    lines.push('  1. Which framework? [React / Vue / Svelte]');
+    lines.push('  2. Add tests? [yes / no]');
+    lines.push('  ```');
+    lines.push('  Single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, open-ended has no brackets. Answers come back as a follow-up user message.');
+    lines.push('- **schedule_wakeup** when you need to check back after a known wait (a deploy settling, a SLURM job starting, a rate-limit cooling). Releases the session immediately and re-enters with your chosen prompt after 60-3600s. Much better than a tight `sleep` loop.');
+    lines.push('- **task_create / task_progress / task_list** for anything spanning more than one back-and-forth. Commit to a task when you agree to a multi-step job; update it as you finish each step; read back later to pick up where you left off. Tasks survive restarts, so the operator can return a day later and you still know where you stopped. Use `blockedBy` to express dependencies — a task with open blockers is hidden from the default list until its blockers flip to done.');
+    lines.push('- **log_watch** (local paths only) when you need continuous visibility into a log file while something runs (training loss, deploy output, startup). Matches arrive as interjections mid-turn. Use tight regex — every match becomes a message. Prefer over repeated `remote_tail` calls. For remote logs, pair `remote_exec` with `tmux_session` + `remote_tail`.');
+    lines.push('- **Plan mode** behaves differently per session:');
+    lines.push('  - **Web session plan mode**: if the operator flipped it ON, your mutating tools (`graph_delete`, `exec`, `write_file`, etc.) get queued for approval instead of executing. Propose the full sequence by CALLING those tools normally; each returns `{queued:true, summary}`. Summarize your plan in a natural-language reply. Operator clicks Approve or Reject in the chat.');
+    lines.push('  - **CLI session plan mode** (Acorn): the operator flips CLI-side. When on, respond with your plan as prose, end with a `PLAN_READY` marker on its own line. The CLI shows Execute/Revise/Cancel. On execute, it replays your plan as a new chat turn and you implement it for real.');
+    lines.push('  - Read-only tools (`graph_query`, `read_file`, `web_fetch`) always run immediately, both modes.');
+
+    lines.push('');
     lines.push('### Platform & Messaging');
     if (this.config.discordToken) {
       lines.push('You are connected to **Discord**. Key facts:');
@@ -980,40 +998,184 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push(`**Current project directory: ${opts.clientCwd}** — This is the user's active project. When reading files, searching code, or answering questions about "the codebase" or "this project", scope your work to this directory. Do NOT read or reference files from other projects in the workspace unless the user explicitly asks.`);
       parts.push('');
     }
-    parts.push('Use `message_send` / `message_read` / `message_edit` / `message_react` without a target for the current conversation. Only specify platform targets like `discord:123` or `telegram:456` for intentional cross-chat actions.');
-    parts.push(`Your workspace is ${workspace} — use it for scripts, files, and tools you create. It persists across restarts.`);
 
-    const envSummary = this._getEnvironmentSummary(workspace);
-    if (envSummary) {
+    // Project context from acorn (structured, sent fresh each turn).
+    // Lives in the system prompt so it doesn't accumulate in messages[]
+    // across turns. Replaces the old "GatherContext glued onto user
+    // message" path on the acorn-cli side.
+    //
+    // Two render modes driven by Phase-4 caching:
+    //  - Cached hit (gitHash matches an existing project node): emit a
+    //    short reference block. Skip the file tree + ACORN.md inline —
+    //    the agent can `graph_query` the node id for full detail when
+    //    actually needed. Cuts ~3-8 KB from every system prompt for
+    //    sessions in projects we've seen before.
+    //  - Cache miss (new project, or gitHash changed): emit the full
+    //    block. The upsert in agent/loop.js already persisted the new
+    //    state; subsequent turns will hit the cached path.
+    if (opts.projectContext) {
+      const pc = opts.projectContext;
+      const cached = opts.cachedProjectNodeId && !opts.cachedProjectStale && !opts.cachedProjectIsNew;
       parts.push('');
-      parts.push('### Pre-installed environment (do NOT reinstall these — they are already available)');
-      parts.push(envSummary);
-      parts.push('A persistent Python venv exists at /workspace/.venv (survives restarts). Use `/workspace/.venv/bin/pip install <pkg>` to add NEW packages only. Use `/workspace/.venv/bin/python3` (or just `python3`) to run scripts.');
-    } else {
-      parts.push('A persistent Python venv exists at /workspace/.venv (survives restarts). Use `/workspace/.venv/bin/pip install <pkg>` to install packages permanently. Use `/workspace/.venv/bin/python3` to run scripts with those packages.');
+      parts.push(`## Project Context — ${pc.project || 'project'}`);
+      if (pc.cwd) parts.push(`- CWD: ${pc.cwd}`);
+      if (pc.os || pc.arch) parts.push(`- Platform: ${pc.os || '?'}/${pc.arch || '?'}`);
+      if (pc.projectType) parts.push(`- Project type: ${pc.projectType}`);
+      if (pc.gitBranch) {
+        const hash = pc.gitHash ? ` @ ${pc.gitHash}` : '';
+        parts.push(`- Git: branch=${pc.gitBranch}${hash}`);
+      }
+      if (pc.gitStatus) {
+        parts.push('- Git status:');
+        for (const line of pc.gitStatus.split('\n')) parts.push(`    ${line}`);
+      }
+      if (pc.tools && pc.tools.length) {
+        parts.push(`- Tools available: ${pc.tools.join(', ')}`);
+      }
+
+      if (cached) {
+        // Cached hit — short reference, agent can pull more from graph.
+        parts.push(`- Project memory: graph node \`${opts.cachedProjectNodeId}\` (cached — gitHash unchanged since last session). Use \`graph_query({ query: "...", nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve file tree, ACORN.md, prior decisions, and recent activity from past sessions.`);
+      } else {
+        // Cache miss — inline the full project context.
+        if (pc.tree && pc.tree.length) {
+          const shown = pc.tree.slice(0, 80);
+          parts.push(`- Project tree (${pc.tree.length} entries${pc.tree.length > shown.length ? `, showing first ${shown.length}` : ''}):`);
+          for (const path of shown) parts.push(`    ${path}`);
+        }
+        if (pc.acornMd) {
+          parts.push('');
+          parts.push('### ACORN.md (project instructions from the user)');
+          parts.push(pc.acornMd);
+        }
+        if (opts.cachedProjectNodeId) {
+          parts.push('');
+          parts.push(`**Project memory**: this project is tracked as graph node \`${opts.cachedProjectNodeId}\`. Use \`graph_query({ nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve prior decisions, conventions, and recent activity from past sessions.`);
+        }
+      }
+
+      parts.push('');
+      if (pc.scope === 'expanded') {
+        parts.push(`**Sandbox**: the user has run \`/scope expanded\`, lifting the cwd containment for this session. file operations may target any path on the user's machine — but the project root is still ${pc.cwd}, so write project files there unless the user has asked you to touch something elsewhere (shared dotfiles, a sibling repo, their home directory, etc.). Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart.`);
+      } else {
+        parts.push(`**Sandbox**: ALL file operations (read_file, write_file, edit_file, exec) are sandboxed to ${pc.cwd}. Paths outside that directory will be REJECTED by the tool executor on the user's machine. If the user explicitly asks you to touch a path outside ${pc.cwd}, tell them to run \`/scope expanded\` first to lift the sandbox. Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart. Write everything to ${pc.cwd}.`);
+      }
+      parts.push('**Work style**: One or two tool calls per turn, not six. After each file write or command, briefly tell the user what you did and what is next. Do NOT batch many write_file calls in a single response — the user cannot see progress and it takes too long to generate.');
+      parts.push('');
     }
 
-    parts.push('');
-    parts.push('**All installs persist across restarts**: pip packages (/workspace/.venv), npm global packages, Go binaries, Cargo crates, Ruby gems, Playwright/Puppeteer browsers, and apt packages are all stored on persistent volumes. You do NOT need to reinstall them after a restart. Before installing something, check if it already exists (`which <cmd>`, `pip list | grep <pkg>`, etc.).');
-
-
-    parts.push('You can read/write your own config at /app/spore.json and your graph at ' + this.config.graphDbPath + ' via the exec tool.');
-    parts.push('If a tool returns an absolute `filePath` (for example from `browser({ action: "screenshot" })`), you can deliver that file to the user with `message_send`.');
-
-    const keyStatus = [];
-    if (this.config.anthropicApiKey) keyStatus.push('ANTHROPIC_API_KEY ✓');
-    if (this.config.openaiApiKey) keyStatus.push('OPENAI_API_KEY ✓');
-    if (this.config.deepgramApiKey) keyStatus.push('DEEPGRAM_API_KEY ✓');
-    if (this.config.xiApiKey) keyStatus.push('XI_API_KEY (ElevenLabs) ✓');
-    else keyStatus.push('XI_API_KEY (ElevenLabs) ✗ not set');
-    if (this.config.voice?.enabled) {
-      const tts = this.config.xiApiKey ? 'ElevenLabs' : this.config.openaiApiKey ? 'OpenAI' : 'Edge (free)';
-      const stt = this.config.deepgramApiKey ? 'Deepgram' : this.config.openaiApiKey ? 'OpenAI Whisper' : 'none';
-      keyStatus.push(`Voice pipeline: TTS=${tts}, STT=${stt}`);
+    // Plan-mode prompt block — was previously glued onto every user
+    // message by acorn (PlanPrefix in cli/update.go). Now sent here
+    // once per turn via projectContext.mode. Verbatim port of the
+    // Python PLAN_PREFIX from acorn/cli.py so behaviour matches —
+    // including the literal QUESTIONS: example, the EXACT-format
+    // emphasis, the don't-embed-questions-in-plan-text rule, and the
+    // 'ask first then plan' constraint that prevents the agent from
+    // dumping QUESTIONS: and PLAN_READY in the same response.
+    if (opts.projectContext) {
+      try { this.log.info(`[plan-mode] projectContext.mode=${opts.projectContext.mode || 'unset'} platform=${opts.platform || 'unset'}`); } catch {}
+    } else if (opts.platform === 'cli') {
+      try { this.log.warn('[plan-mode] cli turn but projectContext is missing — agent will see no Project Context section'); } catch {}
     }
-    parts.push('');
-    parts.push('### API Keys & Services');
-    parts.push(keyStatus.join(' · '));
+    if (opts.projectContext && opts.projectContext.mode === 'plan') {
+      parts.push('## Plan Mode (acorn CLI)');
+      parts.push('[MODE: Plan only. You are in planning mode. Follow these phases in order:');
+      parts.push('');
+      parts.push('PHASE 1 — ENVIRONMENT AUDIT:');
+      parts.push("The Project Context section above includes the local environment (OS, installed tools, project type, file tree). Review what is available. If the task requires tools/runtimes not installed, note them.");
+      parts.push('');
+      parts.push('PHASE 2 — CODEBASE SCAN:');
+      parts.push('Use read_file, glob, and grep to understand the existing codebase structure, patterns, conventions, config files, and dependencies.');
+      parts.push('');
+      parts.push('PHASE 3 — RESEARCH:');
+      parts.push('Identify topics you need more context on — frameworks, APIs, libraries, best practices. Use web_search and web_fetch to research them.');
+      parts.push('');
+      parts.push('PHASE 4 — CLARIFY:');
+      parts.push("If the request leaves ANY material ambiguity — framework choice, scope, audience, design direction, target language, file layout, naming, technical approach — you MUST ask before proceeding to PHASE 5. A request like \"build me a website about bridges\" is ambiguous: framework? styling? data source? routing? deployment target? Ask. Default to asking when uncertain — the user can always say \"you choose\" if they don't care, but they cannot un-do an unwanted scaffolded project.");
+      parts.push('');
+      parts.push("Emit a QUESTIONS: marker on its own line, then the questions. TWO formats are accepted — prefer JSON.");
+      parts.push('');
+      parts.push('**PREFERRED — JSON (most robust):**');
+      parts.push('QUESTIONS:');
+      parts.push('```json');
+      parts.push('[');
+      parts.push('  {"text": "What framework?", "type": "single", "options": ["React", "Vue", "Svelte"]},');
+      parts.push('  {"text": "Which features?", "type": "multi", "options": ["Auth", "DB", "API", "WebSocket"]},');
+      parts.push('  {"text": "Project name?", "type": "open"}');
+      parts.push(']');
+      parts.push('```');
+      parts.push('');
+      parts.push('Valid `type` values: `single` (one-of), `multi` (any-of), `open` (free text).');
+      parts.push('If `type` is omitted, presence of `options` implies single-select; absence implies open.');
+      parts.push('');
+      parts.push('**LEGACY — prose fallback (if you cannot emit JSON cleanly):**');
+      parts.push('QUESTIONS:');
+      parts.push('1. Single-select question? [Option A / Option B / Option C]');
+      parts.push('2. Multi-select question? {Option A / Option B / Option C / Option D}');
+      parts.push('3. Open-ended question?');
+      parts.push('');
+      parts.push('FORMAT RULES — the CLI parser is strict:');
+      parts.push("- The marker is the literal string `QUESTIONS:` on its own line. Do NOT wrap the MARKER in markdown bold/italic (`**QUESTIONS:**` etc). The parser tolerates it but it's ugly.");
+      parts.push('- For the JSON form: valid JSON only. No trailing commas. No comments. No smart quotes. Use `"` quotes, not `“`/`”`. Close every bracket. If you hit an output limit, STOP with `]` before the close of the QUESTIONS block rather than emitting invalid JSON.');
+      parts.push('- For the prose form: discrete-choice questions MUST use `[A / B / C]` (single) or `{A / B / C}` (multi) — do NOT list options as prose with "or" separators, those render as open-ended free text and the user has to type.');
+      parts.push('- Do NOT apply bold/italic/code formatting to the question TEXT either — it leaks into the picker rows.');
+      parts.push('');
+      parts.push("If you have questions, output ONLY the QUESTIONS: block and STOP — do NOT include PLAN_READY in the same response. Wait for answers before presenting the plan.");
+      parts.push('');
+      parts.push('PHASE 5 — PLAN:');
+      parts.push('Only after questions are answered (or if you have none), present a detailed plan with prerequisites, step-by-step changes with file paths, new files vs existing files to modify, dependencies to install, commands to run, and how to verify it works.');
+      parts.push('');
+      parts.push('RULES (these are HARD constraints, not suggestions):');
+      parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT create directories. The user has explicitly chosen plan mode to PREVIEW your approach before any changes land.');
+      parts.push('- Do NOT call exec for anything destructive or modifying — no `mkdir`, `npm init`, `git init`, `touch`, `>`, `>>`, `mv`, `cp`, `rm`, `chmod`, `chown`, package installs, or builds. Read-only inspection only.');
+      parts.push('- You MAY use: read_file, glob, grep, web_search, web_fetch, exec (READ-ONLY commands only — `ls`, `cat`, `which`, `--version`, `git status`, `git log`, etc).');
+      parts.push('- Do NOT put questions and PLAN_READY in the same response — ask first, then plan after answers.');
+      parts.push("- End your plan with \"PLAN_READY\" on its own line — that's the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.");
+      parts.push("- After the user clicks Execute, the SAME plan is replayed as a NEW turn with mode=execute — that's when you actually run write_file etc. Do not pre-emptively try to skip plan mode by writing now.]");
+      parts.push('');
+    }
+
+    // Server-platform sections (workspace, persistent venv, API keys,
+    // voice pipeline, spore.json config) are irrelevant for an acorn
+    // coding agent running on the user's box — the user's machine has
+    // its own toolchain and the agent shouldn't be reaching for SPORE's
+    // /workspace paths or API keys. Saves ~600 bytes per system prompt
+    // and removes prompt content the agent might otherwise act on.
+    if (opts.platform !== 'cli') {
+      parts.push('Use `message_send` / `message_read` / `message_edit` / `message_react` without a target for the current conversation. Only specify platform targets like `discord:123` or `telegram:456` for intentional cross-chat actions.');
+      parts.push(`Your workspace is ${workspace} — use it for scripts, files, and tools you create. It persists across restarts.`);
+
+      const envSummary = this._getEnvironmentSummary(workspace);
+      if (envSummary) {
+        parts.push('');
+        parts.push('### Pre-installed environment (do NOT reinstall these — they are already available)');
+        parts.push(envSummary);
+        parts.push('A persistent Python venv exists at /workspace/.venv (survives restarts). Use `/workspace/.venv/bin/pip install <pkg>` to add NEW packages only. Use `/workspace/.venv/bin/python3` (or just `python3`) to run scripts.');
+      } else {
+        parts.push('A persistent Python venv exists at /workspace/.venv (survives restarts). Use `/workspace/.venv/bin/pip install <pkg>` to install packages permanently. Use `/workspace/.venv/bin/python3` to run scripts with those packages.');
+      }
+
+      parts.push('');
+      parts.push('**All installs persist across restarts**: pip packages (/workspace/.venv), npm global packages, Go binaries, Cargo crates, Ruby gems, Playwright/Puppeteer browsers, and apt packages are all stored on persistent volumes. You do NOT need to reinstall them after a restart. Before installing something, check if it already exists (`which <cmd>`, `pip list | grep <pkg>`, etc.).');
+
+      parts.push('You can read/write your own config at /app/spore.json and your graph at ' + this.config.graphDbPath + ' via the exec tool.');
+      parts.push('If a tool returns an absolute `filePath` (for example from `browser({ action: "screenshot" })`), you can deliver that file to the user with `message_send`.');
+
+      const keyStatus = [];
+      if (this.config.anthropicApiKey) keyStatus.push('ANTHROPIC_API_KEY ✓');
+      if (this.config.openaiApiKey) keyStatus.push('OPENAI_API_KEY ✓');
+      if (this.config.deepgramApiKey) keyStatus.push('DEEPGRAM_API_KEY ✓');
+      if (this.config.xiApiKey) keyStatus.push('XI_API_KEY (ElevenLabs) ✓');
+      else keyStatus.push('XI_API_KEY (ElevenLabs) ✗ not set');
+      if (this.config.voice?.enabled) {
+        const tts = this.config.xiApiKey ? 'ElevenLabs' : this.config.openaiApiKey ? 'OpenAI' : 'Edge (free)';
+        const stt = this.config.deepgramApiKey ? 'Deepgram' : this.config.openaiApiKey ? 'OpenAI Whisper' : 'none';
+        keyStatus.push(`Voice pipeline: TTS=${tts}, STT=${stt}`);
+      }
+      parts.push('');
+      parts.push('### API Keys & Services');
+      parts.push(keyStatus.join(' · '));
+    }
 
     if (opts.platform === 'web' || opts.platform === 'discord' || !opts.platform) {
       parts.push('');

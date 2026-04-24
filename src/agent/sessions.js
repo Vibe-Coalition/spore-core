@@ -81,7 +81,76 @@ class SessionManager {
       
       CREATE INDEX IF NOT EXISTS idx_lineage_session ON session_lineage(session_key);
       CREATE INDEX IF NOT EXISTS idx_lineage_compacted ON session_lineage(compacted_from);
+
+      CREATE TABLE IF NOT EXISTS wakeups (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key TEXT NOT NULL,
+        channel_id  TEXT,
+        channel_name TEXT,
+        user_id     TEXT,
+        user_name   TEXT,
+        platform    TEXT,
+        is_dm       INTEGER NOT NULL DEFAULT 1,
+        fire_at     INTEGER NOT NULL,
+        prompt      TEXT NOT NULL,
+        reason      TEXT,
+        created     INTEGER NOT NULL,
+        fired       INTEGER NOT NULL DEFAULT 0,
+        fired_at    INTEGER,
+        failed      INTEGER NOT NULL DEFAULT 0,
+        error       TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_wakeups_fire_at ON wakeups(fire_at, fired);
+
+      CREATE TABLE IF NOT EXISTS tasks (
+        id           TEXT PRIMARY KEY,
+        subject      TEXT NOT NULL,
+        description  TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        owner        TEXT,
+        blocked_by   TEXT,
+        result       TEXT,
+        channel_id   TEXT,
+        session_key  TEXT,
+        user_id      TEXT,
+        priority     INTEGER NOT NULL DEFAULT 3,
+        created      INTEGER NOT NULL,
+        updated      INTEGER NOT NULL,
+        completed    INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_tasks_status  ON tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_key);
+
+      CREATE TABLE IF NOT EXISTS task_comments (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id  TEXT NOT NULL,
+        author   TEXT NOT NULL,
+        body     TEXT NOT NULL,
+        created  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_comments_task ON task_comments(task_id);
+
+      CREATE TABLE IF NOT EXISTS plan_proposals (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key TEXT NOT NULL,
+        sequence    INTEGER NOT NULL,
+        tool        TEXT NOT NULL,
+        input       TEXT NOT NULL,
+        summary     TEXT,
+        status      TEXT NOT NULL DEFAULT 'pending',
+        result      TEXT,
+        error       TEXT,
+        created     INTEGER NOT NULL,
+        applied_at  INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_plan_proposals_session ON plan_proposals(session_key, status);
     `);
+
+    // Backward-compatible column add for plan_mode on sessions.
+    const cols = this.db.prepare("PRAGMA table_info(sessions)").all();
+    if (!cols.some(c => c.name === 'plan_mode')) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0");
+    }
   }
   
   /**
@@ -146,6 +215,20 @@ class SessionManager {
       }
     }
 
+    // Don't persist 'NO_REPLY' assistant messages. Storing them
+    // pollutes the conversation history (every refresh shows the
+    // pair, every chat:history-request replays it into the client),
+    // and they're not useful as context for future turns — the
+    // agent already knows it chose not to reply. The decision and
+    // reason are still captured by the [loop-noreply] log line.
+    if (role === 'assistant' && typeof contentStr === 'string') {
+      const stripped = contentStr.trim();
+      if (stripped === 'NO_REPLY' || stripped === '') {
+        this.log.debug(`[session] Skipping NO_REPLY persistence for ${key}`);
+        return;
+      }
+    }
+
     this.db.prepare(`
       INSERT INTO messages (session_key, role, content, tool_use_id, tool_name)
       VALUES (?, ?, ?, ?, ?)
@@ -194,6 +277,24 @@ class SessionManager {
       ORDER BY id DESC LIMIT 1
     `).get(key);
     if (row) {
+      this.db.prepare('DELETE FROM messages WHERE id = ?').run(row.id);
+    }
+  }
+
+  /**
+   * Remove the most recent assistant message from a session iff it's
+   * literally 'NO_REPLY'. Belt-and-braces cleanup: the addMessage
+   * filter should already prevent these from being stored at all,
+   * but this catches any that slipped through (or were stored before
+   * the filter landed).
+   */
+  removeLastAssistantNoReply(key) {
+    const row = this.db.prepare(`
+      SELECT id, content FROM messages
+      WHERE session_key = ? AND role = 'assistant'
+      ORDER BY id DESC LIMIT 1
+    `).get(key);
+    if (row && typeof row.content === 'string' && row.content.trim() === 'NO_REPLY') {
       this.db.prepare('DELETE FROM messages WHERE id = ?').run(row.id);
     }
   }
@@ -565,10 +666,19 @@ class SessionManager {
 
     let cleaned = 0;
 
-    // Idle timeout: clear group channel sessions idle longer than threshold
+    // Idle timeout: clear group channel sessions idle longer than threshold.
+    //
+    // EXCLUDES channel:cli:* — those are acorn-cli sessions, bounded by
+    // the CLI's own lifetime and a stable WS connection. The user
+    // stepping away from a coding session for 60+ minutes is normal
+    // (lunch, meeting, sleep); wiping their conversation under them
+    // produces the dreaded 'what's "4"?' moment when they come back
+    // to a numbered list and reply with one digit. acorn manages its
+    // own session lifecycle via /new and /clear.
     const idleSessions = this.db.prepare(`
       SELECT key FROM sessions
       WHERE key LIKE 'channel:%'
+        AND key NOT LIKE 'channel:cli:%'
         AND updated < datetime('now', '-${idleMinutes} minutes')
     `).all();
 
@@ -580,11 +690,15 @@ class SessionManager {
       }
     }
 
-    // Daily reset: check if any sessions span across the reset hour
+    // Daily reset: check if any sessions span across the reset hour.
+    // Same acorn carve-out as above — coding sessions can sit
+    // overnight without being abandoned.
     const now = new Date();
     if (now.getUTCHours() === dailyResetHour) {
       const oldSessions = this.db.prepare(`
-        SELECT key FROM sessions WHERE updated < datetime('now', '-12 hours')
+        SELECT key FROM sessions
+        WHERE updated < datetime('now', '-12 hours')
+          AND key NOT LIKE 'channel:cli:%'
       `).all();
       for (const s of oldSessions) {
         const count = this.getMessageCount(s.key);

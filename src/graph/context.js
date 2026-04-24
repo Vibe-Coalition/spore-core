@@ -18,6 +18,30 @@ const { DatabaseSync } = require('node:sqlite');
 const graphEvents = require('./events');
 const { classifyQueryType, QUERY_TYPE_PARAMS } = require('./retrieval');
 
+// _looksLikeCodingTurn detects acorn messages that are clearly tool-
+// driven coding work and don't need the per-turn graph recall pipeline.
+// Conservative: any positive signal trips skip; everything else still
+// gets full recall. Aggregation/recall-shaped queries are filtered
+// upstream by queryType, so this only sees specific/task-shaped ones.
+const _CODING_FILE_RE = /[\/\\]?[A-Za-z0-9_.\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs|go|rs|java|kt|c|cc|cpp|h|hpp|cs|rb|php|lua|sh|bash|zsh|fish|sql|html|css|scss|less|md|json|jsonc|toml|yaml|yml|xml|ini|env|dockerfile|makefile|gradle|cmake|proto|graphql|gql|svelte|vue)\b/i;
+const _CODING_VERB_RE = /\b(?:read|edit|write|create|delete|rename|move|copy|fix|refactor|build|run|exec|test|debug|grep|find|search|implement|add|remove|update|patch|merge|rebase|commit|push|deploy|install|compile|lint|format|stub|mock|wire|hook|port|migrate|generate|scaffold)\b/i;
+const _CODING_TOOL_RE = /\b(?:read_file|write_file|edit_file|exec|glob|grep|web_fetch|web_search|bash|terminal|file)\b/i;
+const _CODE_FENCE_RE = /```/;
+const _COMMAND_RE = /^\s*[\$>]?\s*(?:npm|yarn|pnpm|bun|go|cargo|pip|pip3|python|python3|node|deno|make|just|docker|git|ls|cd|cat|grep|sed|awk|find|curl|wget)\s/i;
+function _looksLikeCodingTurn(text) {
+  if (!text || typeof text !== 'string') return false;
+  if (_CODE_FENCE_RE.test(text)) return true;
+  if (_CODING_FILE_RE.test(text)) return true;
+  if (_CODING_TOOL_RE.test(text)) return true;
+  if (_COMMAND_RE.test(text)) return true;
+  // Verb check is the loosest signal — only count it when paired with
+  // some code-context cue (the message is short and direct, OR it
+  // includes another code-shaped fragment). Pure prose like "I should
+  // refactor my schedule" shouldn't trip this.
+  if (_CODING_VERB_RE.test(text) && (text.length < 240 || /\.[a-z]{1,5}\b/i.test(text))) return true;
+  return false;
+}
+
 class GraphContext {
   constructor(config, logger) {
     this.config = config;
@@ -363,6 +387,25 @@ class GraphContext {
       const qp = QUERY_TYPE_PARAMS[queryType] || QUERY_TYPE_PARAMS.specific;
       opts._queryType = queryType;
       opts._queryParams = qp;
+
+      // Skip the per-turn graph recall pipeline (LLM decomposition,
+      // hybrid search × N sub-queries, 2-hop graph walks) for acorn
+      // coding turns. The agent on a coding turn doesn't need
+      // 'remember our chat from last week' — it needs to use tools
+      // against the user's filesystem. Recall is ~45-65 DB hits +
+      // an LLM round-trip on every message; for a focused refactor
+      // session that's pure overhead.
+      //
+      // Heuristic: platform === 'cli' (acorn) AND the message looks
+      // task-shaped (file path / code fence / file-op verb / explicit
+      // tool name). Aggregation queries ("summarize last week") still
+      // get full recall — those genuinely need it. The cached project
+      // node (Phase 4) carries cross-session memory; the agent can
+      // graph_query it explicitly when it does want recall.
+      if (opts.platform === 'cli' && queryType !== 'aggregation' && _looksLikeCodingTurn(opts.messageContent)) {
+        this.log.info(`[graph] Skipping recall (acorn code-turn): "${opts.messageContent.slice(0, 80)}..."`);
+        return this.buildSystemPrompt(opts);
+      }
 
       try {
         if (this.config.enhancedRecall && opts._llmClient) {

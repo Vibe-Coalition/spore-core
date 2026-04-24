@@ -43,47 +43,7 @@
   }
   html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: 'Geist', system-ui, -apple-system, sans-serif; }
 
-  /* ── Login Overlay ── */
-  #login-overlay {
-    position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center;
-    background: var(--bg);
-  }
-  #login-overlay.hidden { display: none; }
-  #login-overlay canvas { position: absolute; inset: 0; z-index: 0; }
-  #login-box {
-    position: relative; z-index: 1; width: 340px; padding: 40px 36px 32px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    text-align: center;
-  }
-  #login-box .login-logo { margin-bottom: 14px; }
-  #login-box h1 { font-size: 1.2rem; font-weight: 600; color: var(--text-bright); margin-bottom: 4px; }
-  #login-box .tagline { font-size: .88rem; color: var(--text); margin-bottom: 4px; font-weight: 500; }
-  #login-box .login-hint { font-size: .72rem; color: var(--text-dim); margin-bottom: 18px; }
-  #login-box .login-error { color: var(--danger); font-size: .78rem; margin-bottom: 10px; display: none; }
-  #login-box label { display: block; text-align: left; font-size: .68rem; color: var(--text-dim);
-    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; margin-top: 12px; }
-  #login-box input {
-    width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--surface); color: var(--text-bright); font-size: .88rem; outline: none;
-    transition: border-color .2s;
-  }
-  #login-box input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(59,130,246,.15); }
-  #login-box .login-btn {
-    width: 100%; margin-top: 20px; padding: 11px; border: none; border-radius: 8px; cursor: pointer;
-    font-size: .88rem; font-weight: 600; color: #fff; letter-spacing: 0.02em;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    transition: opacity .2s, transform .1s;
-  }
-  #login-box .login-btn:hover { opacity: .9; }
-  #login-box .login-btn:active { transform: scale(.98); }
-  #login-box .login-btn:disabled { opacity: .5; cursor: not-allowed; }
-  #login-create-fields.hidden { display: none; }
-  #login-box .login-mode-toggle { margin-top: 14px; text-align: center; font-size: .76rem; }
-  #login-box .login-mode-toggle a {
-    color: var(--text-dim); text-decoration: none; transition: color .15s ease;
-  }
-  #login-box .login-mode-toggle a:hover { color: var(--accent); }
-  #login-box .login-mode-toggle a.hidden { display: none; }
+  /* Login lives at its own /login page now (static/login.html). */
 
   /* ── Onboarding Wizard Overlay ── */
   #onboarding-overlay {
@@ -621,13 +581,17 @@
   .settings-inline { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .settings-model-grid { display: grid; gap: 12px; }
   .settings-model-row {
-    display: grid; grid-template-columns: 100px 150px minmax(0, 1fr) 80px 80px auto; gap: 8px; align-items: end;
+    display: grid; grid-template-columns: 100px 150px minmax(0, 1fr) 80px 80px 80px 90px auto; gap: 8px; align-items: end;
     padding-top: 12px; border-top: 1px solid rgba(255,255,255,.05);
   }
   .settings-model-row .settings-model-ctx label,
-  .settings-model-row .settings-model-compact label { font-size: .62rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .08em; display: block; margin-bottom: 2px; }
+  .settings-model-row .settings-model-compact label,
+  .settings-model-row .settings-model-maxout label,
+  .settings-model-row .settings-model-effort label { font-size: .62rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .08em; display: block; margin-bottom: 2px; }
   .settings-model-row .settings-model-ctx input,
-  .settings-model-row .settings-model-compact input {
+  .settings-model-row .settings-model-compact input,
+  .settings-model-row .settings-model-maxout input,
+  .settings-model-row .settings-model-effort select {
     width: 100%; padding: 6px 8px; font-size: .78rem; background: var(--panel);
     border: 1px solid var(--border); border-radius: 6px; color: var(--text-bright);
     -moz-appearance: textfield;
@@ -635,7 +599,9 @@
   .settings-model-row .settings-model-ctx input::-webkit-outer-spin-button,
   .settings-model-row .settings-model-ctx input::-webkit-inner-spin-button,
   .settings-model-row .settings-model-compact input::-webkit-outer-spin-button,
-  .settings-model-row .settings-model-compact input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .settings-model-row .settings-model-compact input::-webkit-inner-spin-button,
+  .settings-model-row .settings-model-maxout input::-webkit-outer-spin-button,
+  .settings-model-row .settings-model-maxout input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .settings-model-row > .settings-model-test {
     display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
     min-width: 120px;
@@ -943,7 +909,57 @@
   .chat-msg.system {
     align-self: center; font-size: 0.7rem; color: var(--text-dim);
     font-family: 'Geist Mono', monospace; padding: 4px 10px;
+    white-space: pre-wrap;
   }
+
+  /* ── ask_user picker ── */
+  .chat-ask-user {
+    background: var(--surface); border: 1px solid var(--accent); border-radius: 8px;
+    padding: 12px 14px; max-width: 85%; align-self: flex-start;
+  }
+  .chat-ask-user .au-question { font-weight: 600; color: var(--text-bright); margin-bottom: 10px; }
+  .chat-ask-user .au-options { display: flex; flex-direction: column; gap: 6px; }
+  .chat-ask-user .au-option {
+    display: block; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+    cursor: pointer; font-size: .82rem;
+  }
+  .chat-ask-user .au-option:hover { border-color: var(--accent); }
+  .chat-ask-user .au-desc { font-size: .72rem; color: var(--text-dim); margin-top: 2px; margin-left: 20px; }
+  .chat-ask-user .au-submit {
+    margin-top: 10px; padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+    background: var(--accent); color: #fff; font-size: .78rem; font-weight: 600;
+  }
+  .chat-ask-user .au-submit:disabled { opacity: .5; cursor: not-allowed; }
+  .chat-ask-user .au-status { font-size: .7rem; color: var(--text-dim); margin-top: 6px; }
+
+  /* ── plan-mode UI ── */
+  #plan-mode-toggle.chat-plan-toggle {
+    font-size: .66rem; font-family: 'Geist Mono', monospace; letter-spacing: .05em;
+    padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+  }
+  #plan-mode-toggle.chat-plan-toggle:hover { color: var(--text); border-color: var(--text-dim); }
+  #plan-mode-toggle.chat-plan-toggle.on {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .plan-card {
+    align-self: stretch; background: var(--panel); border: 1px solid var(--accent2);
+    border-radius: 8px; padding: 10px 14px; font-size: .78rem;
+  }
+  .plan-card .plan-header { font-weight: 600; color: var(--text-bright); margin-bottom: 6px; }
+  .plan-card .plan-row { padding: 3px 0; font-family: 'Geist Mono', monospace; font-size: .72rem; }
+  .plan-card .plan-seq { color: var(--text-dim); display: inline-block; width: 20px; }
+  .plan-card .plan-tool { color: var(--accent); margin-right: 6px; }
+  .plan-card .plan-summary { color: var(--text); }
+  .plan-card .plan-buttons { display: flex; gap: 8px; margin-top: 10px; }
+  .plan-card .plan-approve,
+  .plan-card .plan-reject {
+    padding: 5px 12px; border: none; border-radius: 5px; cursor: pointer; font-size: .76rem; font-weight: 600;
+  }
+  .plan-card .plan-approve { background: var(--accent); color: #fff; }
+  .plan-card .plan-reject { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .plan-card button:disabled { opacity: .5; cursor: not-allowed; }
 
   /* ── Tool & usage tags ── */
   .chat-msg .tool-tag {
@@ -2940,35 +2956,6 @@
 </style>
 </head>
 <body>
-<!-- Login Overlay -->
-<div id="login-overlay">
-  <canvas id="login-particles"></canvas>
-  <div id="login-box">
-    <div class="login-logo" id="login-logo-el"></div>
-    <h1 id="login-title">SPORE</h1>
-    <div class="tagline" id="login-tagline">Graph Viewer</div>
-    <div class="login-hint" id="login-hint">Sign in to continue</div>
-    <div class="login-error" id="login-error"></div>
-    <form id="login-form" autocomplete="on">
-      <label for="login-user">Username</label>
-      <input type="text" id="login-user" name="username" autocomplete="username" required>
-      <label for="login-pass">Password</label>
-      <input type="password" id="login-pass" name="password" autocomplete="current-password" required>
-      <div id="login-create-fields" class="hidden">
-        <label for="login-pass2">Confirm password</label>
-        <input type="password" id="login-pass2" name="password2" autocomplete="new-password">
-        <label for="login-acorn-key">Acorn team key</label>
-        <input type="password" id="login-acorn-key" name="acornKey" autocomplete="off">
-      </div>
-      <button type="submit" class="login-btn" id="login-btn">Sign in</button>
-      <div class="login-mode-toggle">
-        <a href="#" id="login-create-toggle">Create an account →</a>
-        <a href="#" id="login-back-toggle" class="hidden">← Back to sign in</a>
-      </div>
-    </form>
-  </div>
-</div>
-
 <!-- Onboarding Wizard Overlay -->
 <div id="onboarding-overlay" class="hidden">
   <div id="onboarding-box">
@@ -3134,6 +3121,7 @@
     <div id="chat-header">
       <span id="chat-logo"></span>
       <h2 id="chat-header-text"></h2>
+      <button id="plan-mode-toggle" type="button" class="chat-plan-toggle" onclick="_togglePlanMode()" title="Plan mode: mutating tools queue for operator approval instead of executing">Plan: off</button>
       <span id="ws-status" class="disconnected">disconnected</span>
       <div class="floating-pane-actions chat-window-actions">
         <button class="floating-pane-btn" type="button" data-window-action="maximize">max</button>
@@ -3918,16 +3906,6 @@ const VB = window.BRAND || {};
   s('chat-logo', VB.chatLogo || '');
   s('chat-header-text', VB.chatHeaderText || 'GRAPH VIEWER');
   s('chat-welcome', `Send a message to speak with this ${VB.agent || 'agent'}. Graph updates appear in real time.`);
-  const loginTitle = document.getElementById('login-title');
-  if (loginTitle) loginTitle.textContent = VB.name || 'SPORE';
-  const loginTagline = document.getElementById('login-tagline');
-  if (loginTagline) loginTagline.textContent = 'Creator Login';
-  const loginHint = document.getElementById('login-hint');
-  if (loginHint) loginHint.textContent = `Use your ${VB.name || 'SPORE'} credentials`;
-  const loginLogo = document.getElementById('login-logo-el');
-  if (loginLogo && VB.chatLogo) {
-    loginLogo.innerHTML = VB.chatLogo.replace(/height="\d+"/, 'height="56"');
-  }
 })();
 const API = window.location.pathname.replace(/\/graph\/?$/, '');
 
@@ -4026,7 +4004,6 @@ const THEMES = {
 };
 
 let _currentTheme = 'midnight';
-let _loginParticleRaf = null;
 
 function applyGraphTheme(name) {
   const theme = THEMES[name] || THEMES.midnight;
@@ -4045,10 +4022,6 @@ function applyGraphTheme(name) {
   document.querySelectorAll('.theme-option').forEach(el => {
     el.classList.toggle('active', el.dataset.theme === name);
   });
-  // Restart login particles if login overlay is visible
-  if (!document.getElementById('login-overlay')?.classList.contains('hidden')) {
-    startLoginParticles(theme.particles);
-  }
 }
 
 function renderGraphThemePicker() {
@@ -4451,9 +4424,13 @@ function populateSettingsPanel(data) {
           const mInp = document.getElementById(`settings-model-${key}-name`);
           const cInp = document.getElementById(`settings-model-${key}-ctx`);
           const cmpInp = document.getElementById(`settings-model-${key}-compact`);
+          const moInp = document.getElementById(`settings-model-${key}-maxout`);
+          const efInp = document.getElementById(`settings-model-${key}-effort`);
           if (mInp) mInp.value = '';
           if (cInp) cInp.value = '';
           if (cmpInp) cmpInp.value = '';
+          if (moInp) moInp.value = '';
+          if (efInp) efInp.value = 'auto';
           _settingsRefreshTierModelList(key);
           _settingsOnTierModelChange(key);
           mInp?.focus();
@@ -4473,8 +4450,16 @@ function populateSettingsPanel(data) {
       const compactCell = document.createElement('div');
       compactCell.className = 'settings-model-compact';
       compactCell.innerHTML = `<label for="settings-model-${key}-compact">Compact at</label><input id="settings-model-${key}-compact" data-settings-tier-compact="${key}" type="number" placeholder="auto" min="1" step="1024">`;
+      const maxOutCell = document.createElement('div');
+      maxOutCell.className = 'settings-model-maxout';
+      maxOutCell.innerHTML = `<label for="settings-model-${key}-maxout">Max out</label><input id="settings-model-${key}-maxout" data-settings-tier-maxout="${key}" type="number" placeholder="auto" min="1" step="256">`;
+      const effortCell = document.createElement('div');
+      effortCell.className = 'settings-model-effort';
+      effortCell.innerHTML = `<label for="settings-model-${key}-effort">Thinking</label><select id="settings-model-${key}-effort" data-settings-tier-effort="${key}"><option value="auto">auto</option><option value="off">off</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="max">max</option></select>`;
       row.insertBefore(ctxCell, testCell);
       row.insertBefore(compactCell, testCell);
+      row.insertBefore(maxOutCell, testCell);
+      row.insertBefore(effortCell, testCell);
     }
     const limKey = (modelData.provider && modelData.provider !== 'anthropic')
       ? `${modelData.provider}/${modelData.model || ''}`
@@ -4483,6 +4468,7 @@ function populateSettingsPanel(data) {
     const detectedCtx = _settingsKnownLimits[limKey]?.contextLength;
     const ctxInput = document.getElementById(`settings-model-${key}-ctx`);
     const compactInput = document.getElementById(`settings-model-${key}-compact`);
+    const maxOutInput = document.getElementById(`settings-model-${key}-maxout`);
     if (ctxInput) {
       ctxInput.value = lim?.contextWindow || '';
       ctxInput.dataset.limKey = limKey;
@@ -4491,6 +4477,15 @@ function populateSettingsPanel(data) {
         ctxInput.dataset.bound = '1';
         ctxInput.addEventListener('input', () => _settingsRefreshTierPlaceholders(key));
       }
+    }
+    if (maxOutInput) {
+      maxOutInput.value = lim?.maxTokens || '';
+      maxOutInput.dataset.limKey = limKey;
+    }
+    const effortInput = document.getElementById(`settings-model-${key}-effort`);
+    if (effortInput) {
+      effortInput.value = lim?.reasoningEffort || 'auto';
+      effortInput.dataset.limKey = limKey;
     }
     if (compactInput) {
       compactInput.value = lim?.compactAt || '';
@@ -4684,6 +4679,29 @@ async function _populateProfileSection() {
   if (!section.dataset.bound) {
     section.dataset.bound = '1';
     document.getElementById('settings-profile-pw-save')?.addEventListener('click', _settingsChangePassword);
+    document.getElementById('settings-profile-logout')?.addEventListener('click', _settingsLogout);
+  }
+}
+
+async function _settingsLogout() {
+  const out = document.getElementById('settings-profile-logout-result');
+  if (out) { out.className = 'settings-test-result'; out.textContent = '…'; }
+  // Try both logout endpoints — whichever cookie you had will be cleared.
+  // Order doesn't matter; the other just no-ops if you don't have that cookie.
+  try {
+    await fetch(API + '/api/webapp/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+    await fetch(API + '/api/auth/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+    // Best-effort: clear any client-side auth hints before redirecting.
+    try { localStorage.removeItem('spore-session'); } catch {}
+    try { sessionStorage.clear(); } catch {}
+    if (out) { out.className = 'settings-test-result ok'; out.textContent = 'signed out ✓'; }
+    // Send the user back to the main app. '/' redirects to '/graph' which
+    // serves the SPA; its login overlay takes over since we no longer have a
+    // session cookie. (Don't land on '/login' — that's now a 302 alias.)
+    const base = (window.location.pathname || '/').replace(/\/(graph|index\.html|login)?\/?$/, '');
+    setTimeout(() => { window.location.href = (base || '') + '/'; }, 250);
+  } catch (e) {
+    if (out) { out.className = 'settings-test-result err'; out.textContent = String(e.message || e).slice(0, 100); }
   }
 }
 
@@ -5141,11 +5159,15 @@ async function saveSettingsPanel() {
     models[key] = { provider, model };
     const ctx = parseInt(document.getElementById(`settings-model-${key}-ctx`)?.value, 10);
     const cmp = parseInt(document.getElementById(`settings-model-${key}-compact`)?.value, 10);
-    if ((ctx > 0 || cmp > 0) && model) {
+    const mxo = parseInt(document.getElementById(`settings-model-${key}-maxout`)?.value, 10);
+    const eff = document.getElementById(`settings-model-${key}-effort`)?.value || 'auto';
+    if ((ctx > 0 || cmp > 0 || mxo > 0 || (eff && eff !== 'auto')) && model) {
       const limKey = (provider && provider !== 'anthropic') ? `${provider}/${model}` : model;
       const entry = modelLimits[limKey] || {};
       if (ctx > 0) entry.contextWindow = ctx;
       if (cmp > 0) entry.compactAt = cmp;
+      if (mxo > 0) entry.maxTokens = mxo;
+      if (eff && eff !== 'auto') entry.reasoningEffort = eff;
       modelLimits[limKey] = entry;
     }
   }
@@ -5215,6 +5237,32 @@ async function saveSettingsPanel() {
     });
     const data = await r.json();
     if (!r.ok || !data?.ok) throw new Error(data?.error || 'Failed to save settings');
+    // Profile tab's "What should the agent call you?" lives in per-user prefs,
+    // not /api/settings (which is global agent config). Save it separately so
+    // the Profile tab's value persists across reopens for creators too.
+    const profileDn = document.getElementById('settings-profile-displayname')?.value.trim() || '';
+    try {
+      await fetch(API + '/api/preferences', {
+        method: 'PUT',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme, displayName: profileDn }),
+      });
+    } catch {}
+    // Fan out to each subsection's dedicated save endpoint. These sections
+    // have their own Save buttons in the UI, but the big Save button should
+    // also capture any edits the user made there. Values were populated on
+    // panel open, so re-saving unchanged fields is idempotent.
+    const sectionSaves = [
+      ['Backups', typeof _bkSaveSettings === 'function' ? _bkSaveSettings : null],
+      ['Cluster', typeof _clSaveSettings === 'function' ? _clSaveSettings : null],
+      ['Cluster hosts', typeof _clHostsSave === 'function' ? _clHostsSave : null],
+      ['Email', typeof _emailSaveSettings === 'function' ? _emailSaveSettings : null],
+    ].filter(([, fn]) => fn);
+    const sectionFailures = [];
+    for (const [name, fn] of sectionSaves) {
+      try { await fn(); } catch (e) { sectionFailures.push(`${name}: ${e.message || e}`); }
+    }
+    if (sectionFailures.length) toast('Some subsections failed: ' + sectionFailures.join('; '), true);
     populateSettingsPanel(data.settings);
     if (theme && theme !== _currentTheme) await selectGraphTheme(theme);
     updateErBadge(!!data.settings?.memory?.enhancedRecall);
@@ -5312,61 +5360,6 @@ document.getElementById('tmi-enhanced-recall')?.addEventListener('click', (e) =>
 
 renderGraphThemePicker();
 
-// ── Login particles (parameterized) ──
-function startLoginParticles(cfg) {
-  const canvas = document.getElementById('login-particles');
-  if (!canvas) return;
-  if (_loginParticleRaf) { cancelAnimationFrame(_loginParticleRaf); _loginParticleRaf = null; }
-  if (!cfg) { canvas.style.display = 'none'; return; }
-  canvas.style.display = 'block';
-  const ctx = canvas.getContext('2d');
-  let w, h, particles = [], mouse = { x: -999, y: -999 };
-  const { count, speed, colors, lineColor, maxDist, mouseRadius, mouseForce, glow, damping, drift } = cfg;
-  function resize() { w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight; }
-  resize(); window.addEventListener('resize', resize);
-  canvas.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
-  particles = [];
-  for (let i = 0; i < count; i++) {
-    particles.push({ x: Math.random() * 2000, y: Math.random() * 2000, r: Math.random() * 1.5 + 0.5,
-      vx: (Math.random() - 0.5) * speed, vy: (Math.random() - 0.5) * speed + (drift || 0),
-      color: colors[Math.floor(Math.random() * colors.length)] });
-  }
-  function draw() {
-    ctx.clearRect(0, 0, w, h);
-    for (let i = 0; i < particles.length; i++) {
-      const p = particles[i];
-      p.x += p.vx; p.y += p.vy;
-      if (p.x < 0) p.x = w; if (p.x > w) p.x = 0;
-      if (p.y < 0) p.y = h; if (p.y > h) p.y = 0;
-      if (mouseRadius > 0) {
-        const dx = p.x - mouse.x, dy = p.y - mouse.y, dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < mouseRadius) { const f = (mouseRadius - dist) / mouseRadius * mouseForce; p.vx += dx / dist * f * 10; p.vy += dy / dist * f * 10; }
-      }
-      p.vx *= damping; p.vy *= damping;
-      if (drift) p.vy += drift * 0.01;
-      const alpha = 0.45;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${p.color},${alpha})`; ctx.fill();
-      if (maxDist > 0) {
-        for (let j = i + 1; j < particles.length; j++) {
-          const q = particles[j];
-          const ex = p.x - q.x, ey = p.y - q.y, dist = Math.sqrt(ex * ex + ey * ey);
-          if (dist < maxDist) {
-            ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
-            ctx.strokeStyle = `rgba(${lineColor},${(1 - dist / maxDist) * 0.12})`; ctx.lineWidth = 0.5; ctx.stroke();
-          }
-        }
-      }
-    }
-    _loginParticleRaf = requestAnimationFrame(draw);
-  }
-  draw();
-  window._stopLoginParticles = () => { cancelAnimationFrame(_loginParticleRaf); _loginParticleRaf = null; };
-}
-
-// Boot login particles with cached or default theme
-startLoginParticles(THEMES[localStorage.getItem('spore-theme') || 'midnight']?.particles ?? THEMES.midnight.particles);
-
 // ── Auth check & login ──
 let _authenticated = false;
 let _userRole = null;
@@ -5378,20 +5371,17 @@ async function checkAuthState() {
     const data = await r.json();
     if (data.role) _userRole = data.role;
     if (data.username) _currentUserName = data.username;
-    if (data.authenticated && (data.role === 'admin' || data.role === 'creator' || data.role === 'webapp')) return true;
-    if (!data.needsAuth && !data.hasWebappUsers) {
-      _userRole = 'admin';
-      return true;
-    }
+    const authed = (data.authenticated && (data.role === 'admin' || data.role === 'creator' || data.role === 'webapp'))
+      || (!data.needsAuth && !data.hasWebappUsers);
+    if (authed && !data.role && !data.needsAuth) _userRole = 'admin';
+    return { ok: authed, wizardNeeded: !!data.wizardNeeded };
   } catch {}
-  return false;
+  return { ok: false, wizardNeeded: false };
 }
 
 function showApp() {
   _authenticated = true;
-  document.getElementById('login-overlay').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
-  if (window._stopLoginParticles) window._stopLoginParticles();
   loadGraphThemePreference();
   if (_userRole !== 'admin') {
     document.getElementById('tmi-longmemeval')?.remove();
@@ -5429,88 +5419,7 @@ async function _loadCurrentUserProfile() {
   } catch {}
 }
 
-// Track whether the login form is in 'login' or 'create' mode.
-let _loginMode = 'login';
-function _setLoginMode(mode) {
-  _loginMode = mode;
-  const fields = document.getElementById('login-create-fields');
-  const btn = document.getElementById('login-btn');
-  const createToggle = document.getElementById('login-create-toggle');
-  const backToggle = document.getElementById('login-back-toggle');
-  const passInput = document.getElementById('login-pass');
-  if (mode === 'create') {
-    fields.classList.remove('hidden');
-    btn.textContent = 'Create account';
-    createToggle.classList.add('hidden');
-    backToggle.classList.remove('hidden');
-    passInput.setAttribute('autocomplete', 'new-password');
-  } else {
-    fields.classList.add('hidden');
-    btn.textContent = 'Sign in';
-    createToggle.classList.remove('hidden');
-    backToggle.classList.add('hidden');
-    passInput.setAttribute('autocomplete', 'current-password');
-  }
-  document.getElementById('login-error').style.display = 'none';
-}
-document.getElementById('login-create-toggle')?.addEventListener('click', (e) => { e.preventDefault(); _setLoginMode('create'); });
-document.getElementById('login-back-toggle')?.addEventListener('click', (e) => { e.preventDefault(); _setLoginMode('login'); });
-
-document.getElementById('login-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('login-btn');
-  const errEl = document.getElementById('login-error');
-  btn.disabled = true; errEl.style.display = 'none';
-  const username = document.getElementById('login-user').value.trim();
-  const password = document.getElementById('login-pass').value;
-  try {
-    if (_loginMode === 'create') {
-      const password2 = document.getElementById('login-pass2').value;
-      const acornKey = document.getElementById('login-acorn-key').value.trim();
-      if (password.length < 8) throw new Error('Password must be at least 8 characters');
-      if (password !== password2) throw new Error('Passwords do not match');
-      if (!acornKey) throw new Error('Acorn team key is required');
-      const r = await fetch(API + '/api/webapp/users/self-register', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, acornKey }),
-      });
-      const data = await r.json();
-      if (!r.ok || !data.ok) throw new Error(data.error || 'Registration failed');
-      _userRole = data.role || 'webapp';
-      _currentUserName = username;
-      if (data.wizardNeeded) {
-        document.getElementById('login-overlay').classList.add('hidden');
-        if (window._stopLoginParticles) window._stopLoginParticles();
-        startUserWizard();
-      } else {
-        showApp();
-      }
-    } else {
-      const r = await fetch(API + '/api/auth/login', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await r.json();
-      if (r.ok && data.ok) {
-        _userRole = data.role || 'creator';
-        _currentUserName = username;
-        if (data.wizardNeeded) {
-          document.getElementById('login-overlay').classList.add('hidden');
-          if (window._stopLoginParticles) window._stopLoginParticles();
-          startUserWizard();
-        } else {
-          showApp();
-        }
-      } else {
-        throw new Error(data.error || 'Invalid credentials');
-      }
-    }
-  } catch (err) {
-    errEl.textContent = err.message || 'Connection error';
-    errEl.style.display = 'block';
-  }
-  btn.disabled = false;
-});
+// Login lives at /login.html — the SPA just redirects there when unauthenticated.
 
 // ── First-run onboarding wizard ────────────────────────────────────────
 // Two modes share the same overlay infrastructure:
@@ -5534,8 +5443,6 @@ let _obStep = 1;
 let _obData = { theme: 'midnight', providers: {} };
 
 function startOnboarding() {
-  document.getElementById('login-overlay').classList.add('hidden');
-  if (window._stopLoginParticles) window._stopLoginParticles();
   document.getElementById('app').classList.add('hidden');
   const ov = document.getElementById('onboarding-overlay');
   ov.classList.remove('hidden');
@@ -6311,8 +6218,6 @@ function _obShowAcornReveal(key) {
 // User wizard — slim 4-step variant for self-registered guests.
 function startUserWizard() {
   _obMode = 'user';
-  document.getElementById('login-overlay').classList.add('hidden');
-  if (window._stopLoginParticles) window._stopLoginParticles();
   document.getElementById('app').classList.add('hidden');
   const ov = document.getElementById('onboarding-overlay');
   ov.classList.remove('hidden');
@@ -6354,10 +6259,19 @@ async function _obFinishUserWizard() {
   }
 }
 
-// Bootstrap: decide between onboarding, login, or direct app entry.
+// Bootstrap: first-run → operator wizard; authed → slim wizard if needed else
+// the app; unauthed → bounce to /login (the standalone page handles credentials
+// and registration, then redirects back here).
 (async () => {
   if (window.__ONBOARDING__?.needed) { startOnboarding(); return; }
-  if (await checkAuthState()) showApp();
+  const auth = await checkAuthState();
+  if (!auth.ok) {
+    const base = (window.location.pathname || '/').replace(/\/(graph|index\.html|login)?\/?$/, '');
+    window.location.replace((base || '') + '/login');
+    return;
+  }
+  if (auth.wizardNeeded) { startUserWizard(); return; }
+  showApp();
 })();
 
 const TYPE_COLORS = {
@@ -7856,7 +7770,176 @@ function handleWsMessage(msg) {
     handleSubagentMessage(msg);
   } else if (msg.type && msg.type.startsWith('benchmark:')) {
     handleBenchmarkWs(msg);
+  } else if (msg.type === 'ask_user') {
+    renderAskUserCard(msg);
+  } else if (msg.type === 'ask_user_answer_ack') {
+    // ack landed — picker already disabled; nothing to do
+  } else if (msg.type === 'plan_proposal' || msg.type === 'plan_applied'
+             || msg.type === 'plan_rejected' || msg.type === 'plan_mode') {
+    handlePlanModeMessage(msg);
   }
+}
+
+// ── ask_user picker card ──
+function renderAskUserCard(msg) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  const card = document.createElement('div');
+  card.className = 'chat-msg agent chat-ask-user';
+  card.dataset.qid = msg.qid;
+  const opts = (msg.options || []).map((o, i) =>
+    `<label class="au-option"><input type="radio" name="au-${msg.qid}" value="${(o.label || '').replace(/"/g, '&quot;')}" ${i === 0 ? 'checked' : ''}> <strong>${escapeHtml(o.label || '')}</strong>${o.description ? `<div class="au-desc">${escapeHtml(o.description)}</div>` : ''}</label>`
+  ).join('');
+  card.innerHTML = `
+    <div class="au-question">${escapeHtml(msg.question || '')}</div>
+    <div class="au-options">${opts}</div>
+    <button class="au-submit">Submit</button>
+    <div class="au-status"></div>
+  `;
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+  const submitBtn = card.querySelector('.au-submit');
+  submitBtn.addEventListener('click', () => {
+    const picked = card.querySelector(`input[name="au-${msg.qid}"]:checked`);
+    if (!picked) { card.querySelector('.au-status').textContent = 'Pick one first.'; return; }
+    submitBtn.disabled = true;
+    card.querySelectorAll('input').forEach(i => i.disabled = true);
+    try {
+      ws.send(JSON.stringify({ type: 'ask_user_answer', qid: msg.qid, answer: picked.value }));
+      card.querySelector('.au-status').textContent = `Sent: ${picked.value}`;
+    } catch (e) {
+      submitBtn.disabled = false;
+      card.querySelectorAll('input').forEach(i => i.disabled = false);
+      card.querySelector('.au-status').textContent = 'Failed to send — reconnect?';
+    }
+  });
+}
+
+// Tiny HTML escaper for the picker (the chat otherwise renders markdown).
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ── Plan-mode UI ──
+let _planModeEnabled = false;
+function handlePlanModeMessage(msg) {
+  const card = document.getElementById('plan-proposals-card');
+  if (msg.type === 'plan_mode') {
+    _planModeEnabled = !!msg.enabled;
+    _refreshPlanModeBadge();
+    return;
+  }
+  if (msg.type === 'plan_proposal') {
+    _refreshPlanProposals();
+    return;
+  }
+  if (msg.type === 'plan_applied') {
+    const container = document.getElementById('chat-messages');
+    if (container) {
+      const el = document.createElement('div');
+      el.className = 'chat-msg system';
+      const lines = (msg.results || []).map(r => `${r.ok ? '✓' : '✗'} ${r.tool} — ${r.summary || ''}${r.error ? ' · ' + r.error : ''}`);
+      el.textContent = `[plan] Applied ${msg.results?.filter(r => r.ok).length}/${msg.results?.length}\n${lines.join('\n')}`;
+      container.appendChild(el);
+      container.scrollTop = container.scrollHeight;
+    }
+    _refreshPlanProposals();
+    return;
+  }
+  if (msg.type === 'plan_rejected') {
+    _refreshPlanProposals();
+    return;
+  }
+}
+
+async function _refreshPlanProposals() {
+  const sessionKey = _currentSessionKeyForPlan();
+  if (!sessionKey) return;
+  try {
+    const r = await fetch(API + '/api/plan/pending?sessionKey=' + encodeURIComponent(sessionKey), { headers: authHeaders() });
+    const d = await r.json();
+    _renderPlanCard(d.proposals || [], sessionKey);
+  } catch {}
+}
+
+function _currentSessionKeyForPlan() {
+  // Same keying as the server: `dm:<username>` for normal sessions.
+  if (_userRole === 'creator' || _userRole === 'admin' || _userRole === 'webapp') {
+    return 'dm:' + (_currentUserName || 'operator');
+  }
+  return null;
+}
+
+function _renderPlanCard(proposals, sessionKey) {
+  let card = document.getElementById('plan-proposals-card');
+  if (!proposals.length) {
+    if (card) card.remove();
+    return;
+  }
+  if (!card) {
+    card = document.createElement('div');
+    card.id = 'plan-proposals-card';
+    card.className = 'plan-card';
+    const container = document.getElementById('chat-messages');
+    if (container) container.appendChild(card);
+  }
+  const rows = proposals.map(p => `<div class="plan-row"><span class="plan-seq">${p.sequence}.</span> <span class="plan-tool">${escapeHtml(p.tool)}</span> <span class="plan-summary">${escapeHtml(p.summary || '')}</span></div>`).join('');
+  card.innerHTML = `
+    <div class="plan-header">Pending plan (${proposals.length} step${proposals.length !== 1 ? 's' : ''})</div>
+    <div class="plan-rows">${rows}</div>
+    <div class="plan-buttons">
+      <button class="plan-approve">Approve</button>
+      <button class="plan-reject">Reject</button>
+    </div>
+  `;
+  card.querySelector('.plan-approve').addEventListener('click', () => _approvePlan(sessionKey));
+  card.querySelector('.plan-reject').addEventListener('click', () => _rejectPlan(sessionKey));
+  const container = document.getElementById('chat-messages');
+  if (container) container.scrollTop = container.scrollHeight;
+}
+
+async function _approvePlan(sessionKey) {
+  const card = document.getElementById('plan-proposals-card');
+  if (card) card.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    const r = await fetch(API + '/api/plan/approve', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionKey }) });
+    const d = await r.json();
+    if (!d.ok) toast('Approve failed: ' + (d.error || 'unknown'), true);
+  } catch (e) { toast('Approve error: ' + e.message, true); }
+  _refreshPlanProposals();
+}
+
+async function _rejectPlan(sessionKey) {
+  const card = document.getElementById('plan-proposals-card');
+  if (card) card.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    const r = await fetch(API + '/api/plan/reject', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionKey }) });
+    await r.json();
+  } catch {}
+  _refreshPlanProposals();
+}
+
+function _togglePlanMode() {
+  const sessionKey = _currentSessionKeyForPlan();
+  if (!sessionKey) return;
+  const next = !_planModeEnabled;
+  fetch(API + '/api/plan/mode', { method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionKey, enabled: next }) })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        _planModeEnabled = d.planMode;
+        _refreshPlanModeBadge();
+        toast(_planModeEnabled ? 'Plan mode ON — mutating tools will queue for approval' : 'Plan mode OFF');
+      }
+    })
+    .catch(e => toast('Plan mode toggle failed: ' + e.message, true));
+}
+
+function _refreshPlanModeBadge() {
+  const btn = document.getElementById('plan-mode-toggle');
+  if (!btn) return;
+  btn.classList.toggle('on', !!_planModeEnabled);
+  btn.textContent = _planModeEnabled ? 'Plan: ON' : 'Plan: off';
 }
 
 // ── Subagent Activity (multi-agent) ──
@@ -11582,7 +11665,15 @@ async function doDeleteEdge(source, target, type) {
 
 async function reload() {
   const data = await fetchGraph();
-  initGraph(data);
+  // Incremental merge when the graph is already running — preserves the
+  // user's current zoom + pan + force layout. Full initGraph wipes the SVG
+  // (including the zoom transform) which feels like the camera "jumping"
+  // every time you delete a node or aspect.
+  if (simulation) {
+    mergeGraph(data, { newNodes: new Set(), pulseNodes: new Set(), newEdges: [] });
+  } else {
+    initGraph(data);
+  }
 }
 
 function showNewNodeModal() {
@@ -12173,8 +12264,6 @@ document.addEventListener('click', (e) => {
     _janForget(t.dataset.janitorForget);
   } else if (t.id === 'settings-backup-run') {
     _bkRunSnapshot();
-  } else if (t.id === 'settings-backup-save') {
-    _bkSaveSettings();
   } else if (t.dataset?.backupRestore) {
     _bkRestore(t.dataset.backupRestore);
   } else if (t.dataset?.backupDelete) {
@@ -12187,18 +12276,12 @@ document.addEventListener('click', (e) => {
     _tsTriggerLogin();
   } else if (t.id === 'settings-tailscale-logout') {
     _tsLogout();
-  } else if (t.id === 'settings-cluster-save') {
-    _clSaveSettings();
   } else if (t.id === 'settings-cluster-test') {
     _clTestSsh();
-  } else if (t.id === 'settings-email-save') {
-    _emailSaveSettings();
   } else if (t.id === 'settings-email-test') {
     _emailSelfTest();
   } else if (t.id === 'settings-cluster-hosts-add') {
     _clHostsAddRow();
-  } else if (t.id === 'settings-cluster-hosts-save') {
-    _clHostsSave();
   } else if (t.dataset?.clusterHostRm !== undefined) {
     t.closest('[data-cluster-row]')?.remove();
   } else if (t.dataset?.clusterHostTest !== undefined) {
@@ -12254,7 +12337,15 @@ function _collectModelTierFormValues(tier) {
     gemini: _collectProviderFormValues('gemini'),
     custom: typeof collectSettingsCustomProviders === 'function' ? collectSettingsCustomProviders() : [],
   };
-  return { tier, provider, model, providers };
+  // Include the per-tier maxTokens + reasoningEffort overrides so Test
+  // respects the values the user just typed (without requiring a Save first).
+  const maxOut = parseInt(v(`settings-model-${tier}-maxout`), 10);
+  const effort = v(`settings-model-${tier}-effort`);
+  return {
+    tier, provider, model, providers,
+    maxTokens: maxOut > 0 ? maxOut : undefined,
+    reasoningEffort: (effort && effort !== 'auto') ? effort : undefined,
+  };
 }
 
 async function runProviderTest(name) {
@@ -16744,7 +16835,6 @@ build/
             </label>
           </div>
           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="settings-btn-secondary" id="settings-cluster-save" style="font-size:.68rem;padding:3px 8px">Save primary cluster</button>
             <button class="settings-btn-secondary" id="settings-cluster-test" style="font-size:.68rem;padding:3px 8px">Test SSH (primary)</button>
           </div>
           <div id="settings-cluster-test-result" style="margin-top:6px;font-family:'Geist Mono',monospace;font-size:.64rem;color:var(--text-dim);white-space:pre-wrap"></div>
@@ -16756,9 +16846,6 @@ build/
             </div>
             <div class="settings-note" style="margin-top:2px">Extra SLURM clusters reachable over the same tailnet. The agent sees them all in its live state and can pick the right one when you tell it which cluster to use. Username falls back to the primary cluster's if left blank.</div>
             <div id="settings-cluster-hosts-list" style="margin-top:8px;display:flex;flex-direction:column;gap:6px"></div>
-            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-              <button class="settings-btn-secondary" id="settings-cluster-hosts-save" type="button" style="font-size:.68rem;padding:3px 8px">Save additional clusters</button>
-            </div>
             <div id="settings-cluster-hosts-status" style="margin-top:4px;font-family:'Geist Mono',monospace;font-size:.62rem;color:var(--text-dim)"></div>
           </div>
 
@@ -16830,7 +16917,6 @@ build/
             <label style="font-size:.68rem;display:flex;align-items:center;gap:4px">
               <input id="settings-backup-on-change-only" type="checkbox" checked> Skip unchanged
             </label>
-            <button class="settings-btn-secondary" id="settings-backup-save" style="font-size:.68rem;padding:3px 8px">Save settings</button>
             <button class="settings-btn-secondary" id="settings-backup-run" style="font-size:.68rem;padding:3px 8px">Snapshot now</button>
           </div>
           <div id="settings-backup-status" style="margin-top:6px;font-family:'Geist Mono',monospace;font-size:.62rem;color:var(--text-dim)"></div>
@@ -16904,7 +16990,6 @@ build/
         <div id="settings-email-pw-status" class="settings-hint" style="margin-top:4px"></div>
 
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="settings-btn-secondary" id="settings-email-save" type="button" style="font-size:.68rem;padding:4px 10px">Save email settings</button>
           <button class="settings-btn-secondary" id="settings-email-test" type="button" style="font-size:.68rem;padding:4px 10px">Send self-test</button>
         </div>
         <div id="settings-email-test-result" class="settings-status-line"></div>
@@ -16930,6 +17015,12 @@ build/
         <div class="settings-test-row">
           <button type="button" class="settings-test-btn" id="settings-profile-pw-save">change password</button>
           <span class="settings-test-result" id="settings-profile-pw-result"></span>
+        </div>
+        <h4 style="margin-top:18px">Sign out</h4>
+        <div class="settings-note">Ends your session on this device. You'll be sent back to the login screen.</div>
+        <div class="settings-test-row">
+          <button type="button" class="settings-test-btn" id="settings-profile-logout">log out</button>
+          <span class="settings-test-result" id="settings-profile-logout-result"></span>
         </div>
       </div>
 

@@ -109,6 +109,22 @@ class AgentLoop {
     };
     ac.signal.addEventListener('abort', onAbort, { once: true });
 
+    // Per-session context so tool handlers (schedule_wakeup, task_create,
+    // log_watch, ask_user, plan-mode gate) know who called them. This map is
+    // keyed by sessionKey so it's safe under concurrent sessions. The tool
+    // layer itself uses AsyncLocalStorage for the "which session is calling
+    // RIGHT NOW" question — see tools.js:_execContext.
+    if (!this.tools._sessionContexts) this.tools._sessionContexts = new Map();
+    this.tools._sessionContexts.set(sessionKey, {
+      channelId: opts.channelId,
+      channelName: opts.channelName,
+      userId: opts.userId,
+      userName: opts.userName,
+      platform: opts.platform,
+      isDm: opts.isDm !== false,
+      sessionKey,
+    });
+
     try {
       return await this._runLoop(sessionKey, opts);
     } finally {
@@ -119,6 +135,15 @@ class AgentLoop {
       this.tools._abortSignal = null;
       // Clean up per-session tool context
       if (this.tools._sessionContexts) this.tools._sessionContexts.delete(sessionKey);
+      // Kill any per-session log watches so subprocesses don't outlive sessions.
+      if (typeof this.tools.killSessionLogWatches === 'function') {
+        try { this.tools.killSessionLogWatches(sessionKey); } catch {}
+      }
+      // Reject any pending ask_user prompts for this session so the tool
+      // handler doesn't hang forever.
+      if (typeof this.tools.cancelSessionAskUser === 'function') {
+        try { this.tools.cancelSessionAskUser(sessionKey); } catch {}
+      }
       // Notify any waiters (e.g. gateway retrying after abort)
       const waiters = this._sessionWaiters.get(sessionKey);
       if (waiters) { this._sessionWaiters.delete(sessionKey); for (const r of waiters) r(); }
@@ -211,6 +236,11 @@ class AgentLoop {
       messageId: opts.messageId,
       webappStatus: this.tools?.gateway?.getWebappStatus?.() || null,
       clientCwd: opts.clientCwd || null,
+      // Structured project metadata from acorn (cwd, git, tree, ACORN.md,
+      // tools, mode). Routed into the system prompt by prompt-sections.js,
+      // never into messages[]. Replaces the old "glue GatherContext onto
+      // message content" path. See plan/spore-context.
+      projectContext: opts.projectContext || null,
     };
 
     // Detect casual chat for lighter prompt mode
@@ -226,13 +256,56 @@ class AgentLoop {
       && !hasTaskWords && !(hasStatusWords && hasActiveTasks);
     const promptMode = isCasualChat ? 'chat' : 'full';
 
+    // Project node — upsert per-(user, cwd) into the graph so prompt
+    // sections can decide whether to inline the full project context
+    // (new project / changed gitHash) or just reference the cached
+    // node by id. Subsequent acorn sessions in the same project pick
+    // up cross-session memory via this node. See graph/projects.js.
+    let cachedProjectNodeId = null;
+    let cachedProjectStale = false;
+    let cachedProjectIsNew = false;
+    if (opts.projectContext && this.learner) {
+      try {
+        const projects = require('../graph/projects');
+        const r = projects.upsertProject(this.learner, opts.userId || 'anon', opts.projectContext);
+        if (r) {
+          cachedProjectNodeId = r.id;
+          cachedProjectStale = r.gitHashChanged;
+          cachedProjectIsNew = r.isNew;
+        }
+      } catch (e) {
+        this.log.warn(`[project-node] upsert failed: ${e.message}`);
+      }
+    }
+
     // Build system prompt using async path (hybrid search + Enhanced Recall)
     const llmClient = this.tools?.anthropicClient || null;
     const systemPrompt = await this.graph.buildSystemPromptAsync({
       ...dynamicOpts,
       promptMode,
       _llmClient: llmClient,
+      cachedProjectNodeId,
+      cachedProjectStale,
+      cachedProjectIsNew,
     });
+    // Plan-mode verification logging — confirms the QUESTIONS:/PLAN_READY
+    // instructions actually reach the model. Counts marker occurrences
+    // in the final assembled system prompt and warns if they're missing
+    // when projectContext.mode === 'plan'.
+    if (opts.platform === 'cli' && opts.projectContext?.mode === 'plan') {
+      const has = {
+        planHeader: systemPrompt.includes('## Plan Mode'),
+        questionsMarker: systemPrompt.includes('QUESTIONS:'),
+        planReadyMarker: systemPrompt.includes('PLAN_READY'),
+        rulesHeader: systemPrompt.includes('RULES'),
+      };
+      const missing = Object.entries(has).filter(([_, v]) => !v).map(([k]) => k);
+      if (missing.length > 0) {
+        this.log.warn(`[plan-mode] system prompt MISSING markers: ${missing.join(', ')} | total prompt size: ${systemPrompt.length} bytes`);
+      } else {
+        this.log.info(`[plan-mode] system prompt OK — all 4 markers present, ${systemPrompt.length} bytes total`);
+      }
+    }
     // Split for prompt caching: static part can be cached by the API between calls
     const staticPrompt = this.graph.buildStaticPrompt(promptMode);
     const dynamicContext = systemPrompt.length > staticPrompt.length ? systemPrompt.slice(staticPrompt.length) : null;
@@ -305,7 +378,7 @@ class AgentLoop {
     const _activeForLimits = isCasualChat
       ? (this.config.casualModel || this.config.normalModel || this.config.plannerModel)
       : (this.config.normalModel || this.config.plannerModel);
-    const _modelLimit = (this.config.modelLimits && _activeForLimits) ? this.config.modelLimits[_activeForLimits] : null;
+    const _modelLimit = this._lookupModelLimit(_activeForLimits);
     const contextWindow = (_modelLimit?.contextWindow && Number(_modelLimit.contextWindow) > 0)
       ? Number(_modelLimit.contextWindow)
       : 200000;
@@ -652,14 +725,17 @@ class AgentLoop {
             graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
             if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { } }
             const toolExecStart = Date.now();
+            // Pass the session's context explicitly so concurrent sessions
+            // don't race on a shared "current session" field in tools.js.
+            const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
             let result;
             if (opts.onToolExecute) {
               result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
               if (result === null || result === undefined) {
-                result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+                result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
               }
             } else {
-              result = await this.tools.executeTool(toolBlock.name, toolBlock.input);
+              result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
             }
             let resultContent = JSON.stringify(result);
 
@@ -878,6 +954,32 @@ class AgentLoop {
           this.log.error(`API server error (${e.status}) — all 5 retries exhausted for session ${sessionKey}`);
         }
 
+        // Network-level failures (no HTTP status). Undici throws a TypeError
+        // with message 'fetch failed' when the TCP connection drops mid-
+        // stream, the TLS handshake times out, DNS fails, or the peer sends
+        // a reset. Also covers ECONNRESET / ETIMEDOUT / ENOTFOUND / socket
+        // hang up / premature close. This hits a LOT on custom OAI-compatible
+        // providers whose streaming endpoints are less forgiving than
+        // Anthropic's — without a retry branch the turn silently dies.
+        {
+          const msg = (e?.message || '') + ' ' + (e?.cause?.message || '') + ' ' + (e?.cause?.code || '');
+          const isNetworkFail = !e.status && /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|Premature close|network|aborted|terminated/i.test(msg);
+          if (isNetworkFail) {
+            if (!apiRetries) apiRetries = 0;
+            apiRetries++;
+            if (apiRetries <= 5) {
+              const delay = Math.min(apiRetries * 3000, 15000);
+              this.log.warn(`Network error (${(e.message || '').substring(0, 80)}), retry ${apiRetries}/5 in ${delay / 1000}s...`);
+              if (opts.onStatus) {
+                try { opts.onStatus({ type: 'api_retry', status: 'network', attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { }
+              }
+              await this._sleep(delay);
+              continue;
+            }
+            this.log.error(`Network error — all 5 retries exhausted for session ${sessionKey}`);
+          }
+        }
+
         if (opts.onError) opts.onError(e);
         throw e;
       }
@@ -934,6 +1036,22 @@ class AgentLoop {
         channelName: opts.channelName,
         toolCalls: toolLog.length > 0 ? toolLog : undefined,
       }).catch(e => this.log.error('[learner] Background extraction error:', e.message));
+    }
+
+    // Project node — append a one-line activity note so cross-session
+    // memory accumulates. Captures user prompt + tool-call summary so
+    // the agent can later graph_query and see "what we worked on
+    // last time in this project". Cheap (one INSERT, capped at 50).
+    if (opts.projectContext && this.learner && (finalText || toolLog.length)) {
+      try {
+        const projects = require('../graph/projects');
+        const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+        const tools = toolLog.length ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]` : '';
+        const summary = `${userSnip}${tools}`;
+        projects.noteProjectInteraction(this.learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
+      } catch (e) {
+        this.log.warn(`[project-node] note failed: ${e.message}`);
+      }
     }
 
     // Plugin context engines: afterTurn
@@ -1052,6 +1170,101 @@ class AgentLoop {
     if (m.includes('sonnet')) return 32000;
     if (m.includes('haiku')) return 16000;
     return 8192;
+  }
+
+  // Resolve a model ref against config.modelLimits with a few key forms so
+  // lookups are consistent everywhere. Returns the limit entry or null.
+  //   1. Direct match (handles e.g. "kimi//blob/raw/…/Kimi-K2.6")
+  //   2. Any stored key that ENDS with "/<model>" (handles bare-name model
+  //      lookup against provider/model keys)
+  //   3. Any stored key that, when provider-prefixed-stripped, equals model
+  _lookupModelLimit(model) {
+    const limits = this.config.modelLimits;
+    if (!limits || !model) return null;
+    if (limits[model]) return limits[model];
+    for (const k of Object.keys(limits)) {
+      if (k.endsWith('/' + model)) return limits[k];
+      const slash = k.indexOf('/');
+      if (slash > 0 && k.slice(slash + 1) === model) return limits[k];
+    }
+    return null;
+  }
+
+  // Translator: turns a categorical reasoning effort (off/minimal/low/medium/
+  // high/max) into whatever field each provider family actually accepts.
+  // Static so the probe endpoint can reuse it without constructing a loop.
+  static applyReasoningEffort(req, model, effort) {
+    return AgentLoop._applyReasoningEffortImpl(req, model, effort);
+  }
+  _applyReasoningEffort(req, model, effort) {
+    return AgentLoop._applyReasoningEffortImpl(req, model, effort);
+  }
+  static _applyReasoningEffortImpl(req, model, effort) {
+    const m = String(model || '').toLowerCase();
+    const out = { ...req };
+
+    // OpenAI (o-series, gpt-5) — categorical reasoning_effort
+    if (/^openai\//.test(m) || /^(o1|o3|o4|gpt-5)/.test(m)) {
+      if (effort === 'off') { delete out.reasoning_effort; return out; }
+      const supportsMinimal = /gpt-5/.test(m);
+      let v = effort;
+      if (v === 'max') v = 'high';
+      if (v === 'minimal' && !supportsMinimal) v = 'low';
+      out.reasoning_effort = v;
+      return out;
+    }
+
+    // Anthropic Claude Sonnet/Opus 4+ — token budget
+    if (/sonnet|opus/i.test(m) && !/3-5|3\.5/i.test(m)) {
+      if (effort === 'off') { out.thinking = { type: 'disabled' }; return out; }
+      const budgets = { minimal: 1024, low: 2048, medium: 10000, high: 24000, max: 32000 };
+      const budget = budgets[effort] || 10000;
+      const need = budget + 1024;
+      if ((out.max_tokens || 0) < need) out.max_tokens = need;
+      out.thinking = { type: 'enabled', budget_tokens: budget };
+      return out;
+    }
+
+    // Gemini 2.5 — thinking_config.thinking_budget
+    if (/gemini[-/]?2\.5/.test(m)) {
+      const budgets = { off: 0, minimal: 256, low: 2000, medium: 8000, high: 24000, max: 32000 };
+      const bud = budgets[effort] ?? -1;
+      out.generationConfig = { ...(out.generationConfig || {}), thinkingConfig: { thinkingBudget: bud } };
+      return out;
+    }
+
+    // xAI Grok: grok-4 reasons unconditionally and rejects the knob; grok-3-mini accepts low/high
+    if (/grok-4/.test(m)) return out;
+    if (/^xai\//.test(m) || /grok/.test(m)) {
+      if (effort === 'off') { delete out.reasoning_effort; return out; }
+      out.reasoning_effort = (effort === 'high' || effort === 'max') ? 'high' : 'low';
+      return out;
+    }
+
+    // Qwen 3 — chat_template_kwargs.enable_thinking
+    if (/qwen-?3|qwen3/.test(m)) {
+      out.chat_template_kwargs = { ...(out.chat_template_kwargs || {}), enable_thinking: effort !== 'off' };
+      return out;
+    }
+
+    // Zhipu GLM 4.5/4.6 — thinking.type
+    if (/^glm[-/]|glm-?4\.[56]/.test(m)) {
+      out.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' };
+      return out;
+    }
+
+    // DeepSeek vLLM-style
+    if (/deepseek/.test(m)) {
+      out.chat_template_kwargs = { ...(out.chat_template_kwargs || {}), thinking: effort !== 'off' };
+      return out;
+    }
+
+    // Generic OAI-compat proxy — try reasoning_effort passthrough
+    if (effort && effort !== 'off') {
+      const v = effort === 'minimal' ? 'low' : (effort === 'max' ? 'high' : effort);
+      out.reasoning_effort = v;
+    }
+    return out;
   }
 
   // ── Tool Input Summary (for panel streaming) ────────────────────────
@@ -1210,11 +1423,26 @@ class AgentLoop {
   }
 
   /**
-   * Tool-enabled turns use non-stream requests so tool names/arguments are
-   * finalized in one response rather than assembled from streaming deltas.
+   * Decide whether a tool-enabled turn should skip streaming.
+   *
+   * History: tool turns used to always go non-stream because some providers
+   * had flaky tool_call delta reassembly. That's been solid in
+   * providers/index.js for a while now — every OAI chunk's
+   * `delta.tool_calls[].function.{name,arguments}` is accumulated across
+   * chunks and emitted cleanly at stream end.
+   *
+   * The non-stream fallback is actively harmful on slow upstreams: a big
+   * reasoning model (Kimi, GLM, long context) can generate for longer than
+   * the fronting nginx's `proxy_read_timeout`, and we get a 504 while the
+   * model is still producing tokens. Streaming keeps bytes flowing, so
+   * nginx stays happy.
+   *
+   * Default is now streaming. Set `config.nonStreamToolTurns: true` to
+   * revert if a provider regresses.
    */
   _shouldUseNonStreamToolTurn(requestOpts) {
-    return Array.isArray(requestOpts?.tools) && requestOpts.tools.length > 0;
+    if (!Array.isArray(requestOpts?.tools) || requestOpts.tools.length === 0) return false;
+    return this.config.nonStreamToolTurns === true;
   }
 
   _createAbortError() {
@@ -1348,21 +1576,32 @@ class AgentLoop {
     const resolvedRequest = this.client?.resolveRequest?.(baseRequest)
       || { ...baseRequest, model: this.client?.resolveModel?.(baseRequest) || requestedModel };
     const model = resolvedRequest.model || requestedModel;
-    const maxTokens = this.config.maxTokens !== 8192
-      ? this.config.maxTokens
-      : this._modelMaxOutputTokens(model);
+    // Precedence: per-model override (modelLimits[<ref>].maxTokens) → global
+    // config.maxTokens (if operator changed it from the 8192 default) → model
+    // family heuristic.
+    const _modelLim = this._lookupModelLimit(model);
+    const _perModelMax = Number(_modelLim?.maxTokens) || 0;
+    const maxTokens = _perModelMax > 0
+      ? _perModelMax
+      : (this.config.maxTokens !== 8192 ? this.config.maxTokens : this._modelMaxOutputTokens(model));
     const supportsThinking = /sonnet|opus/i.test(model) && !/3-5|3\.5/i.test(model);
     const thinkingBudget = supportsThinking ? (this.config.thinkingBudget || 10000) : 0;
     const openaiReasoningEffort = /^openai\//i.test(model)
       ? (this.config.openaiReasoningEffort || null)
       : null;
-    const requestOpts = {
+    let requestOpts = {
       max_tokens: maxTokens,
       ...resolvedRequest,
       model,
       ...(openaiReasoningEffort ? { reasoning_effort: openaiReasoningEffort } : {}),
       ...(thinkingBudget > 0 ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
     };
+    // Per-model reasoning effort override (categorical: off/minimal/low/medium/high/max).
+    // Translated to whatever knob each provider family actually accepts.
+    const _effort = _modelLim?.reasoningEffort || null;
+    if (_effort && _effort !== 'auto') {
+      requestOpts = this._applyReasoningEffort(requestOpts, model, _effort);
+    }
 
     const signal = opts.abortSignal;
     const useToolTurnNonStream = this._shouldUseNonStreamToolTurn(requestOpts);

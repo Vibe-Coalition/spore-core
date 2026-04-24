@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Sign in · SPORE</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
+  :root {
+    --bg:#08090e; --surface:#0e1017; --panel:#0e1017;
+    --border:#1e2133; --text:#c8cdd8; --text-dim:#4a4f68; --text-bright:#e2e6f0;
+    --accent:#5b8af5; --accent2:#8b6cf7; --danger:#f05858;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif}
+  body{min-height:100vh;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;transition:background-color .3s ease,color .3s ease}
+  #particles{position:absolute;inset:0;z-index:0}
+  .login-box{position:relative;z-index:1;width:360px;padding:40px 36px 28px;background:var(--surface);border:1px solid var(--border);border-radius:12px;text-align:center;transition:background-color .3s ease,border-color .3s ease}
+  .login-logo{display:flex;justify-content:center;margin-bottom:14px}
+  .login-logo svg{width:42px;height:42px}
+  h1{font-size:1.2rem;font-weight:600;color:var(--text-bright);margin-bottom:4px}
+  .tagline{font-size:.88rem;color:var(--text);margin-bottom:4px;font-weight:500}
+  .hint{font-size:.72rem;color:var(--text-dim);margin-bottom:18px}
+  .err{color:var(--danger);font-size:.78rem;margin-bottom:10px;display:none}
+  label{display:block;text-align:left;font-size:.68rem;color:var(--text-dim);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px;margin-top:12px}
+  input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text-bright);font-size:.88rem;outline:none;transition:border-color .2s,box-shadow .2s}
+  input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent)}
+  .btn{width:100%;margin-top:20px;padding:11px;border:none;border-radius:8px;cursor:pointer;font-size:.88rem;font-weight:600;color:#fff;letter-spacing:.02em;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:opacity .2s,transform .1s}
+  .btn:hover{opacity:.9}.btn:active{transform:scale(.98)}.btn:disabled{opacity:.5;cursor:not-allowed}
+  .hidden{display:none !important}
+  .mode-toggle{margin-top:14px;text-align:center;font-size:.76rem}
+  .mode-toggle a{color:var(--text-dim);text-decoration:none;transition:color .15s ease;cursor:pointer}
+  .mode-toggle a:hover{color:var(--accent)}
+</style>
+</head>
+<body>
+<canvas id="particles"></canvas>
+<div class="login-box">
+  <div class="login-logo" id="logo-el"></div>
+  <h1 id="title">SPORE</h1>
+  <div class="tagline" id="tagline">Graph Viewer</div>
+  <div class="hint" id="hint">Sign in to continue</div>
+  <div class="err" id="err"></div>
+  <form id="f" autocomplete="on">
+    <label for="u">Username</label>
+    <input type="text" id="u" name="username" autocomplete="username" required>
+    <label for="p">Password</label>
+    <input type="password" id="p" name="password" autocomplete="current-password" required>
+    <div id="create-fields" class="hidden">
+      <label for="p2">Confirm password</label>
+      <input type="password" id="p2" name="password2" autocomplete="new-password">
+      <label for="akey">Acorn team key</label>
+      <input type="password" id="akey" name="acornKey" autocomplete="off">
+    </div>
+    <button type="submit" class="btn" id="submit-btn">Sign in</button>
+    <div class="mode-toggle">
+      <a id="create-toggle">Create an account →</a>
+      <a id="back-toggle" class="hidden">← Back to sign in</a>
+    </div>
+  </form>
+</div>
+<script src="brand.js"></script>
+<script>
+(function () {
+  // Base path handles reverse-proxy prefixing: /prefix/login → /prefix/…
+  const BASE = window.location.pathname.replace(/\/login\/?$/, '') || '';
+  const API = BASE;
+
+  // Theme — mirror the table in graph-viewer.html so the login matches the
+  // user's saved theme before any JS runs against the server.
+  const THEMES = {
+    midnight: {},
+    dark: { '--bg':'#09090b','--surface':'#18181b','--panel':'#0f0f11','--border':'#27272a','--text':'#d4d4d8','--text-dim':'#71717a','--text-bright':'#fafafa','--accent':'#3b82f6','--accent2':'#8b5cf6','--danger':'#ef4444' },
+    paper: { '--bg':'#f5f3ef','--surface':'#ffffff','--panel':'#f8f6f2','--border':'#c8c0b4','--text':'#1a1a1a','--text-dim':'#6b6560','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#7c3aed','--danger':'#dc2626' },
+    terminal: { '--bg':'#000000','--surface':'#0a0a0a','--panel':'#050505','--border':'#1a3a1a','--text':'#33ff33','--text-dim':'#1a6b1a','--text-bright':'#66ff66','--accent':'#33ff33','--accent2':'#00cc00','--danger':'#ff3333' },
+    ember: { '--bg':'#12100e','--surface':'#1a1614','--panel':'#151210','--border':'#3a2e24','--text':'#e8d5c0','--text-dim':'#7a6a58','--text-bright':'#f5e8d8','--accent':'#f59e0b','--accent2':'#ef4444','--danger':'#ef4444' },
+    arctic: { '--bg':'#e8edf4','--surface':'#f0f4f9','--panel':'#e0e6f0','--border':'#b0bad0','--text':'#0f172a','--text-dim':'#5a6a80','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#4f46e5','--danger':'#dc2626' },
+    neon: { '--bg':'#0a0318','--surface':'#0d0520','--panel':'#080215','--border':'#2a1050','--text':'#e0d0f0','--text-dim':'#6040a0','--text-bright':'#f0e0ff','--accent':'#ff2d95','--accent2':'#00f0ff','--danger':'#ff2d55' },
+    forest: { '--bg':'#080e08','--surface':'#0e1a0e','--panel':'#0a140a','--border':'#1e3a1e','--text':'#c0dcc0','--text-dim':'#4a7a4a','--text-bright':'#d8f0d8','--accent':'#4ade80','--accent2':'#a3e635','--danger':'#ef4444' },
+  };
+  const themeName = (() => { try { return localStorage.getItem('spore-theme') || 'midnight'; } catch { return 'midnight'; } })();
+  const vars = THEMES[themeName] || {};
+  Object.keys(vars).forEach(k => document.documentElement.style.setProperty(k, vars[k]));
+
+  // Branding — brand.js exposes window.BRAND with chatLogo (SVG string),
+  // name, and tagline. Upscale the logo SVG since brand.js sizes it for the
+  // chat header.
+  try {
+    const b = window.BRAND || {};
+    if (b.name) document.getElementById('title').textContent = b.name;
+    if (b.tagline) document.getElementById('tagline').textContent = b.tagline;
+    if (b.chatLogo) {
+      document.getElementById('logo-el').innerHTML = b.chatLogo.replace(/height="\d+"/, 'height="56"');
+    }
+  } catch {}
+
+  // Mode toggle
+  let mode = 'login';
+  const fields = document.getElementById('create-fields');
+  const submitBtn = document.getElementById('submit-btn');
+  const createToggle = document.getElementById('create-toggle');
+  const backToggle = document.getElementById('back-toggle');
+  const passInput = document.getElementById('p');
+  const errEl = document.getElementById('err');
+  function setMode(m) {
+    mode = m;
+    if (m === 'create') {
+      fields.classList.remove('hidden');
+      submitBtn.textContent = 'Create account';
+      createToggle.classList.add('hidden');
+      backToggle.classList.remove('hidden');
+      passInput.setAttribute('autocomplete', 'new-password');
+      document.getElementById('hint').textContent = 'Register with your team key';
+    } else {
+      fields.classList.add('hidden');
+      submitBtn.textContent = 'Sign in';
+      createToggle.classList.remove('hidden');
+      backToggle.classList.add('hidden');
+      passInput.setAttribute('autocomplete', 'current-password');
+      document.getElementById('hint').textContent = 'Sign in to continue';
+    }
+    errEl.style.display = 'none';
+  }
+  createToggle.addEventListener('click', (e) => { e.preventDefault(); setMode('create'); });
+  backToggle.addEventListener('click', (e) => { e.preventDefault(); setMode('login'); });
+
+  // Submit
+  document.getElementById('f').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    submitBtn.disabled = true;
+    errEl.style.display = 'none';
+    const username = document.getElementById('u').value.trim();
+    const password = document.getElementById('p').value;
+    try {
+      if (mode === 'create') {
+        const password2 = document.getElementById('p2').value;
+        const acornKey = document.getElementById('akey').value.trim();
+        if (password.length < 8) throw new Error('Password must be at least 8 characters');
+        if (password !== password2) throw new Error('Passwords do not match');
+        if (!acornKey) throw new Error('Acorn team key is required');
+        const r = await fetch(API + '/api/webapp/users/self-register', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password, acornKey }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'Registration failed');
+      } else {
+        const r = await fetch(API + '/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'Invalid credentials');
+      }
+      // Success — bounce to the main app. SPA will pick up wizardNeeded
+      // from /api/auth/check and show the slim wizard if the user just
+      // registered.
+      window.location.href = BASE + '/';
+    } catch (err) {
+      errEl.textContent = err.message || 'Connection error';
+      errEl.style.display = 'block';
+      submitBtn.disabled = false;
+    }
+  });
+
+  // Lightweight particle backdrop so the page isn't dead flat
+  const canvas = document.getElementById('particles');
+  const ctx = canvas.getContext('2d');
+  let w, h, parts;
+  function resize() {
+    w = canvas.width = window.innerWidth;
+    h = canvas.height = window.innerHeight;
+    parts = Array.from({ length: 60 }, () => ({
+      x: Math.random() * w, y: Math.random() * h,
+      vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25,
+      r: Math.random() * 1.5 + 0.5,
+    }));
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  function tick() {
+    ctx.clearRect(0, 0, w, h);
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#5b8af5';
+    ctx.fillStyle = accent;
+    ctx.globalAlpha = 0.25;
+    for (const p of parts) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0) p.x += w; if (p.x > w) p.x -= w;
+      if (p.y < 0) p.y += h; if (p.y > h) p.y -= h;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+})();
+</script>
+</body>
+</html>

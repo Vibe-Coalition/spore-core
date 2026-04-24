@@ -339,6 +339,12 @@ async function boot() {
   try {
     await gateways.connectAll();
     tools.platformManager = gateways;
+    // Wire the WS broadcaster so ask_user + plan-mode proposals can push
+    // directly from the tools layer to the right operator's WS clients.
+    const _webGw = gateways.getGateway?.('web') || tools.gateway;
+    if (_webGw && typeof _webGw._broadcastToSessionKey === 'function') {
+      tools._wsBroadcast = (sessionKey, payload) => _webGw._broadcastToSessionKey(sessionKey, payload);
+    }
     log.info('SPORE is running.');
   } catch (e) {
     log.error('Failed to connect gateways:', e.message);
@@ -465,6 +471,13 @@ async function boot() {
     }
   }, 12000);
 
+  // Fast sweep for agent-scheduled wakeups. The heartbeat runs too infrequently
+  // (45m) to be useful for "wake me in 60–3600s" timers — they need a tight
+  // poll. 10s gives a reasonable precision/overhead trade.
+  const wakeupSweepTimer = setInterval(() => {
+    try { tools.sweepWakeups?.(); } catch (e) { log.error('[wakeup-sweep] error:', e.message); }
+  }, 10000);
+
   const heartbeatMs = (config.heartbeatIntervalMinutes || 45) * 60 * 1000;
   const heartbeatTimer = setInterval(async () => {
     log.info('[heartbeat] Running periodic tasks...');
@@ -552,6 +565,7 @@ async function boot() {
     log.info(`Received ${signal}, shutting down...`);
     try {
       clearInterval(heartbeatTimer);
+      clearInterval(wakeupSweepTimer);
       clearInterval(janitorTimer);
       try { backup.stop(); } catch {}
       tools._killAllTracked();

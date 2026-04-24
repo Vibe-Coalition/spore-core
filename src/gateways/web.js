@@ -378,9 +378,34 @@ async function _probeModelTier(tier, body, appConfig) {
   try {
     const client = createClientForModel(effectiveModel, cfg);
     const messages = [{ role: 'user', content: spec.user }];
-    // 8K so reasoning models (Qwen3/GLM/etc.) have room to finish thinking
-    // and still produce a final-answer block before max_tokens cuts them off.
-    const params = { model: effectiveModel, max_tokens: 8192, messages };
+    // Honor a per-model maxTokens override. Priority:
+    //   1. body.maxTokens (what the operator just typed in the tier row,
+    //      lets them test before saving)
+    //   2. config.modelLimits[<ref>].maxTokens (saved value)
+    //   3. 8K default — enough for reasoning models (Qwen/GLM/Kimi) to
+    //      finish thinking and still produce a final-answer block.
+    const limits = cfg?.modelLimits || {};
+    const savedLimKey = limits[effectiveModel]
+      ? effectiveModel
+      : Object.keys(limits).find(k => k.endsWith('/' + effectiveModel)) ||
+        Object.keys(limits).find(k => {
+          const slash = k.indexOf('/');
+          return slash > 0 && k.slice(slash + 1) === effectiveModel;
+        }) || null;
+    const savedLim = savedLimKey ? limits[savedLimKey] : null;
+    const perModelMax =
+      Number(body?.maxTokens) ||
+      Number(savedLim?.maxTokens) ||
+      0;
+    let params = { model: effectiveModel, max_tokens: perModelMax > 0 ? perModelMax : 8192, messages };
+    // Reasoning effort: prefer body override (live UI value), else saved.
+    const effort = body?.reasoningEffort || savedLim?.reasoningEffort || null;
+    if (effort && effort !== 'auto') {
+      try {
+        const { AgentLoop } = require('../agent/loop');
+        params = AgentLoop.applyReasoningEffort(params, effectiveModel, effort);
+      } catch {}
+    }
     if (spec.system) params.system = spec.system;
 
     let text = '';
@@ -1016,15 +1041,19 @@ class WebGateway {
     }
 
     if (body.modelLimits && typeof body.modelLimits === 'object') {
-      // Sanitize: only keep entries with positive integers
+      const validEfforts = new Set(['off','minimal','low','medium','high','max']);
       const cleaned = {};
       for (const [model, lim] of Object.entries(body.modelLimits)) {
         if (!model) continue;
         const ctx = Number(lim?.contextWindow);
         const cmp = Number(lim?.compactAt);
+        const mxo = Number(lim?.maxTokens);
+        const eff = String(lim?.reasoningEffort || '').toLowerCase();
         const entry = {};
         if (Number.isFinite(ctx) && ctx > 0) entry.contextWindow = Math.floor(ctx);
         if (Number.isFinite(cmp) && cmp > 0) entry.compactAt = Math.floor(cmp);
+        if (Number.isFinite(mxo) && mxo > 0) entry.maxTokens = Math.floor(mxo);
+        if (validEfforts.has(eff)) entry.reasoningEffort = eff;
         if (Object.keys(entry).length) cleaned[model] = entry;
       }
       const json = Object.keys(cleaned).length ? JSON.stringify(cleaned) : null;
@@ -1346,6 +1375,54 @@ class WebGateway {
     return 0;
   }
 
+  /**
+   * Broadcast a payload to every WS client that belongs to this agent-loop
+   * session. Used by ask_user + plan-mode proposals so the picker card /
+   * approve buttons reach the right operator's tabs only.
+   *
+   * Routing:
+   *   'dm:<userId>'               — webapp DM: every WS with ws._user===userId
+   *   'shared:dm:web:<userId>'    — same (multi-platform buildKey form)
+   *   'channel:web:control-panel' — shared; route to every web creator
+   *   '<mode>-<ts>-<rand>' (merge/link/child/wakeup/etc.) — route to operator
+   *   acorn session ids           — route via _sessionClients (sessionId keyed)
+   */
+  _broadcastToSessionKey(sessionKey, payload) {
+    if (!sessionKey) return 0;
+    const data = JSON.stringify(payload);
+
+    // Acorn + shared-channel path: `_sessionClients` is keyed by bare sessionId
+    // (e.g. "abc123"), but the agent-loop sessionKey format wraps it as
+    // "channel:abc123" via buildKey(sessionId, isDm=false). Try both keys.
+    for (const tryKey of [sessionKey, sessionKey.replace(/^(?:shared:|private:)?channel:(?:[a-z]+:)?/, '')]) {
+      const set = this._sessionClients?.get(tryKey);
+      if (!set) continue;
+      let count = 0;
+      for (const entry of set) {
+        if (entry.ws.readyState === 1) {
+          try { entry.ws.send(data); count++; } catch {}
+        }
+      }
+      if (count) return count;
+    }
+
+    // DM path: resolve the userId from the key and match every WS client
+    // (all of that user's tabs).
+    let targetUser = null;
+    const dmMatch = sessionKey.match(/^(?:shared:|private:)?dm:(?:[a-z]+:)?(.+)$/);
+    if (dmMatch) targetUser = dmMatch[1];
+    else if (/^(merge|link|child|wakeup)[-_]/.test(sessionKey)) targetUser = 'operator';
+    if (!targetUser) return 0;
+    let count = 0;
+    for (const wsClient of this._wss?.clients || []) {
+      if (wsClient.readyState !== 1) continue;
+      if (wsClient._user === targetUser) {
+        try { wsClient.send(data); count++; } catch {}
+      }
+    }
+    return count;
+  }
+
   _removeClientFromAllSessions(ws) {
     for (const [sessionId, set] of this._sessionClients) {
       for (const entry of set) {
@@ -1400,8 +1477,28 @@ class WebGateway {
     return 'operator';
   }
 
+  // hasOperatorConnected — true when at least one connected WS client
+  // has a creator/admin role (i.e. the actual instance owner viewing the
+  // web panel). Used to gate proactive outreach: webapp guests and
+  // acorn CLI sessions don't get unsolicited 'thinking out loud'
+  // messages, only the operator does.
+  hasOperatorConnected() {
+    if (!this._wss) return false;
+    const WebSocket = require('ws');
+    for (const client of this._wss.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      if (client._role === 'creator' || client._role === 'admin') return true;
+    }
+    return false;
+  }
+
   getActiveChannelIds() {
-    if (!this._wss || !this.hasConnectedClients()) return [];
+    // Only return the web chat channel when an OPERATOR (creator/admin)
+    // is currently viewing it. Without this, the proactive maintainer
+    // would also fire when only a webapp guest or an acorn CLI client
+    // is connected — which is wrong (proactive thoughts should only
+    // ever surface to the instance owner).
+    if (!this._wss || !this.hasOperatorConnected()) return [];
     return [{ id: 'web:control-panel', name: 'web chat' }];
   }
 
@@ -1456,8 +1553,12 @@ class WebGateway {
   }
 
   injectProactivePrompt(channelId, context, topic) {
-    if (!this._wss || !this.hasConnectedClients()) {
-      this.log.debug('[proactive:web] No connected clients, skipping');
+    // Gate: ONLY fire when an operator (creator/admin) is viewing the
+    // web panel. Webapp guests and acorn CLI sessions should never
+    // see unsolicited proactive thoughts. This also stops the agent
+    // from talking to itself when nobody's watching.
+    if (!this._wss || !this.hasOperatorConnected()) {
+      this.log.debug('[proactive:web] No operator connected, skipping');
       return;
     }
 
@@ -1474,7 +1575,13 @@ class WebGateway {
     if (!this._proactiveQueue) this._proactiveQueue = Promise.resolve();
     this._proactiveQueue = this._proactiveQueue.then(async () => {
       try {
-        this.broadcast({ type: 'chat:start', sessionId });
+        // Route every stream event to the target session ONLY, not to
+        // every connected WS client. Previously the deltas were
+        // broadcast() which leaked them into acorn (and any other
+        // viewer of any session) — visible as a stray 'NO_REPLY'
+        // bubble in the CLI even though the prompt was never posted
+        // to the cli session.
+        this._sendToSession(sessionId, { type: 'chat:start', sessionId });
         const result = await agent.processMessage({
           content: prompt,
           channelId: sessionId,
@@ -1485,21 +1592,21 @@ class WebGateway {
           platform: 'web',
           isDm: true,
           onTextDelta: (delta) => {
-            this.broadcast({ type: 'chat:delta', text: delta });
+            this._sendToSession(sessionId, { type: 'chat:delta', text: delta });
           },
           onThinkingDelta: (delta) => {
-            this.broadcast({ type: 'chat:thinking', text: delta });
+            this._sendToSession(sessionId, { type: 'chat:thinking', text: delta });
           },
           onToolUse: (toolName) => {
-            this.broadcast({ type: 'chat:tool', tool: toolName });
+            this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName });
           },
           onStatus: (evt) => {
             try {
               if (evt.type?.startsWith('code:')) {
-                this.broadcast(evt);
+                this._sendToSession(sessionId, evt);
               } else {
                 const { type: statusType, ...rest } = evt;
-                this.broadcast({ type: 'chat:status', status: statusType, ...rest });
+                this._sendToSession(sessionId, { type: 'chat:status', status: statusType, ...rest });
               }
             } catch { }
           },
@@ -1507,10 +1614,23 @@ class WebGateway {
 
         const text = result?.text;
         if (!text || text.trim() === 'NO_REPLY' || text.includes('NO_REPLY')) {
-          this.broadcast({ type: 'chat:done', text: '' });
+          this._sendToSession(sessionId, { type: 'chat:done', text: '' });
           this.log.info('[proactive:web] Agent chose NO_REPLY');
+          // Clean up: remove the synthetic prompt from the session DB
+          // too, so a refresh doesn't replay [proactive thought: ...]
+          // followed by an awkward NO_REPLY pair. The operator never
+          // saw the conversation; pretend it didn't happen.
+          try {
+            const sk = this.tools?._sessions?.constructor?.buildKey?.(sessionId, true, activeUser);
+            if (sk) {
+              this.tools._sessions.removeLastUserMessage(sk);
+              this.tools._sessions.removeLastAssistantNoReply?.(sk);
+            }
+          } catch (e) {
+            this.log.debug(`[proactive:web] cleanup failed: ${e.message}`);
+          }
         } else {
-          this.broadcast({
+          this._sendToSession(sessionId, {
             type: 'chat:done',
             text,
             usage: result.usage,
@@ -2239,8 +2359,18 @@ class WebGateway {
         }
         const hasWebappUsers = loadWebappUsers().length > 0;
         const needsAuth = !!(managerUrl || (authUser && authPass));
+        // wizardNeeded: true if the authenticated user hasn't completed the
+        // per-user onboarding wizard yet. Drives the slim post-login wizard
+        // that the SPA runs when a fresh webapp user first lands on /graph.
+        let wizardNeeded = false;
+        if (valid && username && (role === 'webapp' || role === 'creator')) {
+          try {
+            const prefs = JSON.parse(fs.readFileSync(path.join(this.config.dataDir, 'preferences.json'), 'utf8'));
+            wizardNeeded = !prefs[username]?.wizardCompleted;
+          } catch { wizardNeeded = role === 'webapp'; }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ authenticated: valid, needsAuth, role, hasWebappUsers, username }));
+        res.end(JSON.stringify({ authenticated: valid, needsAuth, role, hasWebappUsers, username, wizardNeeded }));
         return;
       }
 
@@ -3541,75 +3671,20 @@ class WebGateway {
         }
       }
 
-      // ── Webapp login page ──
+      // ── /login: serve the standalone login page ──
       if (urlPath === '/login' || urlPath === '/login/') {
-        const displayName = this.config.displayName || this.config.agentId || 'SPORE';
-        const brandJs = (() => { try { return fs.readFileSync(path.join(__dirname, '..', 'static', 'brand.js'), 'utf8'); } catch { return ''; } })();
-        const serverTheme = _readServerTheme(this.config.dataDir);
-        res.writeHead(200, {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store, no-cache, must-revalidate',
-          'Pragma': 'no-cache',
-        });
-        res.end(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Sign in \u00b7 SPORE</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-:root{
-  --bg:#08090e;--surface:#0e1017;--panel:#0e1017;
-  --border:#1e2133;--text:#c8cdd8;--text-dim:#4a4f68;--text-bright:#e2e6f0;
-  --accent:#5b8af5;--accent2:#8b6cf7;--danger:#f05858;
-  --login-card-bg:rgba(14,16,23,.85);
-}
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{background:var(--bg);color:var(--text)}
-body{height:100vh;display:flex;align-items:center;justify-content:center;font-family:'Inter',system-ui,sans-serif;transition:background-color .3s ease,color .3s ease}
-.login-box{width:340px;padding:36px 32px 28px;background:var(--login-card-bg);border:1px solid var(--border);border-radius:14px;backdrop-filter:blur(24px);text-align:center;transition:background-color .3s ease,border-color .3s ease}
-.login-box h1{font-size:1.15rem;font-weight:600;color:var(--text-bright);margin-bottom:4px}
-.login-box .sub{font-size:.78rem;color:var(--text-dim);margin-bottom:20px}
-.login-box label{display:block;text-align:left;font-size:.68rem;color:var(--text-dim);letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px;margin-top:12px}
-.login-box input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--panel);color:var(--text-bright);font-size:.88rem;outline:none;transition:border-color .2s ease,box-shadow .2s ease,background-color .3s ease}
-.login-box input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent)}
-.login-box .btn{width:100%;margin-top:18px;padding:11px;border:none;border-radius:8px;cursor:pointer;font-size:.88rem;font-weight:600;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:opacity .2s ease,background .3s ease}
-.login-box .btn:hover{opacity:.9}.btn:disabled{opacity:.5;cursor:not-allowed}
-.err{color:var(--danger);font-size:.78rem;margin-top:8px;display:none}
-</style></head><body>
-<div class="login-box">
-<h1>${displayName}</h1>
-<div class="sub">Sign in to continue</div>
-<div class="err" id="err"></div>
-<form id="f" autocomplete="on">
-<label for="u">Username</label><input id="u" name="username" autocomplete="username" required>
-<label for="p">Password</label><input id="p" type="password" name="password" autocomplete="current-password" required>
-<button type="submit" class="btn">Sign in</button>
-</form>
-</div>
-<script>${brandJs}
-(function(){
-  const THEMES={
-    midnight:{},
-    dark:{'--bg':'#09090b','--surface':'#18181b','--panel':'#0f0f11','--border':'#27272a','--text':'#d4d4d8','--text-dim':'#71717a','--text-bright':'#fafafa','--accent':'#3b82f6','--accent2':'#8b5cf6','--danger':'#ef4444'},
-    paper:{'--bg':'#f5f3ef','--surface':'#ffffff','--panel':'#f8f6f2','--border':'#c8c0b4','--text':'#1a1a1a','--text-dim':'#6b6560','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#7c3aed','--danger':'#dc2626','--login-card-bg':'rgba(255,255,255,.9)'},
-    terminal:{'--bg':'#000000','--surface':'#0a0a0a','--panel':'#050505','--border':'#1a3a1a','--text':'#33ff33','--text-dim':'#1a6b1a','--text-bright':'#66ff66','--accent':'#33ff33','--accent2':'#00cc00','--danger':'#ff3333','--login-card-bg':'rgba(10,10,10,.85)'},
-    ember:{'--bg':'#12100e','--surface':'#1a1614','--panel':'#151210','--border':'#3a2e24','--text':'#e8d5c0','--text-dim':'#7a6a58','--text-bright':'#f5e8d8','--accent':'#f59e0b','--accent2':'#ef4444','--danger':'#ef4444','--login-card-bg':'rgba(26,22,20,.85)'},
-    arctic:{'--bg':'#e8edf4','--surface':'#f0f4f9','--panel':'#e0e6f0','--border':'#b0bad0','--text':'#0f172a','--text-dim':'#5a6a80','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#4f46e5','--danger':'#dc2626','--login-card-bg':'rgba(240,244,249,.9)'},
-    neon:{'--bg':'#0a0318','--surface':'#0d0520','--panel':'#080215','--border':'#2a1050','--text':'#e0d0f0','--text-dim':'#6040a0','--text-bright':'#f0e0ff','--accent':'#ff2d95','--accent2':'#00f0ff','--danger':'#ff2d55','--login-card-bg':'rgba(13,5,32,.85)'},
-    forest:{'--bg':'#080e08','--surface':'#0e1a0e','--panel':'#0a140a','--border':'#1e3a1e','--text':'#c0dcc0','--text-dim':'#4a7a4a','--text-bright':'#d8f0d8','--accent':'#4ade80','--accent2':'#a3e635','--danger':'#ef4444','--login-card-bg':'rgba(14,26,14,.85)'}
-  };
-  const name=localStorage.getItem('spore-theme')||${JSON.stringify(serverTheme)};
-  const vars=THEMES[name]||{};
-  const root=document.documentElement.style;
-  Object.keys(vars).forEach(k=>root.setProperty(k,vars[k]));
-  try{localStorage.setItem('spore-theme',name);}catch(e){}
-})();
-const API=window.location.pathname.replace(/\\/login\\/?$/,'');
-document.getElementById('f').onsubmit=async e=>{e.preventDefault();
-const err=document.getElementById('err');err.style.display='none';
-const r=await fetch(API+'/api/webapp/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('u').value.trim(),password:document.getElementById('p').value})});
-const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.textContent=d.error||'Invalid credentials';err.style.display='block';}};
-</script></body></html>`);
+        try {
+          const p = path.join(__dirname, '..', 'static', 'login.html');
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+            'Pragma': 'no-cache',
+          });
+          res.end(fs.readFileSync(p, 'utf8'));
+        } catch { res.writeHead(404); res.end('Login page not found.'); }
         return;
       }
+
 
       // ── Static files: webapp auth / OAuth gate ──
       {
@@ -3851,12 +3926,31 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
       ws._pendingTools = new Map();
       ws.on('pong', () => { ws._missedPongs = 0; });
 
+      // Capability advertisement. acorn checks this to decide whether to
+      // send projectContext as a sibling field (new path — routed into
+      // system prompt) or fall back to gluing GatherContext onto message
+      // content (old path). Sent unconditionally for every client; non-
+      // acorn clients ignore unknown frame types.
+      try {
+        ws.send(JSON.stringify({
+          type: 'capabilities',
+          projectContext: true,
+          sporeVersion: 'v0.1.0',
+        }));
+      } catch {}
+
       // Acorn clients manage their own session history — don't send web panel history
       if (!isAcornClient) {
         try {
-          if (this.tools._sessions) {
-            const sessionKey = this.tools._sessions.constructor.buildKey('web:control-panel', true, ws._user || 'operator');
-            this.log.info(`[ws] history-fetch user=${ws._user || '(anon)'} → sessionKey=${sessionKey}`);
+          // CRITICAL: never serve DM history to an anonymous socket. Before
+          // the user has authenticated, `ws._user` is null — falling back to
+          // 'operator' here leaks the operator's entire chat history to any
+          // unauthenticated visitor. Silently skip the history block instead;
+          // the client will receive history once it reconnects with a valid
+          // session token.
+          if (this.tools._sessions && ws._user) {
+            const sessionKey = this.tools._sessions.constructor.buildKey('web:control-panel', true, ws._user);
+            this.log.info(`[ws] history-fetch user=${ws._user} → sessionKey=${sessionKey}`);
             const rows = this.tools._sessions.db.prepare(
               `SELECT role, content, created FROM messages WHERE session_key = ? ORDER BY id DESC LIMIT 60`
             ).all(sessionKey);
@@ -3887,24 +3981,28 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
           }
         } catch (e) { this.log.warn('[ws] Failed to send chat history:', e.message); }
 
-        // Tell reconnecting web clients if the agent is mid-turn so they restore busy state
-        try {
-          const agent = this.tools._agent;
-          const userId = ws._user || 'operator';
-          const activeKeys = agent ? [...agent.activeRuns] : [];
-          this.log.info(`[ws] Connect: user=${userId}, activeRuns=${activeKeys.length > 0 ? activeKeys.join(',') : 'none'}`);
-          if (agent && activeKeys.length > 0) {
-            // Only flag THIS user's session as busy — don't let user A's active
-            // loop disable user B's send button. Each user has their own dm:<user>
-            // session key; match on that specifically.
-            const myKey = `dm:${userId}`;
-            const webBusy = activeKeys.includes(myKey);
-            if (webBusy) {
-              ws.send(JSON.stringify({ type: 'chat:busy' }));
-              this.log.info(`[ws] Sent chat:busy to reconnecting client (own session ${myKey} active)`);
+        // Tell reconnecting web clients if the agent is mid-turn so they restore busy state.
+        // Skip anon sockets — they have no session of their own to be busy on,
+        // and mapping them to operator would make every anonymous visitor
+        // appear "busy" whenever the operator has a run going.
+        if (ws._user) {
+          try {
+            const agent = this.tools._agent;
+            const userId = ws._user;
+            const activeKeys = agent ? [...agent.activeRuns] : [];
+            this.log.info(`[ws] Connect: user=${userId}, activeRuns=${activeKeys.length > 0 ? activeKeys.join(',') : 'none'}`);
+            if (agent && activeKeys.length > 0) {
+              const myKey = `dm:${userId}`;
+              const webBusy = activeKeys.includes(myKey);
+              if (webBusy) {
+                ws.send(JSON.stringify({ type: 'chat:busy' }));
+                this.log.info(`[ws] Sent chat:busy to reconnecting client (own session ${myKey} active)`);
+              }
             }
-          }
-        } catch (e) { this.log.warn('[ws] Busy check failed:', e.message); }
+          } catch (e) { this.log.warn('[ws] Busy check failed:', e.message); }
+        } else {
+          this.log.info(`[ws] Connect: user=(anon), activeRuns=(skipped — not authenticated)`);
+        }
       }
 
       // Graph events only for web panel clients, not Acorn
@@ -3920,6 +4018,14 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         if (msg.type === 'ping') {
           ws._missedPongs = 0;
           try { ws.send(JSON.stringify({ type: 'pong' })); } catch { }
+          return;
+        }
+
+        // Answer to an ask_user tool call — resolves the pending promise on
+        // the tools side so the agent's tool_result returns cleanly.
+        if (msg.type === 'ask_user_answer' && msg.qid && typeof msg.answer === 'string') {
+          const ok = this.tools.answerAskUser(msg.qid, msg.answer);
+          try { ws.send(JSON.stringify({ type: 'ask_user_answer_ack', qid: msg.qid, ok })); } catch {}
           return;
         }
 
@@ -4309,8 +4415,33 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
             // If an observer (mobile app) sends a message, tools still go to the CLI.
             const originWs = isAcorn ? (this._getOriginClient(sessionId) || ws) : null;
 
+            // Debug: log the projectContext.mode acorn sent so we can
+            // tell whether "plan mode didn't behave as plan mode" is a
+            // client-side bug (mode not sent) or server-side (mode
+            // sent but prompt didn't activate).
+            if (isAcorn) {
+              const mode = msg.projectContext?.mode || '(none)';
+              const hasPC = msg.projectContext ? 'yes' : 'no';
+              this.log.info(`[acorn-chat] sessionId=${sessionId} projectContext=${hasPC} mode=${mode} content=${JSON.stringify((msg.content || '').slice(0, 80))}`);
+            }
+
+            // Plan-mode reminder — when acorn signals plan mode via
+            // projectContext.mode='plan', prepend a tiny inline marker
+            // onto the user's message. The full PLAN_PREFIX block lives
+            // in the system prompt (prompt-sections.js), but the model
+            // pays much more attention to instructions adjacent to the
+            // user's actual content. Python glued the entire 1KB prefix;
+            // we keep that signal-strength advantage with ~150 bytes.
+            // The marker also makes it impossible to miss in the
+            // session log when debugging "did the agent know it was
+            // in plan mode?".
+            let userContent = msg.content + fileNote;
+            if (isAcorn && msg.projectContext && msg.projectContext.mode === 'plan') {
+              userContent = '[PLAN MODE — read ## Plan Mode in your system prompt before responding. Do NOT call write_file/edit_file/exec mutating commands. End with `PLAN_READY` (after PHASE 5) OR a `QUESTIONS:` block (during PHASE 4). Vague request ⇒ ASK.]\n\n' + userContent;
+            }
+
             const agentOpts = {
-              content: msg.content + fileNote,
+              content: userContent,
               channelId: sessionId,
               channelName: isAcorn ? `acorn:${ws._user}` : 'control-panel',
               // userId is server-trusted (from the authenticated WS session)
@@ -4328,6 +4459,13 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
               platform: isAcorn ? 'cli' : 'web',
               isDm: !isAcorn,
               clientCwd: ws._cwd || null,
+              // projectContext is the structured project metadata acorn sends
+              // on every chat:submit. The agent loop routes this into the
+              // SYSTEM PROMPT instead of the user message — so the project
+              // info doesn't accumulate in messages[] across turns. Old
+              // acorn builds don't send this field; we just pass undefined
+              // and the prompt builder skips the section.
+              projectContext: msg.projectContext || null,
               images,
               media,
               onTextDelta: (delta) => {
@@ -6123,6 +6261,53 @@ const d=await r.json();if(r.ok&&d.ok){window.location.href=API+'/';}else{err.tex
         const summary = feed.readTokenSummary();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(summary || { error: 'No token data yet' }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Plan-mode endpoints ──
+    if (urlPath === '/api/plan/mode' && req.method === 'PUT') {
+      try {
+        if (!isAnyAuth(req)) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'auth required' })); return; }
+        const body = await _readJsonBody(req);
+        const sessionKey = String(body.sessionKey || '').trim();
+        const enabled = body.enabled === true;
+        if (!sessionKey) { res.writeHead(400); res.end(JSON.stringify({ error: 'sessionKey required' })); return; }
+        const sessions = this.tools._sessions;
+        // Ensure the session row exists
+        sessions.ensureSession(sessionKey);
+        sessions.db.prepare('UPDATE sessions SET plan_mode=? WHERE key=?').run(enabled ? 1 : 0, sessionKey);
+        try { this._broadcastToSessionKey(sessionKey, { type: 'plan_mode', enabled }); } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, planMode: enabled }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if ((urlPath === '/api/plan/approve' || urlPath === '/api/plan/reject') && req.method === 'POST') {
+      try {
+        if (!isAnyAuth(req)) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'auth required' })); return; }
+        const body = await _readJsonBody(req);
+        const sessionKey = String(body.sessionKey || '').trim();
+        if (!sessionKey) { res.writeHead(400); res.end(JSON.stringify({ error: 'sessionKey required' })); return; }
+        const fn = urlPath.endsWith('/approve') ? 'applyPlanProposals' : 'rejectPlanProposals';
+        // Pass sessionKey explicitly — the approve/reject methods take it as
+        // an argument and route internal dispatch through _executeToolDirect
+        // which bypasses the plan-mode gate anyway.
+        const out = await this.tools[fn](sessionKey);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out || { ok: true }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/plan/pending' && req.method === 'GET') {
+      try {
+        if (!isAnyAuth(req)) { res.writeHead(401); res.end(JSON.stringify({ error: 'auth required' })); return; }
+        const sessionKey = new URL(req.url, 'http://x').searchParams.get('sessionKey') || '';
+        const rows = this.tools.listPendingProposals(sessionKey);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ proposals: rows }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
