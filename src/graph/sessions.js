@@ -33,6 +33,10 @@
 //                       (mirror so traversal works either way)
 
 const projects = require('./projects');
+// Event bus — lets the graph viewer (and any other subscribers) see
+// distillation work live. Without this, summarize/distill runs silently
+// from the viewer's POV; a fresh node appears only after manual refresh.
+const graphEvents = require('./events');
 
 function sessionNodeId(sessionId) {
   return 'session-' + String(sessionId || '').replace(/[^a-zA-Z0-9_:@.-]/g, '_').slice(0, 200);
@@ -91,6 +95,7 @@ function upsertSessionNode(learner, opts = {}) {
       'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
       'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
     ).run(id, label, 'session', description, 6, 'graphcorn', 'session-start', new Date().toISOString(), extraJson);
+    graphEvents.emit('change', { op: 'node:create', node: { id, label, type: 'session', description }, source: 'graphcorn' });
   } else {
     db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
   }
@@ -208,6 +213,8 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     return;
   }
 
+  graphEvents.emit('change', { op: 'session:summarize-start', nodeId: id, source: 'graphcorn' });
+
   // Pull the round breadcrumbs — chronological from oldest to newest.
   const rows = db.prepare(
     "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='rounds' ORDER BY a.id ASC"
@@ -255,6 +262,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
       db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(extraObj), id);
       if (log) log.warn(`[graphcorn] summary for ${id} returned empty text — marked to avoid retries`);
+      graphEvents.emit('change', { op: 'session:summarize-done', nodeId: id, empty: true, source: 'graphcorn' });
       return;
     }
     // Replace any prior summary aspect (if session ended twice on a
@@ -272,9 +280,13 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     extraObj.summarized_at = new Date().toISOString();
     db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
       .run(JSON.stringify(extraObj), id);
+    graphEvents.emit('change', { op: 'aspect:create', nodeId: id, aspect: 'summary', source: 'graphcorn' });
+    graphEvents.emit('change', { op: 'attribute:create', nodeId: id, aspect: 'summary', content: text, source: 'graphcorn' });
+    graphEvents.emit('change', { op: 'session:summarize-done', nodeId: id, empty: false, chars: text.length, source: 'graphcorn' });
     if (log) log.info(`[graphcorn] session ${id} summary written (${text.length} chars, ${rows.length} rounds, model=${model})`);
   } catch (e) {
     if (log) log.warn(`[graphcorn] summary for ${id} failed: ${e.message}`);
+    graphEvents.emit('change', { op: 'session:summarize-done', nodeId: id, error: e.message, source: 'graphcorn' });
   }
 }
 
@@ -329,6 +341,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
   extraObj.distilling = true;
   db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
     .run(JSON.stringify(extraObj), id);
+  graphEvents.emit('change', { op: 'session:distill-start', nodeId: id, source: 'graphcorn' });
 
   try {
     // Exclude the session node itself from the candidate list — it
@@ -347,6 +360,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       delete extraObj.distilling;
       db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(extraObj), id);
+      graphEvents.emit('change', { op: 'session:distill-done', nodeId: id, promoted: 0, created: 0, dropped: 0, notesAppended: 0, empty: true, source: 'graphcorn' });
       if (log) log.info(`[distill] ${id} no session-temp nodes — marked complete`);
       return { promoted: 0, dropped: 0 };
     }
@@ -500,9 +514,16 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         // Edge: created → project (uses) + created → session (first_seen_in)
         const insE = db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 1, 'graphcorn-distill')");
         if (projectIdForEdges) {
-          try { insE.run(newId, projectIdForEdges, 'uses'); } catch {}
+          try {
+            insE.run(newId, projectIdForEdges, 'uses');
+            graphEvents.emit('change', { op: 'edge:create', edge: { source: newId, target: projectIdForEdges, type: 'uses' }, source: 'graphcorn-distill' });
+          } catch {}
         }
-        try { insE.run(newId, id, 'first_seen_in'); } catch {}
+        try {
+          insE.run(newId, id, 'first_seen_in');
+          graphEvents.emit('change', { op: 'edge:create', edge: { source: newId, target: id, type: 'first_seen_in' }, source: 'graphcorn-distill' });
+        } catch {}
+        graphEvents.emit('change', { op: 'node:create', node: { id: newId, label, type: nodeType, description }, source: 'graphcorn-distill' });
         createdCount.value++;
       } catch (e) {
         if (log) log.warn(`[distill] createNode ${newId} failed: ${e.message}`);
@@ -542,6 +563,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         ext.distilled_at = new Date().toISOString();
         db.prepare('UPDATE nodes SET extra = ?, importance = MAX(importance, 6), updated = CURRENT_TIMESTAMP WHERE id = ?')
           .run(JSON.stringify(ext), targetId);
+        graphEvents.emit('change', { op: 'node:update', nodeId: targetId, renamedFrom: targetId !== tempId ? tempId : undefined, source: 'graphcorn-distill' });
         promotedIds.add(tempId);
       }
     }
@@ -564,6 +586,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         db.prepare(
           "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn-distill', 'graphcorn-distill')"
         ).run(asp.id, content);
+        graphEvents.emit('change', { op: 'attribute:create', nodeId: tgt, aspect: aspectName, content, source: 'graphcorn-distill' });
         notesAppended++;
       }
     }
@@ -607,6 +630,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         insBin.run(t.id, t.label, payload, `session ${sessionId} not promoted`, expiresAt);
         db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(t.id, t.id);
         db.prepare('DELETE FROM nodes WHERE id = ?').run(t.id);
+        graphEvents.emit('change', { op: 'node:delete', nodeId: t.id, source: 'graphcorn-distill' });
         dropped++;
       } catch (e) {
         if (log) log.warn(`[distill] failed to recycle ${t.id}: ${e.message}`);
@@ -622,6 +646,15 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
       .run(JSON.stringify(extraObj), id);
 
+    graphEvents.emit('change', {
+      op: 'session:distill-done',
+      nodeId: id,
+      promoted: promotedIds.size,
+      created: createdCount.value,
+      dropped,
+      notesAppended,
+      source: 'graphcorn',
+    });
     if (log) log.info(`[distill] ${id} done: promoted=${promotedIds.size} created=${createdCount.value} dropped=${dropped} notes=${notesAppended} model=${model}`);
     return { promoted: promotedIds.size, created: createdCount.value, dropped, notesAppended };
   } catch (e) {
@@ -631,6 +664,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     try {
       db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), id);
     } catch {}
+    graphEvents.emit('change', { op: 'session:distill-done', nodeId: id, error: e.message, source: 'graphcorn' });
     if (log) log.warn(`[distill] ${id} failed: ${e.message} (temps left in place; janitor will clean in 48h)`);
     return { error: e.message };
   }
