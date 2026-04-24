@@ -67,6 +67,40 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 
 
 -- ═══════════════════════════════════════════════════════════════
+-- NODE: Web Search & Fetch (web_search + web_fetch)
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-web-search', 'Web Search & Fetch (web_search + web_fetch)', 'reference',
+  'Live-web information retrieval — web_search returns ranked results, web_fetch reads a specific URL. Routes through SearXNG (primary) with Brave fallback.', 9, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-search', 'when_to_use', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'USE web_search whenever the answer depends on current information — library versions, framework docs, API changes, recent events, error messages you have not seen before, "what is the latest", "what does X do", "is X deprecated". Your training data is stale; the web is not.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'USE web_fetch when you ALREADY have a URL (returned by web_search, mentioned by the user, or referenced from a file you read) and you want the page content. Do NOT web_search for a URL you already know — just web_fetch it.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'SKIP web_search for facts that are stable and inside your training (basic syntax, well-known algorithms, math). Burning a tool call on those is wasteful.', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'SKIP web_search inside a `delegate_task({persona: "researcher", ...})` — the researcher persona has only web_search + web_fetch; if you are the researcher you should use them, but if you are the orchestrator, delegate parallel research instead of serial searches yourself.', 7, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-search', 'workflow_pattern', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Standard pattern: `web_search` broad → look at the top 5-10 results → pick 1-3 most authoritative URLs → `web_fetch` each. Don''t fetch all 10; pick the official docs / primary sources.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Always include the current year in queries about recent topics ("expo router 2026", "React Native 0.76 breaking changes"). Without a year, search engines often return stale results from prior years that look authoritative but aren''t.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use site: filters for known trustworthy domains: `site:docs.expo.dev`, `site:github.com`, `site:stackoverflow.com`. Filters out SEO-spam blog posts that copy real docs out-of-date.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'For error messages, search the EXACT error string in quotes — `"TypeError: Cannot read properties of undefined" expo router`. The quotes pin the search to actual occurrences.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Authenticated APIs: `web_fetch({url: "...", credential: "BFL_API_KEY", method: "POST", body: {...}})` injects the vault key server-side without exposing it. The credential parameter is the vault key NAME (see ref-api-keys for the catalog).', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-search', 'output_format', 7, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'web_search returns a list of {title, url, snippet} objects. Snippets are usually 1-2 sentences — use them to decide which URLs to fetch, not as the answer itself. Result count is capped (typically 10).', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'web_fetch returns the page content, capped at 30,000 chars. For longer pages, fetch a more specific URL (anchor / sub-page) rather than asking the same URL repeatedly. PDFs, JSON, and HTML are all supported.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'When citing a fact you got from the web, always include the source URL in your reply so the user can verify. Format: "Per <url>: <fact>" — keeps you honest and the user able to double-check.', 9, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-search', 'backend', 6, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Primary backend: SearXNG self-hosted metasearch (set via SEARXNG_URL env). Fallback: Brave Search API (BRAVE_API_KEY). If web_search returns nothing useful, that''s usually a real "no good results" signal — not a backend problem. Log lines tell which backend served the query.', 7, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
 -- NODE: FLUX Image Generation
 -- ═══════════════════════════════════════════════════════════════
 
@@ -227,7 +261,8 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'Use grep/glob (native tools) instead of exec+grep/find for code search — structured results, no shell quoting issues. See ref-search-tools for caps and patterns.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'When the user asks about local state — "is the dev server up", "what''s in this file", "why is X slow", "did the build finish", "is port N open" — RUN THE TOOLS (exec, read_file, grep) and answer with the actual result. Do NOT respond like a remote chatbot ("I can''t see your machine, here''s how you could check"). For acorn sessions you ARE on the user''s box; behave like it.', 10, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'For project-wide listings, NEVER use exec ls -laR / exec find / exec tree — they walk node_modules and hit the 3-minute tool timeout. Use the glob tool (auto-skips noise dirs, capped at 500 paths) or read the Project Tree from the system prompt.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'When showing exec output / describing a project, FILTER noise dirs from your reply even if the tool returned them. Suppress: .git, node_modules, .venv, venv, __pycache__, dist, build, target, .next, .cache, .acorn, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode, *.egg-info, coverage, .nyc_output, .DS_Store. The user does not want to see node_modules in chat.', 9, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'When showing exec output / describing a project, FILTER noise dirs from your reply even if the tool returned them. Suppress: .git, node_modules, .venv, venv, __pycache__, dist, build, target, .next, .cache, .acorn, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode, *.egg-info, coverage, .nyc_output, .DS_Store. The user does not want to see node_modules in chat.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'For things you CAN''T learn from the user''s machine — current library versions, framework docs, error messages you''ve never seen, "is X deprecated", recent breaking changes — use `web_search` (then `web_fetch` the best 1-3 results). Don''t guess from training data; the web is more current. See ref-web-search for caps + workflow patterns.', 9, 'seed', 'seed');
 
 
 -- ═══════════════════════════════════════════════════════════════
