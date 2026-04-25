@@ -27,16 +27,30 @@ const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 // Compact theme table — kept in sync with THEMES in graph-viewer.html. Only the
 // subset of vars needed by the login overlay is inlined; the viewer's JS applies
 // the full set once `applyGraphTheme` runs post-auth.
+// Two themes only — `dark` (zinc baseline; vars are empty so the
+// graph-viewer.html :root defaults take effect) and `light` (warm stone
+// palette). The compact var set here is the subset used by the pre-auth
+// login overlay; full-fat vars + node colors live in graph-viewer.html's
+// THEMES object and apply post-auth via applyGraphTheme().
 const _THEME_VARS = {
-  midnight: {},
-  dark: {'--bg':'#09090b','--surface':'#18181b','--panel':'#0f0f11','--border':'#27272a','--text':'#d4d4d8','--text-dim':'#71717a','--text-bright':'#fafafa','--accent':'#3b82f6','--accent2':'#8b5cf6','--danger':'#ef4444'},
-  paper: {'--bg':'#f5f3ef','--surface':'#ffffff','--panel':'#f8f6f2','--border':'#c8c0b4','--text':'#1a1a1a','--text-dim':'#6b6560','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#7c3aed','--danger':'#dc2626'},
-  terminal: {'--bg':'#000000','--surface':'#0a0a0a','--panel':'#050505','--border':'#1a3a1a','--text':'#33ff33','--text-dim':'#1a6b1a','--text-bright':'#66ff66','--accent':'#33ff33','--accent2':'#00cc00','--danger':'#ff3333'},
-  ember: {'--bg':'#12100e','--surface':'#1a1614','--panel':'#151210','--border':'#3a2e24','--text':'#e8d5c0','--text-dim':'#7a6a58','--text-bright':'#f5e8d8','--accent':'#f59e0b','--accent2':'#ef4444','--danger':'#ef4444'},
-  arctic: {'--bg':'#e8edf4','--surface':'#f0f4f9','--panel':'#e0e6f0','--border':'#b0bad0','--text':'#0f172a','--text-dim':'#5a6a80','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#4f46e5','--danger':'#dc2626'},
-  neon: {'--bg':'#0a0318','--surface':'#0d0520','--panel':'#080215','--border':'#2a1050','--text':'#e0d0f0','--text-dim':'#6040a0','--text-bright':'#f0e0ff','--accent':'#ff2d95','--accent2':'#00f0ff','--danger':'#ff2d55'},
-  forest: {'--bg':'#080e08','--surface':'#0e1a0e','--panel':'#0a140a','--border':'#1e3a1e','--text':'#c0dcc0','--text-dim':'#4a7a4a','--text-bright':'#d8f0d8','--accent':'#4ade80','--accent2':'#a3e635','--danger':'#ef4444'},
+  dark: {},
+  light: {
+    '--bg': '#fafaf9', '--surface': '#ffffff', '--panel': '#f5f5f4',
+    '--border': '#d6d3d1',
+    '--text': '#1c1917', '--text-dim': '#57534e', '--text-bright': '#0c0a09',
+    '--accent': '#2563eb', '--accent2': '#7c3aed', '--danger': '#dc2626',
+  },
 };
+
+// Mirror of the client-side normalizer in graph-viewer.html. Maps any
+// legacy theme name (midnight, paper, terminal, ember, arctic, neon,
+// forest, anything else) onto the surviving two — `paper`/`arctic` →
+// `light`, everything else → `dark`. Used everywhere a stored theme
+// name might come back from preferences.json.
+function _normalizeThemeName(name) {
+  if (name === 'light' || name === 'paper' || name === 'arctic') return 'light';
+  return 'dark';
+}
 
 function _readServerTheme(dataDir) {
   // The login overlay reflects the OPERATOR's theme — never a webapp user's
@@ -49,13 +63,13 @@ function _readServerTheme(dataDir) {
       creatorUsernames = users.filter(u => u?.role === 'creator').map(u => u.username);
     } catch {}
     for (const u of creatorUsernames) {
-      if (prefs[u]?.theme && _THEME_VARS[prefs[u].theme]) return prefs[u].theme;
+      if (prefs[u]?.theme) return _normalizeThemeName(prefs[u].theme);
     }
     // No creator theme yet (fresh install pre-onboarding) → fall back to the
     // legacy _lastUsed marker so the operator's wizard pick still lands.
-    if (prefs._lastUsed?.theme && _THEME_VARS[prefs._lastUsed.theme]) return prefs._lastUsed.theme;
+    if (prefs._lastUsed?.theme) return _normalizeThemeName(prefs._lastUsed.theme);
   } catch {}
-  return 'midnight';
+  return 'dark';
 }
 
 function _buildThemeInlineStyle(dataDir) {
@@ -3449,7 +3463,10 @@ class WebGateway {
 
       if (urlPath === '/api/preferences') {
         const PREFS_PATH = path.join(this.config.dataDir, 'preferences.json');
-        const VALID_THEMES = ['midnight', 'dark', 'paper', 'terminal', 'ember', 'arctic', 'neon', 'forest'];
+        // Two-theme system. Legacy values (paper, midnight, terminal, ember,
+        // arctic, neon, forest) are coerced via _normalizeThemeName() so an
+        // old client / saved pref doesn't reject. The PUT path always
+        // stores the normalized name; GETs always return one of {dark, light}.
         const loadPrefs = () => { try { return JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch { return {}; } };
         const authType = isAnyAuth(req);
         if (!authType) { if (!(await tryManagerSSO(req, res))) { res.writeHead(401); res.end('{}'); return; } }
@@ -3468,7 +3485,7 @@ class WebGateway {
           const prefs = loadPrefs();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
-            theme: prefs[username]?.theme || 'midnight',
+            theme: _normalizeThemeName(prefs[username]?.theme),
             displayName: prefs[username]?.displayName || '',
             username,
           }));
@@ -3482,7 +3499,9 @@ class WebGateway {
             const prefs = loadPrefs();
             if (!prefs[username]) prefs[username] = {};
             if (Object.prototype.hasOwnProperty.call(parsed, 'theme')) {
-              const safeTheme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : 'midnight';
+              // Coerce any incoming value (including legacy names) to one
+              // of the two surviving themes via the shared normalizer.
+              const safeTheme = _normalizeThemeName(parsed.theme);
               prefs[username].theme = safeTheme;
               // Only creator-tier sessions can update the global "last used"
               // marker that the login page falls back on.

@@ -1855,10 +1855,9 @@
   .lme-ref .bar-fill { height:100%; border-radius:3px; }
   .lme-ref .bar-label { width:80px; text-align:right; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .lme-ref .bar-val { font-weight:600; width:40px; }
-  .theme-option { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:5px; cursor:pointer; font-size:.74rem; color:var(--text); transition:background .15s; white-space:nowrap; }
-  .theme-option:hover { background:rgba(255,255,255,.08); }
-  .theme-option.active { background:var(--accent); color:#fff; }
-  .theme-swatch { width:14px; height:14px; border-radius:3px; border:1px solid rgba(255,255,255,.15); flex-shrink:0; }
+  /* Theme toggle button — sun/moon swap. Uses the same color tokens as
+     the rest of the header so it inherits both themes automatically. */
+  #theme-toggle:hover { border-color: var(--accent); background: var(--surface); }
 
   #stats {
     position: absolute; bottom: 16px; left: 16px; font-family: 'Geist Mono', monospace;
@@ -3309,12 +3308,12 @@
       <button id="btn-center" title="Reset zoom">center</button>
       <button id="btn-new-node" class="btn-new" title="Create new node">+ node</button>
       <span style="width:1px;height:16px;background:var(--border);opacity:.4"></span>
+      <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme" style="background:transparent;border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.95rem;width:30px;height:30px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1;transition:border-color .15s ease,background-color .15s ease">☀</button>
       <div style="position:relative;display:inline-block" id="tools-menu-wrap">
         <button id="btn-tools-menu" title="Tools &amp; settings">menu</button>
         <div id="tools-menu" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px;z-index:999;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
           <div class="tools-menu-item" id="tmi-settings" title="Configure this agent">Settings</div>
           <div class="tools-menu-item" id="tmi-graphs" title="Switch knowledge graph">Graphs</div>
-          <div class="tools-menu-item" id="tmi-theme" title="Change theme">Theme</div>
           <div class="tools-menu-item" id="tmi-longmemeval" title="Run LongMemEval benchmark">LongMemEval</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           <div class="tools-menu-item" id="tmi-enhanced-recall" title="LLM-powered query decomposition for better memory retrieval" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer">
@@ -3323,7 +3322,6 @@
           </div>
         </div>
         <div id="graph-picker" class="picker-dropdown"></div>
-        <div id="theme-picker" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px;z-index:999;min-width:140px;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div>
       </div>
     </div>
     <div id="search"><input type="text" placeholder="search nodes..." id="search-input"></div>
@@ -3910,105 +3908,125 @@ const VB = window.BRAND || {};
 const API = window.location.pathname.replace(/\/graph\/?$/, '');
 
 // ── Theme Definitions ──
+//
+// Two themes: `dark` (default — the zinc baseline already lives in :root, so
+// applying `dark` just clears any light-theme overrides) and `light` (a warm
+// stone-based palette designed as a coherent companion). The 16 categorical
+// graph node colors get their own per-theme palette: dark uses the existing
+// vivid jewel tones from :root, light uses saturated mid-tones tuned for
+// legibility on a near-white background.
+//
+// Picker UX: a single sun/moon toggle button in the header. No dropdown.
+//
+// Migration: legacy theme names (midnight, terminal, ember, arctic, neon,
+// forest, paper) are normalized in normalizeThemeName() — `paper` → `light`,
+// everything else → `dark`. Applied silently on first load and rewritten to
+// localStorage + /api/preferences so old names never leak again.
 const THEMES = {
-  midnight: {
-    label: 'Zinc', swatch: '#0a0a0a',
+  dark: {
+    label: 'Dark',
+    icon: '🌙',
+    swatch: '#0a0a0a',
+    // Empty vars — :root carries the dark palette as the baseline. Applying
+    // this theme just removes any light overrides so :root values take effect.
     vars: {},
     nodeVars: {},
-    particles: { count: 60, speed: 0.3, colors: ['59,130,246','139,92,246'], lineColor: '59,130,246', maxDist: 120, mouseRadius: 150, mouseForce: 0.015, glow: true, damping: 0.99 },
   },
-  dark: {
-    label: 'Dark', swatch: '#18181b',
+  light: {
+    label: 'Light',
+    icon: '☀',
+    swatch: '#fafaf9',
     vars: {
-      '--bg':'#09090b','--surface':'#18181b','--panel':'#0f0f11',
-      '--border':'#27272a','--border-active':'#3f3f46',
-      '--text':'#d4d4d8','--text-dim':'#71717a','--text-bright':'#fafafa',
-      '--accent':'#3b82f6','--accent2':'#8b5cf6','--accent3':'#f59e0b',
-      '--danger':'#ef4444','--warn':'#f59e0b',
+      // Tier 1 — semantic foundation
+      '--bg': '#fafaf9',
+      '--surface': '#ffffff',
+      '--panel': '#f5f5f4',
+      '--element': '#e7e5e4',
+      '--border': '#d6d3d1',
+      '--border-active': '#a8a29e',
+      '--border-subtle': '#e7e5e4',
+      '--text': '#1c1917',
+      '--text-bright': '#0c0a09',
+      '--text-dim': '#57534e',
+      '--text-muted': '#a8a29e',
+      '--accent': '#2563eb',
+      '--accent2': '#7c3aed',
+      '--accent3': '#b45309',
+      '--danger': '#dc2626',
+      '--warn': '#b45309',
+      '--success': '#16a34a',
+      '--info': '#0284c7',
+      // Tier 2 — markdown
+      '--md-heading': '#0c0a09',
+      '--md-heading-marker': '#2563eb',
+      '--md-link': '#0284c7',
+      '--md-link-text': '#2563eb',
+      '--md-code': '#15803d',
+      '--md-code-bg': 'rgba(21,128,61,.08)',
+      '--md-code-block-bg': 'rgba(0,0,0,.04)',
+      '--md-code-block-border': '#d6d3d1',
+      '--md-blockquote': '#57534e',
+      '--md-blockquote-border': '#7c3aed',
+      '--md-emph': '#b45309',
+      '--md-strong': '#92400e',
+      '--md-list-marker': '#2563eb',
+      '--md-hr': '#d6d3d1',
+      '--md-table-header-bg': 'rgba(37,99,235,.06)',
+      '--md-table-border': '#d6d3d1',
+      // Tier 3 — diffs
+      '--diff-added': '#166534',
+      '--diff-added-bg': 'rgba(22,101,52,.08)',
+      '--diff-removed': '#991b1b',
+      '--diff-removed-bg': 'rgba(153,27,27,.06)',
+      '--diff-context': '#57534e',
+      '--diff-hunk': '#2563eb',
+      '--diff-line-num': '#a8a29e',
     },
-    nodeVars: {},
-    particles: null,
-  },
-  paper: {
-    label: 'Paper', swatch: '#f5f3ef',
-    vars: {
-      '--bg':'#f5f3ef','--surface':'#ffffff','--panel':'#f8f6f2',
-      '--border':'#c8c0b4','--border-active':'#a8a090',
-      '--text':'#1a1a1a','--text-dim':'#6b6560','--text-bright':'#000000',
-      '--accent':'#2563eb','--accent2':'#7c3aed','--accent3':'#b45309',
-      '--danger':'#dc2626','--warn':'#b45309',
+    // Tier 4 — categorical graph node palette tuned for white-ish background.
+    // Each color is darker/more saturated than the dark-theme equivalent so
+    // it stays legible against #fafaf9 instead of bleeding into the canvas.
+    nodeVars: {
+      '--node-self': '#2563eb',
+      '--node-person': '#0284c7',
+      '--node-default': '#6b7280',
+      '--node-concept': '#7c3aed',
+      '--node-channel': '#ea580c',
+      '--node-rule': '#dc2626',
+      '--node-project': '#0d9488',
+      '--node-tool': '#db2777',
+      '--node-memory': '#6d28d9',
+      '--node-skill': '#16a34a',
+      '--node-capability': '#0891b2',
+      '--node-event': '#c2410c',
+      '--node-preference': '#c026d3',
+      '--node-organization': '#ca8a04',
+      '--node-topic': '#4b5563',
+      '--node-location': '#65a30d',
     },
-    nodeVars: { '--node-self':'#2563eb','--node-person':'#0369a1','--node-default':'#6b6560','--node-concept':'#7c3aed','--node-channel':'#b45309' },
-    particles: null,
-  },
-  terminal: {
-    label: 'Terminal', swatch: '#000000',
-    vars: {
-      '--bg':'#000000','--surface':'#0a0a0a','--panel':'#050505',
-      '--border':'#1a3a1a','--border-active':'#1f4a1f',
-      '--text':'#33ff33','--text-dim':'#1a6b1a','--text-bright':'#66ff66',
-      '--accent':'#33ff33','--accent2':'#00cc00','--accent3':'#ffcc00',
-      '--danger':'#ff3333','--warn':'#ffcc00',
-    },
-    nodeVars: { '--node-self':'#33ff33','--node-person':'#00cc00','--node-default':'#1a6b1a' },
-    particles: null,
-  },
-  ember: {
-    label: 'Ember', swatch: '#1a1210',
-    vars: {
-      '--bg':'#12100e','--surface':'#1a1614','--panel':'#151210',
-      '--border':'#3a2e24','--border-active':'#4a3b2e',
-      '--text':'#e8d5c0','--text-dim':'#7a6a58','--text-bright':'#f5e8d8',
-      '--accent':'#f59e0b','--accent2':'#ef4444','--accent3':'#f97316',
-      '--danger':'#ef4444','--warn':'#f97316',
-    },
-    nodeVars: { '--node-self':'#f59e0b','--node-default':'#7a6a58' },
-    particles: { count: 45, speed: 0.15, colors: ['245,158,11','239,68,68','249,115,22'], lineColor: '245,158,11', maxDist: 0, mouseRadius: 100, mouseForce: 0.005, glow: true, damping: 0.995, drift: -0.03 },
-  },
-  arctic: {
-    label: 'Arctic', swatch: '#e8edf4',
-    vars: {
-      '--bg':'#e8edf4','--surface':'#f0f4f9','--panel':'#e0e6f0',
-      '--border':'#b0bad0','--border-active':'#90a0b8',
-      '--text':'#0f172a','--text-dim':'#5a6a80','--text-bright':'#000000',
-      '--accent':'#2563eb','--accent2':'#4f46e5','--accent3':'#0369a1',
-      '--danger':'#dc2626','--warn':'#d97706',
-    },
-    nodeVars: { '--node-self':'#2563eb','--node-person':'#0369a1','--node-default':'#5a6a80','--node-concept':'#4f46e5','--node-channel':'#d97706' },
-    particles: { count: 35, speed: 0.1, colors: ['37,99,235','79,70,229','3,105,161'], lineColor: '37,99,235', maxDist: 0, mouseRadius: 0, mouseForce: 0, glow: false, damping: 0.998, drift: 0.02 },
-  },
-  neon: {
-    label: 'Neon', swatch: '#0d0520',
-    vars: {
-      '--bg':'#0a0318','--surface':'#0d0520','--panel':'#080215',
-      '--border':'#2a1050','--border-active':'#3a1870',
-      '--text':'#e0d0f0','--text-dim':'#6040a0','--text-bright':'#f0e0ff',
-      '--accent':'#ff2d95','--accent2':'#00f0ff','--accent3':'#bf5af2',
-      '--danger':'#ff2d55','--warn':'#fbbf24',
-    },
-    nodeVars: { '--node-self':'#ff2d95','--node-person':'#00f0ff','--node-default':'#6040a0' },
-    particles: { count: 90, speed: 0.5, colors: ['255,45,149','0,240,255','191,90,242'], lineColor: '255,45,149', maxDist: 110, mouseRadius: 200, mouseForce: 0.025, glow: true, damping: 0.985 },
-  },
-  forest: {
-    label: 'Forest', swatch: '#0a1a0a',
-    vars: {
-      '--bg':'#080e08','--surface':'#0e1a0e','--panel':'#0a140a',
-      '--border':'#1e3a1e','--border-active':'#2a4a2a',
-      '--text':'#c0dcc0','--text-dim':'#4a7a4a','--text-bright':'#d8f0d8',
-      '--accent':'#4ade80','--accent2':'#a3e635','--accent3':'#84cc16',
-      '--danger':'#ef4444','--warn':'#eab308',
-    },
-    nodeVars: { '--node-self':'#4ade80','--node-person':'#a3e635','--node-default':'#4a7a4a' },
-    particles: { count: 40, speed: 0.18, colors: ['74,222,128','163,230,53','132,204,22'], lineColor: '74,222,128', maxDist: 90, mouseRadius: 140, mouseForce: 0.007, glow: true, damping: 0.997 },
   },
 };
 
-let _currentTheme = 'midnight';
+// Normalize legacy theme names to one of the two surviving themes. Used both
+// on the client (loadGraphThemePreference) and mirrored on the server in
+// gateways/web.js so user preferences from before the redesign don't leak
+// stale names anywhere.
+function normalizeThemeName(name) {
+  if (name === 'light' || name === 'paper' || name === 'arctic') return 'light';
+  // dark, midnight, terminal, ember, neon, forest, undefined, anything else
+  // → dark (the new baseline).
+  return 'dark';
+}
+
+let _currentTheme = 'dark';
 
 function applyGraphTheme(name) {
-  const theme = THEMES[name] || THEMES.midnight;
-  _currentTheme = name;
+  const normalized = normalizeThemeName(name);
+  const theme = THEMES[normalized] || THEMES.dark;
+  _currentTheme = normalized;
   const root = document.documentElement.style;
+  // Clear every var that ANY theme defines so applying a theme that omits a
+  // var (e.g. dark with empty vars) reverts that var to the :root baseline
+  // instead of leaving the prior theme's value sticking around.
   const allVars = new Set();
   Object.values(THEMES).forEach(t => {
     Object.keys(t.vars).forEach(k => allVars.add(k));
@@ -4017,35 +4035,57 @@ function applyGraphTheme(name) {
   allVars.forEach(k => root.removeProperty(k));
   Object.entries(theme.vars).forEach(([k, v]) => root.setProperty(k, v));
   Object.entries(theme.nodeVars || {}).forEach(([k, v]) => root.setProperty(k, v));
-  localStorage.setItem('spore-theme', name);
-  // Update picker active
-  document.querySelectorAll('.theme-option').forEach(el => {
-    el.classList.toggle('active', el.dataset.theme === name);
-  });
+  // Set data-theme on <html> so any future CSS using
+  // [data-theme="light"]{...} selectors works without JS coordination, and
+  // for color-scheme-aware native widgets (scrollbars, form controls).
+  document.documentElement.setAttribute('data-theme', normalized);
+  document.documentElement.style.colorScheme = normalized === 'light' ? 'light' : 'dark';
+  localStorage.setItem('spore-theme', normalized);
+  // Sync the toggle button's icon
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) toggle.textContent = THEMES[normalized === 'light' ? 'dark' : 'light'].icon;
 }
 
-function renderGraphThemePicker() {
-  const picker = document.getElementById('theme-picker');
-  if (!picker) return;
-  picker.innerHTML = Object.entries(THEMES).map(([key, t]) =>
-    `<div class="theme-option${key === _currentTheme ? ' active' : ''}" data-theme="${key}" onclick="selectGraphTheme('${key}')">
-      <div class="theme-swatch" style="background:${t.swatch}"></div>${t.label}</div>`
-  ).join('');
-}
-
-async function selectGraphTheme(name) {
-  applyGraphTheme(name);
-  document.getElementById('theme-picker').style.display = 'none';
-  try { await fetch(API + '/api/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: name }) }); } catch {}
+async function toggleTheme() {
+  const next = _currentTheme === 'light' ? 'dark' : 'light';
+  applyGraphTheme(next);
+  try {
+    await fetch(API + '/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: next }),
+    });
+  } catch {}
 }
 
 async function loadGraphThemePreference() {
+  // Apply localStorage first for instant render — no waiting on the server
+  // round-trip. Server preference (if it disagrees) overrides afterward.
   const cached = localStorage.getItem('spore-theme');
-  if (cached && THEMES[cached]) applyGraphTheme(cached);
+  if (cached) {
+    const normalizedCached = normalizeThemeName(cached);
+    applyGraphTheme(normalizedCached);
+    // Rewrite stale legacy names so the next load doesn't have to migrate.
+    if (normalizedCached !== cached) localStorage.setItem('spore-theme', normalizedCached);
+  }
   try {
     const r = await fetch(API + '/api/preferences');
     const data = await r.json();
-    if (data?.theme && THEMES[data.theme]) applyGraphTheme(data.theme);
+    if (data?.theme) {
+      const normalized = normalizeThemeName(data.theme);
+      applyGraphTheme(normalized);
+      // If the server stored a legacy name, write the normalized one back so
+      // it's clean next time.
+      if (normalized !== data.theme) {
+        try {
+          await fetch(API + '/api/preferences', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ theme: normalized }),
+          });
+        } catch {}
+      }
+    }
   } catch {}
 }
 
@@ -5278,7 +5318,7 @@ async function saveSettingsPanel() {
       });
       const data = await r.json();
       if (!r.ok || !data.ok) throw new Error(data.error || 'Failed to save');
-      if (theme && theme !== _currentTheme) await selectGraphTheme(theme);
+      if (theme && theme !== _currentTheme) applyGraphTheme(theme);
       setSettingsBusy(false, 'Saved');
       toast('Preferences saved');
       closeSettingsPanel();
@@ -5402,7 +5442,7 @@ async function saveSettingsPanel() {
     }
     if (sectionFailures.length) toast('Some subsections failed: ' + sectionFailures.join('; '), true);
     populateSettingsPanel(data.settings);
-    if (theme && theme !== _currentTheme) await selectGraphTheme(theme);
+    if (theme && theme !== _currentTheme) applyGraphTheme(theme);
     updateErBadge(!!data.settings?.memory?.enhancedRecall);
     if (data.settings?._acornKeyGenerated && data.settings?.acorn?.key) {
       _showAcornFlash(data.settings.acorn.key, 'Acorn key generated:');
@@ -5422,7 +5462,6 @@ const toolsMenu = document.getElementById('tools-menu');
 let _toolsMenuOpen = false;
 
 function closeToolsSubmenus() {
-  document.getElementById('theme-picker').style.display = 'none';
   if (_graphPickerOpen) { _graphPickerOpen = false; graphPickerEl?.classList.remove('open'); }
 }
 
@@ -5442,12 +5481,9 @@ document.addEventListener('click', e => {
   }
 });
 
-document.getElementById('tmi-theme')?.addEventListener('click', (e) => {
+document.getElementById('theme-toggle')?.addEventListener('click', (e) => {
   e.stopPropagation();
-  toolsMenu.style.display = 'none';
-  _toolsMenuOpen = false;
-  const p = document.getElementById('theme-picker');
-  p.style.display = p.style.display === 'none' ? 'block' : 'none';
+  toggleTheme();
 });
 
 document.getElementById('tmi-settings')?.addEventListener('click', (e) => {
@@ -5495,8 +5531,6 @@ document.getElementById('tmi-enhanced-recall')?.addEventListener('click', (e) =>
     toast(d.enhancedRecall ? 'Enhanced Recall ON — LLM search active' : 'Enhanced Recall OFF');
   }).catch(() => { updateErBadge(!newState); toast('Failed to update', true); });
 });
-
-renderGraphThemePicker();
 
 // ── Auth check & login ──
 let _authenticated = false;
@@ -5578,7 +5612,7 @@ function _obIsOptional(n) { return OB_OPTIONAL_BY_MODE[_obMode].has(n); }
 const OB_TOTAL_STEPS = 9; // upper bound; effective count is _obStepCount()
 const OB_OPTIONAL_STEPS = OB_OPTIONAL_BY_MODE.operator;
 let _obStep = 1;
-let _obData = { theme: 'midnight', providers: {} };
+let _obData = { theme: 'dark', providers: {} };
 
 function startOnboarding() {
   document.getElementById('app').classList.add('hidden');
@@ -16889,11 +16923,11 @@ build/
       </div>
       <!-- Existing sections below are re-parented into the panes at init.
            data-target-tab on each section maps it to a tab. -->
-      <div class="settings-section" data-target-tab="profile">
-        <h4>Appearance</h4>
-        <label for="settings-theme">Theme</label>
-        <select id="settings-theme"></select>
-        <div class="settings-note">Theme is saved per user. The sections below are agent-level settings.</div>
+      <!-- Appearance section removed: theme is now controlled by the
+           sun/moon toggle button in the header. The two-theme system
+           (light + dark) doesn't need a settings UI for it. -->
+      <div class="settings-section" data-target-tab="profile" style="display:none">
+        <select id="settings-theme" style="display:none"></select>
       </div>
 
       <div class="settings-section wide" data-target-tab="graph-memory">
