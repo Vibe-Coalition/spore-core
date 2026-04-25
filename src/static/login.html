@@ -5,30 +5,34 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Sign in · SPORE</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
+  @font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 400 600; font-display: swap; src: url('/fonts/fraunces.woff2?v=20260425b') format('woff2'); }
+  @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/jetbrainsmono.woff2?v=20260425b') format('woff2'); }
+  @font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/spacegrotesk.woff2?v=20260425b') format('woff2'); }
   :root {
-    --bg:#08090e; --surface:#0e1017; --panel:#0e1017;
-    --border:#1e2133; --text:#c8cdd8; --text-dim:#4a4f68; --text-bright:#e2e6f0;
-    --accent:#5b8af5; --accent2:#8b6cf7; --danger:#f05858;
+    --bg:#16140f; --surface:#1f1c16; --panel:#1a1812;
+    --border:#2c2820; --text:#bdb6a3; --text-dim:#8a8676; --text-bright:#ece4cf;
+    --accent:#e08a4e; --accent2:#7aa583; --danger:#d94e3a;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif}
+  html,body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',system-ui,-apple-system,'Segoe UI','Helvetica Neue',sans-serif}
   body{min-height:100vh;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;transition:background-color .3s ease,color .3s ease}
   #particles{position:absolute;inset:0;z-index:0}
-  .login-box{position:relative;z-index:1;width:360px;padding:40px 36px 28px;background:var(--surface);border:1px solid var(--border);border-radius:12px;text-align:center;transition:background-color .3s ease,border-color .3s ease}
+  .login-box{position:relative;z-index:1;width:380px;padding:48px 40px 32px;background:var(--surface);border:1px solid var(--border);border-radius:14px;text-align:center;transition:background-color .3s ease,border-color .3s ease;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+  .login-eyebrow{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.62rem;color:var(--text-dim);letter-spacing:.22em;text-transform:lowercase}
+  .login-eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
   .login-logo{display:flex;justify-content:center;margin-bottom:14px}
-  .login-logo svg{width:42px;height:42px}
-  h1{font-size:1.2rem;font-weight:600;color:var(--text-bright);margin-bottom:4px}
-  .tagline{font-size:.88rem;color:var(--text);margin-bottom:4px;font-weight:500}
-  .hint{font-size:.72rem;color:var(--text-dim);margin-bottom:18px}
-  .err{color:var(--danger);font-size:.78rem;margin-bottom:10px;display:none}
-  label{display:block;text-align:left;font-size:.68rem;color:var(--text-dim);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px;margin-top:12px}
-  input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text-bright);font-size:.88rem;outline:none;transition:border-color .2s,box-shadow .2s}
+  .login-logo svg{width:96px;height:96px;opacity:.95}
+  h1{font-family:'Fraunces','Newsreader',Georgia,serif;font-size:2.6rem;font-weight:400;letter-spacing:-.035em;color:var(--text-bright);margin:8px 0 2px;line-height:1}
+  .tagline{font-family:'Fraunces','Newsreader',Georgia,serif;font-size:1rem;color:var(--text);margin-bottom:18px;font-weight:400;font-style:italic;letter-spacing:-.005em}
+  .hint{font-size:.78rem;color:var(--text-dim);margin-bottom:22px}
+  .err{color:var(--danger);font-size:.82rem;margin-bottom:10px;display:none}
+  label{display:block;text-align:left;font-size:.7rem;color:var(--text-dim);letter-spacing:.06em;text-transform:uppercase;margin-bottom:5px;margin-top:14px;font-weight:500}
+  input{width:100%;padding:11px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text-bright);font-size:.92rem;outline:none;transition:border-color .2s,box-shadow .2s;font-family:'Space Grotesk',system-ui,sans-serif}
   input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent)}
-  .btn{width:100%;margin-top:20px;padding:11px;border:none;border-radius:8px;cursor:pointer;font-size:.88rem;font-weight:600;color:#fff;letter-spacing:.02em;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:opacity .2s,transform .1s}
-  .btn:hover{opacity:.9}.btn:active{transform:scale(.98)}.btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn{width:100%;margin-top:24px;padding:12px;border:none;border-radius:8px;cursor:pointer;font-size:.92rem;font-weight:500;color:#fff;background:var(--accent);transition:background-color .15s,transform .1s}
+  .btn:hover{background:color-mix(in srgb,var(--accent) 88%,#fff)}.btn:active{transform:scale(.98)}.btn:disabled{opacity:.5;cursor:not-allowed}
   .hidden{display:none !important}
-  .mode-toggle{margin-top:14px;text-align:center;font-size:.76rem}
+  .mode-toggle{margin-top:16px;text-align:center;font-size:.82rem}
   .mode-toggle a{color:var(--text-dim);text-decoration:none;transition:color .15s ease;cursor:pointer}
   .mode-toggle a:hover{color:var(--accent)}
 </style>
@@ -37,9 +41,9 @@
 <canvas id="particles"></canvas>
 <div class="login-box">
   <div class="login-logo" id="logo-el"></div>
-  <h1 id="title">SPORE</h1>
-  <div class="tagline" id="tagline">Graph Viewer</div>
-  <div class="hint" id="hint">Sign in to continue</div>
+  <h1 id="title">Spore</h1>
+  <div class="tagline" id="tagline">memory that grows with you.</div>
+  <div class="hint" id="hint">sign in to continue</div>
   <div class="err" id="err"></div>
   <form id="f" autocomplete="on">
     <label for="u">Username</label>
@@ -74,10 +78,10 @@
   const THEMES = {
     dark: {},
     light: {
-      '--bg':'#fafaf9','--surface':'#ffffff','--panel':'#f5f5f4',
-      '--border':'#d6d3d1',
-      '--text':'#1c1917','--text-dim':'#57534e','--text-bright':'#0c0a09',
-      '--accent':'#2563eb','--accent2':'#7c3aed','--danger':'#dc2626',
+      '--bg':'#f3efe6','--surface':'#fbf8f0','--panel':'#ede7d8',
+      '--border':'#e6e0d2',
+      '--text':'#3c3a35','--text-dim':'#9a948a','--text-bright':'#1f1d1a',
+      '--accent':'#c2542d','--accent2':'#3e6b47','--danger':'#b8341c',
     },
   };
   function normalizeThemeName(name) {
@@ -94,16 +98,48 @@
   Object.keys(vars).forEach(k => document.documentElement.style.setProperty(k, vars[k]));
 
   // Branding — brand.js exposes window.BRAND with chatLogo (SVG string),
-  // name, and tagline. Upscale the logo SVG since brand.js sizes it for the
-  // chat header.
+  // name, and tagline. CSS sizes the logo (.login-logo svg), so we don't
+  // override the height attr here.
   try {
     const b = window.BRAND || {};
     if (b.name) document.getElementById('title').textContent = b.name;
     if (b.tagline) document.getElementById('tagline').textContent = b.tagline;
     if (b.chatLogo) {
-      document.getElementById('logo-el').innerHTML = b.chatLogo.replace(/height="\d+"/, 'height="56"');
+      document.getElementById('logo-el').innerHTML = b.chatLogo;
     }
   } catch {}
+
+  // Wobble the F01 mark — same A06 idle animation we use on the self-node
+  // in the graph. Pure rAF; modifies the petal/spoke geometry directly so
+  // it stays smooth across the spec layout (six-petal ring at r=0.62 with
+  // a 0.04 perpendicular jitter per petal, offset by phase).
+  (function _animateLoginLogo() {
+    const svg = document.querySelector('#logo-el svg');
+    if (!svg) return;
+    const lines  = svg.querySelectorAll('line');
+    const petals = svg.querySelectorAll('g[fill] circle');  // petals only
+    if (lines.length < 6 || petals.length < 6) return;
+    const ringR = 0.62;
+    const ANGLES = [];
+    for (let i = 0; i < 6; i++) ANGLES.push(-Math.PI / 2 + (i / 6) * Math.PI * 2);
+    let start = 0;
+    function tick(now) {
+      if (!start) start = now;
+      const t = (now - start) / 1000;
+      for (let i = 0; i < 6; i++) {
+        const a = ANGLES[i];
+        const off = Math.sin(t * 1.8 + i * 1.1) * 0.04;
+        const x = ringR * Math.cos(a) + Math.cos(a + Math.PI / 2) * off;
+        const y = ringR * Math.sin(a) + Math.sin(a + Math.PI / 2) * off;
+        lines[i].setAttribute('x2', x.toFixed(3));
+        lines[i].setAttribute('y2', y.toFixed(3));
+        petals[i].setAttribute('cx', x.toFixed(3));
+        petals[i].setAttribute('cy', y.toFixed(3));
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  })();
 
   // Mode toggle
   let mode = 'login';
@@ -191,7 +227,7 @@
   window.addEventListener('resize', resize);
   function tick() {
     ctx.clearRect(0, 0, w, h);
-    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#5b8af5';
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#e08a4e';
     ctx.fillStyle = accent;
     ctx.globalAlpha = 0.25;
     for (const p of parts) {

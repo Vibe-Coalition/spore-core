@@ -491,6 +491,19 @@ class Learner {
     } catch (e) {
       this.stats.errors++;
       this.log.error('[learner] Batch extraction failed:', e.message);
+      // Always close the learner:start we emitted at line 373 — otherwise
+      // any subscriber tracking active state (e.g. the web UI's self-node
+      // activity pulse) is stuck indefinitely. The two graceful failure
+      // paths above also emit learner:done; this catches the throw path.
+      try {
+        graphEvents.emit('change', {
+          op: 'learner:done',
+          sessionKey: sessionId,
+          error: e?.message || 'exception',
+          elapsedMs: Date.now() - startedAt,
+          source: 'learner',
+        });
+      } catch {}
     } finally {
       this._running = false;
       this._drainQueue();

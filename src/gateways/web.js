@@ -27,18 +27,18 @@ const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 // Compact theme table — kept in sync with THEMES in graph-viewer.html. Only the
 // subset of vars needed by the login overlay is inlined; the viewer's JS applies
 // the full set once `applyGraphTheme` runs post-auth.
-// Two themes only — `dark` (zinc baseline; vars are empty so the
-// graph-viewer.html :root defaults take effect) and `light` (warm stone
+// Two themes only — `dark` (Petri warm-earth baseline; vars are empty so the
+// graph-viewer.html :root defaults take effect) and `light` (Petri warm-paper
 // palette). The compact var set here is the subset used by the pre-auth
 // login overlay; full-fat vars + node colors live in graph-viewer.html's
 // THEMES object and apply post-auth via applyGraphTheme().
 const _THEME_VARS = {
   dark: {},
   light: {
-    '--bg': '#fafaf9', '--surface': '#ffffff', '--panel': '#f5f5f4',
-    '--border': '#d6d3d1',
-    '--text': '#1c1917', '--text-dim': '#57534e', '--text-bright': '#0c0a09',
-    '--accent': '#2563eb', '--accent2': '#7c3aed', '--danger': '#dc2626',
+    '--bg': '#f3efe6', '--surface': '#fbf8f0', '--panel': '#ede7d8',
+    '--border': '#e6e0d2',
+    '--text': '#3c3a35', '--text-dim': '#9a948a', '--text-bright': '#1f1d1a',
+    '--accent': '#c2542d', '--accent2': '#3e6b47', '--danger': '#b8341c',
   },
 };
 
@@ -1811,8 +1811,8 @@ class WebGateway {
           onThinkingDelta: (delta) => {
             this._sendToSession(sessionId, { type: 'chat:thinking', text: delta });
           },
-          onToolUse: (toolName) => {
-            this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName });
+          onToolUse: (toolName, toolInput) => {
+            this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName, input: toolInput });
           },
           onStatus: (evt) => {
             try {
@@ -3021,6 +3021,23 @@ class WebGateway {
         return;
       }
 
+      // Self-hosted fonts (Petri direction). Avoids the external Google Fonts
+      // dependency so the redesign actually paints when the user's browser
+      // can't reach fonts.googleapis.com.
+      if (urlPath.startsWith('/fonts/') && /^\/fonts\/[a-zA-Z0-9_.-]+\.woff2?$/.test(urlPath)) {
+        try {
+          const fontPath = path.join(__dirname, '..', 'static', urlPath);
+          const ext = path.extname(fontPath).toLowerCase();
+          res.writeHead(200, {
+            'Content-Type': ext === '.woff2' ? 'font/woff2' : 'font/woff',
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+          });
+          res.end(fs.readFileSync(fontPath));
+        } catch { res.writeHead(404); res.end('Not found'); }
+        return;
+      }
+
       // ── CORS for Acorn API endpoints (companion web app) ──
       if (urlPath.startsWith('/api/acorn/')) {
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -4214,6 +4231,19 @@ class WebGateway {
             ).all(sessionKey);
             rows.reverse();
             const history = [];
+            // Markers prefixing harness-injected user messages that the
+            // operator should never see in the chat scrollback. When one
+            // of these is found, ALSO skip the next assistant message \u2014
+            // it's the agent's acknowledgement of the cancellation /
+            // background task / interjection and reads as orphaned chatter
+            // without the prompt that triggered it.
+            const INTERNAL_PROMPT_PREFIXES = [
+              '[BACKGROUND TASK',
+              '[You were working on a task',  // stop / cancel
+              '[INTERJECTION]',               // user mid-flight follow-up
+              '[TASK COMPLETE',               // delegated-task finish
+            ];
+            let _swallowNextAssistant = false;
             for (const row of rows) {
               let text = row.content;
               try {
@@ -4229,8 +4259,17 @@ class WebGateway {
                 }
               } catch { }
               if (!text || !text.trim()) continue;
-              if (text.startsWith('[BACKGROUND TASK')) continue;
+              const isInternalPrompt = INTERNAL_PROMPT_PREFIXES.some(p => text.startsWith(p));
+              if (isInternalPrompt) {
+                _swallowNextAssistant = true;
+                continue;
+              }
               const role = row.role === 'assistant' ? 'assistant' : row.role === 'notification' ? 'notification' : 'user';
+              if (role === 'assistant' && _swallowNextAssistant) {
+                _swallowNextAssistant = false;
+                continue;
+              }
+              if (role !== 'assistant') _swallowNextAssistant = false;
               history.push({ role, text: text.substring(0, 2000), ts: row.created });
             }
             if (history.length) {

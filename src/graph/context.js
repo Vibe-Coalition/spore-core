@@ -121,7 +121,7 @@ class GraphContext {
 
   static PROMPT_MODES = {
     full: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'relevant', 'episodes', 'anti', 'feed', 'tooling', 'behavior', 'reflections', 'gaps', 'runtime', 'cluster'],
-    chat: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'episodes', 'behavior', 'cluster'],
+    chat: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'episodes', 'tooling', 'behavior', 'cluster'],
     recall: ['persona', 'identity', 'relevant', 'episodes', 'derived', 'reflections', 'person'],
     minimal: ['identity', 'rules', 'tooling', 'runtime', 'cluster'],
     none: ['identity'],

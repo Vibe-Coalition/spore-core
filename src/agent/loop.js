@@ -293,6 +293,32 @@ class AgentLoop {
       cachedProjectStale,
       cachedProjectIsNew,
     });
+    // DEBUG: dump the assembled system prompt + tool list to disk so we can
+    // inspect exactly what hit the model. Toggle with SPORE_DEBUG_DUMP_PROMPT=1.
+    if (process.env.SPORE_DEBUG_DUMP_PROMPT === '1') {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const dir = process.env.SPORE_DEBUG_DUMP_DIR || '/data';
+        const outFile = path.join(dir, 'last-prompt.txt');
+        const toolList = (this.tools?.getToolDefinitions?.() || []).map(t => t.name);
+        const dump = [
+          `# trigger=${opts.trigger} platform=${opts.platform} promptMode=${promptMode}`,
+          `# user=${opts.userId || ''} session=${sessionKey}`,
+          `# tools (${toolList.length}): ${toolList.join(', ')}`,
+          `# systemPrompt length: ${systemPrompt.length} chars`,
+          `# tooling section present: ${systemPrompt.includes('### Tool Selection Rules')}`,
+          `# web_search mentioned: ${systemPrompt.includes('web_search')}`,
+          '',
+          '── SYSTEM PROMPT ──',
+          systemPrompt,
+        ].join('\n');
+        fs.writeFileSync(outFile, dump);
+        this.log.info(`[debug] wrote system prompt to ${outFile} (${systemPrompt.length} chars, mode=${promptMode}, tooling=${systemPrompt.includes('### Tool Selection Rules')})`);
+      } catch (e) {
+        this.log.warn(`[debug] dump failed: ${e.message}`);
+      }
+    }
     // Plan-mode verification logging — confirms the QUESTIONS:/PLAN_READY
     // instructions actually reach the model. Counts marker occurrences
     // in the final assembled system prompt and warns if they're missing
@@ -1700,7 +1726,7 @@ class AgentLoop {
     if (toolBlocks.length > 0 && opts.onToolUse) {
       for (const toolBlock of toolBlocks) {
         if (!toolBlock?.name) continue;
-        try { opts.onToolUse(toolBlock.name); } catch { }
+        try { opts.onToolUse(toolBlock.name, toolBlock.input); } catch { }
       }
     }
 
