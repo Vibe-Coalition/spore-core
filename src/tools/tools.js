@@ -53,6 +53,10 @@ class ToolSystem {
     this.skills = new SkillsManager(logger, config.sharedSkillsDir);
     this.gateway = null;
 
+    // Credential guard mode for write tools — 'block' (default) | 'warn' | 'off'
+    const rawGuard = (config.credentialGuard || 'block').toLowerCase();
+    this._credentialGuardMode = ['block', 'warn', 'off'].includes(rawGuard) ? rawGuard : 'block';
+
     // Global process tracker — caps total child processes to prevent fork bombs
     this._trackedPids = new Set();
     this._maxChildProcesses = config.maxChildProcesses || 32;
@@ -4098,6 +4102,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       } catch { /* file doesn't exist, proceed */ }
     }
 
+    const guard = this._guardCredentialWrite(safe.path, content);
+    if (guard?.error) return { error: guard.error };
+
     try {
       const dir = path.dirname(safe.path);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -4108,10 +4115,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         fs.writeFileSync(safe.path, content, 'utf8');
       }
 
-      const keyWarning = this._checkForExposedKeys(safe.path, content);
-
       const result = { success: true, path: safe.path, bytes: Buffer.byteLength(content) };
-      if (keyWarning) result.security_warning = keyWarning;
+      if (guard?.warning) result.security_warning = guard.warning;
       return result;
     } catch (e) {
       return { error: `Write failed: ${e.message}` };
@@ -4119,10 +4124,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _checkForExposedKeys(filePath, content) {
-    const webDir = path.join(this.config.workspacePath || process.cwd(), 'web');
-    if (!filePath.startsWith(webDir)) return null;
-    const ext = path.extname(filePath).toLowerCase();
-    if (!['.html', '.htm', '.js', '.mjs', '.jsx', '.ts', '.tsx', '.css', '.json', '.svelte', '.vue'].includes(ext)) return null;
+    if (typeof content !== 'string' || !content) return null;
 
     const patterns = [
       { re: /(?:sk-|sk-proj-)[A-Za-z0-9_-]{20,}/g, name: 'OpenAI/Anthropic key' },
@@ -4148,14 +4150,25 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
 
     if (found.length === 0) return null;
+    return found.map(f => `${f.type} (×${f.count})`).join(', ');
+  }
 
-    const summary = found.map(f => `${f.type} (×${f.count})`).join(', ');
-    this.log.warn(`[security] Possible exposed credentials in web file ${filePath}: ${summary}`);
-    return `⚠️ SECURITY: This web-served file appears to contain credentials (${summary}). ` +
-      'API keys in browser-visible files can be stolen. Two secure alternatives: ' +
-      '(1) Use web_fetch with credential parameter for server-side API calls. ' +
-      '(2) For webapp frontend calls, write /workspace/web/.api-proxy.json with $VAULT:KEY_NAME headers, ' +
-      'then call /api/proxy/<route> from your frontend. Keys are injected server-side from the vault.';
+  // Decides what to do about a write whose content matched _checkForExposedKeys.
+  // Returns null to allow, { warning } to allow with a note, { error } to block.
+  _guardCredentialWrite(filePath, content) {
+    if (this._credentialGuardMode === 'off') return null;
+    const summary = this._checkForExposedKeys(filePath, content);
+    if (!summary) return null;
+    const advice = `Possible exposed credentials in ${filePath}: ${summary}. ` +
+      'API keys in writable files can be stolen or accidentally committed. Two secure alternatives: ' +
+      '(1) call web_fetch with the credential parameter for server-side API calls; ' +
+      '(2) for webapp frontend calls, write /workspace/web/.api-proxy.json with $VAULT:KEY_NAME headers and call /api/proxy/<route> — keys are injected server-side from the vault.';
+    if (this._credentialGuardMode === 'warn') {
+      this.log.warn(`[security] ${advice}`);
+      return { warning: `⚠️ SECURITY: ${advice}` };
+    }
+    this.log.warn(`[security] Refused write: ${advice}`);
+    return { error: `Refused to write ${filePath}: ${summary}. ${advice} Set SPORE_CREDENTIAL_GUARD=warn to override or SPORE_CREDENTIAL_GUARD=off to disable.` };
   }
 
   _editFileTool(input) {
@@ -4178,8 +4191,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
 
       const updated = all ? content.replaceAll(old_text, new_text) : content.replace(old_text, new_text);
+      const guard = this._guardCredentialWrite(safe.path, updated);
+      if (guard?.error) return { error: guard.error };
       fs.writeFileSync(safe.path, updated, 'utf8');
-      return { success: true, path: safe.path, replacements: all ? count : 1 };
+      const result = { success: true, path: safe.path, replacements: all ? count : 1 };
+      if (guard?.warning) result.security_warning = guard.warning;
+      return result;
     } catch (e) {
       return { error: `Edit failed: ${e.message}` };
     }
@@ -5404,6 +5421,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const mgr = this._ensureSSHManager();
     if (!mgr) return { error: 'SSH manager not available' };
 
+    const guard = this._guardCredentialWrite(`${host}:${filePath}`, content);
+    if (guard?.error) return { error: guard.error };
+
     try {
       if (append) {
         let existing = '';
@@ -5415,7 +5435,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       } else {
         await mgr.sftpWriteFile(host, filePath, content);
       }
-      return { ok: true, path: filePath, host, bytes: Buffer.byteLength(content, 'utf8') };
+      const result = { ok: true, path: filePath, host, bytes: Buffer.byteLength(content, 'utf8') };
+      if (guard?.warning) result.security_warning = guard.warning;
+      return result;
     } catch (e) {
       return { error: e.message };
     }

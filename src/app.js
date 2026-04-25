@@ -78,10 +78,22 @@ function updateWebCapabilityNode(config, db, log) {
       attrs.push('Web server is not enabled. Set SPORE_WEB_PORT to activate it, or use the web_serve tool.');
     }
 
+    let domain = config.ingressDomain || null;
+    let https = config.ingressHttps ?? false;
+    let urlPath = (config.ingressPath || '').replace(/\/$/, '');
+    if (publicUrl) {
+      try {
+        const u = new URL(publicUrl);
+        if (!domain) domain = u.hostname;
+        if (!config.ingressHttps) https = u.protocol === 'https:';
+        if (!urlPath && u.pathname && u.pathname !== '/') urlPath = u.pathname.replace(/\/$/, '');
+      } catch { /* leave defaults */ }
+    }
+
     if (publicUrl) {
       attrs.push(`Public URL: ${publicUrl}`);
-      attrs.push(`Base domain: ${domain}`);
-      if (rawPath) attrs.push(`URL path prefix: ${rawPath}`);
+      if (domain) attrs.push(`Base domain: ${domain}`);
+      if (urlPath) attrs.push(`URL path prefix: ${urlPath}`);
       attrs.push(`Ingress mode: ${config.ingressMode || 'traefik'} (${https ? 'HTTPS/TLS' : 'HTTP'}).`);
     } else if (config.webPort) {
       attrs.push('No public domain configured — reachable on LAN or via direct port only.');
@@ -459,14 +471,20 @@ async function boot() {
 
   const gateways = new GatewayManager(config, log, agent, tools);
 
-  // Plugin system
+  // Plugin system — opt-in. Plugins run as full-privilege Node code with no
+  // sandbox, so loading is gated behind SPORE_PLUGINS_ENABLED and the default
+  // directory lives outside the agent-writable workspace.
   const plugins = new PluginManager(config, log);
-  const pluginsDir = config.pluginsDir || path.join(config.workspacePath || process.cwd(), 'plugins');
-  await plugins.loadAll(pluginsDir);
-  await plugins.initAll({ config, log, graph, sessions, tools, agent, learner, gateways });
+  if (config.pluginsEnabled) {
+    const pluginsDir = config.pluginsDir || path.join(__dirname, '..', 'shared', 'plugins');
+    await plugins.loadAll(pluginsDir);
+    await plugins.initAll({ config, log, graph, sessions, tools, agent, learner, gateways });
+    if (plugins.plugins.size > 0) log.info(`[plugins] ${plugins.plugins.size} plugin(s) active from ${pluginsDir}`);
+  } else {
+    log.info('[plugins] Disabled (set SPORE_PLUGINS_ENABLED=true to enable). Plugins run unsandboxed with full process privileges.');
+  }
   tools._pluginManager = plugins;
   agent._pluginManager = plugins;
-  if (plugins.plugins.size > 0) log.info(`[plugins] ${plugins.plugins.size} plugin(s) active`);
 
   const healthServer = startHealthServer(config, log, graph, sessions, gateways, learner, maintainer, tools, agent);
 

@@ -88,6 +88,21 @@ The `_safePath` function in `tools.js` resolves all paths with `path.resolve` an
 
 ---
 
+## Plugin System
+
+The plugin loader (`src/plugins/manager.js`) `require()`s plugin entry points directly — there is **no sandbox**. A loaded plugin runs as full-privilege Node code in the same process as the agent, can read any environment variable, can modify the agent's runtime, and can call out over the network.
+
+For that reason plugins are **opt-in and operator-managed**:
+
+- **Disabled by default.** `SPORE_PLUGINS_ENABLED` must be explicitly set to `true` to enable plugin loading.
+- **Default directory is `<repo>/shared/plugins/`**, not the agent's workspace. This is intentional: the workspace is writable by the agent's own `write_file` and `exec` tools, so a prompt-injection or compromised model run could otherwise drop a plugin and gain remote code execution at the next boot.
+- **Workspace overlap is refused.** If `SPORE_PLUGINS_DIR` is set to a path inside `SPORE_WORKSPACE_PATH`, `loadAll` logs an error and skips loading rather than running plugins from agent-writable storage.
+- **No signature, hash, or manifest allowlist.** Plugins are trusted on the basis of where they live on disk. Treat the plugins directory the same way you treat the agent's `.env` — any user who can write to it can execute arbitrary code in the agent process.
+
+If you don't need plugins, leave `SPORE_PLUGINS_ENABLED` unset. If you do, point `SPORE_PLUGINS_DIR` at an operator-owned directory and review every plugin you put there.
+
+---
+
 ## Discord / Telegram Tokens
 
 Bot tokens are stored only in the agent's `.env` file and mounted as environment variables into the container. They are never logged, never returned by the health endpoint, and never exposed via the graph API.
