@@ -910,6 +910,11 @@ class TelegramGateway {
 
     // Fallback (no pairing store)
     if (this.pendingDmApprovals.has(userId)) return;
+    // Cap at 1000 entries (insertion-order eviction) — prevents unbounded
+    // growth across many users hitting the no-pairing-store fallback path.
+    if (this.pendingDmApprovals.size >= 1000) {
+      this.pendingDmApprovals.delete(this.pendingDmApprovals.values().next().value);
+    }
     this.pendingDmApprovals.add(userId);
     try {
       await this.sendMessage(chatId, 'This bot is in pairing mode. Ask the owner to add your Telegram user ID to `channels.telegram.allowFrom` or switch `dmPolicy` to `open`.');

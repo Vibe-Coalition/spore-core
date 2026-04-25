@@ -1191,6 +1191,11 @@ class AgentLoop {
             }
           }
         }
+        // Cap at 200 sessions (insertion-order eviction) — prevents unbounded
+        // growth across many short-lived channel/session keys.
+        if (!this._sessionFailures.has(sessKey) && this._sessionFailures.size >= 200) {
+          this._sessionFailures.delete(this._sessionFailures.keys().next().value);
+        }
         this._sessionFailures.set(sessKey, buf);
       } catch (e) {
         this.log.warn(`[graphcorn] failure capture loop failed: ${e.message}`);
@@ -2332,8 +2337,12 @@ class AgentLoop {
       }
     }
 
-    // Store for iterative re-compression on subsequent compactions
+    // Store for iterative re-compression on subsequent compactions.
+    // Capped at 200 sessions (insertion-order eviction).
     if (summary) {
+      if (!this._compactionSummaries.has(sessionKey) && this._compactionSummaries.size >= 200) {
+        this._compactionSummaries.delete(this._compactionSummaries.keys().next().value);
+      }
       this._compactionSummaries.set(sessionKey, summary);
     }
 

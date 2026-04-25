@@ -378,9 +378,14 @@ function applyRetrievalMixin(GraphContext) {
   };
 
   proto.getEdges = function getEdges(nodeId) {
-    return this.stmt('getEdges', `
-      SELECT * FROM edges WHERE source = ? OR target = ?
+    // LIMIT 5000 is a safety cap — real nodes never have anywhere close to
+    // this many edges. If hit, the graph is malformed and the missing edges
+    // are the least of the operator's problems.
+    const rows = this.stmt('getEdges', `
+      SELECT * FROM edges WHERE source = ? OR target = ? LIMIT 5000
     `).all(nodeId, nodeId);
+    if (rows.length === 5000) this.log?.warn?.(`[graph] getEdges(${nodeId}) hit 5000-row cap`);
+    return rows;
   };
 
   proto.getNodesByType = function getNodesByType(type, provenance) {
@@ -392,9 +397,12 @@ function applyRetrievalMixin(GraphContext) {
       params.push(provenance);
     }
 
-    sql += ' ORDER BY importance DESC';
+    // Safety cap — a single type with 10k+ nodes would already blow the
+    // prompt-section budget; this just stops the SELECT from OOMing first.
+    sql += ' ORDER BY importance DESC LIMIT 10000';
 
     const rows = this.stmt(`getByType${provenance ? '_' + provenance : ''}`, sql).all(...params);
+    if (rows.length === 10000) this.log?.warn?.(`[graph] getNodesByType(${type}) hit 10000-row cap`);
     return rows.map(r => this._hydrateNode(r));
   };
 

@@ -42,10 +42,11 @@ class Maintainer {
     this._lastGraphChangeAt = 0;
     this._lastCreativeRunAt = 0;
 
-    graphEvents.on('change', (evt) => {
+    this._onGraphChange = (evt) => {
       if (evt?.source === 'maintainer') return;
       this._lastGraphChangeAt = Date.now();
-    });
+    };
+    graphEvents.on('change', this._onGraphChange);
 
     this.stats = {
       cycles: 0, gapsDetected: 0, gapsFilled: 0, gapsDormant: 0,
@@ -53,6 +54,17 @@ class Maintainer {
     };
 
     this.proactive = new ProactiveEngine(this);
+  }
+
+  /**
+   * Detach event listeners so a recreated Maintainer doesn't accumulate
+   * stale 'change' handlers on the global graphEvents emitter.
+   */
+  shutdown() {
+    if (this._onGraphChange) {
+      graphEvents.removeListener('change', this._onGraphChange);
+      this._onGraphChange = null;
+    }
   }
 
   /**
