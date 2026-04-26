@@ -1092,115 +1092,8 @@ class AgentLoop {
       }
     }
 
-    // graphcorn — failure capture. Per-session ring buffer of recent
-    // failed exec calls; when a SUBSEQUENT successful exec runs a
-    // "similar" command (same first token + similar target) we
-    // synthesize a `failure_fix` discovery so the user doesn't have
-    // to relearn how to escape that specific gotcha next session.
-    // Cross-round (within last 5 turns + 30min wall clock) so it
-    // catches both immediate retries and "tried other stuff first"
-    // resolutions. Server-side only — invisible to the agent.
-    if (opts.platform === 'cli' && opts.channelId && toolLog.length) {
-      try {
-        if (!this._sessionFailures) this._sessionFailures = new Map();
-        const sessKey = String(opts.channelId);
-        const buf = this._sessionFailures.get(sessKey) || [];
-        const now = Date.now();
-        const turn = (() => {
-          // Reuse the turn count we just incremented — read it back
-          // from the lifecycle aspect on the session node.
-          try {
-            const sessId = 'session-' + sessKey;
-            const row = this.learner?.db?.prepare(
-              "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'turn_count:%'"
-            ).get(sessId);
-            const m = row && String(row.content).match(/turn_count:\s*(\d+)/);
-            return m ? parseInt(m[1], 10) : 0;
-          } catch { return 0; }
-        })();
-
-        // Helper: extract the first command token + a "target" (first
-        // path-shaped or URL-shaped argument) for similarity matching.
-        const parseCmd = (cmd) => {
-          if (typeof cmd !== 'string') return { token: '', target: '' };
-          const trimmed = cmd.trim().replace(/^cd\s+\S+\s*&&\s*/, '');
-          const parts = trimmed.split(/\s+/);
-          let token = (parts[0] || '').toLowerCase();
-          if ((token === 'npx' || token === 'pnpx' || token === 'bunx' || token === 'yarn' || token === 'pnpm' || token === 'bun' || token === 'npm') && parts[1]) {
-            token = token + ' ' + parts[1].toLowerCase();
-          }
-          const target = parts.slice(1).find(p => /[\\/.]/.test(p) || p.startsWith('http')) || '';
-          return { token, target };
-        };
-
-        for (const t of toolLog) {
-          if (t.tool !== 'exec') continue;
-          // Reconstruct the input — toolLog stores it as JSON string capped at 300
-          let cmd = '';
-          try {
-            const inp = typeof t.input === 'string' ? JSON.parse(t.input) : t.input;
-            cmd = inp?.command || '';
-          } catch {}
-          if (!cmd) continue;
-          const parsed = parseCmd(cmd);
-          if (t.succeeded === false) {
-            // Capture failure for later matching
-            buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300) });
-            if (buf.length > 10) buf.shift();
-          } else {
-            // Look for a recent similar failure (same token, target overlap or both empty)
-            const fiveTurnsAgo = turn - 5;
-            const thirtyMinAgo = now - 30 * 60 * 1000;
-            const match = buf.find(f =>
-              f.token === parsed.token &&
-              f.turn >= fiveTurnsAgo &&
-              f.ts >= thirtyMinAgo &&
-              (!parsed.target || !f.target || parsed.target.includes(f.target) || f.target.includes(parsed.target))
-            );
-            if (match) {
-              // Synthesize failure_fix discovery via the tool wrapper —
-              // get the session/user context via _execContext.run so
-              // _noteDiscoveryTool's ALS lookup populates correctly.
-              try {
-                const _execContext = this.tools?.constructor?._execContext || null; // not exposed
-                // Simpler: build a synthetic ctx and call the tool directly.
-                const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${match.preview ? '≠0' : '?'}). Fixed by: ${cmd.slice(0, 200)}`;
-                if (this.tools?._noteDiscoveryTool) {
-                  // Use AsyncLocalStorage from the tools module so the
-                  // ctx-derived sessionId/userId/cwd populate correctly.
-                  const { AsyncLocalStorage } = require('async_hooks');
-                  // The tools module's _execContext is a private const;
-                  // we can't get to it from here cleanly. Instead patch
-                  // _currentChannelId / _currentUserId on the tools
-                  // singleton (they're the fallback path inside
-                  // _resolveFallbackCtx).
-                  this.tools._currentChannelId = sessKey;
-                  this.tools._currentUserId = opts.userId || 'anon';
-                  this.tools._currentPlatform = 'cli';
-                  if (opts.projectContext?.cwd) this.tools._currentCwd = opts.projectContext.cwd;
-                  const r = this.tools._noteDiscoveryTool({ text, kind: 'failure_fix' });
-                  if (r?.ok) {
-                    this.log.info(`[graphcorn] failure_fix captured: ${r.nodeId} (${match.token} → ${parsed.token})`);
-                  }
-                }
-              } catch (e) {
-                this.log.warn(`[graphcorn] failure_fix capture failed: ${e.message}`);
-              }
-              // Drop the matched failure so we don't re-fire on a third success
-              buf.splice(buf.indexOf(match), 1);
-            }
-          }
-        }
-        // Cap at 200 sessions (insertion-order eviction) — prevents unbounded
-        // growth across many short-lived channel/session keys.
-        if (!this._sessionFailures.has(sessKey) && this._sessionFailures.size >= 200) {
-          this._sessionFailures.delete(this._sessionFailures.keys().next().value);
-        }
-        this._sessionFailures.set(sessKey, buf);
-      } catch (e) {
-        this.log.warn(`[graphcorn] failure capture loop failed: ${e.message}`);
-      }
-    }
+    // graphcorn — failure capture (extracted to keep _runLoop slim)
+    this._captureFailureFix(opts, toolLog);
 
     // graphcorn — round checkpoint. Each finished round leaves a
     // breadcrumb on the session node's `rounds` aspect: turn N | tools
@@ -1328,6 +1221,120 @@ class AgentLoop {
       iterations,
       sessionKey,
     };
+  }
+
+  // ── Post-loop graphcorn helpers (extracted from _runLoop) ───────────
+
+  /**
+   * Per-session ring buffer of recent failed exec calls. When a SUBSEQUENT
+   * successful exec runs a "similar" command (same first token + similar
+   * target), synthesize a `failure_fix` discovery so the user doesn't have
+   * to relearn how to escape that specific gotcha next session. Cross-round
+   * (within last 5 turns + 30min wall clock) so it catches both immediate
+   * retries and "tried other stuff first" resolutions. Server-side only —
+   * invisible to the agent.
+   */
+  _captureFailureFix(opts, toolLog) {
+    if (!(opts.platform === 'cli' && opts.channelId && toolLog.length)) return;
+    try {
+      if (!this._sessionFailures) this._sessionFailures = new Map();
+      const sessKey = String(opts.channelId);
+      const buf = this._sessionFailures.get(sessKey) || [];
+      const now = Date.now();
+      const turn = (() => {
+        // Reuse the turn count we just incremented — read it back
+        // from the lifecycle aspect on the session node.
+        try {
+          const sessId = 'session-' + sessKey;
+          const row = this.learner?.db?.prepare(
+            "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'turn_count:%'"
+          ).get(sessId);
+          const m = row && String(row.content).match(/turn_count:\s*(\d+)/);
+          return m ? parseInt(m[1], 10) : 0;
+        } catch { return 0; }
+      })();
+
+      // Helper: extract the first command token + a "target" (first
+      // path-shaped or URL-shaped argument) for similarity matching.
+      const parseCmd = (cmd) => {
+        if (typeof cmd !== 'string') return { token: '', target: '' };
+        const trimmed = cmd.trim().replace(/^cd\s+\S+\s*&&\s*/, '');
+        const parts = trimmed.split(/\s+/);
+        let token = (parts[0] || '').toLowerCase();
+        if ((token === 'npx' || token === 'pnpx' || token === 'bunx' || token === 'yarn' || token === 'pnpm' || token === 'bun' || token === 'npm') && parts[1]) {
+          token = token + ' ' + parts[1].toLowerCase();
+        }
+        const target = parts.slice(1).find(p => /[\\/.]/.test(p) || p.startsWith('http')) || '';
+        return { token, target };
+      };
+
+      for (const t of toolLog) {
+        if (t.tool !== 'exec') continue;
+        // Reconstruct the input — toolLog stores it as JSON string capped at 300
+        let cmd = '';
+        try {
+          const inp = typeof t.input === 'string' ? JSON.parse(t.input) : t.input;
+          cmd = inp?.command || '';
+        } catch {}
+        if (!cmd) continue;
+        const parsed = parseCmd(cmd);
+        if (t.succeeded === false) {
+          // Capture failure for later matching
+          buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300) });
+          if (buf.length > 10) buf.shift();
+        } else {
+          // Look for a recent similar failure (same token, target overlap or both empty)
+          const fiveTurnsAgo = turn - 5;
+          const thirtyMinAgo = now - 30 * 60 * 1000;
+          const match = buf.find(f =>
+            f.token === parsed.token &&
+            f.turn >= fiveTurnsAgo &&
+            f.ts >= thirtyMinAgo &&
+            (!parsed.target || !f.target || parsed.target.includes(f.target) || f.target.includes(parsed.target))
+          );
+          if (match) {
+            // Synthesize failure_fix discovery via the tool wrapper —
+            // get the session/user context via _execContext.run so
+            // _noteDiscoveryTool's ALS lookup populates correctly.
+            try {
+              const _execContext = this.tools?.constructor?._execContext || null; // not exposed
+              // Simpler: build a synthetic ctx and call the tool directly.
+              const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${match.preview ? '≠0' : '?'}). Fixed by: ${cmd.slice(0, 200)}`;
+              if (this.tools?._noteDiscoveryTool) {
+                // Use AsyncLocalStorage from the tools module so the
+                // ctx-derived sessionId/userId/cwd populate correctly.
+                const { AsyncLocalStorage } = require('async_hooks');
+                // The tools module's _execContext is a private const;
+                // we can't get to it from here cleanly. Instead patch
+                // _currentChannelId / _currentUserId on the tools
+                // singleton (they're the fallback path inside
+                // _resolveFallbackCtx).
+                this.tools._currentChannelId = sessKey;
+                this.tools._currentUserId = opts.userId || 'anon';
+                this.tools._currentPlatform = 'cli';
+                if (opts.projectContext?.cwd) this.tools._currentCwd = opts.projectContext.cwd;
+                const r = this.tools._noteDiscoveryTool({ text, kind: 'failure_fix' });
+                if (r?.ok) {
+                  this.log.info(`[graphcorn] failure_fix captured: ${r.nodeId} (${match.token} → ${parsed.token})`);
+                }
+              }
+            } catch (e) {
+              this.log.warn(`[graphcorn] failure_fix capture failed: ${e.message}`);
+            }
+            // Drop the matched failure so we don't re-fire on a third success
+            buf.splice(buf.indexOf(match), 1);
+          }
+        }
+      }
+      // Cap at 200 sessions (insertion-order eviction) — prevents unbounded
+      // growth across many short-lived channel/session keys.
+      if (!this._sessionFailures.has(sessKey) && this._sessionFailures.size >= 200) {
+        this._sessionFailures.delete(this._sessionFailures.keys().next().value);
+      }
+      this._sessionFailures.set(sessKey, buf);
+    } catch (e) {
+      this.log.warn(`[graphcorn] failure capture loop failed: ${e.message}`);
+    }
   }
 
   // ── Multimodal attachment handling ──────────────────────────────────
