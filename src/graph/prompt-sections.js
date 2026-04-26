@@ -1013,7 +1013,7 @@ function applyPromptSectionsMixin(GraphContext) {
         admin: 'admin (operator with full control of this instance)',
         creator: 'creator (operator with full control of this instance)',
         webapp: 'webapp user (a guest who self-registered with the team key — they can talk and edit nodes, but should NOT be granted access to provider keys, server settings, or destructive admin actions)',
-        acorn: 'acorn CLI user (workstation operator)',
+        cli: 'CLI user (workstation operator)',
       })[opts.userRole] || opts.userRole;
       parts.push(`- User role: ${roleLabel}`);
     }

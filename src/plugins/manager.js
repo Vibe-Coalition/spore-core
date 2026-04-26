@@ -561,6 +561,23 @@ class PluginManager {
   }
 
   /**
+   * Resolve a bare WS frame type (e.g. 'session:start') to the FIRST
+   * plugin that registered a handler for it. Used by core's protocol-
+   * contract aliases — the Go acorn-cli sends bare `session:start` and
+   * core finds the plugin that owns it without core needing to know
+   * which plugin id (acorn-cli, future-cli, etc.) provides the handler.
+   * Returns { pluginId, handler } or null.
+   */
+  resolveBareWsHandler(frameType) {
+    if (!frameType) return null;
+    for (const [pluginId, plugin] of this.plugins) {
+      const handler = plugin.instance?.getWsHandler?.(frameType);
+      if (handler) return { pluginId, handler };
+    }
+    return null;
+  }
+
+  /**
    * Collect every plugin's settings pane (if registered) along with its
    * current config slot, masked for secret fields. Used by the settings UI.
    */

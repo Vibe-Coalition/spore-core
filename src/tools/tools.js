@@ -3170,7 +3170,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       // which returns null (no CLI gateway exists), so the push
       // silently dropped and the agent never got woken up.
       if (platform === 'web' || platform === 'cli') {
-        const isAcorn = platform === 'cli';
+        const isCli = platform === 'cli';
         const deliveryUserId = taskUserId || 'operator';
         const elapsed = Math.round((taskEntry.completedAt - taskEntry.startedAt) / 1000);
         const status = taskEntry.status === 'done' ? 'completed' : 'failed';
@@ -3219,12 +3219,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               const result = await this._agent.processMessage({
                 content,
                 channelId,
-                channelName: isAcorn ? `acorn:${deliveryUserId}` : 'control-panel',
+                channelName: isCli ? `cli:${deliveryUserId}` : 'control-panel',
                 userId: deliveryUserId,
                 userName: taskEntry.originalUserName || 'System',
                 trigger: 'task_complete',
-                platform: isAcorn ? 'cli' : 'web',
-                isDm: !isAcorn, // acorn sessions aren't DM — preserves per-session isolation
+                platform: isCli ? 'cli' : 'web',
+                isDm: !isCli, // CLI sessions aren't DM — preserves per-session isolation
                 projectContext: taskEntry.projectContext || null,
                 onTextDelta: (delta) => {
                   this.broadcast({ type: 'chat:delta', text: delta });
@@ -3247,7 +3247,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                 });
               }
             } catch (e) {
-              this.log.warn(`[subagent:${taskId}] ${isAcorn ? 'CLI' : 'Web'} result delivery failed: ${e.message}`);
+              this.log.warn(`[subagent:${taskId}] ${isCli ? 'CLI' : 'Web'} result delivery failed: ${e.message}`);
               this._agent.sessions?.addMessage(sessionKey, 'user', content);
               if (chatStartSent) this.broadcast({ type: 'chat:done', text: `Background task finished but delivery failed. Send a message to see results.` });
             }

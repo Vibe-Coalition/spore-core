@@ -136,7 +136,11 @@ async function handleAuth(api, req, res) {
   const acornSid = crypto.randomBytes(16).toString('hex');
   webSessions.set(acornSid, {
     user: username.toLowerCase().trim(),
-    type: 'acorn',
+    // 'cli' is core's generic CLI-class role — core's WS handler treats
+    // any session with type 'cli' as a CLI client (sessionId-keyed
+    // history, no graph-event broadcast, etc.). Plugin-specific role
+    // names like 'acorn' would couple core to this plugin.
+    type: 'cli',
     created: Date.now(),
   });
   api.getLogger().info(`Auth OK for user: ${username}`);
@@ -1088,9 +1092,9 @@ module.exports = function register(api) {
   // no-op when graceful already ran. For network drop / SIGKILL /
   // alt-tab-and-leave-it, the session:end never arrives and this is
   // the only chance to distill before the 48h janitor sweep. Gates on
-  // `ws._role === 'acorn'` so non-acorn closes are a no-op.
+  // ws._role === 'cli' so non-cli closes are a no-op.
   api.registerLifecycleHook('wsClose', ({ ws, sessionIds, log }) => {
-    if (ws?._role !== 'acorn' || !sessionIds?.length) return;
+    if (ws?._role !== 'cli' || !sessionIds?.length) return;
     const ctx = api._appContext;
     const learner = ctx?.tools?.learner || ctx?.learner;
     const config = ctx?.config || {};

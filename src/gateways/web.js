@@ -1784,7 +1784,7 @@ class WebGateway {
   getSessionForUser(username) {
     const now = Date.now();
     let best = null;
-    const priority = { admin: 3, creator: 2, acorn: 1, webapp: 0 };
+    const priority = { admin: 3, creator: 2, cli: 1, webapp: 0 };
     for (const [sid, sess] of this._webSessions) {
       if (now - sess.created >= SESSION_TTL) continue;
       if (sess.user !== username) continue;
@@ -4369,8 +4369,8 @@ class WebGateway {
     });
 
     wss.on('connection', (ws) => {
-      const isAcornClient = ws._role === 'acorn';
-      this.log.info(`[ws] Client connected: user=${ws._user || '(anon)'} role=${ws._role || '(none)'}${isAcornClient ? ' [acorn]' : ''}`);
+      const isCliClient = ws._role === 'cli';
+      this.log.info(`[ws] Client connected: user=${ws._user || '(anon)'} role=${ws._role || '(none)'}${isCliClient ? ' [cli]' : ''}`);
       ws._missedPongs = 0;
       ws._pendingTools = new Map();
       ws.on('pong', () => { ws._missedPongs = 0; });
@@ -4389,7 +4389,7 @@ class WebGateway {
       } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
 
       // Acorn clients manage their own session history — don't send web panel history
-      if (!isAcornClient) {
+      if (!isCliClient) {
         try {
           // CRITICAL: never serve DM history to an anonymous socket. Before
           // the user has authenticated, `ws._user` is null — falling back to
@@ -4477,7 +4477,7 @@ class WebGateway {
       }
 
       // Graph events only for web panel clients, not Acorn
-      const onGraphEvent = isAcornClient ? null : (evt) => {
+      const onGraphEvent = isCliClient ? null : (evt) => {
         try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
       };
       if (onGraphEvent) graphEvents.on('change', onGraphEvent);
@@ -4503,31 +4503,27 @@ class WebGateway {
           // Fall through to default unknown-type handling if nothing matched.
         }
 
-        // Acorn session:* alias — Go-client protocol contract preserved
-        // while the acorn-cli plugin owns the actual handlers. Rewrites
-        // bare `session:start` / `session:end` / `session:observe` /
-        // `session:unobserve` to the plugin-namespaced form and
-        // dispatches to the plugin if installed. If no plugin handler
-        // is registered for a given subtype the frame falls through;
-        // session:observe and session:unobserve still hit the in-tree
-        // handlers below because they touch the gateway-internal
-        // _sessionClients fan-out map. session:start / session:end have
-        // no in-tree handlers — when the plugin isn't installed those
-        // frames are silently ignored.
+        // session:* protocol contract — bare `session:start` /
+        // `session:end` / `session:observe` / `session:unobserve` frames
+        // route to the FIRST plugin that registered a handler for them.
+        // Generic — core doesn't know which plugin (acorn-cli, future
+        // CLIs, etc.) owns the contract. session:observe and
+        // session:unobserve still fall through to the in-tree handlers
+        // below when no plugin claims them, because those handlers need
+        // the gateway-internal _sessionClients fan-out map.
         if (typeof msg.type === 'string' && msg.type.startsWith('session:')) {
           const mgr = this.tools?._pluginManager;
-          const aliasType = `plugin:acorn-cli:${msg.type}`;
-          const resolved = mgr?.resolveWsHandler?.(aliasType);
+          const resolved = mgr?.resolveBareWsHandler?.(msg.type);
           if (resolved) {
             try {
               await resolved.handler(ws, msg, { user: ws._user, sessionId: msg.sessionId, log: this.log });
             } catch (e) {
-              this.log.warn(`[plugins] WS handler ${aliasType} threw: ${e.message}`);
+              this.log.warn(`[plugins] WS handler ${msg.type} (plugin:${resolved.pluginId}) threw: ${e.message}`);
             }
             return;
           }
           // Fall through — observe/unobserve in-tree handlers below
-          // still need to run when the plugin isn't installed.
+          // still need to run when no plugin claims them.
         }
 
         if (msg.type === 'ping') {
@@ -4573,11 +4569,11 @@ class WebGateway {
         if (msg.type === 'chat:history-request' && msg.sessionId) {
           try {
             if (this.tools._sessions) {
-              const isAcorn = ws._role === 'acorn';
+              const isCli = ws._role === 'cli';
               const reqSessionId = msg.sessionId;
               const userId = ws._user || 'operator';
               // Use legacy buildKey format to match how processMessage stores messages
-              const historyKey = isAcorn
+              const historyKey = isCli
                 ? this.tools._sessions.constructor.buildKey(reqSessionId, false, userId)
                 : this.tools._sessions.constructor.buildKey(reqSessionId, true, userId);
               const rows = this.tools._sessions.db.prepare(
@@ -4774,8 +4770,8 @@ class WebGateway {
           if (this.tools._agent) {
             const userId = ws._user || 'operator';
             const sessionId = msg.sessionId || 'web:control-panel';
-            const isAcorn = ws._role === 'acorn';
-            const stopped = isAcorn
+            const isCli = ws._role === 'cli';
+            const stopped = isCli
               ? this.tools._agent.abortSession(sessionId, false, userId)
               : this.tools._agent.abortSession('web:control-panel', true, userId);
             this.log.info(`[ws] Stop requested for ${userId} — ${stopped ? 'aborted' : 'no active run'}`);
@@ -4783,7 +4779,7 @@ class WebGateway {
               try { ws.send(JSON.stringify({ type: 'chat:status', status: 'stopping' })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               // Reject any pending tool Promises on the CLI's WebSocket so the
               // agent loop breaks out immediately instead of waiting 3 minutes
-              const originWs = isAcorn ? this._getOriginClient(sessionId) : null;
+              const originWs = isCli ? this._getOriginClient(sessionId) : null;
               if (originWs && originWs._pendingTools?.size > 0) {
                 for (const [toolId, entry] of originWs._pendingTools) {
                   clearTimeout(entry.timeout);
@@ -4800,14 +4796,14 @@ class WebGateway {
         if (msg.type === 'chat:clear') {
           if (this.tools._sessions) {
             const userId = ws._user || 'operator';
-            const isAcorn = ws._role === 'acorn';
+            const isCli = ws._role === 'cli';
             const clearSessionId = msg.sessionId || 'web:control-panel';
-            const clearKey = isAcorn
+            const clearKey = isCli
               ? this.tools._sessions.constructor.buildKey(clearSessionId, false, userId)
               : this.tools._sessions.constructor.buildKey('web:control-panel', true, userId);
             this.tools._sessions.clearSession(clearKey);
             ws.send(JSON.stringify({ type: 'chat:cleared' }));
-            this.log.info(`[ws] Chat history cleared by ${userId}${isAcorn ? ` (acorn: ${clearSessionId})` : ''}`);
+            this.log.info(`[ws] Chat history cleared by ${userId}${isCli ? ` (cli: ${clearSessionId})` : ''}`);
           }
           return;
         }
@@ -4818,7 +4814,7 @@ class WebGateway {
             return;
           }
           const sessionId = msg.sessionId || 'web:control-panel';
-          const isAcorn = ws._role === 'acorn';
+          const isCli = ws._role === 'cli';
           // If auth is required (webapp users exist or manager URL is set), refuse
           // anonymous chat — otherwise every user's messages collapse into the same
           // 'dm:operator' session and the agent can't tell them apart.
@@ -4828,7 +4824,7 @@ class WebGateway {
             hasWebappUsers = fs.existsSync(wuPath) && JSON.parse(fs.readFileSync(wuPath, 'utf8')).length > 0;
           } catch (e) { this.log.warn('[web] path.join failed: ' + e.message); }
           const requiresChatAuth = hasWebappUsers || !!this.config.managerUrl || !!(this.config.webAuthUser && this.config.webAuthPass);
-          if (requiresChatAuth && !isAcorn && !ws._user) {
+          if (requiresChatAuth && !isCli && !ws._user) {
             this.log.warn(`[ws] chat refused — no authenticated user on this connection (token=${ws._sessionToken ? 'stale' : 'missing'})`);
             ws.send(JSON.stringify({ type: 'chat:error', error: 'Session expired — reload the page and log in again.', code: 'auth-required' }));
             return;
@@ -4836,12 +4832,12 @@ class WebGateway {
           this.log.info(`[ws] chat from user=${ws._user || '(anon)'} role=${ws._role || '(none)'} displayName=${(msg.userName || '').slice(0, 40)} sessionId=${sessionId}`);
 
           // Store the client's working directory (sent by Acorn CLI)
-          if (msg.cwd && isAcorn) ws._cwd = msg.cwd;
+          if (msg.cwd && isCli) ws._cwd = msg.cwd;
 
           // Register this client for the session.
           // If the client is already an observer (companion app), keep that role —
           // don't promote to origin or it will evict the CLI's origin registration.
-          if (isAcorn) {
+          if (isCli) {
             const existingClients = this._sessionClients.get(sessionId);
             let isObserver = false;
             if (existingClients) {
@@ -4873,7 +4869,7 @@ class WebGateway {
           try {
             // Acorn fans out to all session clients (CLI + observer mobile apps).
             // Web users are isolated — chat:start only goes to the sending socket.
-            if (!isAcorn) {
+            if (!isCli) {
               try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
             } else {
               this._sendToSession(sessionId, { type: 'chat:start', sessionId });
@@ -4928,16 +4924,16 @@ class WebGateway {
 
             // For Acorn: find the origin CLI client for tool execution.
             // If an observer (mobile app) sends a message, tools still go to the CLI.
-            const originWs = isAcorn ? (this._getOriginClient(sessionId) || ws) : null;
+            const originWs = isCli ? (this._getOriginClient(sessionId) || ws) : null;
 
             // Debug: log the projectContext.mode acorn sent so we can
             // tell whether "plan mode didn't behave as plan mode" is a
             // client-side bug (mode not sent) or server-side (mode
             // sent but prompt didn't activate).
-            if (isAcorn) {
+            if (isCli) {
               const mode = msg.projectContext?.mode || '(none)';
               const hasPC = msg.projectContext ? 'yes' : 'no';
-              this.log.info(`[acorn-chat] sessionId=${sessionId} projectContext=${hasPC} mode=${mode} content=${JSON.stringify((msg.content || '').slice(0, 80))}`);
+              this.log.info(`[cli-chat] sessionId=${sessionId} projectContext=${hasPC} mode=${mode} content=${JSON.stringify((msg.content || '').slice(0, 80))}`);
             }
 
             // Plan-mode reminder — when acorn signals plan mode via
@@ -4951,14 +4947,14 @@ class WebGateway {
             // session log when debugging "did the agent know it was
             // in plan mode?".
             let userContent = msg.content + fileNote;
-            if (isAcorn && msg.projectContext && msg.projectContext.mode === 'plan') {
+            if (isCli && msg.projectContext && msg.projectContext.mode === 'plan') {
               userContent = '[PLAN MODE — read ## Plan Mode in your system prompt before responding. Do NOT call write_file/edit_file/exec mutating commands. End with `PLAN_READY` (after PHASE 5) OR a `QUESTIONS:` block (during PHASE 4). Vague request ⇒ ASK.]\n\n' + userContent;
             }
 
             const agentOpts = {
               content: userContent,
               channelId: sessionId,
-              channelName: isAcorn ? `acorn:${ws._user}` : 'control-panel',
+              channelName: isCli ? `cli:${ws._user}` : 'control-panel',
               // userId is server-trusted (from the authenticated WS session)
               // to prevent spoofing another user's conversation. The client's
               // msg.userId is ignored — only ws._user matters.
@@ -4968,11 +4964,11 @@ class WebGateway {
               // Role comes from the WS session (server-trusted). The agent
               // uses this to decide what it will / won't agree to do for
               // non-creator users.
-              userRole: ws._role || (isAcorn ? 'acorn' : 'creator'),
+              userRole: ws._role || (isCli ? 'cli' : 'creator'),
               sessionToken: ws._sessionToken || null,
               trigger: 'dm',
-              platform: isAcorn ? 'cli' : 'web',
-              isDm: !isAcorn,
+              platform: isCli ? 'cli' : 'web',
+              isDm: !isCli,
               clientCwd: ws._cwd || null,
               // projectContext is the structured project metadata acorn sends
               // on every chat:submit. The agent loop routes this into the
@@ -4984,7 +4980,7 @@ class WebGateway {
               images,
               media,
               onTextDelta: (delta) => {
-                if (isAcorn) {
+                if (isCli) {
                   this._sendToSession(sessionId, { type: 'chat:delta', text: delta });
                 } else {
                   try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
@@ -4994,7 +4990,7 @@ class WebGateway {
                 try { ws.send(JSON.stringify({ type: 'chat:thinking', text: delta })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               },
               onToolUse: (toolName) => {
-                if (isAcorn) {
+                if (isCli) {
                   this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName });
                 } else {
                   try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
@@ -5004,7 +5000,7 @@ class WebGateway {
                 try {
                   const payload = evt.type?.startsWith('code:') ? evt
                     : { type: 'chat:status', status: evt.type, ...Object.fromEntries(Object.entries(evt).filter(([k]) => k !== 'type')) };
-                  if (isAcorn) {
+                  if (isCli) {
                     this._sendToSession(sessionId, payload);
                   } else {
                     ws.send(JSON.stringify(payload));
@@ -5013,7 +5009,7 @@ class WebGateway {
               },
               // Acorn: forward tool calls to the origin CLI client for local execution.
               // tool:request only goes to origin client. Observers get tool:pending notification.
-              onToolExecute: isAcorn ? async (toolName, toolInput, toolId) => {
+              onToolExecute: isCli ? async (toolName, toolInput, toolId) => {
                 // Notify observers that a tool is awaiting approval/execution
                 const summary = toolName === 'exec' ? (toolInput?.command || '').substring(0, 120)
                   : toolName === 'write_file' || toolName === 'edit_file' || toolName === 'read_file' ? (toolInput?.path || '')
@@ -5056,7 +5052,7 @@ class WebGateway {
             if (result.skipped) {
               const userId = ws._user || 'operator';
               const waitKey = this.tools._sessions.constructor.buildKey(
-                isAcorn ? sessionId : 'web:control-panel', !isAcorn, userId
+                isCli ? sessionId : 'web:control-panel', !isCli, userId
               );
 
               const injected = this.tools._agent.interject(waitKey, msg.content + fileNote);
@@ -5064,7 +5060,7 @@ class WebGateway {
                 // Loop will pick it up on next iteration — notify client and return
                 this.log.info(`[ws] Interjection accepted for ${sessionId}`);
                 const payload = { type: 'chat:status', status: 'interjected' };
-                if (isAcorn) { this._sendToSession(sessionId, payload); }
+                if (isCli) { this._sendToSession(sessionId, payload); }
                 else { try { ws.send(JSON.stringify(payload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
                 return; // Don't send chat:done — the running loop handles completion
               }
@@ -5072,7 +5068,7 @@ class WebGateway {
               // Injection failed (loop is aborting after Ctrl+C) — wait for release + retry
               this.log.info(`[ws] Interjection failed (aborting?), waiting for session release: ${sessionId}`);
               const statusPayload = { type: 'chat:status', status: 'waiting' };
-              if (isAcorn) { this._sendToSession(sessionId, statusPayload); }
+              if (isCli) { this._sendToSession(sessionId, statusPayload); }
               else { try { ws.send(JSON.stringify(statusPayload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
 
               try {
@@ -5081,13 +5077,13 @@ class WebGateway {
                   new Promise((_, rej) => setTimeout(() => rej(new Error('Interjection wait timed out')), 15000)),
                 ]);
                 // Re-send chat:start for the retry
-                if (isAcorn) { this._sendToSession(sessionId, { type: 'chat:start', sessionId }); }
+                if (isCli) { this._sendToSession(sessionId, { type: 'chat:start', sessionId }); }
                 else { try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
                 result = await this.tools._agent.processMessage(agentOpts);
               } catch (waitErr) {
                 this.log.error(`[ws] Interjection wait failed: ${waitErr.message}`);
                 const errPayload = { type: 'chat:error', error: 'Session busy — try again in a moment' };
-                if (isAcorn) { this._sendToSession(sessionId, errPayload); }
+                if (isCli) { this._sendToSession(sessionId, errPayload); }
                 else { try { ws.send(JSON.stringify(errPayload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
                 return;
               }
@@ -5101,7 +5097,7 @@ class WebGateway {
               iterations: result.iterations,
               toolUsage: result.toolUsage,
             };
-            if (isAcorn) {
+            if (isCli) {
               this._sendToSession(sessionId, donePayload);
             } else {
               ws.send(JSON.stringify(donePayload));
@@ -5123,7 +5119,7 @@ class WebGateway {
               : e.status === 500 || e.error?.type === 'api_error' ? 'API server error — try again shortly'
                 : e.status === 429 ? 'Rate limited — too many requests, wait a moment'
                   : (e.error?.error?.message || e.message || 'Unknown error').substring(0, 200);
-            if (isAcorn) {
+            if (isCli) {
               this._sendToSession(sessionId, { type: 'chat:error', error: friendly });
             } else {
               ws.send(JSON.stringify({ type: 'chat:error', error: friendly }));
@@ -5323,7 +5319,7 @@ class WebGateway {
 
       ws.on('close', () => {
         // If this CLI had pending tools, save them for re-send on reconnect
-        if (ws._role === 'acorn' && ws._pendingTools?.size > 0) {
+        if (ws._role === 'cli' && ws._pendingTools?.size > 0) {
           const pending = [];
           for (const [toolId, entry] of ws._pendingTools) {
             pending.push({ toolId, resolve: entry.resolve, reject: entry.reject, timeout: entry.timeout });
@@ -5346,7 +5342,7 @@ class WebGateway {
         // Plugin wsClose lifecycle hook — fires once per WS-close with
         // the set of session ids attached to this ws. Acorn-cli's
         // handler implements the ungraceful-close distillation chain
-        // (finalize → summarize → distill) for `ws._role === 'acorn'`
+        // (finalize → summarize → distill) for `ws._role === 'cli'`
         // sessions; idempotent w.r.t. the graceful session:end path.
         // Other plugins can use this for any per-ws-close cleanup.
         if (this.tools?._pluginManager) {
