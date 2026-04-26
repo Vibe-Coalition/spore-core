@@ -1,15 +1,17 @@
 -- acorn-cli plugin uninstall SQL.
 --
--- Removes ref-acorn-context and everything anchored to it. The CASCADE
--- on aspects.node_id → nodes.id (and attributes.aspect_id → aspects.id)
--- handles the descendants when we delete the node, but we go bottom-up
--- explicitly so the operator reading this file can see exactly what
--- gets removed and so we only touch plugin-tagged rows. Edges don't
--- cascade, so we delete those by extracted_with.
+-- Removes ref-acorn-context and everything anchored to it.
+-- Order matters because edges.source/target reference nodes.id but have
+-- no ON DELETE CASCADE: any leftover edge referencing the node would
+-- block the node DELETE with a FOREIGN KEY constraint failure.
+--
+-- We delete edges referencing this plugin's node REGARDLESS of who tagged
+-- them. Edges from other plugins / the maintainer / user activity that
+-- pointed at our node would otherwise dangle when the node is gone, so
+-- removing them is correct.
 
 DELETE FROM edges
- WHERE (source = 'ref-acorn-context' OR target = 'ref-acorn-context')
-   AND extracted_with = '{{plugin_id}}';
+ WHERE source = 'ref-acorn-context' OR target = 'ref-acorn-context';
 
 DELETE FROM attributes
  WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = 'ref-acorn-context')

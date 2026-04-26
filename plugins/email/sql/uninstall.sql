@@ -1,13 +1,16 @@
 -- email plugin uninstall SQL.
--- Removes the ref-email node + all its descendants. The aspects/attributes
--- cascade through the FK ON DELETE CASCADE, so deleting the node alone is
--- sufficient — but we explicitly delete plugin-tagged rows in dependency
--- order for clarity and to handle the edge (which doesn't cascade from
--- the source node).
+--
+-- Removes ref-email and everything anchored to it.
+-- Order matters because edges.source/target reference nodes.id but have
+-- no ON DELETE CASCADE: any leftover edge referencing the node would
+-- block the node DELETE with a FOREIGN KEY constraint failure.
+--
+-- We delete edges referencing this plugin's node REGARDLESS of who tagged
+-- them (maintainer, user activity, other plugins). They'd dangle anyway
+-- when the node is gone.
 
 DELETE FROM edges
- WHERE target = 'ref-email'
-   AND extracted_with = '{{plugin_id}}';
+ WHERE source = 'ref-email' OR target = 'ref-email';
 
 DELETE FROM attributes
  WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = 'ref-email')

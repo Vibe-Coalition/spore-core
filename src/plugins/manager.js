@@ -294,11 +294,21 @@ class PluginManager {
 
   /**
    * Default uninstall: remove every row this plugin owns by `extracted_with`.
-   * Cascades through aspects/attributes/edges; FK ON DELETE CASCADE handles
-   * dependent rows in node_sources, edge_sources, aliases, gaps, etc.
-   * Uses prepared statements so the plugin id never enters SQL as a literal.
+   * Order matters because edges.source/target reference nodes.id without
+   * ON DELETE CASCADE — any edge pointing at a plugin-owned node must go
+   * before the node DELETE, even if the edge itself was created by the
+   * maintainer / another plugin / user activity. The first DELETE handles
+   * that defensively by purging any edge whose source OR target is a
+   * plugin-owned node, regardless of who tagged the edge.
    */
   _runAutoUninstall(db, pluginId) {
+    const ownedNodeIds = db.prepare('SELECT id FROM nodes WHERE extracted_with = ?').all(pluginId).map(r => r.id);
+    if (ownedNodeIds.length > 0) {
+      // Drop any edge referencing a node we're about to delete.
+      const placeholders = ownedNodeIds.map(() => '?').join(',');
+      db.prepare(`DELETE FROM edges WHERE source IN (${placeholders}) OR target IN (${placeholders})`)
+        .run(...ownedNodeIds, ...ownedNodeIds);
+    }
     const stmts = [
       'DELETE FROM attributes WHERE extracted_with = ?',
       'DELETE FROM aspects    WHERE extracted_with = ?',
@@ -306,6 +316,23 @@ class PluginManager {
       'DELETE FROM nodes      WHERE extracted_with = ?',
     ];
     for (const s of stmts) db.prepare(s).run(pluginId);
+  }
+
+  /**
+   * Safety net for plugins shipping a custom uninstall.sql that forgets to
+   * clean up edges referencing their owned nodes. Called AFTER custom
+   * uninstall SQL runs, BEFORE the bookkeeping row is removed. Idempotent:
+   * if the custom SQL handled it, this is a no-op.
+   */
+  _purgeOrphanEdgesForPluginNodes(db, pluginId) {
+    const ownedNodeIds = db.prepare('SELECT id FROM nodes WHERE extracted_with = ?').all(pluginId).map(r => r.id);
+    if (ownedNodeIds.length === 0) return;
+    const placeholders = ownedNodeIds.map(() => '?').join(',');
+    const purged = db.prepare(`DELETE FROM edges WHERE source IN (${placeholders}) OR target IN (${placeholders})`)
+      .run(...ownedNodeIds, ...ownedNodeIds);
+    if (purged.changes > 0) {
+      this.log.debug(`[plugins] Purged ${purged.changes} orphan edge(s) referencing ${pluginId}'s nodes`);
+    }
   }
 
   /**
@@ -375,6 +402,9 @@ class PluginManager {
       if (refs && refs.uninstall) {
         const sql = this._substituteTokens(this._resolveSqlSource(api, refs.uninstall), pluginId);
         db.exec(sql);
+        // Safety net: purge any edges still pointing at this plugin's nodes
+        // in case the custom SQL forgot. No-op if it didn't.
+        this._purgeOrphanEdgesForPluginNodes(db, pluginId);
       } else {
         this._runAutoUninstall(db, pluginId);
       }
