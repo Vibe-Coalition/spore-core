@@ -830,86 +830,16 @@ class AgentLoop {
         break;
 
       } catch (e) {
-        if (abortSignal?.aborted || e.name === 'AbortError' || e.message?.includes('aborted')) {
-          this.log.info(`[abort] Session ${sessionKey} aborted mid-call`);
-          loopBroken = true;
-          break;
-        }
-        this.log.error(`Agent loop error (iteration ${iterations}):`, e.message);
-        if (e.error) this.log.error('API error detail:', JSON.stringify(e.error));
-        if (e.status === 400 && e.message?.includes('tool_use') && e.message?.includes('tool_result') && !sessionRecoveredThisCall) {
-          sessionRecoveredThisCall = true;
-          // First attempt: re-sanitize messages to strip orphaned tool pairs
-          this.log.warn(`Corrupted session in ${sessionKey} — attempting re-sanitization`);
-          messages = this._sanitizeMessages(messages);
-          if (messages.length > 1) {
-            this.log.info(`Re-sanitized to ${messages.length} messages — retrying`);
-            continue;
-          }
-          // Fallback: nuke session and retry with bare message
-          this.log.warn(`Re-sanitization insufficient for ${sessionKey} — clearing session`);
-          this.sessions.clearSession(sessionKey);
-          messages = [{ role: 'user', content: opts.content }];
-          continue;
-        }
-
-        if (e.status === 400) {
-          this.log.error('Request params — model:', this.config.model, 'msgs:', messages.length, 'tools:', this.tools.getToolDefinitions().length);
-        }
-
-        if (e.status === 429) {
-          this.log.warn('Rate limited, waiting 5s...');
-          await this._sleep(5000);
-          continue;
-        }
-
-        if (e.status === 529) {
-          this.log.warn('API overloaded, waiting 10s...');
-          await this._sleep(10000);
-          continue;
-        }
-
-        if (e.status === 500 || e.status === 502 || e.status === 503) {
-          if (!apiRetries) apiRetries = 0;
-          apiRetries++;
-          if (apiRetries <= 5) {
-            const delay = apiRetries * 5000;
-            this.log.warn(`API server error (${e.status}), retry ${apiRetries}/5 in ${delay / 1000}s...`);
-            if (opts.onStatus) { try { opts.onStatus({ type: 'api_retry', status: e.status, attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ } }
-            await this._sleep(delay);
-            continue;
-          }
-          this.log.error(`API server error (${e.status}) — all 5 retries exhausted for session ${sessionKey}`);
-        }
-
-        // Network-level failures (no HTTP status). Undici throws a TypeError
-        // with message 'fetch failed' when the TCP connection drops mid-
-        // stream, the TLS handshake times out, DNS fails, or the peer sends
-        // a reset. Also covers ECONNRESET / ETIMEDOUT / ENOTFOUND / socket
-        // hang up / premature close. This hits a LOT on custom OAI-compatible
-        // providers whose streaming endpoints are less forgiving than
-        // Anthropic's — without a retry branch the turn silently dies.
-        {
-          const msg = (e?.message || '') + ' ' + (e?.cause?.message || '') + ' ' + (e?.cause?.code || '');
-          const isNetworkFail = !e.status && /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|Premature close|network|aborted|terminated/i.test(msg);
-          if (isNetworkFail) {
-            if (!apiRetries) apiRetries = 0;
-            apiRetries++;
-            if (apiRetries <= 5) {
-              const delay = Math.min(apiRetries * 3000, 15000);
-              this.log.warn(`Network error (${(e.message || '').substring(0, 80)}), retry ${apiRetries}/5 in ${delay / 1000}s...`);
-              if (opts.onStatus) {
-                try { opts.onStatus({ type: 'api_retry', status: 'network', attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ }
-              }
-              await this._sleep(delay);
-              continue;
-            }
-            this.log.error(`Network error — all 5 retries exhausted for session ${sessionKey}`);
-          }
-        }
-
-        if (opts.onError) opts.onError(e);
-        throw e;
+        const errState = { sessionRecoveredThisCall, apiRetries };
+        const result = await this._handleIterationError(e, {
+          abortSignal, sessionKey, iterations, opts, messages, state: errState,
+        });
+        sessionRecoveredThisCall = errState.sessionRecoveredThisCall;
+        apiRetries = errState.apiRetries;
+        if (result.messages) messages = result.messages;
+        if (result.action === 'break') { loopBroken = true; break; }
+        if (result.action === 'continue') continue;
+        if (result.action === 'rethrow') throw e;
       }
     }
 
@@ -1251,6 +1181,99 @@ class AgentLoop {
         engine.afterTurn(turnData).catch(() => { /* silent: plugin best-effort */ });
       }
     }
+  }
+
+  /**
+   * Categorize errors thrown inside the inference-loop iteration and
+   * decide what to do next. Returns one of:
+   *   { action: 'break' }    — abort signal fired; caller breaks loop
+   *   { action: 'continue', messages? } — retry next iteration; caller
+   *     re-binds messages if the helper returned a sanitized array
+   *   { action: 'rethrow' }  — caller re-throws e
+   *
+   * Also mutates `ctx.state` (sessionRecoveredThisCall, apiRetries) so the
+   * caller can copy the values back into its own let-bindings. Tracks
+   * retries across iterations via that shared state.
+   */
+  async _handleIterationError(e, ctx) {
+    const { abortSignal, sessionKey, iterations, opts, messages, state } = ctx;
+
+    if (abortSignal?.aborted || e.name === 'AbortError' || e.message?.includes('aborted')) {
+      this.log.info(`[abort] Session ${sessionKey} aborted mid-call`);
+      return { action: 'break' };
+    }
+
+    this.log.error(`Agent loop error (iteration ${iterations}):`, e.message);
+    if (e.error) this.log.error('API error detail:', JSON.stringify(e.error));
+
+    // 400 with mismatched tool_use/tool_result pairs — try to recover by
+    // re-sanitizing, then fall back to clearing the session entirely.
+    if (e.status === 400 && e.message?.includes('tool_use') && e.message?.includes('tool_result') && !state.sessionRecoveredThisCall) {
+      state.sessionRecoveredThisCall = true;
+      this.log.warn(`Corrupted session in ${sessionKey} — attempting re-sanitization`);
+      const sanitized = this._sanitizeMessages(messages);
+      if (sanitized.length > 1) {
+        this.log.info(`Re-sanitized to ${sanitized.length} messages — retrying`);
+        return { action: 'continue', messages: sanitized };
+      }
+      this.log.warn(`Re-sanitization insufficient for ${sessionKey} — clearing session`);
+      this.sessions.clearSession(sessionKey);
+      return { action: 'continue', messages: [{ role: 'user', content: opts.content }] };
+    }
+
+    if (e.status === 400) {
+      this.log.error('Request params — model:', this.config.model, 'msgs:', messages.length, 'tools:', this.tools.getToolDefinitions().length);
+    }
+
+    if (e.status === 429) {
+      this.log.warn('Rate limited, waiting 5s...');
+      await this._sleep(5000);
+      return { action: 'continue' };
+    }
+
+    if (e.status === 529) {
+      this.log.warn('API overloaded, waiting 10s...');
+      await this._sleep(10000);
+      return { action: 'continue' };
+    }
+
+    if (e.status === 500 || e.status === 502 || e.status === 503) {
+      state.apiRetries = (state.apiRetries || 0) + 1;
+      if (state.apiRetries <= 5) {
+        const delay = state.apiRetries * 5000;
+        this.log.warn(`API server error (${e.status}), retry ${state.apiRetries}/5 in ${delay / 1000}s...`);
+        if (opts.onStatus) { try { opts.onStatus({ type: 'api_retry', status: e.status, attempt: state.apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ } }
+        await this._sleep(delay);
+        return { action: 'continue' };
+      }
+      this.log.error(`API server error (${e.status}) — all 5 retries exhausted for session ${sessionKey}`);
+    }
+
+    // Network-level failures (no HTTP status). Undici throws a TypeError
+    // with message 'fetch failed' when the TCP connection drops mid-
+    // stream, the TLS handshake times out, DNS fails, or the peer sends
+    // a reset. Also covers ECONNRESET / ETIMEDOUT / ENOTFOUND / socket
+    // hang up / premature close. This hits a LOT on custom OAI-compatible
+    // providers whose streaming endpoints are less forgiving than
+    // Anthropic's — without a retry branch the turn silently dies.
+    const msg = (e?.message || '') + ' ' + (e?.cause?.message || '') + ' ' + (e?.cause?.code || '');
+    const isNetworkFail = !e.status && /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|Premature close|network|aborted|terminated/i.test(msg);
+    if (isNetworkFail) {
+      state.apiRetries = (state.apiRetries || 0) + 1;
+      if (state.apiRetries <= 5) {
+        const delay = Math.min(state.apiRetries * 3000, 15000);
+        this.log.warn(`Network error (${(e.message || '').substring(0, 80)}), retry ${state.apiRetries}/5 in ${delay / 1000}s...`);
+        if (opts.onStatus) {
+          try { opts.onStatus({ type: 'api_retry', status: 'network', attempt: state.apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ }
+        }
+        await this._sleep(delay);
+        return { action: 'continue' };
+      }
+      this.log.error(`Network error — all 5 retries exhausted for session ${sessionKey}`);
+    }
+
+    if (opts.onError) opts.onError(e);
+    return { action: 'rethrow' };
   }
 
   /**
