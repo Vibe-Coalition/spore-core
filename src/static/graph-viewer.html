@@ -4934,7 +4934,7 @@ async function _populateUsersSection() {
       });
     });
   } catch (e) {
-    list.innerHTML = `<div class="settings-note" style="color:var(--danger)">${(e.message || e)}</div>`;
+    list.innerHTML = `<div class="settings-note" style="color:var(--danger)">${esc(e.message || e)}</div>`;
   }
 }
 async function _settingsPatchUser(username, patch) {
@@ -6244,7 +6244,8 @@ function _obAddCustomRow(preset = {}) {
   const row = document.createElement('div');
   row.className = 'ob-custom-row';
   row.dataset.seq = String(seq);
-  const esc = (s) => String(s || '').replace(/"/g, '&quot;');
+  // (Uses the script-scope esc() defined further down — handles all five
+  // critical HTML characters, not just the double-quote.)
   row.innerHTML = `
     <div class="ob-custom-row-head">
       <input type="text" data-cp-field="name" placeholder="prefix (e.g. glm)" value="${esc(preset.name)}">
@@ -9249,7 +9250,7 @@ function _saGetOrCreate(taskId) {
   panel.id = 'sa-panel-' + taskId;
 
   const shortId = taskId.split('_').pop();
-  panel.innerHTML = `<div class="sa-panel-header" onclick="this.nextElementSibling.classList.toggle('collapsed')"><span class="sa-panel-title">SUB ${shortId}</span><span class="sa-panel-status"></span></div><div class="sa-panel-body"></div>`;
+  panel.innerHTML = `<div class="sa-panel-header" onclick="this.nextElementSibling.classList.toggle('collapsed')"><span class="sa-panel-title">SUB ${esc(shortId)}</span><span class="sa-panel-status"></span></div><div class="sa-panel-body"></div>`;
   container.prepend(panel);
   container.classList.add('active');
 
@@ -11846,8 +11847,9 @@ function _dragEnd(e, d) {
 function _nodeDomFromId(id) {
   if (!id) return null;
   // <g class="graph-node" data-node-id="..."> wrapper set at render time.
-  const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(id) : String(id).replace(/"/g, '\\"');
-  return document.querySelector(`g.graph-node[data-node-id="${esc}"]`);
+  // CSS.escape (not HTML escape — different rules) for the selector value.
+  const cssId = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(id) : String(id).replace(/"/g, '\\"');
+  return document.querySelector(`g.graph-node[data-node-id="${cssId}"]`);
 }
 
 function _nodeIdFromDomElement(el) {
@@ -12692,11 +12694,11 @@ async function renderTokenDashboard(body) {
     const res = await fetch(API + '/api/tokens');
     data = await res.json();
   } catch (e) {
-    body.innerHTML = `<div style="color:var(--danger);font-size:0.8rem">Failed to load: ${e.message}</div>`;
+    body.innerHTML = `<div style="color:var(--danger);font-size:0.8rem">Failed to load: ${esc(e.message)}</div>`;
     return;
   }
   if (data.error) {
-    body.innerHTML = `<div style="color:var(--text-dim);font-size:0.8rem;padding:8px 0">${data.error}</div>`;
+    body.innerHTML = `<div style="color:var(--text-dim);font-size:0.8rem;padding:8px 0">${esc(data.error)}</div>`;
     return;
   }
 
@@ -15756,15 +15758,15 @@ async function fpViewFile(filePath, name) {
     return;
   }
   if (isVideoFile(name) && !remote) {
-    fpViewerContent.innerHTML = `<video src="${fileUrl}" controls preload="metadata" style="max-width:100%;max-height:calc(100vh - 200px);background:#000;border-radius:6px;"></video>`;
+    fpViewerContent.innerHTML = `<video src="${esc(fileUrl)}" controls preload="metadata" style="max-width:100%;max-height:calc(100vh - 200px);background:#000;border-radius:6px;"></video>`;
     return;
   }
   if (isAudioFile(name) && !remote) {
-    fpViewerContent.innerHTML = `<div style="padding:24px;text-align:center"><audio src="${fileUrl}" controls preload="metadata" style="width:100%;max-width:500px"></audio></div>`;
+    fpViewerContent.innerHTML = `<div style="padding:24px;text-align:center"><audio src="${esc(fileUrl)}" controls preload="metadata" style="width:100%;max-width:500px"></audio></div>`;
     return;
   }
   if (isPdfFile(name) && !remote) {
-    fpViewerContent.innerHTML = `<iframe src="${fileUrl}" style="width:100%;height:calc(100vh - 180px);border:0;border-radius:6px;background:#fff"></iframe>`;
+    fpViewerContent.innerHTML = `<iframe src="${esc(fileUrl)}" style="width:100%;height:calc(100vh - 180px);border:0;border-radius:6px;background:#fff"></iframe>`;
     return;
   }
   if (isHtmlFile(name) && !remote) {
@@ -16977,7 +16979,7 @@ async function createNewGraph() {
       if (!p) continue;
       const tab = document.createElement('div');
       tab.className = 'term-tab' + (id === focusedPaneId ? ' active' : '');
-      tab.innerHTML = `<span>${p.label}</span><span class="tab-close" title="Close">&times;</span>`;
+      tab.innerHTML = `<span>${esc(p.label)}</span><span class="tab-close" title="Close">&times;</span>`;
       tab.querySelector('.tab-close').addEventListener('click', (e) => { e.stopPropagation(); closePane(id); });
       tab.addEventListener('click', () => focusPane(id));
       tabsContainer.appendChild(tab);
