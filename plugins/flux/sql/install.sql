@@ -41,3 +41,18 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
     SELECT 'Always show generated images inline in chat: ![description](url)' AS content, 10 AS imp UNION ALL
     SELECT 'Do NOT just report a file path — the user wants to SEE the image', 9
   ) AS v;
+
+-- Append our key to the central ref-api-keys catalog so the agent's
+-- "available APIs" list stays accurate. Idempotent — won't insert if
+-- a BFL_API_KEY row already exists. The uninstall.sql sweeps it back
+-- out by content prefix.
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT
+  (SELECT id FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys'),
+  'BFL_API_KEY — FLUX image generation (api.bfl.ai)', 9, 'seed', 'flux'
+WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys')
+  AND NOT EXISTS (
+    SELECT 1 FROM attributes
+    WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys')
+      AND content LIKE 'BFL_API_KEY%'
+  );

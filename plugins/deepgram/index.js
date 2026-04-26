@@ -11,6 +11,15 @@
 const { DeepgramSTT } = require('./lib/deepgram-stt');
 
 module.exports = function register(api) {
+  // Patches the ref-api-keys catalog so the agent sees DEEPGRAM_API_KEY
+  // listed as available only when this plugin is installed. No
+  // dedicated ref node — the SDK interface is generic enough.
+  api.registerReferenceNodes({
+    install:   './sql/install.sql',
+    uninstall: './sql/uninstall.sql',
+    schemaVersion: 1,
+  });
+
   api.registerSTTProvider('deepgram', (config) => new DeepgramSTT(config), {
     isConfigured: (config) => {
       const slot = config?.plugins?.deepgram || {};
@@ -18,5 +27,5 @@ module.exports = function register(api) {
     },
   });
 
-  api.getLogger().info('Plugin ready — STT provider "deepgram" (Nova-3) registered.');
+  api.getLogger().info('Plugin ready — STT provider "deepgram" (Nova-3) + catalog entry registered.');
 };

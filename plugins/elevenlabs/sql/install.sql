@@ -18,3 +18,15 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
     SELECT 'List voices: GET https://api.elevenlabs.io/v1/voices', 7 UNION ALL
     SELECT 'Voice settings: stability (0.3-0.5), similarity_boost (0.7-0.9), style (0.5-0.7), use_speaker_boost: true', 7
   ) AS v;
+
+-- Append our key to the central ref-api-keys catalog.
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT
+  (SELECT id FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys'),
+  'XI_API_KEY — ElevenLabs TTS and sound effects', 8, 'seed', 'elevenlabs'
+WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys')
+  AND NOT EXISTS (
+    SELECT 1 FROM attributes
+    WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys')
+      AND content LIKE 'XI_API_KEY%'
+  );

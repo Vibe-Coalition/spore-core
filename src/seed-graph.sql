@@ -338,10 +338,13 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'web_serve action:"backend" auto-injects ALL vault keys as env vars in your backend process — no vault_get needed for backends', 9, 'seed', 'seed');
 
 INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-api-keys', 'available_keys', 8, 'seed');
+-- Core keys only. Plugin-owned keys (BFL_API_KEY, XI_API_KEY,
+-- DEEPGRAM_API_KEY, etc.) are appended/removed by each plugin's
+-- install.sql / uninstall.sql so the catalog stays accurate when
+-- plugins toggle on and off. OPENAI_API_KEY stays here even though
+-- the whisper plugin reads it as a fallback — it's also used by
+-- core's LLM provider routing so it's a host concern either way.
 INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'BFL_API_KEY — FLUX image generation (api.bfl.ai)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'XI_API_KEY — ElevenLabs TTS and sound effects', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'DEEPGRAM_API_KEY — Deepgram speech-to-text', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'OPENAI_API_KEY — OpenAI', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'GEMINI_API_KEY — Google Gemini (embeddings)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'SEARXNG_URL — Primary web search (self-hosted metasearch). Set to base URL, e.g. http://searxng:8080', 8, 'seed', 'seed'),

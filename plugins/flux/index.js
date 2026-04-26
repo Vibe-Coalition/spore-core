@@ -15,7 +15,12 @@ module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
     uninstall: './sql/uninstall.sql',
-    schemaVersion: 1,
+    // v2 adds the ref-api-keys catalog patch (BFL_API_KEY entry).
+    // Bumping forces plugin manager to run uninstall.sql then
+    // install.sql on next load, sweeping the legacy 'seed'-tagged
+    // catalog row and re-inserting it tagged 'flux' so uninstall
+    // works cleanly going forward.
+    schemaVersion: 2,
   });
 
   api.registerTool('generate_image', {
