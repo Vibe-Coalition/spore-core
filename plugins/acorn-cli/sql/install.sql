@@ -11,6 +11,62 @@
 -- 2) Idempotent insert (WHERE NOT EXISTS / INSERT OR IGNORE) of the node +
 --    all aspects + attributes + edges with extracted_with='{{plugin_id}}'.
 
+-- ── Self-sufficient node + base aspects ───────────────────────────
+-- Originally these came from src/seed-graph.sql:455-471 (and the edge at
+-- :541). They're INSERT OR IGNORE so they no-op on a fresh install where
+-- seed-graph.sql already ran with extracted_with='seed'; the UPDATE
+-- retags below then take ownership. On a reinstall after a clean
+-- uninstall (where the seed rows were also deleted), these recreate the
+-- node so the migrate-ref-* INSERT INTO aspects don't fail FK.
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-acorn-context', 'Acorn Client Context', 'reference',
+  'How Acorn sessions map to a scoped project on the user''s machine and how to work within that client-side environment.',
+  8, '{{plugin_id}}');
+
+INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'scope', 9, '{{plugin_id}}');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+  SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope'),
+         'Acorn sessions are bound to a specific project CWD on the user''s machine. Stay inside that project unless the user explicitly redirects you.',
+         10, 'seed', '{{plugin_id}}'
+  WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='scope')
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope') AND content LIKE 'Acorn sessions are bound%');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+  SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope'),
+         'File reads, writes, edits, and execs are sandboxed to that client project path. Paths outside the assigned project are rejected.',
+         10, 'seed', '{{plugin_id}}'
+  WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='scope')
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope') AND content LIKE 'File reads, writes%');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+  SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope'),
+         'Do NOT use /workspace or other container-local paths for Acorn project work. Those are server-side paths, not the user''s repo.',
+         10, 'seed', '{{plugin_id}}'
+  WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='scope')
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope') AND content LIKE 'Do NOT use /workspace%');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+  SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope'),
+         'When you mention files back to the user, use the client project path from the Acorn context or tool results, not a container path.',
+         8, 'seed', '{{plugin_id}}'
+  WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='scope')
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope') AND content LIKE 'When you mention files%');
+
+INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'workflow', 8, '{{plugin_id}}');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+  SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow'),
+         'Acorn CLI and Acorn Companion connect to the same server runtime, but each session preserves its own project scope and local-machine context.',
+         8, 'seed', '{{plugin_id}}'
+  WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow')
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow') AND content LIKE 'Acorn CLI and Acorn Companion%');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+  SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow'),
+         'Use the normal coding tools inside that provided project scope. Keep replies concise and execution-focused.',
+         8, 'seed', '{{plugin_id}}'
+  WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow')
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow') AND content LIKE 'Use the normal coding tools%');
+
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+VALUES ('spore', 'ref-acorn-context', 'documents', 0.8, '{{plugin_id}}');
+
 -- ── Backfill legacy seed-tagged rows ──────────────────────────────
 UPDATE nodes
    SET extracted_with = '{{plugin_id}}'
