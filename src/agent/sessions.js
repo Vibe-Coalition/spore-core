@@ -257,11 +257,13 @@ class SessionManager {
     if (sessionTokens > tokenThreshold && !this._compacting?.has(key)) {
       if (!this._compacting) this._compacting = new Set();
       this._compacting.add(key);
-      Promise.resolve().then(() => {
-        try { this._compact(key); }
-        catch (e) { this.log.warn(`[compact] Error compacting ${key}: ${e.message}`); }
-        finally { this._compacting.delete(key); }
-      });
+      // _compact returns a promise that resolves after the async summary
+      // tail completes — keep the lock held until then so a second
+      // compaction can't start concurrently for the same key.
+      Promise.resolve()
+        .then(() => this._compact(key))
+        .catch((e) => this.log.warn(`[compact] Error compacting ${key}: ${e.message}`))
+        .finally(() => this._compacting.delete(key));
     }
   }
 
@@ -307,15 +309,18 @@ class SessionManager {
    */
   truncateConsumedToolResults(key, maxResultLength = 200) {
     const rows = this.db.prepare(`
-      SELECT id, content FROM messages 
+      SELECT id, content FROM messages
       WHERE session_key = ? AND role = 'user'
       ORDER BY id ASC
     `).all(key);
 
     // Don't truncate the last user message — model may not have consumed it yet
     const toCheck = rows.slice(0, -1);
-    let truncated = 0;
 
+    // Build the list of writes first (read-only pass), then apply them
+    // in a single transaction. Avoids N round-trips and lets SQLite batch
+    // the WAL fsync.
+    const writes = [];
     for (const row of toCheck) {
       try {
         const parsed = JSON.parse(row.content);
@@ -333,20 +338,29 @@ class SessionManager {
           return { ...block, content: summary };
         });
 
-        if (changed) {
-          this.db.prepare('UPDATE messages SET content = ? WHERE id = ?')
-            .run(JSON.stringify(updated), row.id);
-          truncated++;
-        }
+        if (changed) writes.push({ id: row.id, content: JSON.stringify(updated) });
       } catch {
-        // Not JSON or not structured — skip
+        // silent: malformed JSON → fallback
       }
     }
 
-    if (truncated > 0) {
-      this.log.debug(`[tool-truncate] Truncated ${truncated} consumed tool results in ${key}`);
+    if (writes.length === 0) return 0;
+
+    // node:sqlite's DatabaseSync has no .transaction() helper (that's
+    // better-sqlite3-specific) — wrap manually so all UPDATEs share one
+    // WAL fsync.
+    const upd = this.db.prepare('UPDATE messages SET content = ? WHERE id = ?');
+    this.db.exec('BEGIN');
+    try {
+      for (const w of writes) upd.run(w.content, w.id);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      try { this.db.exec('ROLLBACK'); } catch {}
+      throw e;
     }
-    return truncated;
+
+    this.log.debug(`[tool-truncate] Truncated ${writes.length} consumed tool results in ${key}`);
+    return writes.length;
   }
   
   /**
@@ -593,8 +607,12 @@ class SessionManager {
       ).run(key, ...idsToRemove);
     }
 
-    summaryPromise.then(summary => {
+    return summaryPromise.then(summary => {
       if (summary) {
+        // Cap at 200 sessions (insertion-order eviction).
+        if (!this._compactionSummaries.has(key) && this._compactionSummaries.size >= 200) {
+          this._compactionSummaries.delete(this._compactionSummaries.keys().next().value);
+        }
         this._compactionSummaries.set(key, summary);
         this.db.prepare(`UPDATE messages SET content = ? WHERE id = ?`)
           .run(`[CONTEXT COMPACTION — ${toRemove.length} earlier turns compacted]\n${summary}\n[END CONTEXT COMPACTION]`, summaryRowId);

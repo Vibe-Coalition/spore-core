@@ -134,7 +134,7 @@ class PlaywrightBrowserBackend {
             w: metadata.deviceWidth || 800,
             h: metadata.deviceHeight || 600,
           }, buf);
-        } catch { }
+        } catch (e) { this.log.warn('[playwright-browser-backend] _cdp.send failed: ' + e.message); }
       });
     } catch (e) {
       this.log.warn(`[browser:${this.name}] Screencast start failed: ${e.message}`);
@@ -268,12 +268,12 @@ class PlaywrightBrowserBackend {
   async _cleanup() {
     this._screencastActive = false;
     if (this._cdp) {
-      try { await this._cdp.send('Page.stopScreencast'); } catch { }
-      try { await this._cdp.detach(); } catch { }
+      try { await this._cdp.send('Page.stopScreencast'); } catch (e) { this.log.warn('[playwright-browser-backend] _cdp.send failed: ' + e.message); }
+      try { await this._cdp.detach(); } catch (e) { this.log.warn('[playwright-browser-backend] _cdp.detach failed: ' + e.message); }
       this._cdp = null;
     }
     if (this._browser) {
-      try { await this._browser.close(); } catch { }
+      try { await this._browser.close(); } catch { /* silent: best-effort close */ }
       this._browser = null;
     }
     this._page = null;

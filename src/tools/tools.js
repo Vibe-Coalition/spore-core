@@ -53,6 +53,10 @@ class ToolSystem {
     this.skills = new SkillsManager(logger, config.sharedSkillsDir);
     this.gateway = null;
 
+    // Credential guard mode for write tools — 'block' (default) | 'warn' | 'off'
+    const rawGuard = (config.credentialGuard || 'block').toLowerCase();
+    this._credentialGuardMode = ['block', 'warn', 'off'].includes(rawGuard) ? rawGuard : 'block';
+
     // Global process tracker — caps total child processes to prevent fork bombs
     this._trackedPids = new Set();
     this._maxChildProcesses = config.maxChildProcesses || 32;
@@ -119,7 +123,7 @@ class ToolSystem {
     const alive = this._reapProcesses();
     if (alive >= this._maxChildProcesses) {
       this.log.error(`[proc-guard] Process cap reached (${alive}/${this._maxChildProcesses}) — refusing to spawn pid ${pid}`);
-      try { process.kill(pid, 'SIGKILL'); } catch {}
+      try { process.kill(pid, 'SIGKILL'); } catch (e) { this.log.warn('[tools] process.kill failed: ' + e.message); }
       return false;
     }
     this._trackedPids.add(pid);
@@ -131,11 +135,11 @@ class ToolSystem {
    */
   _killAllTracked() {
     for (const pid of this._trackedPids) {
-      try { process.kill(pid, 'SIGTERM'); } catch {}
+      try { process.kill(pid, 'SIGTERM'); } catch (e) { this.log.warn('[tools] process.kill failed: ' + e.message); }
     }
     setTimeout(() => {
       for (const pid of this._trackedPids) {
-        try { process.kill(pid, 'SIGKILL'); } catch {}
+        try { process.kill(pid, 'SIGKILL'); } catch (e) { this.log.warn('[tools] process.kill failed: ' + e.message); }
       }
       this._trackedPids.clear();
     }, 3000);
@@ -1265,7 +1269,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           if (row?.plan_mode === 1) {
             return this._queuePlanProposal(sessionKey, normalizedName, input);
           }
-        } catch {}
+        } catch (e) { this.log.warn('[tools] prepare failed: ' + e.message); }
       }
       return await this._executeToolDirect(normalizedName, input);
     });
@@ -1488,7 +1492,7 @@ Set wait:false when you've submitted a long background job and just want to retu
                 gateway.sendMessage(this._currentChannelId,
                   `🛡️ **Package install blocked**\n${vetResult.summary}`);
               }
-            } catch { }
+            } catch (e) { this.log.warn('[tools] getGateway failed: ' + e.message); }
           }
           return {
             error: `Package install blocked by security vetting:\n${vetResult.summary}\nIf you believe this is safe, ask the user for approval.`,
@@ -1504,7 +1508,7 @@ Set wait:false when you've submitted a long background job and just want to retu
                 gateway.sendMessage(this._currentChannelId,
                   `⚠️ **Package install warning**\n${vetResult.summary}\nProceeding anyway.`);
               }
-            } catch { }
+            } catch (e) { this.log.warn('[tools] getGateway failed: ' + e.message); }
           }
         }
       } catch (vetErr) {
@@ -1569,14 +1573,14 @@ Set wait:false when you've submitted a long background job and just want to retu
 
         if (abortSignal) {
           if (abortSignal.aborted) {
-            try { child.kill('SIGTERM'); } catch {}
+            try { child.kill('SIGTERM'); } catch (e) { this.log.warn('[tools] child.kill failed: ' + e.message); }
             this._trackedPids.delete(child.pid);
             reject(new Error('Aborted by user.'));
             return;
           }
           const onAbort = () => {
-            try { child.kill('SIGTERM'); } catch {}
-            setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000);
+            try { child.kill('SIGTERM'); } catch (e) { this.log.warn('[tools] child.kill failed: ' + e.message); }
+            setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { this.log.warn('[tools] child.kill failed: ' + e.message); } }, 2000);
           };
           abortSignal.addEventListener('abort', onAbort, { once: true });
           child.on('exit', () => abortSignal.removeEventListener('abort', onAbort));
@@ -1596,7 +1600,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           const existing = fs.existsSync(manifest) ? fs.readFileSync(manifest, 'utf8').split('\n').filter(Boolean) : [];
           const merged = [...new Set([...existing, ...pkgs])];
           fs.writeFileSync(manifest, merged.join('\n') + '\n');
-        } catch { }
+        } catch (e) { this.log.warn('[tools] replace failed: ' + e.message); }
       }
 
       return { output: truncated };
@@ -2038,12 +2042,12 @@ Set wait:false when you've submitted a long background job and just want to retu
           derivedFacts = db.prepare(
             "SELECT content, reasoning_type, confidence, premises FROM derived_facts WHERE invalidated_at IS NULL AND source_node_ids LIKE ? ORDER BY created DESC LIMIT 8"
           ).all(`%${nodeId}%`);
-        } catch {}
+        } catch (e) { this.log.warn('[tools] db.prepare failed: ' + e.message); }
 
         let gaps = [];
         try {
           gaps = db.prepare("SELECT content FROM gaps WHERE node_id = ? AND status = 'open' LIMIT 5").all(nodeId);
-        } catch {}
+        } catch (e) { this.log.warn('[tools] db.prepare failed: ' + e.message); }
 
         let block = `## ${node.label} (${node.type})${node.description ? ': ' + node.description : ''}\n`;
         if (aspectDetails.length) block += `\nFacts:\n${aspectDetails.join('\n')}\n`;
@@ -2076,7 +2080,7 @@ Set wait:false when you've submitted a long background job and just want to retu
             }
           }
         }
-      } catch {}
+      } catch (e) { this.log.warn('[tools] db.prepare failed: ' + e.message); }
 
       const fullContext = contextBlocks.join('\n---\n') + episodeContext;
 
@@ -2167,7 +2171,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const hit = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(String(raw));
         if (hit) return hit.id;
       }
-    } catch {}
+    } catch (e) { this.log.warn('[tools] learner.db.prepare failed: ' + e.message); }
     // Otherwise sanitize, but keep the broader set of characters that
     // real node IDs use. Whitespace → hyphen, strip disallowed chars,
     // collapse runs of hyphens, trim leading/trailing hyphens.
@@ -2257,7 +2261,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
           ).get('session-' + String(sessionId));
           sessionAlreadyDistilled = !!sessRow?.distilled;
-        } catch {}
+        } catch (e) { this.log.warn('[tools] db.prepare failed: ' + e.message); }
       }
       const extraJson = (sessionId && !sessionAlreadyDistilled)
         ? JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() })
@@ -2389,7 +2393,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         if (setTemp || clearTemp) {
           const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(id);
           let extraObj = {};
-          try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
+          try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[tools] JSON.parse failed: ' + e.message); }
           // Graphcorn-owned nodes: session-end distillation owns their
           // ttl lifecycle. Refuse agent-driven set/clear-temp overrides
           // when extra.sessionId is present OR the id matches the
@@ -2431,7 +2435,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
             ).get('session-' + String(acornSessionId));
             sessionAlreadyDistilled = !!sessRow?.distilled;
-          } catch {}
+          } catch (e) { this.log.warn('[tools] db.prepare failed: ' + e.message); }
         }
         const effectiveSessionId = sessionAlreadyDistilled ? null : acornSessionId;
         let extraObj;
@@ -2546,7 +2550,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           if (ext.distilled_at && input?.force !== true) {
             return { error: `Refusing to delete "${id}" — it carries distilled cross-session knowledge (distilled_at=${ext.distilled_at}). Pass force: true if you really want to delete it. Consider graph_update to remove specific stale attributes instead.` };
           }
-        } catch {}
+        } catch (e) { this.log.warn('[tools] JSON.parse failed: ' + e.message); }
         const edges = db.prepare('SELECT source, target, type FROM edges WHERE source = ? OR target = ?').all(id, id);
         db.prepare('DELETE FROM attributes WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = ?)').run(id);
         db.prepare('DELETE FROM aspects WHERE node_id = ?').run(id);
@@ -2960,14 +2964,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             if (!line) return;
             gateway.sendProgressUpdate(taskEntry.channelId, line);
             latestSummary = '';
-          } catch { }
+          } catch (e) { this.log.warn('[tools] platformManager.getGateway failed: ' + e.message); }
         };
         const sendProgressDone = (error) => {
           try {
             if (!taskEntry.channelId || !this.platformManager) return;
             const gateway = this.platformManager.getGateway(taskEntry.platform || 'discord');
             if (gateway?.sendProgressUpdate) gateway.sendProgressUpdate(taskEntry.channelId, null, error ? { error: true } : { done: true });
-          } catch { }
+          } catch (e) { this.log.warn('[tools] platformManager.getGateway failed: ' + e.message); }
         };
         sendProgress(`📋 **Task started**: ${task.substring(0, 120)}${task.length > 120 ? '…' : ''}`);
 
@@ -3387,7 +3391,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               (finalText || '').substring(0, 4000),
               { sessionId: `subagent:${taskId}`, observedAt: new Date().toISOString(), turnIdx: 0 }
             );
-          } catch { }
+          } catch (e) { this.log.warn('[tools] learner.storeEpisode failed: ' + e.message); }
         }
       } catch (e) {
         if (taskEntry.status === 'cancelled') return;
@@ -3402,7 +3406,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         taskEntry.completedAt = Date.now();
         this.log.warn(`[subagent:${taskId}] Failed: ${taskEntry.result.error}`);
         this.broadcast({ type: 'subagent:error', taskId, error: taskEntry.result.error });
-        try { if (typeof sendProgressDone === 'function') sendProgressDone(true); } catch {}
+        try { if (typeof sendProgressDone === 'function') sendProgressDone(true); } catch (e) { this.log.warn('[tools] sendProgressDone failed: ' + e.message); }
       } finally {
         clearTimeout(abortTimer);
         this._activeSubagents = Math.max(0, this._activeSubagents - 1);
@@ -3716,7 +3720,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         resolved = true;
         clearTimeout(hardTimeout);
         if (abortSignal && onAbort) {
-          try { abortSignal.removeEventListener('abort', onAbort); } catch {}
+          try { abortSignal.removeEventListener('abort', onAbort); } catch (e) { this.log.warn('[tools] abortSignal.removeEventListener failed: ' + e.message); }
         }
         if (child?.pid) this._trackedPids.delete(child.pid);
         resolve(result);
@@ -3733,15 +3737,15 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
 
       hardTimeout = setTimeout(() => {
-        try { child.kill('SIGTERM'); } catch {}
-        setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000);
+        try { child.kill('SIGTERM'); } catch (e) { this.log.warn('[tools] child.kill failed: ' + e.message); }
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { this.log.warn('[tools] child.kill failed: ' + e.message); } }, 2000);
         done({ transportError: `curl_cffi helper timed out after 22s for ${url}` });
       }, 22000);
 
       if (abortSignal) {
         onAbort = () => {
-          try { child.kill('SIGTERM'); } catch {}
-          setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000);
+          try { child.kill('SIGTERM'); } catch (e) { this.log.warn('[tools] child.kill failed: ' + e.message); }
+          setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { this.log.warn('[tools] child.kill failed: ' + e.message); } }, 2000);
           done({ error: 'Aborted by user', transport: 'curl_cffi' });
         };
         abortSignal.addEventListener('abort', onAbort, { once: true });
@@ -3845,13 +3849,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         resolved = true;
         clearTimeout(hardTimeout);
         clearTimeout(dataTimeout);
-        if (abortSignal && onAbort) try { abortSignal.removeEventListener('abort', onAbort); } catch {}
+        if (abortSignal && onAbort) try { abortSignal.removeEventListener('abort', onAbort); } catch (e) { this.log.warn('[tools] abortSignal.removeEventListener failed: ' + e.message); }
         resolve(result);
       };
 
       const hardTimeout = setTimeout(() => {
         done({ error: `Fetch timed out after 20s: ${url}` });
-        try { req.destroy(); } catch { }
+        try { req.destroy(); } catch (e) { this.log.warn('[tools] req.destroy failed: ' + e.message); }
       }, 20000);
 
       // Abort signal from agent loop (Ctrl+C)
@@ -3862,7 +3866,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
       onAbort = () => {
         done({ error: 'Aborted by user' });
-        try { req.destroy(); } catch {}
+        try { req.destroy(); } catch (e) { this.log.warn('[tools] req.destroy failed: ' + e.message); }
       };
       if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
 
@@ -3872,7 +3876,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         clearTimeout(dataTimeout);
         dataTimeout = setTimeout(() => {
           done({ error: `Stalled: no data for 10s from ${url}` });
-          try { req.destroy(); } catch {}
+          try { req.destroy(); } catch (e) { this.log.warn('[tools] req.destroy failed: ' + e.message); }
         }, 10000);
       };
 
@@ -4095,8 +4099,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             error: `File "${safe.path}" already exists (${existingStat.size} bytes). Use edit_file to make targeted changes instead of rewriting the entire file. write_file should only be used for NEW files. If you truly need to replace everything, delete the file first with exec("rm path") then write_file.`,
           };
         }
-      } catch { /* file doesn't exist, proceed */ }
+      } catch (e) { this.log.warn('[tools] fs.statSync failed: ' + e.message); }
     }
+
+    const guard = this._guardCredentialWrite(safe.path, content);
+    if (guard?.error) return { error: guard.error };
 
     try {
       const dir = path.dirname(safe.path);
@@ -4108,10 +4115,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         fs.writeFileSync(safe.path, content, 'utf8');
       }
 
-      const keyWarning = this._checkForExposedKeys(safe.path, content);
-
       const result = { success: true, path: safe.path, bytes: Buffer.byteLength(content) };
-      if (keyWarning) result.security_warning = keyWarning;
+      if (guard?.warning) result.security_warning = guard.warning;
       return result;
     } catch (e) {
       return { error: `Write failed: ${e.message}` };
@@ -4119,10 +4124,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _checkForExposedKeys(filePath, content) {
-    const webDir = path.join(this.config.workspacePath || process.cwd(), 'web');
-    if (!filePath.startsWith(webDir)) return null;
-    const ext = path.extname(filePath).toLowerCase();
-    if (!['.html', '.htm', '.js', '.mjs', '.jsx', '.ts', '.tsx', '.css', '.json', '.svelte', '.vue'].includes(ext)) return null;
+    if (typeof content !== 'string' || !content) return null;
 
     const patterns = [
       { re: /(?:sk-|sk-proj-)[A-Za-z0-9_-]{20,}/g, name: 'OpenAI/Anthropic key' },
@@ -4148,14 +4150,25 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
 
     if (found.length === 0) return null;
+    return found.map(f => `${f.type} (×${f.count})`).join(', ');
+  }
 
-    const summary = found.map(f => `${f.type} (×${f.count})`).join(', ');
-    this.log.warn(`[security] Possible exposed credentials in web file ${filePath}: ${summary}`);
-    return `⚠️ SECURITY: This web-served file appears to contain credentials (${summary}). ` +
-      'API keys in browser-visible files can be stolen. Two secure alternatives: ' +
-      '(1) Use web_fetch with credential parameter for server-side API calls. ' +
-      '(2) For webapp frontend calls, write /workspace/web/.api-proxy.json with $VAULT:KEY_NAME headers, ' +
-      'then call /api/proxy/<route> from your frontend. Keys are injected server-side from the vault.';
+  // Decides what to do about a write whose content matched _checkForExposedKeys.
+  // Returns null to allow, { warning } to allow with a note, { error } to block.
+  _guardCredentialWrite(filePath, content) {
+    if (this._credentialGuardMode === 'off') return null;
+    const summary = this._checkForExposedKeys(filePath, content);
+    if (!summary) return null;
+    const advice = `Possible exposed credentials in ${filePath}: ${summary}. ` +
+      'API keys in writable files can be stolen or accidentally committed. Two secure alternatives: ' +
+      '(1) call web_fetch with the credential parameter for server-side API calls; ' +
+      '(2) for webapp frontend calls, write /workspace/web/.api-proxy.json with $VAULT:KEY_NAME headers and call /api/proxy/<route> — keys are injected server-side from the vault.';
+    if (this._credentialGuardMode === 'warn') {
+      this.log.warn(`[security] ${advice}`);
+      return { warning: `⚠️ SECURITY: ${advice}` };
+    }
+    this.log.warn(`[security] Refused write: ${advice}`);
+    return { error: `Refused to write ${filePath}: ${summary}. ${advice} Set SPORE_CREDENTIAL_GUARD=warn to override or SPORE_CREDENTIAL_GUARD=off to disable.` };
   }
 
   _editFileTool(input) {
@@ -4178,8 +4191,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
 
       const updated = all ? content.replaceAll(old_text, new_text) : content.replace(old_text, new_text);
+      const guard = this._guardCredentialWrite(safe.path, updated);
+      if (guard?.error) return { error: guard.error };
       fs.writeFileSync(safe.path, updated, 'utf8');
-      return { success: true, path: safe.path, replacements: all ? count : 1 };
+      const result = { success: true, path: safe.path, replacements: all ? count : 1 };
+      if (guard?.warning) result.security_warning = guard.warning;
+      return result;
     } catch (e) {
       return { error: `Edit failed: ${e.message}` };
     }
@@ -4312,7 +4329,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     let realResolved = resolved;
     try {
       if (fs.existsSync(resolved)) realResolved = fs.realpathSync(resolved);
-    } catch { }
+    } catch (e) { this.log.warn('[tools] fs.existsSync failed: ' + e.message); }
 
     // Block all .env files anywhere
     const basename = path.basename(realResolved);
@@ -4389,14 +4406,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (currentSlug) registry.refreshStats(currentSlug);
 
     // Close existing connections
-    try { this.graph?.db?.close(); } catch { }
-    try { this.learner?.db?.close(); } catch { }
+    try { this.graph?.db?.close(); } catch { /* silent: best-effort close */ }
+    try { this.learner?.db?.close(); } catch { /* silent: best-effort close */ }
 
     // Close feed.js module-level DB
     try {
       const feed = require('../graph/feed');
       if (feed._closeDb) feed._closeDb();
-    } catch { }
+    } catch (e) { this.log.warn('[tools] require failed: ' + e.message); }
 
     // Update registry active pointer
     registry.setActive(slug);
@@ -4475,7 +4492,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const tmpPath = `/tmp/.env-${key}-${Date.now()}`;
       try {
         fs.writeFileSync(tmpPath, v, { mode: 0o600 });
-        setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 300_000);
+        setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch { /* silent: best-effort cleanup */ } }, 300_000);
       } catch (e) { return { error: `Failed to write temp file: ${e.message}` }; }
       return { key, found: true, path: tmpPath,
         note: `Value written to ${tmpPath} (auto-deleted in 5 min). Read it in your script: $(cat ${tmpPath}). NEVER cat/read this file in a tool call — use it inline in exec commands.` };
@@ -4573,7 +4590,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               const tmpPath = `/tmp/.vault-${key}-${Date.now()}`;
               try {
                 fs.writeFileSync(tmpPath, parsed.value, { mode: 0o600 });
-                setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 300_000);
+                setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch { /* silent: best-effort cleanup */ } }, 300_000);
               } catch (e) { resolve({ error: `Failed to write temp file: ${e.message}` }); return; }
               resolve({ key, found: true, path: tmpPath,
                 note: `Vault key written to ${tmpPath} (auto-deleted in 5 min). Read it in your script: $(cat ${tmpPath}). PREFERRED: use web_fetch with credential:"${key}" to make authenticated API calls without handling keys directly.` });
@@ -4948,7 +4965,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     const registryPath = path.join(toolsDir, 'TOOLS_REGISTRY.json');
     let registry = {};
-    try { registry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { }
+    try { registry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
 
     const ws = this.config.workspacePath || process.cwd();
     const venvPython = path.join(ws, '.venv/bin/python3');
@@ -5294,7 +5311,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const msg = await client.fetchOne(uid, { envelope: true, source: true }, { uid: true });
         if (!msg) continue;
         let parsed = null;
-        try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch {}
+        try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch (e) { this.log.warn('[tools] require failed: ' + e.message); }
         results.push(this._emailSummarize(parsed, msg.envelope, uid));
       }
     } catch (e) {
@@ -5318,9 +5335,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const msg = await client.fetchOne(uid, { envelope: true, source: true, flags: true }, { uid: true });
       if (!msg) { await client.logout().catch(() => {}); return { error: `No message with uid ${uid} in ${folder}` }; }
       let parsed = {};
-      try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch {}
+      try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch (e) { this.log.warn('[tools] require failed: ' + e.message); }
       if (markSeen && msg.flags && !msg.flags.has?.('\\Seen')) {
-        try { await client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true }); } catch {}
+        try { await client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true }); } catch (e) { this.log.warn('[tools] client.messageFlagsAdd failed: ' + e.message); }
       }
       const out = {
         uid,
@@ -5366,7 +5383,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const msg = await client.fetchOne(uid, { envelope: true, source: true }, { uid: true });
         if (!msg) continue;
         let parsed = null;
-        try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch {}
+        try { const { simpleParser } = require('mailparser'); parsed = await simpleParser(msg.source); } catch (e) { this.log.warn('[tools] require failed: ' + e.message); }
         results.push(this._emailSummarize(parsed, msg.envelope, uid));
       }
     } catch (e) {
@@ -5404,18 +5421,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const mgr = this._ensureSSHManager();
     if (!mgr) return { error: 'SSH manager not available' };
 
+    const guard = this._guardCredentialWrite(`${host}:${filePath}`, content);
+    if (guard?.error) return { error: guard.error };
+
     try {
       if (append) {
         let existing = '';
         try {
           const buf = await mgr.sftpReadFile(host, filePath, { maxBytes: 10 * 1024 * 1024 });
           existing = buf.toString('utf8');
-        } catch {}
+        } catch (e) { this.log.warn('[tools] mgr.sftpReadFile failed: ' + e.message); }
         await mgr.sftpWriteFile(host, filePath, existing + content);
       } else {
         await mgr.sftpWriteFile(host, filePath, content);
       }
-      return { ok: true, path: filePath, host, bytes: Buffer.byteLength(content, 'utf8') };
+      const result = { ok: true, path: filePath, host, bytes: Buffer.byteLength(content, 'utf8') };
+      if (guard?.warning) result.security_warning = guard.warning;
+      return result;
     } catch (e) {
       return { error: e.message };
     }
@@ -5525,7 +5547,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       // Kill if running
       const running = this._startupRunning || {};
       if (running[name]) {
-        try { running[name].kill('SIGTERM'); } catch {}
+        try { running[name].kill('SIGTERM'); } catch (e) { this.log.warn('[tools] kill failed: ' + e.message); }
         delete running[name];
       }
 
@@ -5551,13 +5573,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   _executeStartupTask(task) {
     const LOG_DIR = path.join(this.config.workspacePath || process.cwd(), '.startup-logs');
-    try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+    try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { this.log.warn('[tools] fs.mkdirSync failed: ' + e.message); }
 
     if (!this._startupRunning) this._startupRunning = {};
 
     // Kill existing process for this task name
     if (this._startupRunning[task.name]) {
-      try { this._startupRunning[task.name].kill('SIGTERM'); } catch {}
+      try { this._startupRunning[task.name].kill('SIGTERM'); } catch (e) { this.log.warn('[tools] kill failed: ' + e.message); }
       delete this._startupRunning[task.name];
     }
 
@@ -5623,7 +5645,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const HEADER = '#!/bin/sh\n# Auto-generated by startup_tasks tool — do not edit manually\n# Edits will be overwritten. Use the startup_tasks tool to manage tasks.\n\n';
 
     if (!tasks || tasks.length === 0) {
-      try { fs.writeFileSync(ON_BOOT, HEADER + 'echo "[on-boot] No startup tasks configured"\n'); } catch {}
+      try { fs.writeFileSync(ON_BOOT, HEADER + 'echo "[on-boot] No startup tasks configured"\n'); } catch (e) { this.log.warn('[tools] fs.writeFileSync failed: ' + e.message); }
       return;
     }
 
@@ -6068,7 +6090,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         sessionKey: this._ctxSessionKey() || null,
         channelId: ctx.channelId || null,
       });
-    } catch {}
+    } catch (e) { this.log.warn('[tools] broadcast failed: ' + e.message); }
     return { ok: true, id: slug };
   }
 
@@ -6108,7 +6130,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         sessionKey: row.session_key || this._ctxSessionKey() || null,
         channelId: row.channel_id || null,
       });
-    } catch {}
+    } catch (e) { this.log.warn('[tools] broadcast failed: ' + e.message); }
     // Cascade: if status flipped to done, unblock dependents whose remaining
     // blockers are all done. Cheap even on large task tables — we filter by
     // LIKE on the json column then re-check each candidate in JS.
@@ -6124,7 +6146,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           if (q.every(r => r.status === 'done')) {
             sessions.db.prepare("UPDATE tasks SET status='pending', updated=? WHERE id=?").run(now, cand.id);
           }
-        } catch {}
+        } catch (e) { this.log.warn('[tools] JSON.parse failed: ' + e.message); }
       }
     }
     return { ok: true };
@@ -6207,7 +6229,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const body = lines.slice(0, 30).map(l => String(l).slice(0, 400)).join('\n');
       const extra = lines.length > 30 ? `\n…(+${lines.length - 30} more)` : '';
       const msg = `[log_watch ${tagStr}] ${lines.length} line(s):\n${body}${extra}`;
-      try { this._agent?.interject?.(sessionKey, msg); } catch {}
+      try { this._agent?.interject?.(sessionKey, msg); } catch (e) { this.log.warn('[tools] this failed: ' + e.message); }
     };
     const resetIdleTimer = () => {
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
@@ -6239,7 +6261,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       flushBatch();
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
       if (entry.hardTimer) clearTimeout(entry.hardTimer);
-      try { this._agent?.interject?.(sessionKey, `[log_watch ${entry.tag || entry.path}] watch ended (exit ${code}, matches=${entry.matchCount}).`); } catch {}
+      try { this._agent?.interject?.(sessionKey, `[log_watch ${entry.tag || entry.path}] watch ended (exit ${code}, matches=${entry.matchCount}).`); } catch (e) { this.log.warn('[tools] ended failed: ' + e.message); }
       this._activeLogWatches.delete(watchId);
     });
     this.log.info(`[log_watch] started id=${watchId} path=${logPath} match=${match}`);
@@ -6270,7 +6292,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const entry = this._activeLogWatches?.get(watchId);
     if (!entry) return;
     entry.alive = false;
-    try { entry.child.kill('SIGTERM'); } catch {}
+    try { entry.child.kill('SIGTERM'); } catch (e) { this.log.warn('[tools] entry.child.kill failed: ' + e.message); }
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     if (entry.hardTimer) clearTimeout(entry.hardTimer);
     this.log.info(`[log_watch] stop id=${watchId} reason=${reason} matches=${entry.matchCount}`);
@@ -6373,7 +6395,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       if (typeof this._wsBroadcast === 'function') {
         this._wsBroadcast(sessionKey, { type: 'plan_proposal', proposalId: info.lastInsertRowid, tool: toolName, summary, sequence: seq });
       }
-    } catch {}
+    } catch (e) { this.log.warn('[tools] _wsBroadcast failed: ' + e.message); }
     return {
       queued: true,
       planMode: true,
@@ -6434,7 +6456,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       if (typeof this._wsBroadcast === 'function') {
         this._wsBroadcast(sessionKey, { type: 'plan_applied', results });
       }
-    } catch {}
+    } catch (e) { this.log.warn('[tools] _wsBroadcast failed: ' + e.message); }
     return { ok: true, applied: results.length, results };
   }
 
@@ -6449,7 +6471,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       if (typeof this._wsBroadcast === 'function') {
         this._wsBroadcast(sessionKey, { type: 'plan_rejected', count: info.changes });
       }
-    } catch {}
+    } catch (e) { this.log.warn('[tools] _wsBroadcast failed: ' + e.message); }
     return { ok: true, rejected: info.changes };
   }
 

@@ -137,12 +137,12 @@ class AgentLoop {
       if (this.tools._sessionContexts) this.tools._sessionContexts.delete(sessionKey);
       // Kill any per-session log watches so subprocesses don't outlive sessions.
       if (typeof this.tools.killSessionLogWatches === 'function') {
-        try { this.tools.killSessionLogWatches(sessionKey); } catch {}
+        try { this.tools.killSessionLogWatches(sessionKey); } catch (e) { this.log.warn('[loop] this.tools.killSessionLogWatches failed: ' + e.message); }
       }
       // Reject any pending ask_user prompts for this session so the tool
       // handler doesn't hang forever.
       if (typeof this.tools.cancelSessionAskUser === 'function') {
-        try { this.tools.cancelSessionAskUser(sessionKey); } catch {}
+        try { this.tools.cancelSessionAskUser(sessionKey); } catch (e) { this.log.warn('[loop] this.tools.cancelSessionAskUser failed: ' + e.message); }
       }
       // Notify any waiters (e.g. gateway retrying after abort)
       const waiters = this._sessionWaiters.get(sessionKey);
@@ -533,43 +533,12 @@ class AgentLoop {
         // Plugin middleware: beforeInference
         if (this._pluginManager) {
           for (const handler of this._pluginManager.getMiddleware('beforeInference')) {
-            try { await handler({ systemPrompt, messages, iteration: iterations }); } catch { }
+            try { await handler({ systemPrompt, messages, iteration: iterations }); } catch (e) { this.log.warn('[loop] handler failed: ' + e.message); }
           }
         }
 
-        // Check for user interjection before calling Claude.
-        // Instead of merging into tool_result arrays (where it gets ignored),
-        // inject as a clean assistant ack + user message pair so the model
-        // sees the interjection as the most recent thing.
-        const interjections = this._pendingInterjections.get(sessionKey);
-        if (interjections && interjections.length > 0) {
-          this._pendingInterjections.delete(sessionKey);
-          this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
-          // Ensure messages end with an assistant turn so we can add a fresh
-          // user message. Whether there are tool_results still pending or not,
-          // we prepend an assistant ack that reminds the model to KEEP doing
-          // what it was doing AND fold in the new input.
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg?.role === 'user') {
-            messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Interjection received. I will finish the task I was in the middle of and address the follow-up message(s) together in my next reply. I am NOT abandoning the original request.]' }] });
-          }
-          // Build the user turn: raw message(s) + an explicit reminder so the
-          // model does not drop the original task context. Without this the
-          // model often answers only the latest user message and forgets the
-          // in-flight work.
-          const raw = interjections.length === 1
-            ? interjections[0]
-            : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n\n');
-          const framed = `${raw}\n\n---\n[reminder: keep working on the original request too. Your final reply should cover BOTH the in-flight task's results and a response to this follow-up, in one coherent message.]`;
-          messages.push({ role: 'user', content: framed });
-          // Persist each interjection to session history (raw, no framing)
-          for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
-          // Give the agent headroom to respond
-          iterations = Math.max(0, iterations - 4);
-          if (opts.onStatus) {
-            try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { }
-          }
-        }
+        // Pending interjections (extracted to keep _runLoop slim)
+        iterations = this._injectPendingInterjections(sessionKey, messages, opts, iterations);
 
         const iterStart = Date.now();
         this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
@@ -587,7 +556,7 @@ class AgentLoop {
         // Plugin middleware: afterInference
         if (this._pluginManager) {
           for (const handler of this._pluginManager.getMiddleware('afterInference')) {
-            try { await handler({ response, iteration: iterations }); } catch { }
+            try { await handler({ response, iteration: iterations }); } catch (e) { this.log.warn('[loop] handler failed: ' + e.message); }
           }
         }
 
@@ -616,31 +585,10 @@ class AgentLoop {
 
         // If no tool calls, we're done — this text IS the final response
         if (toolBlocks.length === 0 || response.stop_reason === 'end_turn') {
-          if (responseText) {
-            finalText = responseText;
-          }
-          // Store in session regardless (for context continuity)
-          if (finalText) {
-            this.sessions.addMessage(sessionKey, 'assistant', finalText);
-          }
-          // If the final text was already sent as intermediate, don't re-send it
-          if (finalText && finalText === lastSentIntermediate) {
-            finalText = null;
-          }
-          // Before breaking: if a user interjection arrived while we were streaming,
-          // don't exit — send the current text as intermediate and continue the loop
-          // so the interjection gets processed on the next iteration.
-          const pendingIj = this._pendingInterjections.get(sessionKey);
-          if (pendingIj && pendingIj.length > 0) {
-            this.log.info(`[interject] Interjection pending at end_turn — continuing loop`);
-            if (finalText && opts.onTextDelta) {
-              // The text was already streamed via deltas, just record it
-              lastSentIntermediate = finalText;
-            }
-            messages.push({ role: 'assistant', content: response.content });
-            finalText = null;
-            continue;
-          }
+          const r = this._handleEndTurn({ response, responseText, finalText, lastSentIntermediate, sessionKey, opts, messages });
+          finalText = r.finalText;
+          lastSentIntermediate = r.lastSentIntermediate;
+          if (r.action === 'continue') continue;
           break;
         }
 
@@ -662,41 +610,12 @@ class AgentLoop {
         // hit the output limit. The tool JSON is truncated and unusable.
         // Notify user, add continuation message, and let the model retry with smaller output.
         if (response.stop_reason === 'max_tokens') {
-          this.log.warn(`[agent] Iter ${iterations}: hit max_tokens (${iterUsage.output_tokens || '?'} out) — tool call truncated`);
-          if (opts.onStatus) { try { opts.onStatus({ type: 'truncated', iteration: iterations, outputTokens: iterUsage.output_tokens }); } catch { } }
-
-          // Store what we have (text only, skip truncated tool blocks)
-          if (responseText) {
-            this.sessions.addMessage(sessionKey, 'assistant', responseText);
-            messages.push({ role: 'assistant', content: [{ type: 'text', text: responseText }] });
-          } else {
-            messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Response truncated at output token limit]' }] });
-            this.sessions.addMessage(sessionKey, 'assistant', '[Response truncated at output token limit]');
-          }
-          messages.push({ role: 'user', content: '[SYSTEM: Your last response was truncated at the output token limit. Your tool call was NOT executed because the JSON was incomplete. Break large operations into smaller steps — write files in sections using edit_file to append, or split into multiple files. Do NOT attempt to write an entire large file in one tool call.]' });
-          this.sessions.addMessage(sessionKey, 'user', '[System: output truncated, retry with smaller operations]');
+          this._handleMaxTokens({ iterations, iterUsage, responseText, sessionKey, opts, messages });
           continue;
         }
 
-        // 2-tier escalation: casual → normal on any tool use.
-        // Planner (Opus) is reserved for explicit delegation only — triggered
-        // when the agent calls delegate_task, not on routine tool use.
-        if (toolBlocks.length > 0 && activeModel) {
-          const casualM = this.config.casualModel || this.config.normalModel;
-          const normalM = this.config.normalModel || this.config.plannerModel;
-          if (activeModel === casualM && casualM !== normalM) {
-            activeModel = normalM;
-            this.log.info(`[escalation] casual → normal (${activeModel})`);
-          }
-          const plannerM = this.config.plannerModel;
-          if (activeModel === normalM && normalM !== plannerM) {
-            const hasDelegation = toolBlocks.some(b => b.name === 'delegate_task');
-            if (hasDelegation) {
-              activeModel = plannerM;
-              this.log.info(`[escalation] normal → planner (${activeModel}) — delegation requested`);
-            }
-          }
-        }
+        // 2-tier escalation (extracted)
+        activeModel = this._maybeEscalateModel(toolBlocks, activeModel);
         if (toolBlocks.length > 0 && response.stop_reason === 'tool_use') {
           // Store compact version in session — trim large tool inputs for history
           const compactContent = response.content.map(block => {
@@ -711,150 +630,10 @@ class AgentLoop {
           this.sessions.addMessage(sessionKey, 'assistant', compactContent);
           messages.push({ role: 'assistant', content: response.content });
 
-          const toolResults = [];
-          let criticalBlock = false;
-
-          // Safe-to-parallelize tools: read-only, no side effects on each other
-          const PARALLEL_SAFE = new Set(['web_search', 'web_fetch', 'read_file', 'graph_query', 'message_read', 'task_status']);
-
-          const executeOneTool = async (toolBlock) => {
-            if (abortSignal?.aborted) {
-              return {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: JSON.stringify({ error: 'Aborted by user.' }),
-              };
-            }
-
-            this.log.info(`Tool call: ${toolBlock.name}(${JSON.stringify(toolBlock.input).substring(0, 100)})`);
-
-            if (toolBlock.input?._parse_error) {
-              this.log.warn(`[agent] Tool ${toolBlock.name}: argument JSON was malformed`);
-              return {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: JSON.stringify({ error: toolBlock.input._parse_error }),
-              };
-            }
-
-            const callHash = this._hashToolCall(toolBlock.name, toolBlock.input);
-            const loopCheck = this._checkToolLoop(loopTracker, callHash, toolBlock.name);
-
-            if (loopCheck.blocked) {
-              this.log.warn(`[loop-detect] CRITICAL: ${loopCheck.message}`);
-              criticalBlock = true;
-              return {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: JSON.stringify({ error: loopCheck.message }),
-              };
-            }
-
-            if (toolBlock.name === 'delegate_task') delegatedThisTurn = true;
-
-            const toolDetail = this._toolInputSummary(toolBlock.name, toolBlock.input);
-            graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
-            if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { } }
-            const toolExecStart = Date.now();
-            // Pass the session's context explicitly so concurrent sessions
-            // don't race on a shared "current session" field in tools.js.
-            const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
-            let result;
-            if (opts.onToolExecute) {
-              result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
-              if (result === null || result === undefined) {
-                result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
-              }
-            } else {
-              result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
-            }
-            let resultContent = JSON.stringify(result);
-
-            const toolExecMs = Date.now() - toolExecStart;
-            this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
-            if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { } }
-
-            if (opts.onStatus && !result.error) {
-              try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch { }
-            }
-
-            toolLog.push({
-              tool: toolBlock.name,
-              input: JSON.stringify(toolBlock.input).substring(0, 300),
-              resultPreview: resultContent.substring(0, 300),
-              succeeded: !result.error,
-            });
-
-            const defaultCap = this.config.maxToolResultChars || 30000;
-            const toolCaps = { read_file: 120000, web_fetch: 30000, exec: 30000, message_read: 15000, graph_query: 15000 };
-            const maxResultChars = toolCaps[toolBlock.name] ?? defaultCap;
-            if (resultContent.length > maxResultChars) {
-              const truncated = resultContent.length;
-              resultContent = resultContent.substring(0, maxResultChars)
-                + `\n\n[OUTPUT TRUNCATED: ${truncated} chars → ${maxResultChars}. Use offset/limit params for large files.]`;
-              this.log.warn(`Tool result truncated: ${toolBlock.name} returned ${truncated} chars`);
-            }
-
-            const resultHash = this._hashResult(resultContent);
-            this._recordToolResult(loopTracker, callHash, resultHash);
-
-            if (loopCheck.warning) {
-              this.log.warn(`[loop-detect] WARNING: ${loopCheck.message}`);
-              resultContent += `\n\n--- WARNING: ${loopCheck.message} ---`;
-            }
-
-            return {
-              type: 'tool_result',
-              tool_use_id: toolBlock.id,
-              content: resultContent,
-            };
-          };
-
-          // Partition tools into parallel-safe batches and sequential ones.
-          // A contiguous run of parallel-safe tools executes concurrently;
-          // anything else runs sequentially between batches.
-          // Race each tool against the abort signal so a stuck tool doesn't block the loop
-          const abortRace = abortSignal ? (tb) => Promise.race([
-            executeOneTool(tb),
-            new Promise(resolve => {
-              const onAbort = () => resolve({ type: 'tool_result', tool_use_id: tb.id, content: JSON.stringify({ error: 'Aborted by user.' }) });
-              if (abortSignal.aborted) { onAbort(); return; }
-              abortSignal.addEventListener('abort', onAbort, { once: true });
-            }),
-          ]) : executeOneTool;
-
-          const allParallel = toolBlocks.length > 1 && toolBlocks.every(t => PARALLEL_SAFE.has(t.name));
-          if (allParallel) {
-            this.log.info(`[agent] Executing ${toolBlocks.length} tools in parallel: ${toolBlocks.map(t => t.name).join(', ')}`);
-            if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: toolBlocks.length, tools: toolBlocks.map(t => t.name) }); } catch { } }
-            const results = await Promise.all(toolBlocks.map(tb => abortRace(tb)));
-            toolResults.push(...results);
-          } else {
-            // Mixed batch: run parallel-safe prefix concurrently, then sequential remainder
-            let i = 0;
-            while (i < toolBlocks.length && !abortSignal?.aborted) {
-              // Collect contiguous parallel-safe run
-              const batch = [];
-              while (i < toolBlocks.length && PARALLEL_SAFE.has(toolBlocks[i].name)) {
-                batch.push(toolBlocks[i]);
-                i++;
-              }
-              if (batch.length > 1) {
-                this.log.info(`[agent] Parallel batch: ${batch.length} tools (${batch.map(t => t.name).join(', ')})`);
-                if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: batch.length, tools: batch.map(t => t.name) }); } catch { } }
-                const results = await Promise.all(batch.map(tb => abortRace(tb)));
-                toolResults.push(...results);
-              } else if (batch.length === 1) {
-                toolResults.push(await abortRace(batch[0]));
-              }
-              if (abortSignal?.aborted) break;
-              // Execute next sequential tool
-              if (i < toolBlocks.length) {
-                toolResults.push(await abortRace(toolBlocks[i]));
-                i++;
-              }
-            }
-          }
+          const dispatch = await this._executeToolBatch(toolBlocks, { abortSignal, sessionKey, loopTracker, toolLog, opts });
+          const toolResults = dispatch.toolResults;
+          const criticalBlock = dispatch.criticalBlock;
+          if (dispatch.delegated) delegatedThisTurn = true;
 
           if (abortSignal?.aborted) {
             this.log.info(`[abort] Session ${sessionKey} aborted during tool execution`);
@@ -876,27 +655,7 @@ class AgentLoop {
             }
           }
 
-          messages.push({ role: 'user', content: toolResults });
-
-          // Store compressed tool results in session — full results only needed for current turn
-          const compressedResults = toolResults.map(tr => ({
-            ...tr,
-            content: typeof tr.content === 'string' && tr.content.length > 1500
-              ? tr.content.substring(0, 1500) + `\n[...truncated from ${tr.content.length} chars for session storage]`
-              : tr.content,
-          }));
-          this.sessions.addMessage(sessionKey, 'user', compressedResults);
-
-          // Compress old tool results: model already saw them, no need to resend full text.
-          // Only compress results from PREVIOUS iterations (not the one we just added).
-          if (iterations > 1) {
-            this._compressOldToolResults(messages, toolResults);
-          }
-
-          // Truncate consumed tool results in the DB so future getHistory calls are lighter
-          if (iterations > 1) {
-            this.sessions.truncateConsumedToolResults(sessionKey);
-          }
+          this._persistToolResults(sessionKey, messages, toolResults, iterations);
 
           // Mid-loop token check: use API-reported input tokens (accurate) when available,
           // otherwise estimate from the last two messages we just pushed (assistant + tool results).
@@ -933,86 +692,16 @@ class AgentLoop {
         break;
 
       } catch (e) {
-        if (abortSignal?.aborted || e.name === 'AbortError' || e.message?.includes('aborted')) {
-          this.log.info(`[abort] Session ${sessionKey} aborted mid-call`);
-          loopBroken = true;
-          break;
-        }
-        this.log.error(`Agent loop error (iteration ${iterations}):`, e.message);
-        if (e.error) this.log.error('API error detail:', JSON.stringify(e.error));
-        if (e.status === 400 && e.message?.includes('tool_use') && e.message?.includes('tool_result') && !sessionRecoveredThisCall) {
-          sessionRecoveredThisCall = true;
-          // First attempt: re-sanitize messages to strip orphaned tool pairs
-          this.log.warn(`Corrupted session in ${sessionKey} — attempting re-sanitization`);
-          messages = this._sanitizeMessages(messages);
-          if (messages.length > 1) {
-            this.log.info(`Re-sanitized to ${messages.length} messages — retrying`);
-            continue;
-          }
-          // Fallback: nuke session and retry with bare message
-          this.log.warn(`Re-sanitization insufficient for ${sessionKey} — clearing session`);
-          this.sessions.clearSession(sessionKey);
-          messages = [{ role: 'user', content: opts.content }];
-          continue;
-        }
-
-        if (e.status === 400) {
-          this.log.error('Request params — model:', this.config.model, 'msgs:', messages.length, 'tools:', this.tools.getToolDefinitions().length);
-        }
-
-        if (e.status === 429) {
-          this.log.warn('Rate limited, waiting 5s...');
-          await this._sleep(5000);
-          continue;
-        }
-
-        if (e.status === 529) {
-          this.log.warn('API overloaded, waiting 10s...');
-          await this._sleep(10000);
-          continue;
-        }
-
-        if (e.status === 500 || e.status === 502 || e.status === 503) {
-          if (!apiRetries) apiRetries = 0;
-          apiRetries++;
-          if (apiRetries <= 5) {
-            const delay = apiRetries * 5000;
-            this.log.warn(`API server error (${e.status}), retry ${apiRetries}/5 in ${delay / 1000}s...`);
-            if (opts.onStatus) { try { opts.onStatus({ type: 'api_retry', status: e.status, attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { } }
-            await this._sleep(delay);
-            continue;
-          }
-          this.log.error(`API server error (${e.status}) — all 5 retries exhausted for session ${sessionKey}`);
-        }
-
-        // Network-level failures (no HTTP status). Undici throws a TypeError
-        // with message 'fetch failed' when the TCP connection drops mid-
-        // stream, the TLS handshake times out, DNS fails, or the peer sends
-        // a reset. Also covers ECONNRESET / ETIMEDOUT / ENOTFOUND / socket
-        // hang up / premature close. This hits a LOT on custom OAI-compatible
-        // providers whose streaming endpoints are less forgiving than
-        // Anthropic's — without a retry branch the turn silently dies.
-        {
-          const msg = (e?.message || '') + ' ' + (e?.cause?.message || '') + ' ' + (e?.cause?.code || '');
-          const isNetworkFail = !e.status && /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|Premature close|network|aborted|terminated/i.test(msg);
-          if (isNetworkFail) {
-            if (!apiRetries) apiRetries = 0;
-            apiRetries++;
-            if (apiRetries <= 5) {
-              const delay = Math.min(apiRetries * 3000, 15000);
-              this.log.warn(`Network error (${(e.message || '').substring(0, 80)}), retry ${apiRetries}/5 in ${delay / 1000}s...`);
-              if (opts.onStatus) {
-                try { opts.onStatus({ type: 'api_retry', status: 'network', attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { }
-              }
-              await this._sleep(delay);
-              continue;
-            }
-            this.log.error(`Network error — all 5 retries exhausted for session ${sessionKey}`);
-          }
-        }
-
-        if (opts.onError) opts.onError(e);
-        throw e;
+        const errState = { sessionRecoveredThisCall, apiRetries };
+        const result = await this._handleIterationError(e, {
+          abortSignal, sessionKey, iterations, opts, messages, state: errState,
+        });
+        sessionRecoveredThisCall = errState.sessionRecoveredThisCall;
+        apiRetries = errState.apiRetries;
+        if (result.messages) messages = result.messages;
+        if (result.action === 'break') { loopBroken = true; break; }
+        if (result.action === 'continue') continue;
+        if (result.action === 'rethrow') throw e;
       }
     }
 
@@ -1059,254 +748,12 @@ class AgentLoop {
     // Signal LLM is idle so learner can process its queue
     if (this.learner) this.learner.setLLMBusy(false);
 
-    // Async learning — fire and forget, never delays response
-    const learningMode = this.config.learningMode || 'always';
-    if (finalText && this.learner && learningMode === 'always') {
-      this.learner.extractAndLearn(opts.content, finalText, {
-        userName: opts.userName,
-        channelName: opts.channelName,
-        toolCalls: toolLog.length > 0 ? toolLog : undefined,
-        // graphcorn: pass the sessionId (= opts.channelId for acorn —
-        // see web.js:4719 where agentOpts.channelId is set to the WS
-        // sessionId). The learner uses this to link every newly-
-        // created entity to the session-<id> node via a
-        // `discovered_in` edge. Only fires for cli-platform turns
-        // where the session node was actually created at session:start.
-        sessionId: opts.platform === 'cli' ? opts.channelId : null,
-      }).catch(e => this.log.error('[learner] Background extraction error:', e.message));
-    }
-
-    // Project node — append a one-line activity note so cross-session
-    // memory accumulates. Captures user prompt + tool-call summary so
-    // the agent can later graph_query and see "what we worked on
-    // last time in this project". Cheap (one INSERT, capped at 50).
-    if (opts.projectContext && this.learner && (finalText || toolLog.length)) {
-      try {
-        const projects = require('../graph/projects');
-        const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
-        const tools = toolLog.length ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]` : '';
-        const summary = `${userSnip}${tools}`;
-        projects.noteProjectInteraction(this.learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
-      } catch (e) {
-        this.log.warn(`[project-node] note failed: ${e.message}`);
-      }
-    }
-
-    // graphcorn — failure capture. Per-session ring buffer of recent
-    // failed exec calls; when a SUBSEQUENT successful exec runs a
-    // "similar" command (same first token + similar target) we
-    // synthesize a `failure_fix` discovery so the user doesn't have
-    // to relearn how to escape that specific gotcha next session.
-    // Cross-round (within last 5 turns + 30min wall clock) so it
-    // catches both immediate retries and "tried other stuff first"
-    // resolutions. Server-side only — invisible to the agent.
-    if (opts.platform === 'cli' && opts.channelId && toolLog.length) {
-      try {
-        if (!this._sessionFailures) this._sessionFailures = new Map();
-        const sessKey = String(opts.channelId);
-        const buf = this._sessionFailures.get(sessKey) || [];
-        const now = Date.now();
-        const turn = (() => {
-          // Reuse the turn count we just incremented — read it back
-          // from the lifecycle aspect on the session node.
-          try {
-            const sessId = 'session-' + sessKey;
-            const row = this.learner?.db?.prepare(
-              "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'turn_count:%'"
-            ).get(sessId);
-            const m = row && String(row.content).match(/turn_count:\s*(\d+)/);
-            return m ? parseInt(m[1], 10) : 0;
-          } catch { return 0; }
-        })();
-
-        // Helper: extract the first command token + a "target" (first
-        // path-shaped or URL-shaped argument) for similarity matching.
-        const parseCmd = (cmd) => {
-          if (typeof cmd !== 'string') return { token: '', target: '' };
-          const trimmed = cmd.trim().replace(/^cd\s+\S+\s*&&\s*/, '');
-          const parts = trimmed.split(/\s+/);
-          let token = (parts[0] || '').toLowerCase();
-          if ((token === 'npx' || token === 'pnpx' || token === 'bunx' || token === 'yarn' || token === 'pnpm' || token === 'bun' || token === 'npm') && parts[1]) {
-            token = token + ' ' + parts[1].toLowerCase();
-          }
-          const target = parts.slice(1).find(p => /[\\/.]/.test(p) || p.startsWith('http')) || '';
-          return { token, target };
-        };
-
-        for (const t of toolLog) {
-          if (t.tool !== 'exec') continue;
-          // Reconstruct the input — toolLog stores it as JSON string capped at 300
-          let cmd = '';
-          try {
-            const inp = typeof t.input === 'string' ? JSON.parse(t.input) : t.input;
-            cmd = inp?.command || '';
-          } catch {}
-          if (!cmd) continue;
-          const parsed = parseCmd(cmd);
-          if (t.succeeded === false) {
-            // Capture failure for later matching
-            buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300) });
-            if (buf.length > 10) buf.shift();
-          } else {
-            // Look for a recent similar failure (same token, target overlap or both empty)
-            const fiveTurnsAgo = turn - 5;
-            const thirtyMinAgo = now - 30 * 60 * 1000;
-            const match = buf.find(f =>
-              f.token === parsed.token &&
-              f.turn >= fiveTurnsAgo &&
-              f.ts >= thirtyMinAgo &&
-              (!parsed.target || !f.target || parsed.target.includes(f.target) || f.target.includes(parsed.target))
-            );
-            if (match) {
-              // Synthesize failure_fix discovery via the tool wrapper —
-              // get the session/user context via _execContext.run so
-              // _noteDiscoveryTool's ALS lookup populates correctly.
-              try {
-                const _execContext = this.tools?.constructor?._execContext || null; // not exposed
-                // Simpler: build a synthetic ctx and call the tool directly.
-                const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${match.preview ? '≠0' : '?'}). Fixed by: ${cmd.slice(0, 200)}`;
-                if (this.tools?._noteDiscoveryTool) {
-                  // Use AsyncLocalStorage from the tools module so the
-                  // ctx-derived sessionId/userId/cwd populate correctly.
-                  const { AsyncLocalStorage } = require('async_hooks');
-                  // The tools module's _execContext is a private const;
-                  // we can't get to it from here cleanly. Instead patch
-                  // _currentChannelId / _currentUserId on the tools
-                  // singleton (they're the fallback path inside
-                  // _resolveFallbackCtx).
-                  this.tools._currentChannelId = sessKey;
-                  this.tools._currentUserId = opts.userId || 'anon';
-                  this.tools._currentPlatform = 'cli';
-                  if (opts.projectContext?.cwd) this.tools._currentCwd = opts.projectContext.cwd;
-                  const r = this.tools._noteDiscoveryTool({ text, kind: 'failure_fix' });
-                  if (r?.ok) {
-                    this.log.info(`[graphcorn] failure_fix captured: ${r.nodeId} (${match.token} → ${parsed.token})`);
-                  }
-                }
-              } catch (e) {
-                this.log.warn(`[graphcorn] failure_fix capture failed: ${e.message}`);
-              }
-              // Drop the matched failure so we don't re-fire on a third success
-              buf.splice(buf.indexOf(match), 1);
-            }
-          }
-        }
-        this._sessionFailures.set(sessKey, buf);
-      } catch (e) {
-        this.log.warn(`[graphcorn] failure capture loop failed: ${e.message}`);
-      }
-    }
-
-    // graphcorn — round checkpoint. Each finished round leaves a
-    // breadcrumb on the session node's `rounds` aspect: turn N | tools
-    // used | files touched | first sentence of the assistant reply.
-    // Capped at the last 50 entries so the session node doesn't balloon
-    // (full history still in episodes table). Also bumps the
-    // turn_count attribute on lifecycle. Only for acorn turns where
-    // the session node exists.
-    // Trace condition — user observed sessions (T123901) where the
-    // round checkpoint silently didn't fire despite the conditions
-    // appearing to match. Logging the entry + condition values so we
-    // can catch whatever path is skipping it.
-    try {
-      this.log.info(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
-    } catch {}
-    if (opts.platform === 'cli' && opts.channelId && this.learner?.db) {
-      try {
-        const sessions = require('../graph/sessions');
-        const turn = sessions.bumpTurnCount(this.learner, opts.channelId);
-        this.log.info(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
-        const sessId = 'session-' + opts.channelId;
-        const sessExists = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
-        if (sessExists) {
-          let asp = this.learner.db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'rounds'").get(sessId);
-          if (!asp) {
-            this.learner.db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'rounds', 7, 'graphcorn')").run(sessId);
-            asp = { id: this.learner.db.prepare('SELECT last_insert_rowid() AS id').get().id };
-          }
-          // Build a richer breadcrumb. The old format was just
-          // "tools | files | first sentence" which gave the summarizer
-          // almost nothing to work with. Now we also capture:
-          //   - the user's prompt (truncated) so the summarizer knows
-          //     what was asked, not just what was done
-          //   - exec commands attempted (first ~80 chars each)
-          //   - files touched (already had basenames; now full paths)
-          //   - non-zero exec outcomes (error hint for "what failed")
-          //   - a bigger assistant reply preview (~300 chars)
-          // toolLog entries store input as JSON.stringify(...).slice(0, 300)
-          // — a truncated STRING. Earlier checkpoint code was doing
-          // `t.input?.path` expecting an object, which always returned
-          // undefined → "files: none" even when write_file ran. Parse
-          // the string first; fall through on parse failure.
-          const parseInput = (t) => {
-            if (t == null || t.input == null) return null;
-            if (typeof t.input === 'object') return t.input;
-            try { return JSON.parse(t.input); } catch { return null; }
-          };
-          const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
-          const fileSet = new Set();
-          const execCmds = [];
-          let failedExecs = 0;
-          for (const t of toolLog) {
-            if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
-              const inp = parseInput(t);
-              const p = inp?.path;
-              // Store FULL path (not just basename) so the summarizer
-              // can see .acorn/scratch/ vs project-root pollution.
-              if (typeof p === 'string') fileSet.add(p);
-            }
-            if (t.tool === 'exec') {
-              const inp = parseInput(t);
-              const cmd = inp?.command || '';
-              // Bumped per-command preview from 100 → 200. The prior
-              // cap was chopping multi-part commands mid-flag and
-              // losing the "what was actually run" context.
-              if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
-              if (t.succeeded === false) failedExecs++;
-            }
-          }
-          const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
-          // Show up to 6 exec commands (was 3) so full workflows
-          // survive to the summary.
-          const execPart = execCmds.length
-            ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 6).join(' ; ')}${execCmds.length > 6 ? ' …' : ''}`
-            : '';
-          const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 250);
-          const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
-          // Bumped reply cap 300 → 800. A 300-char window cut off most
-          // multi-part replies right when they got to the substantive
-          // content (post-preamble). 800 captures a solid paragraph.
-          const replyPreview = replySnip.length > 800 ? replySnip.slice(0, 797) + '…' : replySnip;
-          const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
-          this.learner.db.prepare(
-            "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
-          ).run(asp.id, content);
-          // Trim to last 50 attributes on this aspect so the session
-          // node doesn't grow unbounded over long conversations.
-          const overflow = this.learner.db.prepare(
-            'SELECT id FROM attributes WHERE aspect_id = ? ORDER BY id DESC LIMIT -1 OFFSET 50'
-          ).all(asp.id);
-          if (overflow.length) {
-            const ids = overflow.map(r => r.id);
-            this.learner.db.prepare(`DELETE FROM attributes WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
-          }
-        }
-      } catch (e) {
-        this.log.warn(`[graphcorn] round checkpoint failed: ${e.message}`);
-      }
-    }
-
-    // Plugin context engines: afterTurn
-    if (this._pluginManager) {
-      const turnData = { userMessage: opts.content, assistantResponse: finalText, toolCalls: toolLog };
-      for (const engine of this._pluginManager.getContextEngines()) {
-        if (engine.engine?.afterTurn) {
-          engine.engine.afterTurn(turnData).catch(() => { });
-        } else if (engine.afterTurn) {
-          engine.afterTurn(turnData).catch(() => { });
-        }
-      }
-    }
+    // Post-loop fire-and-forget hooks (extracted to keep _runLoop slim)
+    this._kickOffLearnerExtraction(opts, finalText, toolLog);
+    this._noteProjectActivity(opts, finalText, toolLog);
+    this._captureFailureFix(opts, toolLog);
+    this._recordRoundCheckpoint(opts, toolLog, finalText);
+    this._firePluginAfterTurn(opts, finalText, toolLog);
 
     if (opts.onComplete) opts.onComplete(finalText, totalUsage);
 
@@ -1322,6 +769,724 @@ class AgentLoop {
       toolUsage: Object.keys(toolUsage).length > 0 ? toolUsage : undefined,
       iterations,
       sessionKey,
+    };
+  }
+
+  // ── Post-loop graphcorn helpers (extracted from _runLoop) ───────────
+
+  /**
+   * Per-session ring buffer of recent failed exec calls. When a SUBSEQUENT
+   * successful exec runs a "similar" command (same first token + similar
+   * target), synthesize a `failure_fix` discovery so the user doesn't have
+   * to relearn how to escape that specific gotcha next session. Cross-round
+   * (within last 5 turns + 30min wall clock) so it catches both immediate
+   * retries and "tried other stuff first" resolutions. Server-side only —
+   * invisible to the agent.
+   */
+  _captureFailureFix(opts, toolLog) {
+    if (!(opts.platform === 'cli' && opts.channelId && toolLog.length)) return;
+    try {
+      if (!this._sessionFailures) this._sessionFailures = new Map();
+      const sessKey = String(opts.channelId);
+      const buf = this._sessionFailures.get(sessKey) || [];
+      const now = Date.now();
+      const turn = (() => {
+        // Reuse the turn count we just incremented — read it back
+        // from the lifecycle aspect on the session node.
+        try {
+          const sessId = 'session-' + sessKey;
+          const row = this.learner?.db?.prepare(
+            "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'turn_count:%'"
+          ).get(sessId);
+          const m = row && String(row.content).match(/turn_count:\s*(\d+)/);
+          return m ? parseInt(m[1], 10) : 0;
+        } catch { return 0; }
+      })();
+
+      // Helper: extract the first command token + a "target" (first
+      // path-shaped or URL-shaped argument) for similarity matching.
+      const parseCmd = (cmd) => {
+        if (typeof cmd !== 'string') return { token: '', target: '' };
+        const trimmed = cmd.trim().replace(/^cd\s+\S+\s*&&\s*/, '');
+        const parts = trimmed.split(/\s+/);
+        let token = (parts[0] || '').toLowerCase();
+        if ((token === 'npx' || token === 'pnpx' || token === 'bunx' || token === 'yarn' || token === 'pnpm' || token === 'bun' || token === 'npm') && parts[1]) {
+          token = token + ' ' + parts[1].toLowerCase();
+        }
+        const target = parts.slice(1).find(p => /[\\/.]/.test(p) || p.startsWith('http')) || '';
+        return { token, target };
+      };
+
+      for (const t of toolLog) {
+        if (t.tool !== 'exec') continue;
+        // Reconstruct the input — toolLog stores it as JSON string capped at 300
+        let cmd = '';
+        try {
+          const inp = typeof t.input === 'string' ? JSON.parse(t.input) : t.input;
+          cmd = inp?.command || '';
+        } catch { /* silent: malformed JSON → fallback */ }
+        if (!cmd) continue;
+        const parsed = parseCmd(cmd);
+        if (t.succeeded === false) {
+          // Capture failure for later matching
+          buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300) });
+          if (buf.length > 10) buf.shift();
+        } else {
+          // Look for a recent similar failure (same token, target overlap or both empty)
+          const fiveTurnsAgo = turn - 5;
+          const thirtyMinAgo = now - 30 * 60 * 1000;
+          const match = buf.find(f =>
+            f.token === parsed.token &&
+            f.turn >= fiveTurnsAgo &&
+            f.ts >= thirtyMinAgo &&
+            (!parsed.target || !f.target || parsed.target.includes(f.target) || f.target.includes(parsed.target))
+          );
+          if (match) {
+            // Synthesize failure_fix discovery via the tool wrapper —
+            // get the session/user context via _execContext.run so
+            // _noteDiscoveryTool's ALS lookup populates correctly.
+            try {
+              const _execContext = this.tools?.constructor?._execContext || null; // not exposed
+              // Simpler: build a synthetic ctx and call the tool directly.
+              const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${match.preview ? '≠0' : '?'}). Fixed by: ${cmd.slice(0, 200)}`;
+              if (this.tools?._noteDiscoveryTool) {
+                // Use AsyncLocalStorage from the tools module so the
+                // ctx-derived sessionId/userId/cwd populate correctly.
+                const { AsyncLocalStorage } = require('async_hooks');
+                // The tools module's _execContext is a private const;
+                // we can't get to it from here cleanly. Instead patch
+                // _currentChannelId / _currentUserId on the tools
+                // singleton (they're the fallback path inside
+                // _resolveFallbackCtx).
+                this.tools._currentChannelId = sessKey;
+                this.tools._currentUserId = opts.userId || 'anon';
+                this.tools._currentPlatform = 'cli';
+                if (opts.projectContext?.cwd) this.tools._currentCwd = opts.projectContext.cwd;
+                const r = this.tools._noteDiscoveryTool({ text, kind: 'failure_fix' });
+                if (r?.ok) {
+                  this.log.info(`[graphcorn] failure_fix captured: ${r.nodeId} (${match.token} → ${parsed.token})`);
+                }
+              }
+            } catch (e) {
+              this.log.warn(`[graphcorn] failure_fix capture failed: ${e.message}`);
+            }
+            // Drop the matched failure so we don't re-fire on a third success
+            buf.splice(buf.indexOf(match), 1);
+          }
+        }
+      }
+      // Cap at 200 sessions (insertion-order eviction) — prevents unbounded
+      // growth across many short-lived channel/session keys.
+      if (!this._sessionFailures.has(sessKey) && this._sessionFailures.size >= 200) {
+        this._sessionFailures.delete(this._sessionFailures.keys().next().value);
+      }
+      this._sessionFailures.set(sessKey, buf);
+    } catch (e) {
+      this.log.warn(`[graphcorn] failure capture loop failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Each finished round leaves a breadcrumb on the session node's `rounds`
+   * aspect: turn N | tools used | files touched | first sentence of the
+   * assistant reply. Capped at the last 50 entries so the session node
+   * doesn't balloon (full history still in episodes table). Also bumps the
+   * turn_count attribute on lifecycle. Only for acorn turns where the
+   * session node exists.
+   */
+  _recordRoundCheckpoint(opts, toolLog, finalText) {
+    // Per-turn trace originally added during the T123901 investigation
+    // (round checkpoint silently not firing). Kept at debug level so the
+    // information is still recoverable but doesn't dominate normal logs.
+    try {
+      this.log.debug(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
+    } catch { /* silent: best-effort log */ }
+    if (!(opts.platform === 'cli' && opts.channelId && this.learner?.db)) return;
+    try {
+      const sessions = require('../graph/sessions');
+      const turn = sessions.bumpTurnCount(this.learner, opts.channelId);
+      this.log.debug(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
+      const sessId = 'session-' + opts.channelId;
+      const sessExists = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
+      if (sessExists) {
+        let asp = this.learner.db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'rounds'").get(sessId);
+        if (!asp) {
+          this.learner.db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'rounds', 7, 'graphcorn')").run(sessId);
+          asp = { id: this.learner.db.prepare('SELECT last_insert_rowid() AS id').get().id };
+        }
+        // Build a richer breadcrumb. The old format was just
+        // "tools | files | first sentence" which gave the summarizer
+        // almost nothing to work with. Now we also capture:
+        //   - the user's prompt (truncated) so the summarizer knows
+        //     what was asked, not just what was done
+        //   - exec commands attempted (first ~80 chars each)
+        //   - files touched (already had basenames; now full paths)
+        //   - non-zero exec outcomes (error hint for "what failed")
+        //   - a bigger assistant reply preview (~300 chars)
+        // toolLog entries store input as JSON.stringify(...).slice(0, 300)
+        // — a truncated STRING. Earlier checkpoint code was doing
+        // `t.input?.path` expecting an object, which always returned
+        // undefined → "files: none" even when write_file ran. Parse
+        // the string first; fall through on parse failure.
+        const parseInput = (t) => {
+          if (t == null || t.input == null) return null;
+          if (typeof t.input === 'object') return t.input;
+          try { return JSON.parse(t.input); } catch { return null; }
+        };
+        const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
+        const fileSet = new Set();
+        const execCmds = [];
+        let failedExecs = 0;
+        for (const t of toolLog) {
+          if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
+            const inp = parseInput(t);
+            const p = inp?.path;
+            // Store FULL path (not just basename) so the summarizer
+            // can see .acorn/scratch/ vs project-root pollution.
+            if (typeof p === 'string') fileSet.add(p);
+          }
+          if (t.tool === 'exec') {
+            const inp = parseInput(t);
+            const cmd = inp?.command || '';
+            // Bumped per-command preview from 100 → 200. The prior
+            // cap was chopping multi-part commands mid-flag and
+            // losing the "what was actually run" context.
+            if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
+            if (t.succeeded === false) failedExecs++;
+          }
+        }
+        const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
+        // Show up to 6 exec commands (was 3) so full workflows
+        // survive to the summary.
+        const execPart = execCmds.length
+          ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 6).join(' ; ')}${execCmds.length > 6 ? ' …' : ''}`
+          : '';
+        const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 250);
+        const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
+        // Bumped reply cap 300 → 800. A 300-char window cut off most
+        // multi-part replies right when they got to the substantive
+        // content (post-preamble). 800 captures a solid paragraph.
+        const replyPreview = replySnip.length > 800 ? replySnip.slice(0, 797) + '…' : replySnip;
+        const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
+        this.learner.db.prepare(
+          "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
+        ).run(asp.id, content);
+        // Trim to last 50 attributes on this aspect so the session
+        // node doesn't grow unbounded over long conversations.
+        const overflow = this.learner.db.prepare(
+          'SELECT id FROM attributes WHERE aspect_id = ? ORDER BY id DESC LIMIT -1 OFFSET 50'
+        ).all(asp.id);
+        if (overflow.length) {
+          const ids = overflow.map(r => r.id);
+          this.learner.db.prepare(`DELETE FROM attributes WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+        }
+      }
+    } catch (e) {
+      this.log.warn(`[graphcorn] round checkpoint failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Fire-and-forget: kick off the learner's async extractAndLearn for the
+   * just-completed turn. No-op if no finalText, no learner, or learning is
+   * disabled by config.
+   */
+  _kickOffLearnerExtraction(opts, finalText, toolLog) {
+    const learningMode = this.config.learningMode || 'always';
+    if (!(finalText && this.learner && learningMode === 'always')) return;
+    this.learner.extractAndLearn(opts.content, finalText, {
+      userName: opts.userName,
+      channelName: opts.channelName,
+      toolCalls: toolLog.length > 0 ? toolLog : undefined,
+      // graphcorn: pass the sessionId (= opts.channelId for acorn —
+      // see web.js:4719 where agentOpts.channelId is set to the WS
+      // sessionId). The learner uses this to link every newly-
+      // created entity to the session-<id> node via a
+      // `discovered_in` edge. Only fires for cli-platform turns
+      // where the session node was actually created at session:start.
+      sessionId: opts.platform === 'cli' ? opts.channelId : null,
+    }).catch(e => this.log.error('[learner] Background extraction error:', e.message));
+  }
+
+  /**
+   * Append a one-line activity note to the project node so cross-session
+   * memory accumulates. Captures user prompt + tool-call summary so the
+   * agent can later graph_query and see "what we worked on last time in
+   * this project". Cheap (one INSERT, capped at 50).
+   */
+  _noteProjectActivity(opts, finalText, toolLog) {
+    if (!(opts.projectContext && this.learner && (finalText || toolLog.length))) return;
+    try {
+      const projects = require('../graph/projects');
+      const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+      const tools = toolLog.length ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]` : '';
+      const summary = `${userSnip}${tools}`;
+      projects.noteProjectInteraction(this.learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
+    } catch (e) {
+      this.log.warn(`[project-node] note failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Fire each plugin context engine's afterTurn hook with the just-
+   * completed turn's data. All calls are fire-and-forget; plugin errors
+   * are caught at the engine boundary so one bad plugin can't break the
+   * loop.
+   */
+  _firePluginAfterTurn(opts, finalText, toolLog) {
+    if (!this._pluginManager) return;
+    const turnData = { userMessage: opts.content, assistantResponse: finalText, toolCalls: toolLog };
+    for (const engine of this._pluginManager.getContextEngines()) {
+      if (engine.engine?.afterTurn) {
+        engine.engine.afterTurn(turnData).catch(() => { /* silent: plugin best-effort */ });
+      } else if (engine.afterTurn) {
+        engine.afterTurn(turnData).catch(() => { /* silent: plugin best-effort */ });
+      }
+    }
+  }
+
+  /**
+   * Categorize errors thrown inside the inference-loop iteration and
+   * decide what to do next. Returns one of:
+   *   { action: 'break' }    — abort signal fired; caller breaks loop
+   *   { action: 'continue', messages? } — retry next iteration; caller
+   *     re-binds messages if the helper returned a sanitized array
+   *   { action: 'rethrow' }  — caller re-throws e
+   *
+   * Also mutates `ctx.state` (sessionRecoveredThisCall, apiRetries) so the
+   * caller can copy the values back into its own let-bindings. Tracks
+   * retries across iterations via that shared state.
+   */
+  async _handleIterationError(e, ctx) {
+    const { abortSignal, sessionKey, iterations, opts, messages, state } = ctx;
+
+    if (abortSignal?.aborted || e.name === 'AbortError' || e.message?.includes('aborted')) {
+      this.log.info(`[abort] Session ${sessionKey} aborted mid-call`);
+      return { action: 'break' };
+    }
+
+    this.log.error(`Agent loop error (iteration ${iterations}):`, e.message);
+    if (e.error) this.log.error('API error detail:', JSON.stringify(e.error));
+
+    // 400 with mismatched tool_use/tool_result pairs — try to recover by
+    // re-sanitizing, then fall back to clearing the session entirely.
+    if (e.status === 400 && e.message?.includes('tool_use') && e.message?.includes('tool_result') && !state.sessionRecoveredThisCall) {
+      state.sessionRecoveredThisCall = true;
+      this.log.warn(`Corrupted session in ${sessionKey} — attempting re-sanitization`);
+      const sanitized = this._sanitizeMessages(messages);
+      if (sanitized.length > 1) {
+        this.log.info(`Re-sanitized to ${sanitized.length} messages — retrying`);
+        return { action: 'continue', messages: sanitized };
+      }
+      this.log.warn(`Re-sanitization insufficient for ${sessionKey} — clearing session`);
+      this.sessions.clearSession(sessionKey);
+      return { action: 'continue', messages: [{ role: 'user', content: opts.content }] };
+    }
+
+    if (e.status === 400) {
+      this.log.error('Request params — model:', this.config.model, 'msgs:', messages.length, 'tools:', this.tools.getToolDefinitions().length);
+    }
+
+    if (e.status === 429) {
+      this.log.warn('Rate limited, waiting 5s...');
+      await this._sleep(5000);
+      return { action: 'continue' };
+    }
+
+    if (e.status === 529) {
+      this.log.warn('API overloaded, waiting 10s...');
+      await this._sleep(10000);
+      return { action: 'continue' };
+    }
+
+    if (e.status === 500 || e.status === 502 || e.status === 503) {
+      state.apiRetries = (state.apiRetries || 0) + 1;
+      if (state.apiRetries <= 5) {
+        const delay = state.apiRetries * 5000;
+        this.log.warn(`API server error (${e.status}), retry ${state.apiRetries}/5 in ${delay / 1000}s...`);
+        if (opts.onStatus) { try { opts.onStatus({ type: 'api_retry', status: e.status, attempt: state.apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ } }
+        await this._sleep(delay);
+        return { action: 'continue' };
+      }
+      this.log.error(`API server error (${e.status}) — all 5 retries exhausted for session ${sessionKey}`);
+    }
+
+    // Network-level failures (no HTTP status). Undici throws a TypeError
+    // with message 'fetch failed' when the TCP connection drops mid-
+    // stream, the TLS handshake times out, DNS fails, or the peer sends
+    // a reset. Also covers ECONNRESET / ETIMEDOUT / ENOTFOUND / socket
+    // hang up / premature close. This hits a LOT on custom OAI-compatible
+    // providers whose streaming endpoints are less forgiving than
+    // Anthropic's — without a retry branch the turn silently dies.
+    const msg = (e?.message || '') + ' ' + (e?.cause?.message || '') + ' ' + (e?.cause?.code || '');
+    const isNetworkFail = !e.status && /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|Premature close|network|aborted|terminated/i.test(msg);
+    if (isNetworkFail) {
+      state.apiRetries = (state.apiRetries || 0) + 1;
+      if (state.apiRetries <= 5) {
+        const delay = Math.min(state.apiRetries * 3000, 15000);
+        this.log.warn(`Network error (${(e.message || '').substring(0, 80)}), retry ${state.apiRetries}/5 in ${delay / 1000}s...`);
+        if (opts.onStatus) {
+          try { opts.onStatus({ type: 'api_retry', status: 'network', attempt: state.apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ }
+        }
+        await this._sleep(delay);
+        return { action: 'continue' };
+      }
+      this.log.error(`Network error — all 5 retries exhausted for session ${sessionKey}`);
+    }
+
+    if (opts.onError) opts.onError(e);
+    return { action: 'rethrow' };
+  }
+
+  /**
+   * After tool dispatch: stitch the tool_results into messages, persist a
+   * compressed copy to session history, then trim historical tool results
+   * from previous iterations (in both the in-memory messages array and
+   * the session DB) so the context window doesn't bloat.
+   *
+   * Mutates `messages` in place. Idempotent across iterations.
+   */
+  _persistToolResults(sessionKey, messages, toolResults, iterations) {
+    messages.push({ role: 'user', content: toolResults });
+    // Store compressed tool results in session — full results only needed for current turn
+    const compressedResults = toolResults.map(tr => ({
+      ...tr,
+      content: typeof tr.content === 'string' && tr.content.length > 1500
+        ? tr.content.substring(0, 1500) + `\n[...truncated from ${tr.content.length} chars for session storage]`
+        : tr.content,
+    }));
+    this.sessions.addMessage(sessionKey, 'user', compressedResults);
+    // Compress old tool results: model already saw them, no need to resend full text.
+    // Only compress results from PREVIOUS iterations (not the one we just added).
+    if (iterations > 1) {
+      this._compressOldToolResults(messages, toolResults);
+      // Truncate consumed tool results in the DB so future getHistory calls are lighter
+      this.sessions.truncateConsumedToolResults(sessionKey);
+    }
+  }
+
+  /**
+   * Run all tool_use blocks in this turn, returning the collected
+   * tool_result blocks plus aggregated flags. Handles:
+   *
+   *   - parallel-safe tools (read-only, no cross-tool side effects) run
+   *     concurrently with Promise.all
+   *   - other tools run sequentially
+   *   - mixed batches: parallel-safe prefixes are batched, then a
+   *     sequential tool runs, then the next parallel-safe prefix, etc.
+   *   - abort: each tool is raced against the abort signal so a stuck
+   *     tool doesn't block the loop. The race resolves to a synthetic
+   *     "Aborted by user." tool_result.
+   *
+   * Returns:
+   *   { toolResults, criticalBlock, delegated }
+   * where criticalBlock is OR'd from any per-tool loop-detector trip,
+   * and delegated is true if any tool was delegate_task.
+   */
+  async _executeToolBatch(toolBlocks, ctx) {
+    const { abortSignal, sessionKey, loopTracker, toolLog, opts } = ctx;
+    const toolResults = [];
+    let criticalBlock = false;
+    let delegated = false;
+
+    // Safe-to-parallelize tools: read-only, no side effects on each other
+    const PARALLEL_SAFE = new Set(['web_search', 'web_fetch', 'read_file', 'graph_query', 'message_read', 'task_status']);
+
+    const runOne = async (toolBlock) => {
+      const r = await this._executeOneTool(toolBlock, { abortSignal, sessionKey, loopTracker, toolLog, opts });
+      if (r.criticalBlock) criticalBlock = true;
+      if (r.delegated) delegated = true;
+      return r.result;
+    };
+
+    // Race each tool against the abort signal so a stuck tool doesn't block the loop
+    const abortRace = abortSignal ? (tb) => Promise.race([
+      runOne(tb),
+      new Promise(resolve => {
+        const onAbort = () => resolve({ type: 'tool_result', tool_use_id: tb.id, content: JSON.stringify({ error: 'Aborted by user.' }) });
+        if (abortSignal.aborted) { onAbort(); return; }
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]) : runOne;
+
+    const allParallel = toolBlocks.length > 1 && toolBlocks.every(t => PARALLEL_SAFE.has(t.name));
+    if (allParallel) {
+      this.log.info(`[agent] Executing ${toolBlocks.length} tools in parallel: ${toolBlocks.map(t => t.name).join(', ')}`);
+      if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: toolBlocks.length, tools: toolBlocks.map(t => t.name) }); } catch { /* silent: best-effort UI callback */ } }
+      const results = await Promise.all(toolBlocks.map(tb => abortRace(tb)));
+      toolResults.push(...results);
+    } else {
+      // Mixed batch: run parallel-safe prefix concurrently, then sequential remainder
+      let i = 0;
+      while (i < toolBlocks.length && !abortSignal?.aborted) {
+        // Collect contiguous parallel-safe run
+        const batch = [];
+        while (i < toolBlocks.length && PARALLEL_SAFE.has(toolBlocks[i].name)) {
+          batch.push(toolBlocks[i]);
+          i++;
+        }
+        if (batch.length > 1) {
+          this.log.info(`[agent] Parallel batch: ${batch.length} tools (${batch.map(t => t.name).join(', ')})`);
+          if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: batch.length, tools: batch.map(t => t.name) }); } catch { /* silent: best-effort UI callback */ } }
+          const results = await Promise.all(batch.map(tb => abortRace(tb)));
+          toolResults.push(...results);
+        } else if (batch.length === 1) {
+          toolResults.push(await abortRace(batch[0]));
+        }
+        if (abortSignal?.aborted) break;
+        // Execute next sequential tool
+        if (i < toolBlocks.length) {
+          toolResults.push(await abortRace(toolBlocks[i]));
+          i++;
+        }
+      }
+    }
+
+    return { toolResults, criticalBlock, delegated };
+  }
+
+  /**
+   * Handle the max_tokens stop reason — the model started a tool call
+   * but ran out of output budget mid-JSON, so the tool block is unusable.
+   * Persists the partial assistant text (or a placeholder), pushes a
+   * system reminder telling the model to break its operation up, and
+   * lets the loop continue.
+   */
+  _handleMaxTokens(ctx) {
+    const { iterations, iterUsage, responseText, sessionKey, opts, messages } = ctx;
+    this.log.warn(`[agent] Iter ${iterations}: hit max_tokens (${iterUsage.output_tokens || '?'} out) — tool call truncated`);
+    if (opts.onStatus) { try { opts.onStatus({ type: 'truncated', iteration: iterations, outputTokens: iterUsage.output_tokens }); } catch { /* silent: best-effort UI callback */ } }
+    // Store what we have (text only, skip truncated tool blocks)
+    if (responseText) {
+      this.sessions.addMessage(sessionKey, 'assistant', responseText);
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: responseText }] });
+    } else {
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Response truncated at output token limit]' }] });
+      this.sessions.addMessage(sessionKey, 'assistant', '[Response truncated at output token limit]');
+    }
+    messages.push({ role: 'user', content: '[SYSTEM: Your last response was truncated at the output token limit. Your tool call was NOT executed because the JSON was incomplete. Break large operations into smaller steps — write files in sections using edit_file to append, or split into multiple files. Do NOT attempt to write an entire large file in one tool call.]' });
+    this.sessions.addMessage(sessionKey, 'user', '[System: output truncated, retry with smaller operations]');
+  }
+
+  /**
+   * Finalize the iteration when the model produced no tool_use blocks
+   * (or signalled end_turn). Persists the assistant text to session
+   * history, suppresses re-emission if the text was already streamed as
+   * intermediate, and detects mid-stream interjections that should keep
+   * the loop running for one more iteration.
+   *
+   * Returns { action: 'continue' | 'break', finalText, lastSentIntermediate }
+   * — the caller mutates messages in place when a continuation is needed
+   * (the response.content is pushed onto messages here).
+   */
+  _handleEndTurn(ctx) {
+    const { response, responseText, sessionKey, opts, messages } = ctx;
+    let { finalText, lastSentIntermediate } = ctx;
+    if (responseText) finalText = responseText;
+    // Store in session regardless (for context continuity)
+    if (finalText) this.sessions.addMessage(sessionKey, 'assistant', finalText);
+    // If the final text was already sent as intermediate, don't re-send it
+    if (finalText && finalText === lastSentIntermediate) finalText = null;
+    // Before breaking: if a user interjection arrived while we were streaming,
+    // don't exit — send the current text as intermediate and continue the loop
+    // so the interjection gets processed on the next iteration.
+    const pendingIj = this._pendingInterjections.get(sessionKey);
+    if (pendingIj && pendingIj.length > 0) {
+      this.log.info(`[interject] Interjection pending at end_turn — continuing loop`);
+      if (finalText && opts.onTextDelta) {
+        // The text was already streamed via deltas, just record it
+        lastSentIntermediate = finalText;
+      }
+      messages.push({ role: 'assistant', content: response.content });
+      finalText = null;
+      return { action: 'continue', finalText, lastSentIntermediate };
+    }
+    return { action: 'break', finalText, lastSentIntermediate };
+  }
+
+  /**
+   * Splice any user interjections that arrived during streaming into the
+   * messages array. Interjections are presented as plain user messages —
+   * sometimes they're added context, sometimes a pivot, sometimes a
+   * cancellation. The model reads the language and decides; we don't
+   * prescribe a behavior.
+   *
+   * Mutates `messages` in place and returns the adjusted iteration count
+   * (with headroom restored so the agent has room to respond).
+   */
+  _injectPendingInterjections(sessionKey, messages, opts, iterations) {
+    const interjections = this._pendingInterjections.get(sessionKey);
+    if (!(interjections && interjections.length > 0)) return iterations;
+    this._pendingInterjections.delete(sessionKey);
+    this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
+    // The Anthropic API requires alternating user/assistant turns. If the
+    // last message is already a user turn (e.g. tool_results still pending),
+    // insert a minimal assistant ack so the new user message is well-formed.
+    // The ack is intentionally bland — no instructions, no framing — so the
+    // model isn't nudged toward any particular interpretation.
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.role === 'user') {
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Acknowledged.]' }] });
+    }
+    // Inject the raw user content. Multiple interjections that arrived in
+    // the same window are concatenated as numbered items so the model can
+    // see them as discrete messages.
+    const raw = interjections.length === 1
+      ? interjections[0]
+      : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n\n');
+    messages.push({ role: 'user', content: raw });
+    // Persist each interjection to session history
+    for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
+    if (opts.onStatus) {
+      try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { /* silent: best-effort UI callback */ }
+    }
+    // Give the agent headroom to respond
+    return Math.max(0, iterations - 4);
+  }
+
+  /**
+   * 2-tier escalation: casual → normal on any tool use. Planner (Opus) is
+   * reserved for explicit delegation only — triggered when the agent calls
+   * delegate_task, not on routine tool use. Returns the (possibly updated)
+   * activeModel; caller assigns the result back.
+   */
+  _maybeEscalateModel(toolBlocks, activeModel) {
+    if (!(toolBlocks.length > 0 && activeModel)) return activeModel;
+    const casualM = this.config.casualModel || this.config.normalModel;
+    const normalM = this.config.normalModel || this.config.plannerModel;
+    if (activeModel === casualM && casualM !== normalM) {
+      activeModel = normalM;
+      this.log.info(`[escalation] casual → normal (${activeModel})`);
+    }
+    const plannerM = this.config.plannerModel;
+    if (activeModel === normalM && normalM !== plannerM) {
+      const hasDelegation = toolBlocks.some(b => b.name === 'delegate_task');
+      if (hasDelegation) {
+        activeModel = plannerM;
+        this.log.info(`[escalation] normal → planner (${activeModel}) — delegation requested`);
+      }
+    }
+    return activeModel;
+  }
+
+  /**
+   * Execute one tool_use block and return the tool_result plus side-effect
+   * flags. Handles abort, malformed input, loop detection, status callbacks,
+   * result truncation, and the loop-tracker bookkeeping. Pure on its inputs
+   * apart from emitting graphEvents and pushing to ctx.toolLog.
+   *
+   * Returns: {
+   *   result: { type, tool_use_id, content }   // tool_result block to send back
+   *   criticalBlock: bool                      // loop detector tripped
+   *   delegated: bool                          // delegate_task was the tool
+   * }
+   */
+  async _executeOneTool(toolBlock, ctx) {
+    const { abortSignal, sessionKey, loopTracker, toolLog, opts } = ctx;
+    let criticalBlock = false;
+    let delegated = false;
+
+    if (abortSignal?.aborted) {
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify({ error: 'Aborted by user.' }),
+        },
+        criticalBlock, delegated,
+      };
+    }
+
+    this.log.info(`Tool call: ${toolBlock.name}(${JSON.stringify(toolBlock.input).substring(0, 100)})`);
+
+    if (toolBlock.input?._parse_error) {
+      this.log.warn(`[agent] Tool ${toolBlock.name}: argument JSON was malformed`);
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify({ error: toolBlock.input._parse_error }),
+        },
+        criticalBlock, delegated,
+      };
+    }
+
+    const callHash = this._hashToolCall(toolBlock.name, toolBlock.input);
+    const loopCheck = this._checkToolLoop(loopTracker, callHash, toolBlock.name);
+
+    if (loopCheck.blocked) {
+      this.log.warn(`[loop-detect] CRITICAL: ${loopCheck.message}`);
+      criticalBlock = true;
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify({ error: loopCheck.message }),
+        },
+        criticalBlock, delegated,
+      };
+    }
+
+    if (toolBlock.name === 'delegate_task') delegated = true;
+
+    const toolDetail = this._toolInputSummary(toolBlock.name, toolBlock.input);
+    graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
+    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { /* silent: best-effort UI callback */ } }
+    const toolExecStart = Date.now();
+    // Pass the session's context explicitly so concurrent sessions
+    // don't race on a shared "current session" field in tools.js.
+    const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
+    let result;
+    if (opts.onToolExecute) {
+      result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
+      if (result === null || result === undefined) {
+        result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
+      }
+    } else {
+      result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
+    }
+    let resultContent = JSON.stringify(result);
+
+    const toolExecMs = Date.now() - toolExecStart;
+    this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
+    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { /* silent: best-effort UI callback */ } }
+
+    if (opts.onStatus && !result.error) {
+      try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch (e) { this.log.warn('[loop] this._emitCodeEvent failed: ' + e.message); }
+    }
+
+    toolLog.push({
+      tool: toolBlock.name,
+      input: JSON.stringify(toolBlock.input).substring(0, 300),
+      resultPreview: resultContent.substring(0, 300),
+      succeeded: !result.error,
+    });
+
+    const defaultCap = this.config.maxToolResultChars || 30000;
+    const toolCaps = { read_file: 120000, web_fetch: 30000, exec: 30000, message_read: 15000, graph_query: 15000 };
+    const maxResultChars = toolCaps[toolBlock.name] ?? defaultCap;
+    if (resultContent.length > maxResultChars) {
+      const truncated = resultContent.length;
+      resultContent = resultContent.substring(0, maxResultChars)
+        + `\n\n[OUTPUT TRUNCATED: ${truncated} chars → ${maxResultChars}. Use offset/limit params for large files.]`;
+      this.log.warn(`Tool result truncated: ${toolBlock.name} returned ${truncated} chars`);
+    }
+
+    const resultHash = this._hashResult(resultContent);
+    this._recordToolResult(loopTracker, callHash, resultHash);
+
+    if (loopCheck.warning) {
+      this.log.warn(`[loop-detect] WARNING: ${loopCheck.message}`);
+      resultContent += `\n\n--- WARNING: ${loopCheck.message} ---`;
+    }
+
+    return {
+      result: {
+        type: 'tool_result',
+        tool_use_id: toolBlock.id,
+        content: resultContent,
+      },
+      criticalBlock, delegated,
     };
   }
 
@@ -1357,7 +1522,7 @@ class AgentLoop {
     const fs = require('fs');
     const path = require('path');
     const uploadDir = path.join(this.config.workspacePath || process.cwd(), 'uploads');
-    try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
+    try { fs.mkdirSync(uploadDir, { recursive: true }); } catch (e) { this.log.warn('[loop] fs.mkdirSync failed: ' + e.message); }
     const saved = [];
     const extByMime = {
       'image/jpeg': 'jpg',
@@ -1721,12 +1886,12 @@ class AgentLoop {
     const responseText = textBlocks.map(b => b.text || '').join('');
 
     if (responseText && opts.onTextDelta) {
-      try { opts.onTextDelta(responseText); } catch { }
+      try { opts.onTextDelta(responseText); } catch { /* silent: best-effort UI callback */ }
     }
     if (toolBlocks.length > 0 && opts.onToolUse) {
       for (const toolBlock of toolBlocks) {
         if (!toolBlock?.name) continue;
-        try { opts.onToolUse(toolBlock.name, toolBlock.input); } catch { }
+        try { opts.onToolUse(toolBlock.name, toolBlock.input); } catch { /* silent: best-effort UI callback */ }
       }
     }
 
@@ -1852,7 +2017,7 @@ class AgentLoop {
       const fallbackStart = Date.now();
       this.log.info(`[stream] ${model} — tool turn using non-stream request`);
       if (opts.onStatus) {
-        try { opts.onStatus({ type: 'mode', mode: 'non_stream_tool_turn', model, reason: 'tool_turn' }); } catch { }
+        try { opts.onStatus({ type: 'mode', mode: 'non_stream_tool_turn', model, reason: 'tool_turn' }); } catch { /* silent: best-effort UI callback */ }
       }
 
       const response = await this._callNonStream(requestOpts, opts);
@@ -1872,7 +2037,7 @@ class AgentLoop {
             tools: toolCount,
             thinkingTokens: 0,
           });
-        } catch { }
+        } catch { /* silent: best-effort UI callback */ }
       }
       return response;
     }
@@ -1881,7 +2046,7 @@ class AgentLoop {
     // Callbacks are optional; when absent we still stream but discard events.
     const stream = this.client.messages.stream(requestOpts);
     if (signal) {
-      const onAbort = () => { try { stream.abort(); } catch { } };
+      const onAbort = () => { try { stream.abort(); } catch { /* silent: best-effort terminate */ } };
       signal.addEventListener('abort', onAbort, { once: true });
       stream.on('end', () => signal.removeEventListener('abort', onAbort));
     }
@@ -1899,7 +2064,7 @@ class AgentLoop {
       const elapsed = Math.round((Date.now() - _streamStart) / 1000);
       this.log.info(`[stream] ${model} — ${elapsed}s, phase=${_phase}, ${_streamChars} chars, ${_streamToolCount} tool(s), ${_thinkingTokens} thinking`);
       if (opts.onStatus) {
-        try { opts.onStatus({ type: 'heartbeat', elapsed, phase: _phase, chars: _streamChars, tools: _streamToolCount, thinkingTokens: _thinkingTokens, toolName: _currentToolName }); } catch { }
+        try { opts.onStatus({ type: 'heartbeat', elapsed, phase: _phase, chars: _streamChars, tools: _streamToolCount, thinkingTokens: _thinkingTokens, toolName: _currentToolName }); } catch { /* silent: best-effort UI callback */ }
       }
     }, heartbeatMs);
     heartbeat.unref?.();
@@ -1916,7 +2081,7 @@ class AgentLoop {
           const chunk = event.delta.thinking || '';
           _thinkingText += chunk;
           if (chunk && opts.onThinkingDelta) {
-            try { opts.onThinkingDelta(chunk); } catch { }
+            try { opts.onThinkingDelta(chunk); } catch { /* silent: best-effort UI callback */ }
           }
           if (_thinkingTokens % 5 === 0 && opts.onStatus) {
             const snippet = _thinkingText.length > 200
@@ -1948,13 +2113,13 @@ class AgentLoop {
         if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
           _phase = 'generating';
         }
-      } catch { }
+      } catch { /* silent: best-effort UI callback */ }
     });
 
     if (opts.onTextDelta) {
       stream.on('text', (text) => {
         _streamChars += text.length;
-        try { opts.onTextDelta(text); } catch { }
+        try { opts.onTextDelta(text); } catch { /* silent: best-effort UI callback */ }
       });
     }
 
@@ -2316,7 +2481,7 @@ class AgentLoop {
             { channelName: 'compaction' }
           ).catch(() => { });
         }
-      } catch { }
+      } catch (e) { this.log.warn('[loop] filter failed: ' + e.message); }
     }
 
     // ── Phase 3: Generate structured summary (iterative if previous exists) ──
@@ -2332,8 +2497,12 @@ class AgentLoop {
       }
     }
 
-    // Store for iterative re-compression on subsequent compactions
+    // Store for iterative re-compression on subsequent compactions.
+    // Capped at 200 sessions (insertion-order eviction).
     if (summary) {
+      if (!this._compactionSummaries.has(sessionKey) && this._compactionSummaries.size >= 200) {
+        this._compactionSummaries.delete(this._compactionSummaries.keys().next().value);
+      }
       this._compactionSummaries.set(sessionKey, summary);
     }
 

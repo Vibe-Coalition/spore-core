@@ -244,7 +244,7 @@ async function runTests() {
     require('fs').unlinkSync('/tmp/spore-test-sessions.db');
     require('fs').unlinkSync('/tmp/spore-test-sessions.db-wal');
     require('fs').unlinkSync('/tmp/spore-test-sessions.db-shm');
-  } catch {}
+  } catch (e) { console.warn('[test] require failed: ' + e.message); }
   
   // ── Results ─────────────────────────────────────────────────────────────
   

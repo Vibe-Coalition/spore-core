@@ -78,10 +78,22 @@ function updateWebCapabilityNode(config, db, log) {
       attrs.push('Web server is not enabled. Set SPORE_WEB_PORT to activate it, or use the web_serve tool.');
     }
 
+    let domain = config.ingressDomain || null;
+    let https = config.ingressHttps ?? false;
+    let urlPath = (config.ingressPath || '').replace(/\/$/, '');
+    if (publicUrl) {
+      try {
+        const u = new URL(publicUrl);
+        if (!domain) domain = u.hostname;
+        if (!config.ingressHttps) https = u.protocol === 'https:';
+        if (!urlPath && u.pathname && u.pathname !== '/') urlPath = u.pathname.replace(/\/$/, '');
+      } catch (e) { console.warn('[app] URL failed: ' + e.message); }
+    }
+
     if (publicUrl) {
       attrs.push(`Public URL: ${publicUrl}`);
-      attrs.push(`Base domain: ${domain}`);
-      if (rawPath) attrs.push(`URL path prefix: ${rawPath}`);
+      if (domain) attrs.push(`Base domain: ${domain}`);
+      if (urlPath) attrs.push(`URL path prefix: ${urlPath}`);
       attrs.push(`Ingress mode: ${config.ingressMode || 'traefik'} (${https ? 'HTTPS/TLS' : 'HTTP'}).`);
     } else if (config.webPort) {
       attrs.push('No public domain configured — reachable on LAN or via direct port only.');
@@ -459,14 +471,20 @@ async function boot() {
 
   const gateways = new GatewayManager(config, log, agent, tools);
 
-  // Plugin system
+  // Plugin system — opt-in. Plugins run as full-privilege Node code with no
+  // sandbox, so loading is gated behind SPORE_PLUGINS_ENABLED and the default
+  // directory lives outside the agent-writable workspace.
   const plugins = new PluginManager(config, log);
-  const pluginsDir = config.pluginsDir || path.join(config.workspacePath || process.cwd(), 'plugins');
-  await plugins.loadAll(pluginsDir);
-  await plugins.initAll({ config, log, graph, sessions, tools, agent, learner, gateways });
+  if (config.pluginsEnabled) {
+    const pluginsDir = config.pluginsDir || path.join(__dirname, '..', 'shared', 'plugins');
+    await plugins.loadAll(pluginsDir);
+    await plugins.initAll({ config, log, graph, sessions, tools, agent, learner, gateways });
+    if (plugins.plugins.size > 0) log.info(`[plugins] ${plugins.plugins.size} plugin(s) active from ${pluginsDir}`);
+  } else {
+    log.info('[plugins] Disabled (set SPORE_PLUGINS_ENABLED=true to enable). Plugins run unsandboxed with full process privileges.');
+  }
   tools._pluginManager = plugins;
   agent._pluginManager = plugins;
-  if (plugins.plugins.size > 0) log.info(`[plugins] ${plugins.plugins.size} plugin(s) active`);
 
   const healthServer = startHealthServer(config, log, graph, sessions, gateways, learner, maintainer, tools, agent);
 
@@ -491,7 +509,7 @@ async function boot() {
     if (fs.existsSync(toolsDir)) {
       const regPath = path.join(toolsDir, 'TOOLS_REGISTRY.json');
       let registry = {};
-      try { registry = JSON.parse(fs.readFileSync(regPath, 'utf8')); } catch {}
+      try { registry = JSON.parse(fs.readFileSync(regPath, 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
 
       // Also discover scripts not in the registry
       const scriptExts = ['.py', '.sh', '.js'];
@@ -520,10 +538,10 @@ async function boot() {
   if (config.webPort) {
     try {
       let savedDir;
-      try { savedDir = fs.readFileSync(path.join(config.dataDir, '.web-serve-dir'), 'utf8').trim(); } catch {}
+      try { savedDir = fs.readFileSync(path.join(config.dataDir, '.web-serve-dir'), 'utf8').trim(); } catch (e) { console.warn('[app] fs.readFileSync failed: ' + e.message); }
 
       let backendCfg;
-      try { backendCfg = JSON.parse(fs.readFileSync(path.join(config.dataDir, '.backend-config.json'), 'utf8')); } catch {}
+      try { backendCfg = JSON.parse(fs.readFileSync(path.join(config.dataDir, '.backend-config.json'), 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
 
       if (backendCfg?.command) {
         const result = tools._webServeTool({
@@ -701,7 +719,7 @@ async function boot() {
       clearInterval(heartbeatTimer);
       clearInterval(wakeupSweepTimer);
       clearInterval(janitorTimer);
-      try { backup.stop(); } catch {}
+      try { backup.stop(); } catch (e) { console.warn('[app] backup.stop failed: ' + e.message); }
       tools._killAllTracked();
       await plugins.shutdownAll();
       await gateways.disconnectAll();
@@ -802,7 +820,7 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
         const result = await Promise.race([resultPromise, timeoutPromise]);
 
         // Clean up the ephemeral session
-        try { sessions.clearSession(invokeSessionKey); } catch {}
+        try { sessions.clearSession(invokeSessionKey); } catch (e) { console.warn('[app] sessions.clearSession failed: ' + e.message); }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({

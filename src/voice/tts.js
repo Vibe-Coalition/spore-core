@@ -21,7 +21,7 @@ function edgeTtsTmpDir() {
       fs.mkdirSync(d, { recursive: true, mode: 0o700 });
       return d;
     }
-  } catch {}
+  } catch (e) { console.warn('[tts] fs.existsSync failed: ' + e.message); }
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'u';
   const d = path.join(os.tmpdir(), `spore-edge-tts-${uid}`);
   fs.mkdirSync(d, { recursive: true, mode: 0o700 });
@@ -179,17 +179,22 @@ class EdgeTTS {
     if (this.rate) args.push('--rate', this.rate);
     if (this.pitch) args.push('--pitch', this.pitch);
 
-    await new Promise((resolve, reject) => {
-      execFile('edge-tts', args, { timeout: 30000 }, (err, stdout, stderr) => {
-        if (err) return reject(new Error(stderr?.trim() || err.message));
-        resolve();
+    try {
+      await new Promise((resolve, reject) => {
+        execFile('edge-tts', args, { timeout: 30000 }, (err, stdout, stderr) => {
+          if (err) return reject(new Error(stderr?.trim() || err.message));
+          resolve();
+        });
       });
-    });
 
-    const buf = fs.readFileSync(tmpFile);
-    try { fs.unlinkSync(tmpFile); } catch {}
-    if (!buf.length) throw new Error('edge-tts produced empty audio');
-    return buf;
+      const buf = fs.readFileSync(tmpFile);
+      if (!buf.length) throw new Error('edge-tts produced empty audio');
+      return buf;
+    } finally {
+      // Always clean up — execFile timeouts and read errors leave the
+      // partial .mp3 on disk otherwise.
+      try { fs.unlinkSync(tmpFile); } catch { /* silent: best-effort cleanup */ }
+    }
   }
 
   async synthesizeOgg(text) {

@@ -42,10 +42,11 @@ class Maintainer {
     this._lastGraphChangeAt = 0;
     this._lastCreativeRunAt = 0;
 
-    graphEvents.on('change', (evt) => {
+    this._onGraphChange = (evt) => {
       if (evt?.source === 'maintainer') return;
       this._lastGraphChangeAt = Date.now();
-    });
+    };
+    graphEvents.on('change', this._onGraphChange);
 
     this.stats = {
       cycles: 0, gapsDetected: 0, gapsFilled: 0, gapsDormant: 0,
@@ -53,6 +54,17 @@ class Maintainer {
     };
 
     this.proactive = new ProactiveEngine(this);
+  }
+
+  /**
+   * Detach event listeners so a recreated Maintainer doesn't accumulate
+   * stale 'change' handlers on the global graphEvents emitter.
+   */
+  shutdown() {
+    if (this._onGraphChange) {
+      graphEvents.removeListener('change', this._onGraphChange);
+      this._onGraphChange = null;
+    }
   }
 
   /**
@@ -121,7 +133,7 @@ class Maintainer {
           invalidated_at DATETIME
         );
       `);
-      try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_derived_facts_created ON derived_facts(created)"); } catch {}
+      try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_derived_facts_created ON derived_facts(created)"); } catch (e) { this.log.warn('[maintainer] db.exec failed: ' + e.message); }
 
       // Add reasoning_type + premises to pre-existing tables that never had them
       const dfCols = this.db.prepare("PRAGMA table_info(derived_facts)").all().map(c => c.name);
@@ -134,15 +146,15 @@ class Maintainer {
         catch (e) { this.log.warn('[maintainer] add premises:', e.message); }
       }
       // Now the column definitely exists — safe to create the index
-      try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_derived_facts_type ON derived_facts(reasoning_type)"); } catch {}
+      try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_derived_facts_type ON derived_facts(reasoning_type)"); } catch (e) { this.log.warn('[maintainer] db.exec failed: ' + e.message); }
 
       // Ensure embedding column exists on nodes
       const nodeCols = this.db.prepare("PRAGMA table_info(nodes)").all().map(c => c.name);
       if (!nodeCols.includes('embedding')) {
-        try { this.db.exec("ALTER TABLE nodes ADD COLUMN embedding TEXT"); } catch {}
+        try { this.db.exec("ALTER TABLE nodes ADD COLUMN embedding TEXT"); } catch (e) { this.log.warn('[maintainer] db.exec failed: ' + e.message); }
       }
       if (!nodeCols.includes('extracted_at')) {
-        try { this.db.exec("ALTER TABLE nodes ADD COLUMN extracted_at DATETIME"); } catch {}
+        try { this.db.exec("ALTER TABLE nodes ADD COLUMN extracted_at DATETIME"); } catch (e) { this.log.warn('[maintainer] db.exec failed: ' + e.message); }
       }
     } catch (e) {
       this.log.warn('[maintainer] Schema migration:', e.message);
@@ -403,7 +415,7 @@ If no meaningful gaps exist, return: []`,
             webContext = '\n\nWeb search results:\n' + results
               .map(r => `- ${r.title}: ${r.description}`).join('\n');
           }
-        } catch {}
+        } catch (e) { this.log.warn('[maintainer] _webSearch failed: ' + e.message); }
       }
 
       const response = await this._callLLM(
@@ -626,7 +638,7 @@ Return ONLY the reflection text, no JSON wrapping.`,
     const victims = [];
     for (const row of rows) {
       let extraObj = {};
-      try { extraObj = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+      try { extraObj = row.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[maintainer] JSON.parse failed: ' + e.message); }
       if (extraObj.ttl !== 'temp') continue;
       const refIso = extraObj.tempCreated || row.created;
       const refMs = refIso ? Date.parse(refIso) : NaN;
@@ -985,14 +997,14 @@ Do these two nodes refer to the SAME real-world entity/concept? Consider that th
     }
 
     // Add alias
-    try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(canonicalId, this.db.prepare('SELECT label FROM nodes WHERE id = ?').get(duplicateId)?.label); } catch {}
-    try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(canonicalId, duplicateId); } catch {}
+    try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(canonicalId, this.db.prepare('SELECT label FROM nodes WHERE id = ?').get(duplicateId)?.label); } catch (e) { this.log.warn('[maintainer] db.prepare failed: ' + e.message); }
+    try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(canonicalId, duplicateId); } catch (e) { this.log.warn('[maintainer] db.prepare failed: ' + e.message); }
 
     // Delete duplicate node
     this.db.prepare('DELETE FROM nodes WHERE id = ?').run(duplicateId);
 
     // Re-embed canonical node with merged content
-    try { embedNode(canonicalId, this.db); } catch {}
+    try { embedNode(canonicalId, this.db); } catch (e) { this.log.warn('[maintainer] embedNode failed: ' + e.message); }
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1261,7 +1273,7 @@ ${reflectionBlock || 'none yet'}`
 
       const allNodeIds = new Set();
       for (const d of recentDerived) {
-        try { JSON.parse(d.source_node_ids).forEach(id => allNodeIds.add(id)); } catch {}
+        try { JSON.parse(d.source_node_ids).forEach(id => allNodeIds.add(id)); } catch { /* silent: malformed JSON → fallback */ }
       }
       for (const r of recentReflections) allNodeIds.add(r.node_id);
       const sourceNodeIds = JSON.stringify([...allNodeIds].slice(0, 5));

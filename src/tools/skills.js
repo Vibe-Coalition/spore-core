@@ -40,7 +40,7 @@ class SkillsManager {
   _writeIndex(index) {
     fs.writeFileSync(this._indexPath, JSON.stringify(index, null, 2), 'utf8');
     this._indexCache = index;
-    try { this._indexMtime = fs.statSync(this._indexPath).mtimeMs; } catch {}
+    try { this._indexMtime = fs.statSync(this._indexPath).mtimeMs; } catch (e) { this.log.warn('[skills] fs.statSync failed: ' + e.message); }
   }
 
   _rebuildIndex() {

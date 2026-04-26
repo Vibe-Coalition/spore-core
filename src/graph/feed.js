@@ -336,7 +336,7 @@ function readForContext({ channelId, guildId, userId, maxLines = 50 } = {}) {
 }
 
 function _closeDb() {
-  if (_db) { try { _db.close(); } catch {} _db = null; }
+  if (_db) { try { _db.close(); } catch { /* silent: best-effort close */ } _db = null; }
 }
 
 module.exports = { readForContext, write, log, logTokens, readTokenSummary, _closeDb };

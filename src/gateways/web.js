@@ -61,14 +61,14 @@ function _readServerTheme(dataDir) {
     try {
       const users = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8'));
       creatorUsernames = users.filter(u => u?.role === 'creator').map(u => u.username);
-    } catch {}
+    } catch { /* silent: malformed JSON → fallback */ }
     for (const u of creatorUsernames) {
       if (prefs[u]?.theme) return _normalizeThemeName(prefs[u].theme);
     }
     // No creator theme yet (fresh install pre-onboarding) → fall back to the
     // legacy _lastUsed marker so the operator's wizard pick still lands.
     if (prefs._lastUsed?.theme) return _normalizeThemeName(prefs._lastUsed.theme);
-  } catch {}
+  } catch { /* silent: malformed JSON → fallback */ }
   return 'dark';
 }
 
@@ -89,7 +89,7 @@ function _acornKeyMatches(typed, stored) {
 function _isOnboardingNeeded(dataDir, config) {
   const prefsPath = path.join(dataDir, 'preferences.json');
   let prefs = {};
-  try { prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8')); } catch {}
+  try { prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
   if (prefs.onboardingCompleted === true) return false;
   if (prefs.onboardingCompleted === false) return true;
   // Auto-backfill for pre-existing installs: if the instance already has
@@ -97,7 +97,7 @@ function _isOnboardingNeeded(dataDir, config) {
   // onboarded so we don't ambush returning operators with the wizard.
   if (config) {
     let hasUsers = false;
-    try { hasUsers = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8')).length > 0; } catch {}
+    try { hasUsers = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8')).length > 0; } catch { /* silent: malformed JSON → fallback */ }
     const hasProvider = !!(
       config.anthropicApiKey || config.openaiApiKey || config.openrouterApiKey ||
       config.geminiApiKey || config.localModelBaseUrl ||
@@ -114,7 +114,7 @@ function _isOnboardingNeeded(dataDir, config) {
         const tmp = prefsPath + '.tmp.' + process.pid;
         fs.writeFileSync(tmp, JSON.stringify(prefs, null, 2));
         fs.renameSync(tmp, prefsPath);
-      } catch {}
+      } catch (e) { console.warn('[web] _backfillOnboardingFlag write failed: ' + e.message); }
       return false;
     }
   }
@@ -418,7 +418,7 @@ async function _probeModelTier(tier, body, appConfig) {
       try {
         const { AgentLoop } = require('../agent/loop');
         params = AgentLoop.applyReasoningEffort(params, effectiveModel, effort);
-      } catch {}
+      } catch (e) { console.warn('[web] applyReasoningEffort failed: ' + e.message); }
     }
     if (spec.system) params.system = spec.system;
 
@@ -596,7 +596,7 @@ class WebGateway {
       // FTS shadow has stale index entries until we tell it to
       // rebuild.
       for (const fts of ftsTables) {
-        try { db.exec(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`); } catch {}
+        try { db.exec(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`); } catch (e) { this.log.warn('[web] db.exec failed: ' + e.message); }
       }
 
       // Re-apply seeds in order:
@@ -1501,7 +1501,7 @@ class WebGateway {
     for (const client of this._wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
       if (creatorOnly && client._role !== 'admin') continue;
-      try { client.send(data); } catch { }
+      try { client.send(data); } catch (e) { this.log.warn('[web] client.send failed: ' + e.message); }
     }
   }
 
@@ -1565,7 +1565,7 @@ class WebGateway {
         let count = 0;
         for (const entry of clients) {
           if (entry.ws !== ws && entry.ws.readyState === 1) {
-            try { entry.ws.send(data); count++; } catch {}
+            try { entry.ws.send(data); count++; } catch (e) { this.log.warn('[web] entry.ws.send failed: ' + e.message); }
           }
         }
         return count;
@@ -1580,7 +1580,7 @@ class WebGateway {
         let count = 0;
         for (const entry of clients) {
           if (entry.ws !== ws && entry.ws.readyState === 1) {
-            try { entry.ws.send(data); count++; } catch {}
+            try { entry.ws.send(data); count++; } catch (e) { this.log.warn('[web] entry.ws.send failed: ' + e.message); }
           }
         }
         return count;
@@ -1614,7 +1614,7 @@ class WebGateway {
       let count = 0;
       for (const entry of set) {
         if (entry.ws.readyState === 1) {
-          try { entry.ws.send(data); count++; } catch {}
+          try { entry.ws.send(data); count++; } catch (e) { this.log.warn('[web] entry.ws.send failed: ' + e.message); }
         }
       }
       if (count) return count;
@@ -1631,7 +1631,7 @@ class WebGateway {
     for (const wsClient of this._wss?.clients || []) {
       if (wsClient.readyState !== 1) continue;
       if (wsClient._user === targetUser) {
-        try { wsClient.send(data); count++; } catch {}
+        try { wsClient.send(data); count++; } catch (e) { this.log.warn('[web] wsClient.send failed: ' + e.message); }
       }
     }
     return count;
@@ -1651,7 +1651,7 @@ class WebGateway {
     if (!clients || clients.size === 0) return;
     const data = JSON.stringify(payload);
     for (const { ws: c } of clients) {
-      try { if (c.readyState === 1) c.send(data); } catch {}
+      try { if (c.readyState === 1) c.send(data); } catch (e) { this.log.warn('[web] c.send failed: ' + e.message); }
     }
   }
 
@@ -1669,7 +1669,7 @@ class WebGateway {
     const WebSocket = require('ws');
     for (const client of this._wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
-      try { client.send(buffer); } catch { }
+      try { client.send(buffer); } catch (e) { this.log.warn('[web] client.send failed: ' + e.message); }
     }
   }
 
@@ -1822,7 +1822,7 @@ class WebGateway {
                 const { type: statusType, ...rest } = evt;
                 this._sendToSession(sessionId, { type: 'chat:status', status: statusType, ...rest });
               }
-            } catch { }
+            } catch (e) { this.log.warn('[web] startsWith failed: ' + e.message); }
           },
         });
 
@@ -1864,7 +1864,7 @@ class WebGateway {
               usage: result.usage,
               iterations: result.iterations,
             });
-          } catch {}
+          } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
         }
       } catch (e) {
         this.log.warn(`[proactive:web] Failed: ${e.message}`);
@@ -1917,7 +1917,7 @@ class WebGateway {
 
   _stop() {
     this._stopBackendProcess();
-    try { fs.unlinkSync(path.join(this.config.dataDir, '.backend-config.json')); } catch {}
+    try { fs.unlinkSync(path.join(this.config.dataDir, '.backend-config.json')); } catch { /* silent: best-effort cleanup */ }
     if (!this._server) return { stopped: false, note: 'Server was not running.' };
     if (this._wss) { this._wss.close(); this._wss = null; }
     this._server.close();
@@ -1931,8 +1931,8 @@ class WebGateway {
 
   _stopBackendProcess() {
     if (this._backendChild) {
-      try { process.kill(-this._backendChild.pid, 'SIGTERM'); } catch {}
-      try { this._backendChild.kill('SIGTERM'); } catch {}
+      try { process.kill(-this._backendChild.pid, 'SIGTERM'); } catch { /* silent: best-effort terminate */ }
+      try { this._backendChild.kill('SIGTERM'); } catch (e) { this.log.warn('[web] this._backendChild.kill failed: ' + e.message); }
       this._backendChild = null;
       this._backendPort = null;
       this.log.info('[web_serve] Backend process killed');
@@ -1943,7 +1943,7 @@ class WebGateway {
       const port = parseInt(fs.readFileSync(appPortFile, 'utf8').trim(), 10);
       if (port > 0) this._killProcessOnPort(port);
       fs.unlinkSync(appPortFile);
-    } catch {}
+    } catch (e) { this.log.warn('[web] parseInt failed: ' + e.message); }
   }
 
   _killProcessOnPort(port) {
@@ -1954,11 +1954,11 @@ class WebGateway {
         for (const pid of pids.split('\n')) {
           const p = parseInt(pid.trim(), 10);
           if (p > 0 && p !== process.pid) {
-            try { process.kill(p, 'SIGTERM'); } catch {}
+            try { process.kill(p, 'SIGTERM'); } catch { /* silent: best-effort terminate */ }
           }
         }
       }
-    } catch {}
+    } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
   }
 
   _allocateBackendPort() {
@@ -1987,7 +1987,7 @@ class WebGateway {
           );
           const parsed = JSON.parse(val);
           if (parsed.value) env[keyName] = parsed.value;
-        } catch {}
+        } catch (e) { this.log.warn('[web] execSync failed: ' + e.message); }
       }
     } catch (e) {
       this.log.warn(`[backend] Failed to fetch vault keys: ${e.message}`);
@@ -2012,7 +2012,7 @@ class WebGateway {
 
     // Write .app-port before spawning so the proxy is ready
     const appPortFile = path.join(this.config.workspacePath || process.cwd(), '.app-port');
-    try { fs.writeFileSync(appPortFile, String(backendPort)); } catch {}
+    try { fs.writeFileSync(appPortFile, String(backendPort)); } catch (e) { this.log.warn('[web] fs.writeFileSync failed: ' + e.message); }
 
     // Auto-inject vault keys into the backend process env
     const vaultKeys = this._fetchVaultKeys();
@@ -2072,7 +2072,7 @@ class WebGateway {
       fs.writeFileSync(path.join(this.config.dataDir, '.backend-config.json'), JSON.stringify({
         dir: serveDir, command, commandDir: workDir,
       }));
-    } catch {}
+    } catch (e) { this.log.warn('[web] fs.writeFileSync failed: ' + e.message); }
 
     let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
     if (!pubUrl && this.config.ingressDomain) {
@@ -2123,7 +2123,7 @@ class WebGateway {
     }
 
     const serveDir = dir || path.join(this.config.workspacePath || process.cwd(), 'web');
-    try { fs.mkdirSync(serveDir, { recursive: true }); } catch { }
+    try { fs.mkdirSync(serveDir, { recursive: true }); } catch (e) { this.log.warn('[web] fs.mkdirSync failed: ' + e.message); }
 
     const indexPath = path.join(serveDir, 'index.html');
     if (!fs.existsSync(indexPath)) {
@@ -2406,11 +2406,11 @@ class WebGateway {
           const oh = new URL(origin).hostname;
           isTrustedOrigin = oh === 'localhost' || oh === '127.0.0.1' || oh === '::1';
         }
-      } catch {}
+      } catch (e) { this.log.warn('[web] URL failed: ' + e.message); }
       const ingressDomain = this.config.ingressDomain;
       let matchesIngress = false;
       if (ingressDomain && origin) {
-        try { matchesIngress = new URL(origin).hostname === ingressDomain; } catch {}
+        try { matchesIngress = new URL(origin).hostname === ingressDomain; } catch (e) { this.log.warn('[web] URL failed: ' + e.message); }
       }
       const allowedOrigin = (isTrustedOrigin || matchesIngress) ? origin : '';
       if (allowedOrigin) {
@@ -2805,7 +2805,7 @@ class WebGateway {
           try {
             const prefs = JSON.parse(fs.readFileSync(path.join(this.config.dataDir, 'preferences.json'), 'utf8'));
             if (prefs[username]?.wizardCompleted) wizardNeeded = false;
-          } catch {}
+          } catch { /* silent: malformed JSON → fallback */ }
           res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded, resumed: true }));
           return;
         }
@@ -2952,7 +2952,7 @@ class WebGateway {
           const PREFS_PATH = path.join(this.config.dataDir, 'preferences.json');
           const VALID_THEMES = ['midnight', 'dark', 'paper', 'terminal', 'ember', 'arctic', 'neon', 'forest'];
           let prefs = {};
-          try { prefs = JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch {}
+          try { prefs = JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
           const theme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : 'midnight';
           if (!prefs[sess.user]) prefs[sess.user] = {};
           prefs[sess.user].theme = theme;
@@ -3154,9 +3154,9 @@ class WebGateway {
             try {
               const aliases = db.prepare("SELECT alias FROM aliases WHERE node_id = ?").all(agentId);
               aliases.forEach(a => { if (a.alias && !names.includes(a.alias.toLowerCase())) names.push(a.alias.toLowerCase()); });
-            } catch { }
+            } catch (e) { this.log.warn('[web] db.prepare failed: ' + e.message); }
           }
-        } catch { }
+        } catch (e) { this.log.warn('[web] db.prepare failed: ' + e.message); }
         const pipeline = this._ensureVoicePipeline();
         const voiceEnabled = !!(pipeline);
         const sttEnabled = !!(pipeline?.stt);
@@ -3212,7 +3212,7 @@ class WebGateway {
             return;
           }
           let body = {};
-          try { body = await new Promise((resolve, reject) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); }); } catch { }
+          try { body = await new Promise((resolve, reject) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); }); } catch (e) { this.log.warn('[web] Promise failed: ' + e.message); }
           const { variant = 'oracle', maxQuestions = 500, skipIngestion = false, forceReeval = false, learnerModel, answerModel, questionTypes } = body;
           const registry = this.tools._graphRegistry;
           if (!registry) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Multi-graph registry not available' })); return; }
@@ -3369,7 +3369,7 @@ class WebGateway {
         let body = '';
         for await (const chunk of req) body += chunk;
         let parsed = {};
-        try { parsed = body ? JSON.parse(body) : {}; } catch {}
+        try { parsed = body ? JSON.parse(body) : {}; } catch { /* silent: malformed JSON → fallback */ }
         if (parsed.confirm !== 'RESET') {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'confirm must be the literal string "RESET"' }));
@@ -3688,9 +3688,9 @@ class WebGateway {
                 } else {
                   results.push({ path: rel, size: stat.size, mtime: stat.mtimeMs });
                 }
-              } catch {}
+              } catch (e) { this.log.warn('[web] fs.statSync failed: ' + e.message); }
             }
-          } catch {}
+          } catch (e) { this.log.warn('[web] fs.readdirSync failed: ' + e.message); }
           return results;
         };
         try {
@@ -3910,7 +3910,7 @@ class WebGateway {
       if (urlPath.startsWith('/api/')) {
         const appPortFile = path.join(this.config.workspacePath || process.cwd(), '.app-port');
         let appPort;
-        try { appPort = parseInt(fs.readFileSync(appPortFile, 'utf8').trim(), 10); } catch {}
+        try { appPort = parseInt(fs.readFileSync(appPortFile, 'utf8').trim(), 10); } catch (e) { this.log.warn('[web] parseInt failed: ' + e.message); }
         if (appPort && appPort > 0 && appPort < 65536 && appPort !== webPort) {
           const authType = isAnyAuth(req);
           if (!authType && !checkCreatorAuth(req, res) && !(await tryManagerSSO(req, res))) {
@@ -4007,7 +4007,7 @@ class WebGateway {
       try {
         const stat = fs.statSync(filePath);
         if (stat.isDirectory()) filePath = path.join(filePath, 'index.html');
-      } catch { }
+      } catch (e) { this.log.warn('[web] fs.statSync failed: ' + e.message); }
 
       try {
         const data = fs.readFileSync(filePath);
@@ -4061,7 +4061,7 @@ class WebGateway {
     this._server = server;
     this._serverDir = serveDir;
 
-    try { fs.writeFileSync(path.join(this.config.dataDir, '.web-serve-dir'), serveDir); } catch { }
+    try { fs.writeFileSync(path.join(this.config.dataDir, '.web-serve-dir'), serveDir); } catch (e) { this.log.warn('[web] fs.writeFileSync failed: ' + e.message); }
 
     this._setupWebSocket(server, authUser, authPass);
 
@@ -4107,7 +4107,7 @@ class WebGateway {
           continue;
         }
         client._missedPongs = (client._missedPongs || 0) + 1;
-        try { client.ping(); } catch { }
+        try { client.ping(); } catch (e) { this.log.warn('[web] client.ping failed: ' + e.message); }
       }
     }, PING_INTERVAL);
     wss.on('close', () => clearInterval(pingTimer));
@@ -4131,7 +4131,7 @@ class WebGateway {
         const appPortFile = path.join(this.config.workspacePath || process.cwd(), '.app-port');
         const wPort = this.config.webPort;
         let appPort;
-        try { appPort = parseInt(fs.readFileSync(appPortFile, 'utf8').trim(), 10); } catch {}
+        try { appPort = parseInt(fs.readFileSync(appPortFile, 'utf8').trim(), 10); } catch (e) { this.log.warn('[web] parseInt failed: ' + e.message); }
         if (appPort && appPort > 0 && appPort < 65536 && appPort !== wPort) {
           const safeHeaders = {};
           const allowHeaders = ['host', 'upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions', 'sec-websocket-protocol'];
@@ -4212,7 +4212,7 @@ class WebGateway {
           projectContext: true,
           sporeVersion: 'v0.1.0',
         }));
-      } catch {}
+      } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
 
       // Acorn clients manage their own session history — don't send web panel history
       if (!isAcornClient) {
@@ -4257,7 +4257,7 @@ class WebGateway {
                     if (toolUses.length) { text = toolUses.map(t => '\u2699 ' + t.name).join(', '); }
                   }
                 }
-              } catch { }
+              } catch { /* silent: malformed JSON → fallback */ }
               if (!text || !text.trim()) continue;
               const isInternalPrompt = INTERNAL_PROMPT_PREFIXES.some(p => text.startsWith(p));
               if (isInternalPrompt) {
@@ -4304,7 +4304,7 @@ class WebGateway {
 
       // Graph events only for web panel clients, not Acorn
       const onGraphEvent = isAcornClient ? null : (evt) => {
-        try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch { }
+        try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
       };
       if (onGraphEvent) graphEvents.on('change', onGraphEvent);
 
@@ -4360,7 +4360,7 @@ class WebGateway {
 
         if (msg.type === 'ping') {
           ws._missedPongs = 0;
-          try { ws.send(JSON.stringify({ type: 'pong' })); } catch { }
+          try { ws.send(JSON.stringify({ type: 'pong' })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
           return;
         }
 
@@ -4368,7 +4368,7 @@ class WebGateway {
         // the tools side so the agent's tool_result returns cleanly.
         if (msg.type === 'ask_user_answer' && msg.qid && typeof msg.answer === 'string') {
           const ok = this.tools.answerAskUser(msg.qid, msg.answer);
-          try { ws.send(JSON.stringify({ type: 'ask_user_answer_ack', qid: msg.qid, ok })); } catch {}
+          try { ws.send(JSON.stringify({ type: 'ask_user_answer_ack', qid: msg.qid, ok })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
           return;
         }
 
@@ -4421,7 +4421,7 @@ class WebGateway {
                     text = parsed.filter(b => b.type === 'text').map(b => b.text).join('\n');
                     if (!text) continue;
                   }
-                } catch { }
+                } catch { /* silent: malformed JSON → fallback */ }
                 if (!text || !text.trim()) continue;
                 const role = row.role === 'assistant' ? 'assistant' : 'user';
                 history.push({ role, text: text.substring(0, 2000), ts: row.created });
@@ -4459,7 +4459,7 @@ class WebGateway {
           if (clients) {
             for (const entry of clients) {
               if (entry.ws !== ws) {
-                try { entry.ws.send(JSON.stringify({ type: 'perm:query', replyTo: msg.sessionId })); } catch {}
+                try { entry.ws.send(JSON.stringify({ type: 'perm:query', replyTo: msg.sessionId })); } catch (e) { this.log.warn('[web] entry.ws.send failed: ' + e.message); }
               }
             }
           }
@@ -4511,7 +4511,7 @@ class WebGateway {
                   id: msg.id,
                   allowed: !!msg.allowed,
                 }));
-              } catch {}
+              } catch (e) { this.log.warn('[web] cliWs.send failed: ' + e.message); }
               this.log.info(`[ws] Remote ${msg.allowed ? 'approve' : 'deny'} for tool from ${ws._user}`);
               break;
             }
@@ -4608,7 +4608,7 @@ class WebGateway {
               : this.tools._agent.abortSession('web:control-panel', true, userId);
             this.log.info(`[ws] Stop requested for ${userId} — ${stopped ? 'aborted' : 'no active run'}`);
             if (stopped) {
-              try { ws.send(JSON.stringify({ type: 'chat:status', status: 'stopping' })); } catch {}
+              try { ws.send(JSON.stringify({ type: 'chat:status', status: 'stopping' })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               // Reject any pending tool Promises on the CLI's WebSocket so the
               // agent loop breaks out immediately instead of waiting 3 minutes
               const originWs = isAcorn ? this._getOriginClient(sessionId) : null;
@@ -4654,7 +4654,7 @@ class WebGateway {
           try {
             const wuPath = path.join(this.config.dataDir, 'webapp-users.json');
             hasWebappUsers = fs.existsSync(wuPath) && JSON.parse(fs.readFileSync(wuPath, 'utf8')).length > 0;
-          } catch {}
+          } catch (e) { this.log.warn('[web] path.join failed: ' + e.message); }
           const requiresChatAuth = hasWebappUsers || !!this.config.managerUrl || !!(this.config.webAuthUser && this.config.webAuthPass);
           if (requiresChatAuth && !isAcorn && !ws._user) {
             this.log.warn(`[ws] chat refused — no authenticated user on this connection (token=${ws._sessionToken ? 'stale' : 'missing'})`);
@@ -4692,7 +4692,7 @@ class WebGateway {
               });
               for (const { ws: c } of clients) {
                 if (c !== ws && c.readyState === 1) {
-                  try { c.send(echoPayload); } catch {}
+                  try { c.send(echoPayload); } catch (e) { this.log.warn('[web] c.send failed: ' + e.message); }
                 }
               }
             }
@@ -4702,7 +4702,7 @@ class WebGateway {
             // Acorn fans out to all session clients (CLI + observer mobile apps).
             // Web users are isolated — chat:start only goes to the sending socket.
             if (!isAcorn) {
-              try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch {}
+              try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
             } else {
               this._sendToSession(sessionId, { type: 'chat:start', sessionId });
             }
@@ -4740,7 +4740,7 @@ class WebGateway {
             let fileNote = '';
             if (Array.isArray(msg.files) && msg.files.length > 0) {
               const uploadDir = path.join(this.config.workspacePath || process.cwd(), 'uploads');
-              try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
+              try { fs.mkdirSync(uploadDir, { recursive: true }); } catch (e) { this.log.warn('[web] fs.mkdirSync failed: ' + e.message); }
               const savedFiles = [];
               for (const f of msg.files) {
                 try {
@@ -4815,17 +4815,17 @@ class WebGateway {
                 if (isAcorn) {
                   this._sendToSession(sessionId, { type: 'chat:delta', text: delta });
                 } else {
-                  try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch { }
+                  try { ws.send(JSON.stringify({ type: 'chat:delta', text: delta })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
                 }
               },
               onThinkingDelta: (delta) => {
-                try { ws.send(JSON.stringify({ type: 'chat:thinking', text: delta })); } catch { }
+                try { ws.send(JSON.stringify({ type: 'chat:thinking', text: delta })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               },
               onToolUse: (toolName) => {
                 if (isAcorn) {
                   this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName });
                 } else {
-                  try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch { }
+                  try { ws.send(JSON.stringify({ type: 'chat:tool', tool: toolName })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
                 }
               },
               onStatus: (evt) => {
@@ -4837,7 +4837,7 @@ class WebGateway {
                   } else {
                     ws.send(JSON.stringify(payload));
                   }
-                } catch { }
+                } catch (e) { this.log.warn('[web] startsWith failed: ' + e.message); }
               },
               // Acorn: forward tool calls to the origin CLI client for local execution.
               // tool:request only goes to origin client. Observers get tool:pending notification.
@@ -4893,7 +4893,7 @@ class WebGateway {
                 this.log.info(`[ws] Interjection accepted for ${sessionId}`);
                 const payload = { type: 'chat:status', status: 'interjected' };
                 if (isAcorn) { this._sendToSession(sessionId, payload); }
-                else { try { ws.send(JSON.stringify(payload)); } catch {} }
+                else { try { ws.send(JSON.stringify(payload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
                 return; // Don't send chat:done — the running loop handles completion
               }
 
@@ -4901,7 +4901,7 @@ class WebGateway {
               this.log.info(`[ws] Interjection failed (aborting?), waiting for session release: ${sessionId}`);
               const statusPayload = { type: 'chat:status', status: 'waiting' };
               if (isAcorn) { this._sendToSession(sessionId, statusPayload); }
-              else { try { ws.send(JSON.stringify(statusPayload)); } catch {} }
+              else { try { ws.send(JSON.stringify(statusPayload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
 
               try {
                 await Promise.race([
@@ -4910,13 +4910,13 @@ class WebGateway {
                 ]);
                 // Re-send chat:start for the retry
                 if (isAcorn) { this._sendToSession(sessionId, { type: 'chat:start', sessionId }); }
-                else { try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch {} }
+                else { try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
                 result = await this.tools._agent.processMessage(agentOpts);
               } catch (waitErr) {
                 this.log.error(`[ws] Interjection wait failed: ${waitErr.message}`);
                 const errPayload = { type: 'chat:error', error: 'Session busy — try again in a moment' };
                 if (isAcorn) { this._sendToSession(sessionId, errPayload); }
-                else { try { ws.send(JSON.stringify(errPayload)); } catch {} }
+                else { try { ws.send(JSON.stringify(errPayload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
                 return;
               }
             }
@@ -4945,7 +4945,7 @@ class WebGateway {
                 usage: result.usage,
                 iterations: result.iterations,
               });
-            } catch {}
+            } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
           } catch (e) {
             const friendly = e.status === 529 || e.error?.type === 'overloaded_error' ? 'API is overloaded — try again in a moment'
               : e.status === 500 || e.error?.type === 'api_error' ? 'API server error — try again shortly'
@@ -4974,10 +4974,10 @@ class WebGateway {
               userRole: ws._role || 'creator',
               trigger: 'dm', platform: 'web', isDm: true,
               onTextDelta: (delta) => {
-                try { ws.send(JSON.stringify({ type: 'voice:delta', text: delta })); } catch { }
+                try { ws.send(JSON.stringify({ type: 'voice:delta', text: delta })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               },
               onToolUse: (toolName) => {
-                try { ws.send(JSON.stringify({ type: 'voice:tool', tool: toolName })); } catch { }
+                try { ws.send(JSON.stringify({ type: 'voice:tool', tool: toolName })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               },
             });
             const resp = {
@@ -5006,7 +5006,7 @@ class WebGateway {
                 usage: result?.usage,
                 iterations: result?.iterations,
               });
-            } catch {}
+            } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
           } catch (e) {
             ws.send(JSON.stringify({ type: 'voice:error', error: e?.message || String(e) }));
           }
@@ -5062,7 +5062,7 @@ class WebGateway {
                   usage: result.usage,
                   iterations: result.iterations,
                 });
-              } catch {}
+              } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
             } else if (msg.mode === 'interrupt-check') {
               const sttResult = await pipeline.transcribeOnly(audioData, mime);
               ws.send(JSON.stringify({ type: 'voice:interrupt-result', text: sttResult.text || '', error: sttResult.error }));
@@ -5209,8 +5209,8 @@ class WebGateway {
         if (onGraphEvent) graphEvents.off('change', onGraphEvent);
         if (ws._terminals) {
           for (const [, sess] of ws._terminals) {
-            if (sess.pty) { try { sess.pty.kill(); } catch { } }
-            if (sess.sshId) { try { this._sshManager?.close(sess.sshId); } catch { } }
+            if (sess.pty) { try { sess.pty.kill(); } catch (e) { this.log.warn('[web] sess.pty.kill failed: ' + e.message); } }
+            if (sess.sshId) { try { this._sshManager?.close(sess.sshId); } catch (e) { this.log.warn('[web] close failed: ' + e.message); } }
           }
           ws._terminals.clear();
         }
@@ -5243,8 +5243,8 @@ class WebGateway {
     const existing = ws._terminals?.get(paneId);
     if (existing) {
       existing._cancelled = true;
-      if (existing.pty) { try { existing.pty.kill(); } catch { } }
-      if (existing.sshId) { try { this._sshManager?.close(existing.sshId); } catch { } }
+      if (existing.pty) { try { existing.pty.kill(); } catch (e) { this.log.warn('[web] existing.pty.kill failed: ' + e.message); } }
+      if (existing.sshId) { try { this._sshManager?.close(existing.sshId); } catch (e) { this.log.warn('[web] close failed: ' + e.message); } }
       ws._terminals.delete(paneId);
     }
 
@@ -5268,12 +5268,12 @@ class WebGateway {
         mgr?.audit(`local_${term.pid}`, 'pty_opened', { shell, paneId });
 
         term.onData((data) => {
-          try { ws.send(JSON.stringify({ type: 'terminal:data', paneId, data })); } catch { }
+          try { ws.send(JSON.stringify({ type: 'terminal:data', paneId, data })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
         });
 
         term.onExit(({ exitCode }) => {
           ws._terminals?.delete(paneId);
-          try { ws.send(JSON.stringify({ type: 'terminal:closed', paneId, reason: `Shell exited (code ${exitCode})` })); } catch { }
+          try { ws.send(JSON.stringify({ type: 'terminal:closed', paneId, reason: `Shell exited (code ${exitCode})` })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
         });
 
         ws.send(JSON.stringify({ type: 'terminal:opened', paneId, mode: 'local', pid: term.pid }));
@@ -5293,7 +5293,7 @@ class WebGateway {
       const result = mgr.connect(hostId, {
         onReady: (sessionId) => {
           if (placeholder._cancelled) {
-            try { this._sshManager?.close(sessionId); } catch { }
+            try { this._sshManager?.close(sessionId); } catch (e) { this.log.warn('[web] close failed: ' + e.message); }
             this.log.info(`[terminal] SSH session ${sessionId} arrived for replaced pane=${paneId}, closing orphan`);
             return;
           }
@@ -5303,12 +5303,12 @@ class WebGateway {
         },
         onData: (data) => {
           if (placeholder._cancelled) return;
-          try { ws.send(JSON.stringify({ type: 'terminal:data', paneId, data })); } catch { }
+          try { ws.send(JSON.stringify({ type: 'terminal:data', paneId, data })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
         },
         onClose: () => {
           if (placeholder._cancelled) return;
           ws._terminals?.delete(paneId);
-          try { ws.send(JSON.stringify({ type: 'terminal:closed', paneId, reason: 'SSH connection closed' })); } catch { }
+          try { ws.send(JSON.stringify({ type: 'terminal:closed', paneId, reason: 'SSH connection closed' })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
         },
         onError: (error) => {
           if (placeholder._cancelled) return;
@@ -5352,7 +5352,7 @@ class WebGateway {
     const paneId = msg?.paneId || 'default';
     const sess = ws._terminals?.get(paneId);
     if (sess) {
-      if (sess.pty) { try { sess.pty.kill(); } catch { } }
+      if (sess.pty) { try { sess.pty.kill(); } catch (e) { this.log.warn('[web] sess.pty.kill failed: ' + e.message); } }
       if (sess.sshId && this._sshManager) { this._sshManager.close(sess.sshId); }
       ws._terminals.delete(paneId);
     }
@@ -5644,7 +5644,7 @@ class WebGateway {
         res.end(JSON.stringify({
           nodes: nodes.map(n => {
             let extra = null;
-            try { if (n.extra && n.extra !== '{}') extra = JSON.parse(n.extra); } catch {}
+            try { if (n.extra && n.extra !== '{}') extra = JSON.parse(n.extra); } catch { /* silent: malformed JSON → fallback */ }
             return { id: n.id, label: n.label, type: n.type, description: n.description || '', importance: n.importance, mentions: n.mentions || 0, aliases: aliasesByNode[n.id] || [], aspects: aspectsByNode[n.id] || [], extra };
           }),
           edges: edges.map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })),
@@ -5686,7 +5686,7 @@ class WebGateway {
         const answeredGaps = db.prepare("SELECT COUNT(*) AS c FROM gaps WHERE status='answered'").get()?.c || 0;
         const reflections = db.prepare("SELECT COUNT(*) AS c FROM reflections").get()?.c || 0;
         let derived = 0;
-        try { derived = db.prepare("SELECT COUNT(*) AS c FROM derived_facts WHERE invalidated_at IS NULL").get()?.c || 0; } catch {}
+        try { derived = db.prepare("SELECT COUNT(*) AS c FROM derived_facts WHERE invalidated_at IS NULL").get()?.c || 0; } catch (e) { this.log.warn('[web] db.prepare failed: ' + e.message); }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           job: this._maintRunJob || { state: 'idle' },
@@ -5724,7 +5724,7 @@ class WebGateway {
       try {
         const janitor = this.tools?._janitor;
         let binCount = 0;
-        try { binCount = db.prepare('SELECT COUNT(*) AS c FROM recycle_bin').get()?.c || 0; } catch {}
+        try { binCount = db.prepare('SELECT COUNT(*) AS c FROM recycle_bin').get()?.c || 0; } catch (e) { this.log.warn('[web] db.prepare failed: ' + e.message); }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           job: this._janitorRunJob || { state: 'idle' },
@@ -6042,7 +6042,7 @@ class WebGateway {
         try {
           const { resetConfigCache } = require('../config');
           if (typeof resetConfigCache === 'function') resetConfigCache();
-        } catch {}
+        } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
 
         // Resolve the top-level `model` pointer (used by detectBackend etc.)
         this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
@@ -6069,7 +6069,7 @@ class WebGateway {
         try {
           const graphEvents = require('../graph/events');
           graphEvents.emit('change', { op: 'graph:import', source: 'import', report });
-        } catch {}
+        } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, report }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
@@ -6101,7 +6101,7 @@ class WebGateway {
       let out = '', err = '';
       proc.stdout.on('data', c => { out += c.toString(); });
       proc.stderr.on('data', c => { err += c.toString(); });
-      const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, timeoutMs);
+      const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) { this.log.warn('[web] proc.kill failed: ' + e.message); } }, timeoutMs);
       proc.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout: out, stderr: err }); });
       proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: e.message }); });
     });
@@ -6153,7 +6153,7 @@ class WebGateway {
               res.end(JSON.stringify({ status: 'already-connected', tailnetIp: (j.Self?.TailscaleIPs || [])[0] || null }));
               return;
             }
-          } catch {}
+          } catch { /* silent: malformed JSON → fallback */ }
         }
 
         // Spawn `tailscale up` non-blocking, parse out the login URL from stderr.
@@ -6175,7 +6175,7 @@ class WebGateway {
         ];
         // Kill any stale previous login attempt
         if (this._tsLoginProc && !this._tsLoginProc.killed) {
-          try { this._tsLoginProc.kill('SIGTERM'); } catch {}
+          try { this._tsLoginProc.kill('SIGTERM'); } catch (e) { this.log.warn('[web] this._tsLoginProc.kill failed: ' + e.message); }
         }
         this._tsAuthUrl = null;
         const proc = spawn('sudo', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -6223,7 +6223,7 @@ class WebGateway {
         const r = await _tsRun(['logout'], 15000);
         this._tsAuthUrl = null;
         if (this._tsLoginProc && !this._tsLoginProc.killed) {
-          try { this._tsLoginProc.kill('SIGTERM'); } catch {}
+          try { this._tsLoginProc.kill('SIGTERM'); } catch (e) { this.log.warn('[web] this._tsLoginProc.kill failed: ' + e.message); }
         }
         res.writeHead(r.code === 0 ? 200 : 500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: r.code === 0, stderr: (r.stderr || '').trim().slice(0, 300) }));
@@ -6425,7 +6425,7 @@ class WebGateway {
         let out = '', err = '';
         proc.stdout.on('data', c => { out += c.toString(); });
         proc.stderr.on('data', c => { err += c.toString(); });
-        const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 20000);
+        const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) { this.log.warn('[web] proc.kill failed: ' + e.message); } }, 20000);
         const code = await new Promise((r) => { proc.on('close', (c) => { clearTimeout(timer); r(c); }); });
         const output = (out || '').trim();
         const stderr = (err || '').trim();
@@ -6463,13 +6463,13 @@ class WebGateway {
         const hasPrivate = fsm.existsSync(KEY_PATH);
         let publicKey = null, fingerprint = null;
         if (fsm.existsSync(PUB_PATH)) {
-          try { publicKey = fsm.readFileSync(PUB_PATH, 'utf8').trim(); } catch {}
+          try { publicKey = fsm.readFileSync(PUB_PATH, 'utf8').trim(); } catch (e) { this.log.warn('[web] fsm.readFileSync failed: ' + e.message); }
         }
         if (hasPrivate) {
           try {
             const { execFileSync } = require('child_process');
             fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
-          } catch {}
+          } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ hasPrivate, publicKey, fingerprint }));
@@ -6484,15 +6484,15 @@ class WebGateway {
         const SSH_DIR = '/data/.ssh';
         const KEY_PATH = path.join(SSH_DIR, 'id_cluster');
         fsm.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
-        try { fsm.chmodSync(SSH_DIR, 0o700); } catch {}
+        try { fsm.chmodSync(SSH_DIR, 0o700); } catch (e) { this.log.warn('[web] fsm.chmodSync failed: ' + e.message); }
         // Remove old if present
-        try { fsm.unlinkSync(KEY_PATH); } catch {}
-        try { fsm.unlinkSync(KEY_PATH + '.pub'); } catch {}
+        try { fsm.unlinkSync(KEY_PATH); } catch (e) { this.log.warn('[web] fsm.unlinkSync failed: ' + e.message); }
+        try { fsm.unlinkSync(KEY_PATH + '.pub'); } catch (e) { this.log.warn('[web] fsm.unlinkSync failed: ' + e.message); }
         const { execFileSync } = require('child_process');
         const comment = `spore-cluster-${this.config.agentId || 'agent'}`;
         execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', comment, '-f', KEY_PATH], { stdio: ['ignore', 'pipe', 'pipe'] });
-        try { fsm.chmodSync(KEY_PATH, 0o600); } catch {}
-        try { fsm.chmodSync(KEY_PATH + '.pub', 0o644); } catch {}
+        try { fsm.chmodSync(KEY_PATH, 0o600); } catch (e) { this.log.warn('[web] fsm.chmodSync failed: ' + e.message); }
+        try { fsm.chmodSync(KEY_PATH + '.pub', 0o644); } catch (e) { this.log.warn('[web] fsm.chmodSync failed: ' + e.message); }
         const publicKey = fsm.readFileSync(KEY_PATH + '.pub', 'utf8').trim();
         const fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -6515,9 +6515,9 @@ class WebGateway {
         const SSH_DIR = '/data/.ssh';
         const KEY_PATH = path.join(SSH_DIR, 'id_cluster');
         fsm.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
-        try { fsm.chmodSync(SSH_DIR, 0o700); } catch {}
+        try { fsm.chmodSync(SSH_DIR, 0o700); } catch (e) { this.log.warn('[web] fsm.chmodSync failed: ' + e.message); }
         fsm.writeFileSync(KEY_PATH, privateKey.endsWith('\n') ? privateKey : privateKey + '\n', { mode: 0o600 });
-        try { fsm.chmodSync(KEY_PATH, 0o600); } catch {}
+        try { fsm.chmodSync(KEY_PATH, 0o600); } catch (e) { this.log.warn('[web] fsm.chmodSync failed: ' + e.message); }
         // Derive public key
         let publicKey = null, fingerprint = null;
         try {
@@ -6542,8 +6542,8 @@ class WebGateway {
       try {
         const fsm = require('fs');
         const KEY_PATH = '/data/.ssh/id_cluster';
-        try { fsm.unlinkSync(KEY_PATH); } catch {}
-        try { fsm.unlinkSync(KEY_PATH + '.pub'); } catch {}
+        try { fsm.unlinkSync(KEY_PATH); } catch (e) { this.log.warn('[web] fsm.unlinkSync failed: ' + e.message); }
+        try { fsm.unlinkSync(KEY_PATH + '.pub'); } catch (e) { this.log.warn('[web] fsm.unlinkSync failed: ' + e.message); }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
@@ -6655,7 +6655,7 @@ class WebGateway {
         // Ensure the session row exists
         sessions.ensureSession(sessionKey);
         sessions.db.prepare('UPDATE sessions SET plan_mode=? WHERE key=?').run(enabled ? 1 : 0, sessionKey);
-        try { this._broadcastToSessionKey(sessionKey, { type: 'plan_mode', enabled }); } catch {}
+        try { this._broadcastToSessionKey(sessionKey, { type: 'plan_mode', enabled }); } catch (e) { this.log.warn('[web] this._broadcastToSessionKey failed: ' + e.message); }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, planMode: enabled }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
@@ -6783,7 +6783,7 @@ class WebGateway {
           try {
             const graphEvents = require('../graph/events');
             graphEvents.emit('change', { op: 'edge:create', edge: { source: s, target: t, type: edgeType }, source: 'drop-menu' });
-          } catch {}
+          } catch (e) { this.log.warn('[web] require failed: ' + e.message); }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, mode, edge: { source: s, target: t, type: edgeType }, created: !dup }));
           return;

@@ -8,6 +8,7 @@
 const { Client, GatewayIntentBits, Partials, Events, ActivityType } = require('discord.js');
 const { feed } = require('../graph');
 const { resolveSourcePolicy } = require('./privacy');
+const { MessageQueue } = require('./message-queue');
 
 const { DiscordVoice } = require('./discord-voice');
 
@@ -18,9 +19,11 @@ class DiscordGateway {
     this.agent = agentLoop;
     this.client = null;
     
-    this._channels = new Map();
-    this._maxQueueSize = config.maxQueuePerChannel || 3;
-    this._debounceMs = config.messageDebounceMs || 800;
+    this._queue = new MessageQueue({
+      config,
+      log: logger,
+      processOnce: (channelId, ch) => this._processQueueOnce(channelId, ch),
+    });
 
     this._seenMessages = new Set();
     this._seenMessagesMax = 200;
@@ -57,10 +60,7 @@ class DiscordGateway {
   }
 
   _getChannel(channelId) {
-    if (!this._channels.has(channelId)) {
-      this._channels.set(channelId, { queue: [], processing: false, debounceTimer: null });
-    }
-    return this._channels.get(channelId);
+    return this._queue.getChannel(channelId);
   }
   
   /**
@@ -206,35 +206,23 @@ class DiscordGateway {
 
     if (trigger && policy.respond) {
       // Triggered — queue for agent processing
-      const ch = this._getChannel(channelId);
-      ch.name = channelName;
-      // Cancel any pending lull — a real trigger supersedes it
-      if (ch.lullTimer) { clearTimeout(ch.lullTimer); ch.lullTimer = null; }
-      if (ch.queue.length >= this._maxQueueSize) {
-        this.log.warn(`Queue full for #${channelName}, dropping oldest`);
-        ch.queue.shift();
-      }
-      ch.queue.push({
+      this._getChannel(channelId).name = channelName;
+      this._queue.enqueueTriggered(channelId, {
         content: labeledContent,
         channelId, channelName, userId, userName, guildName, isDm, isThread, parentChannelName,
         message, trigger,
-      });
-
-      if (ch.debounceTimer) clearTimeout(ch.debounceTimer);
-      ch.debounceTimer = setTimeout(() => this._processQueue(channelId), this._debounceMs);
+      }, { channelLabel: `#${channelName}` });
     } else {
       // Observe only — add to session history without invoking the agent
       this.agent.sessions.addMessage(sessionKey, 'user', labeledContent);
       this.log.debug(`Observed message from ${userName} in #${channelName} (no trigger)`);
 
-      // Set a "lull" timer: if nobody triggers the bot for a while after activity,
-      // give the agent a chance to chime in if it has something relevant to say
-      const ch = this._getChannel(channelId);
-      ch.name = channelName;
-      if (ch.lullTimer) clearTimeout(ch.lullTimer);
-      ch.lullTimer = setTimeout(() => {
+      // If nobody triggers the bot for a while after activity, give the
+      // agent a chance to chime in if it has something relevant to say.
+      this._getChannel(channelId).name = channelName;
+      this._queue.scheduleLull(channelId, () => {
         this._maybeLullResponse(channelId, channelName, isDm, userId, userName, guildName, message, isThread, parentChannelName);
-      }, 15_000); // 15s of quiet after observed messages
+      });
     }
   }
 
@@ -252,7 +240,7 @@ class DiscordGateway {
       try {
         const ch = this._getChannel(message.channelId);
         if (ch.lastBotMessageId === repliedTo) return 'reply';
-      } catch {}
+      } catch (e) { this.log.warn('[discord] this._getChannel failed: ' + e.message); }
     }
 
     const botName = this.client.user?.username?.toLowerCase() || '';
@@ -280,46 +268,18 @@ class DiscordGateway {
    * Lull prompt is read from the agent's graph (lull_behavior aspect) if available.
    */
   async _maybeLullResponse(channelId, channelName, isDm, userId, userName, guildName, lastMessage, isThread, parentChannelName) {
-    const ch = this._getChannel(channelId);
-    if (ch.processing) return;
-
-    ch.queue.push({
-      content: '[conversation paused — lull check]',
+    this._queue.enqueueLull(channelId, {
       channelId, channelName, userId, userName, guildName, isDm, isThread, parentChannelName,
       message: lastMessage,
-      trigger: 'lull',
     });
-
-    this._processQueue(channelId);
   }
-  
-  async _processQueue(channelId) {
-    const ch = this._getChannel(channelId);
-    if (ch.processing || ch.queue.length === 0) return;
-    ch.processing = true;
 
-    try {
-      await this._processQueueOnce(channelId, ch);
-    } catch (e) {
-      this.log.error(`Failed to process queue for channel ${channelId}:`, e.message);
-    } finally {
-      ch.processing = false;
-      // Drain followup items that arrived during the run
-      if (ch.queue.length > 0) {
-        const drainDelay = ch.queue[0].trigger === 'lull' ? 2000 : 200;
-        setTimeout(() => this._processQueue(channelId), drainDelay);
-      }
-    }
+  async _processQueue(channelId) {
+    return this._queue.processQueue(channelId);
   }
 
   async _processQueueOnce(channelId, ch) {
-    const items = ch.queue.splice(0);
-    const merged = items.map(i => i.content).join('\n');
-    const last = items[items.length - 1];
-    const TRIGGER_PRIORITY = ['mention', 'reply', 'dm', 'name', 'task_complete', 'continuation', 'lull', 'proactive'];
-    const allTriggers = items.map(i => i.trigger).filter(Boolean);
-    const trigger = TRIGGER_PRIORITY.find(p => allTriggers.includes(p)) || allTriggers[0] || 'unknown';
-    const isPassive = trigger === 'lull' || trigger === 'task_complete' || trigger === 'proactive';
+    const { items, merged, last, trigger, isPassive } = this._queue.drain(ch);
 
     // Typing indicator for direct triggers
     let typingInterval = null;
@@ -441,7 +401,7 @@ class DiscordGateway {
               usage: result.usage,
               iterations: result.iterations,
             });
-          } catch {}
+          } catch (e) { this.log.warn('[discord] feed.log failed: ' + e.message); }
         }
       } else if (trigger === 'lull' || trigger === 'task_complete' || trigger === 'proactive') {
         this.log.debug(`${trigger} in #${last.channelName}: no visible response`);
@@ -642,7 +602,7 @@ class DiscordGateway {
       const channel = await this.client.channels.fetch(channelId);
       const msg = await channel.messages.fetch(entry.messageId);
       await msg.delete();
-    } catch { }
+    } catch (e) { this.log.warn('[discord] this._progressMessages.get failed: ' + e.message); }
     this._progressMessages.delete(channelId);
   }
 
@@ -698,7 +658,7 @@ class DiscordGateway {
    */
   getActiveChannelIds() {
     const results = [];
-    for (const [channelId, ch] of this._channels.entries()) {
+    for (const [channelId, ch] of this._queue.entries()) {
       const name = ch.name || channelId;
       results.push({ id: channelId, name });
     }

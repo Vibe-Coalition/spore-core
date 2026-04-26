@@ -50,8 +50,9 @@ class OpenClawAdapter {
    */
   startListening() {
     if (typeof this.engine.ingest !== 'function') return;
+    if (this._onMessageAdded) return; // already listening
 
-    graphEvents.on('message:added', (data) => {
+    this._onMessageAdded = (data) => {
       try {
         this.engine.ingest({
           role: data.role,
@@ -62,7 +63,19 @@ class OpenClawAdapter {
       } catch (e) {
         this.log.warn(`[openclaw-adapter] ingest error: ${e.message}`);
       }
-    });
+    };
+    graphEvents.on('message:added', this._onMessageAdded);
+  }
+
+  /**
+   * Detach event listener — call before discarding the adapter or reloading
+   * the underlying plugin to keep graphEvents from accumulating stale handlers.
+   */
+  stopListening() {
+    if (this._onMessageAdded) {
+      graphEvents.removeListener('message:added', this._onMessageAdded);
+      this._onMessageAdded = null;
+    }
   }
 
   /**

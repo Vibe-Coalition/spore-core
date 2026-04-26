@@ -58,8 +58,6 @@ function _cosine(a, b) {
   return denom === 0 ? 0 : dot / denom;
 }
 
-let findSimilarNodes = null;
-
 function classifyQueryType(query) {
   const q = query.toLowerCase();
   if (/\bhow\s+many\b|\bhow\s+much\b|\btotal\b|\ball\s+the\b|\blist\s+all\b|\bevery\b|\bhow\s+many\s+\w+\s+(?:did|have|do|was|were|are|has)\b|\bcombined\b|\bin\s+total\b/.test(q))
@@ -224,7 +222,7 @@ function applyRetrievalMixin(GraphContext) {
       try {
         const vec = JSON.parse(row.embedding);
         scored.push({ id: row.id, score: _cosine(queryVec, vec) });
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
     }
 
     scored.sort((a, b) => b.score - a.score);
@@ -249,7 +247,7 @@ function applyRetrievalMixin(GraphContext) {
       try {
         const vec = JSON.parse(row.embedding);
         scored.push({ id: row.id, score: _cosine(queryVec, vec) });
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
     }
 
     scored.sort((a, b) => b.score - a.score);
@@ -378,9 +376,14 @@ function applyRetrievalMixin(GraphContext) {
   };
 
   proto.getEdges = function getEdges(nodeId) {
-    return this.stmt('getEdges', `
-      SELECT * FROM edges WHERE source = ? OR target = ?
+    // LIMIT 5000 is a safety cap — real nodes never have anywhere close to
+    // this many edges. If hit, the graph is malformed and the missing edges
+    // are the least of the operator's problems.
+    const rows = this.stmt('getEdges', `
+      SELECT * FROM edges WHERE source = ? OR target = ? LIMIT 5000
     `).all(nodeId, nodeId);
+    if (rows.length === 5000) this.log?.warn?.(`[graph] getEdges(${nodeId}) hit 5000-row cap`);
+    return rows;
   };
 
   proto.getNodesByType = function getNodesByType(type, provenance) {
@@ -392,9 +395,12 @@ function applyRetrievalMixin(GraphContext) {
       params.push(provenance);
     }
 
-    sql += ' ORDER BY importance DESC';
+    // Safety cap — a single type with 10k+ nodes would already blow the
+    // prompt-section budget; this just stops the SELECT from OOMing first.
+    sql += ' ORDER BY importance DESC LIMIT 10000';
 
     const rows = this.stmt(`getByType${provenance ? '_' + provenance : ''}`, sql).all(...params);
+    if (rows.length === 10000) this.log?.warn?.(`[graph] getNodesByType(${type}) hit 10000-row cap`);
     return rows.map(r => this._hydrateNode(r));
   };
 
@@ -414,7 +420,7 @@ function applyRetrievalMixin(GraphContext) {
     try {
       const extra = JSON.parse(row.extra || '{}');
       Object.assign(node, extra);
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
 
     node.aliases = this.stmt('getAliases', 'SELECT alias FROM aliases WHERE node_id = ?')
       .all(row.id).map(r => r.alias);
@@ -573,7 +579,7 @@ Rules:
             seen.add(row.id);
             pinned.push(this._hydrateNode(row));
           }
-        } catch { }
+        } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
       }
       if (pinned.length >= 6) break;
     }
@@ -727,7 +733,7 @@ Rules:
     try {
       const extra = JSON.parse(row.extra || '{}');
       Object.assign(node, extra);
-    } catch {}
+    } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
 
     try {
       node.aliases = this.db.prepare(`SELECT alias FROM ${sg.alias}.aliases WHERE node_id = ?`)
@@ -824,7 +830,7 @@ Rules:
           })));
         }
       }
-    } catch {}
+    } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
     return result;
   };
 
@@ -851,7 +857,7 @@ Rules:
               results.push({ id: neighbor, depth });
             }
           }
-        } catch { }
+        } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
       }
       frontier = nextFrontier;
       if (results.length >= maxNodes) break;
@@ -1032,7 +1038,7 @@ Rules:
             seenIds.add(localKey);
           }
         }
-      } catch {}
+      } catch (e) { this.log.warn('[retrieval] _searchSharedGraphs failed: ' + e.message); }
     }
 
     if (queryType === 'aggregation' || queryType === 'preference') {
@@ -1113,7 +1119,7 @@ Rules:
           if (node) { results.push(node); seenIds.add(nid); }
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
 
     if (temporalHints.hasTemporal) {
       const refDate = opts._referenceDate || todayStr;
@@ -1136,7 +1142,7 @@ Rules:
             seenIds.add(row.id);
           }
         }
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
     }
 
     if (queryType === 'preference') {
@@ -1158,7 +1164,7 @@ Rules:
             seenIds.add(row.id);
           }
         }
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
     }
 
     if (results.length === 0) return null;
@@ -1249,7 +1255,7 @@ Rules:
             allNodeIds.add(neighborId);
             neighborCount++;
           }
-        } catch { }
+        } catch (e) { this.log.warn('[retrieval] getEdges failed: ' + e.message); }
       }
     }
 
@@ -1282,7 +1288,7 @@ Rules:
           parts.push('- **Relationships**: ' + edgeRelations.slice(0, 8).join('; '));
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] Map failed: ' + e.message); }
 
     try {
       const derivedFacts = this.db.prepare(
@@ -1297,7 +1303,7 @@ Rules:
           parts.push(`- _Inferred: ${df.content}_`);
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
 
     try {
       const nodeIdList = [...allNodeIds];
@@ -1317,7 +1323,7 @@ Rules:
           parts.push(`- _Reflection${r.label ? ` [${r.label}]` : ''}: ${r.content}_`);
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] nodeIdList.map failed: ' + e.message); }
 
     return parts.join('\n');
   };

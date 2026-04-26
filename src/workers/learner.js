@@ -206,12 +206,36 @@ class Learner {
       this.log.info('[learner] Graph writer connected');
 
       this._refreshSharedGraphWriters();
+      this._cleanupOrphanFts();
 
       return true;
     } catch (e) {
       this.log.error('[learner] Failed to open graph for writing:', e.message);
       return false;
     }
+  }
+
+  /**
+   * One-time cleanup of episodes_fts rows whose base episode was deleted.
+   * SQLite reuses INTEGER PRIMARY KEY ids on insert — without this sweep,
+   * a fresh episode reusing a deleted id fails with "constraint failed"
+   * when the FTS insert collides with the orphan rowid.
+   */
+  _cleanupOrphanFts() {
+    const cleanOne = (db, label) => {
+      try {
+        const has = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='episodes_fts'").get();
+        if (!has) return;
+        const r = db.prepare(
+          'DELETE FROM episodes_fts WHERE rowid NOT IN (SELECT id FROM episodes)'
+        ).run();
+        if (r.changes > 0) this.log.info(`[learner] Cleaned ${r.changes} orphan episodes_fts rows in ${label}`);
+      } catch (e) {
+        this.log.warn(`[learner] orphan FTS cleanup failed in ${label}: ${e.message}`);
+      }
+    };
+    cleanOne(this.db, 'main');
+    for (const [slug, sdb] of Object.entries(this._sharedDbs || {})) cleanOne(sdb, slug);
   }
 
   setLLMBusy(busy) {
@@ -282,7 +306,7 @@ class Learner {
     // Close removed projects
     for (const slug of currentSlugs) {
       if (!wantedSlugs.has(slug)) {
-        try { this._sharedDbs[slug].close(); } catch {}
+        try { this._sharedDbs[slug].close(); } catch { /* silent: best-effort close */ }
         delete this._sharedDbs[slug];
         this._sharedProjects = this._sharedProjects.filter(p => p.slug !== slug);
         this.log.info(`[learner] Closed shared graph writer: ${slug}`);
@@ -302,7 +326,7 @@ class Learner {
         const meta = this._sharedProjects.find(p => p.slug === slug);
         if (meta && meta._ino === diskIno) continue;
         // File replaced — close stale handle, reopen below
-        try { this._sharedDbs[slug].close(); } catch {}
+        try { this._sharedDbs[slug].close(); } catch { /* silent: best-effort close */ }
         delete this._sharedDbs[slug];
         this._sharedProjects = this._sharedProjects.filter(p => p.slug !== slug);
         this.log.info(`[learner] File replaced for "${slug}" (ino ${meta?._ino} → ${diskIno}), reconnecting`);
@@ -338,7 +362,7 @@ class Learner {
         observedAt,
         turnIdx: this.stats.runs,
       });
-    } catch {}
+    } catch (e) { this.log.warn('[learner] storeEpisode failed: ' + e.message); }
 
     const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId };
 
@@ -503,7 +527,7 @@ class Learner {
           elapsedMs: Date.now() - startedAt,
           source: 'learner',
         });
-      } catch {}
+      } catch (e) { this.log.warn('[learner] graphEvents.emit failed: ' + e.message); }
     } finally {
       this._running = false;
       this._drainQueue();
@@ -808,7 +832,7 @@ The JSON schema for updates becomes:
         }
 
         if (bestMatch && bestScore >= 0.6) {
-          try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(bestMatch.id, label); } catch {}
+          try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(bestMatch.id, label); } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
           return bestMatch.id;
         }
       }
@@ -880,10 +904,10 @@ The JSON schema for updates becomes:
       }
 
       if (bestId && bestSim >= 0.5) {
-        try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(bestId, label || id); } catch {}
+        try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(bestId, label || id); } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
         return bestId;
       }
-    } catch {}
+    } catch (e) { this.log.warn('[learner] id.split failed: ' + e.message); }
     return null;
   }
 
@@ -1047,7 +1071,7 @@ The JSON schema for updates becomes:
           if (resolved !== id) {
             try {
               this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(resolved, ent.label);
-            } catch {}
+            } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
           }
           // If the LLM re-extracts an existing temp node as non-ephemeral
           // (worth keeping long-term), promote it by clearing the ttl marker.
@@ -1064,13 +1088,13 @@ The JSON schema for updates becomes:
           if (ent.ephemeral === false) {
             try {
               const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(resolved);
-              let extraObj = {}; try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
+              let extraObj = {}; try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[learner] JSON.parse failed: ' + e.message); }
               if (extraObj.ttl === 'temp' && !extraObj.sessionId) {
                 delete extraObj.ttl; delete extraObj.tempCreated;
                 this.db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), resolved);
                 this.log.info(`[learner] Promoted temp node to permanent: ${resolved}`);
               }
-            } catch {}
+            } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
           }
         } else {
           // graphcorn: when called inside an acorn session, most new
@@ -1101,7 +1125,7 @@ The JSON schema for updates becomes:
                 "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
               ).get('session-' + String(opts.sessionId));
               sessionAlreadyDistilled = !!sessRow?.distilled;
-            } catch {}
+            } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
           }
 
           let extraObj;
@@ -1263,7 +1287,7 @@ The JSON schema for updates becomes:
                 if (nodeRow) this._generateAndStoreHints(newAttrId, nodeId, nodeRow.label, asp.name, trimmed, eventDate);
               }
               if (!isShared) {
-                try { targetDb.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(newAttrId, trimmed); } catch {}
+                try { targetDb.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(newAttrId, trimmed); } catch (e) { this.log.warn('[learner] targetDb.prepare failed: ' + e.message); }
               }
               graphEvents.emit('change', { op: 'attribute:create', nodeId, aspect: asp.name, content: trimmed, source: 'learner' });
             }
@@ -1330,8 +1354,8 @@ The JSON schema for updates becomes:
               const nodeRow = this.db.prepare('SELECT label FROM nodes WHERE id = ?').get(nodeId);
               if (nodeRow) this._generateAndStoreHints(match.id, nodeId, nodeRow.label, aspectName, trimmedNew, resolvedDate);
             }
-            try { updDb.prepare('DELETE FROM attr_fts WHERE rowid = ?').run(match.id); } catch {}
-            try { updDb.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(match.id, trimmedNew); } catch {}
+            try { updDb.prepare('DELETE FROM attr_fts WHERE rowid = ?').run(match.id); } catch (e) { this.log.warn('[learner] updDb.prepare failed: ' + e.message); }
+            try { updDb.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(match.id, trimmedNew); } catch (e) { this.log.warn('[learner] updDb.prepare failed: ' + e.message); }
           }
           graphEvents.emit('change', { op: 'attribute:update', nodeId, aspect: aspectName, oldContent: match.content, content: trimmedNew, source: 'learner' });
         } else {
@@ -1347,7 +1371,7 @@ The JSON schema for updates becomes:
             if (nodeRow) this._generateAndStoreHints(fallbackAttrId, nodeId, nodeRow.label, aspectName, trimmedNew, updEventDate);
           }
           if (!updIsShared) {
-            try { updDb.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(fallbackAttrId, trimmedNew); } catch {}
+            try { updDb.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(fallbackAttrId, trimmedNew); } catch (e) { this.log.warn('[learner] updDb.prepare failed: ' + e.message); }
           }
           graphEvents.emit('change', { op: 'attribute:create', nodeId, aspect: aspectName, content: trimmedNew, source: 'learner' });
         }
@@ -1523,8 +1547,8 @@ The JSON schema for updates becomes:
             const tagged = later.content.replace(/^(Purchased|Bought|Acquired|Obtained|Got)/i, 'Follow-up:');
             if (tagged !== later.content) {
               this.db.prepare('UPDATE attributes SET content = ? WHERE id = ?').run(tagged, later.attr_id);
-              try { this.db.prepare('DELETE FROM attr_fts WHERE rowid = ?').run(later.attr_id); } catch {}
-              try { this.db.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(later.attr_id, tagged); } catch {}
+              try { this.db.prepare('DELETE FROM attr_fts WHERE rowid = ?').run(later.attr_id); } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
+              try { this.db.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(later.attr_id, tagged); } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
               this.log.info(`[learner] Conflict resolved: "${later.content.substring(0, 50)}" → "${tagged.substring(0, 50)}"`);
             }
           }
@@ -1595,8 +1619,8 @@ The JSON schema for updates becomes:
           if (toSupersede && !toSupersede.content.includes('(superseded)')) {
             const tagged = `${toSupersede.content} (superseded)`;
             this.db.prepare('UPDATE attributes SET content = ? WHERE id = ?').run(tagged, toSupersede.attr_id);
-            try { this.db.prepare('DELETE FROM attr_fts WHERE rowid = ?').run(toSupersede.attr_id); } catch {}
-            try { this.db.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(toSupersede.attr_id, tagged); } catch {}
+            try { this.db.prepare('DELETE FROM attr_fts WHERE rowid = ?').run(toSupersede.attr_id); } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
+            try { this.db.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)').run(toSupersede.attr_id, tagged); } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
             this.log.info(`[learner] Cross-node conflict: "${toSupersede.content.substring(0, 60)}" superseded by newer fact on ${newAttr.nodeId}`);
           }
         }
@@ -1774,8 +1798,12 @@ ${structuredTemplate}`;
 
       const epId = this.db.prepare('SELECT last_insert_rowid() as id').get().id;
       try {
-        this.db.prepare('INSERT INTO episodes_fts(rowid, content) VALUES (?, ?)').run(epId, content);
-      } catch {}
+        // OR REPLACE handles the case where this rowid was previously used
+        // by a now-deleted episode and never cleaned up from the FTS table.
+        // SQLite reuses INTEGER PRIMARY KEY ids on insert; the FTS rowid
+        // is unique so the new row would collide with the orphan otherwise.
+        this.db.prepare('INSERT OR REPLACE INTO episodes_fts(rowid, content) VALUES (?, ?)').run(epId, content);
+      } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
       return epId;
     } catch (e) {
       this.log.debug?.(`[learner] Episode storage failed: ${e.message}`);
@@ -1799,7 +1827,7 @@ ${structuredTemplate}`;
       )`);
       try {
         this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS hints_fts USING fts5(hint, content=hints, content_rowid=id)`);
-      } catch {}
+      } catch (e) { this.log.warn('[learner] db.exec failed: ' + e.message); }
 
       const humanAspect = aspectName.replace(/_/g, ' ');
       const shortContent = content.substring(0, 60).replace(/\[.*?\]/g, '').trim();
@@ -2007,7 +2035,7 @@ ${structuredTemplate}`;
 
   close() {
     for (const [slug, sdb] of Object.entries(this._sharedDbs)) {
-      try { sdb.close(); } catch {}
+      try { sdb.close(); } catch { /* silent: best-effort close */ }
     }
     this._sharedDbs = {};
     if (this.db) {

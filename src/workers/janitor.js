@@ -221,7 +221,7 @@ class Janitor {
     const candidates = [];
     for (const row of rows) {
       let extraObj = {};
-      try { extraObj = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+      try { extraObj = row.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[janitor] JSON.parse failed: ' + e.message); }
       if (extraObj.ttl !== 'temp') continue;
       const refIso = extraObj.tempCreated || row.created;
       const refMs = refIso ? Date.parse(refIso) : NaN;
@@ -277,7 +277,7 @@ Delete guidance: crawl/error logs from completed runs, one-off scratch nodes, st
           try {
             const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(node.id);
             let extraObj = {};
-            try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
+            try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[janitor] JSON.parse failed: ' + e.message); }
             extraObj.tempCreated = new Date().toISOString();
             this.db.prepare("UPDATE nodes SET extra = ?, updated = datetime('now') WHERE id = ?").run(JSON.stringify(extraObj), node.id);
             this.stats.tempsKept++;
@@ -368,16 +368,16 @@ Return {"prune":[]} if nothing should be pruned.`;
     try {
       const refRows = this.db.prepare("SELECT DISTINCT node_id FROM reflections").all();
       for (const r of refRows) blockIds.add(r.node_id);
-    } catch {}
+    } catch (e) { this.log.warn('[janitor] db.prepare failed: ' + e.message); }
     try {
       const dfRows = this.db.prepare("SELECT source_node_ids FROM derived_facts WHERE invalidated_at IS NULL").all();
       for (const d of dfRows) {
         try {
           const ids = JSON.parse(d.source_node_ids);
           if (Array.isArray(ids)) for (const id of ids) blockIds.add(id);
-        } catch {}
+        } catch { /* silent: malformed JSON → fallback */ }
       }
-    } catch {}
+    } catch (e) { this.log.warn('[janitor] db.prepare failed: ' + e.message); }
 
     const candidates = this.db.prepare(`
       SELECT n.id, n.label, n.type, n.description, n.importance,
@@ -476,7 +476,7 @@ ${edgeLines || '    (no edges)'}`;
           this.stats.nodesTrashed++;
         } else {
           // Keep — bump updated so the node doesn't come up again next cycle
-          try { this.db.prepare("UPDATE nodes SET updated = datetime('now') WHERE id = ?").run(node.id); } catch {}
+          try { this.db.prepare("UPDATE nodes SET updated = datetime('now') WHERE id = ?").run(node.id); } catch (e) { this.log.warn('[janitor] db.prepare failed: ' + e.message); }
         }
       } catch (e) {
         this.log.warn(`[janitor] node prune ${node.id}: ${e.message}`);
@@ -536,7 +536,7 @@ ${edgeLines || '    (no edges)'}`;
       delAspects.run(nodeId);
       delEdges.run(nodeId, nodeId);
       delAliases.run(nodeId);
-      try { delNodeSources.run(nodeId); } catch {}
+      try { delNodeSources.run(nodeId); } catch (e) { this.log.warn('[janitor] delNodeSources.run failed: ' + e.message); }
       delNode.run(nodeId);
 
       graphEvents.emit('change', { op: 'node:delete', nodeId, source: deletedBy });
@@ -656,7 +656,7 @@ ${edgeLines || '    (no edges)'}`;
         for (const al of aliases) insAlias.run(node.id, al.alias);
 
         const insSrc = this.db.prepare('INSERT INTO node_sources (node_id, source) VALUES (?, ?)');
-        for (const ns of nodeSources) { try { insSrc.run(node.id, ns.source); } catch {} }
+        for (const ns of nodeSources) { try { insSrc.run(node.id, ns.source); } catch (e) { this.log.warn('[janitor] insSrc.run failed: ' + e.message); } }
 
         this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(row.id);
         this.stats.restored++;

@@ -1956,7 +1956,7 @@ async function openAnima(id) {
   const wl = document.getElementById('web-links');
   const webLink = `/animas/${id}/graph`;
   if (data.env.ANIMA_WEB_PORT) {
-    wl.innerHTML = `<a href="${webLink}" target="_blank" style="font-size:.78rem">Open Graph Viewer</a>`;
+    wl.innerHTML = `<a href="${esc(webLink)}" target="_blank" style="font-size:.78rem">Open Graph Viewer</a>`;
   } else {
     wl.innerHTML = '';
   }
@@ -2062,7 +2062,7 @@ function addCustomKeyRow(keyName, keyValue) {
   const container = document.getElementById('custom-keys-list');
   const row = document.createElement('div');
   row.style.cssText = 'display:flex;gap:6px;margin-bottom:4px;align-items:center';
-  row.innerHTML = `<input type="text" class="custom-key-name" value="${keyName || ''}" placeholder="KEY_NAME" style="width:40%;font-size:.75rem;text-transform:uppercase"><input type="password" data-1p-ignore class="custom-key-value" value="${keyValue || ''}" placeholder="value" style="width:50%;font-size:.75rem"><button onclick="this.parentElement.remove()" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:1rem">&times;</button>`;
+  row.innerHTML = `<input type="text" class="custom-key-name" value="${esc(keyName || '')}" placeholder="KEY_NAME" style="width:40%;font-size:.75rem;text-transform:uppercase"><input type="password" data-1p-ignore class="custom-key-value" value="${esc(keyValue || '')}" placeholder="value" style="width:50%;font-size:.75rem"><button onclick="this.parentElement.remove()" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:1rem">&times;</button>`;
   container.appendChild(row);
 }
 
@@ -2613,7 +2613,7 @@ async function loadTokens() {
 
   const data = await api(`/api/animas/${currentAnima.id}/tokens`);
   if (!data || data.error) {
-    body.innerHTML = `<div style="color:var(--muted);font-size:.85rem;padding:8px 0">${data?.error || 'No token data available. The web server may not be enabled for this agent.'}</div>`;
+    body.innerHTML = `<div style="color:var(--muted);font-size:.85rem;padding:8px 0">${esc(data?.error || 'No token data available. The web server may not be enabled for this agent.')}</div>`;
     return;
   }
 
@@ -3290,7 +3290,7 @@ async function loadPlugins(animaId) {
     `).join('');
     el.innerHTML = rows;
   } catch (e) {
-    el.innerHTML = `<div style="color:var(--danger);font-size:.85rem;padding:12px">${e.message}</div>`;
+    el.innerHTML = `<div style="color:var(--danger);font-size:.85rem;padding:12px">${esc(e.message)}</div>`;
   }
 }
 

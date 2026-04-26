@@ -6,8 +6,8 @@ const path = require('path');
 let SlackGateway = null;
 try {
   ({ SlackGateway } = require('./slack'));
-} catch {
-  // @slack/bolt not installed — Slack gateway unavailable
+} catch (e) {
+  console.warn('[manager] require failed: ' + e.message);
 }
 
 class GatewayManager {
@@ -97,11 +97,27 @@ class GatewayManager {
 
     let filePath = input.filePath || null;
     if (filePath) {
-      const resolved = require('path').resolve(filePath);
+      const path = require('path');
+      const fs = require('fs');
       const workspace = this.config.workspacePath || process.cwd();
-      if (!resolved.startsWith(workspace) && !resolved.startsWith('/tmp')) {
-        return { error: `Blocked: filePath must be under ${workspace} or /tmp` };
+      // Resolve symlinks so an attacker can't drop a workspace symlink
+      // pointing at /etc/shadow and pass the prefix check. realpath fails
+      // if the target doesn't exist — that's the right thing here since
+      // we're about to read the file anyway.
+      let resolved;
+      try {
+        resolved = fs.realpathSync(path.resolve(filePath));
+      } catch (e) {
+        return { error: `Blocked: filePath does not exist or cannot be resolved: ${e.message}` };
       }
+      const realWorkspace = (() => { try { return fs.realpathSync(workspace); } catch { return path.resolve(workspace); } })();
+      const realTmp = (() => { try { return fs.realpathSync('/tmp'); } catch { return '/tmp'; } })();
+      const inWorkspace = resolved === realWorkspace || resolved.startsWith(realWorkspace + path.sep);
+      const inTmp = resolved === realTmp || resolved.startsWith(realTmp + path.sep);
+      if (!inWorkspace && !inTmp) {
+        return { error: `Blocked: filePath must be under ${realWorkspace} or /tmp` };
+      }
+      filePath = resolved;
     }
     return gateway.sendMessage(id, input.content || '', filePath, input);
   }

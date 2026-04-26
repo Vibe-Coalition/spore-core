@@ -281,7 +281,7 @@ function exportGraph(db, { agentId = null } = {}) {
     for (const ns of db.prepare('SELECT * FROM node_sources').all()) {
       (sourcesByNode[ns.node_id] ||= []).push(ns.source);
     }
-  } catch {}
+  } catch (e) { console.warn('[export-import] db.prepare failed: ' + e.message); }
 
   const nodes = keptNodes.map(n => ({
     id: n.id,
@@ -348,7 +348,7 @@ function exportGraph(db, { agentId = null } = {}) {
     reflections = db.prepare('SELECT * FROM reflections').all()
       .filter(r => !excludedSet.has(r.node_id))
       .map(r => ({ nodeId: r.node_id, content: r.content, model: r.model || null, source: r.source || null, created: r.created || null }));
-  } catch {}
+  } catch (e) { console.warn('[export-import] db.prepare failed: ' + e.message); }
 
   // Derived facts — keep those whose source node ids are all still exported.
   let derivedFacts = [];
@@ -363,7 +363,7 @@ function exportGraph(db, { agentId = null } = {}) {
         created: d.created || null,
       }))
       .filter(d => (d.source_node_ids || []).every(id => !excludedSet.has(id)));
-  } catch {}
+  } catch (e) { console.warn('[export-import] db.prepare failed: ' + e.message); }
 
   const stats = {
     totalNodes: allNodes.length,
@@ -477,10 +477,10 @@ function importGraph(db, payload, { log = console } = {}) {
       }
 
       for (const alias of (n.aliases || [])) {
-        try { insAlias.run(n.id, alias); report.aliasesImported++; } catch {}
+        try { insAlias.run(n.id, alias); report.aliasesImported++; } catch (e) { console.warn('[export-import] insAlias.run failed: ' + e.message); }
       }
       for (const src of (n.sources || [])) {
-        try { insNodeSource.run(n.id, src); report.nodeSourcesImported++; } catch {}
+        try { insNodeSource.run(n.id, src); report.nodeSourcesImported++; } catch (e) { console.warn('[export-import] insNodeSource.run failed: ' + e.message); }
       }
     }
 
@@ -518,7 +518,7 @@ function importGraph(db, payload, { log = console } = {}) {
       try {
         insReflection.run(r.nodeId, r.content, r.model || null, r.source || 'imported', r.created || new Date().toISOString());
         report.reflectionsImported++;
-      } catch {}
+      } catch (e) { console.warn('[export-import] insReflection.run failed: ' + e.message); }
     }
 
     // 4. Derived facts — only ones where all source nodes exist post-import
@@ -532,7 +532,7 @@ function importGraph(db, payload, { log = console } = {}) {
           d.created || new Date().toISOString()
         );
         report.derivedFactsImported++;
-      } catch {}
+      } catch (e) { console.warn('[export-import] insDerivedFact.run failed: ' + e.message); }
     }
 
     db.exec('COMMIT');
@@ -540,7 +540,7 @@ function importGraph(db, payload, { log = console } = {}) {
     db.exec('ROLLBACK');
     throw e;
   } finally {
-    try { db.exec(`PRAGMA foreign_keys = ${prevFk ? 'ON' : 'OFF'}`); } catch {}
+    try { db.exec(`PRAGMA foreign_keys = ${prevFk ? 'ON' : 'OFF'}`); } catch (e) { console.warn('[export-import] db.exec failed: ' + e.message); }
   }
 
   return report;

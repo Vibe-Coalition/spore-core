@@ -237,7 +237,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
   // ws.on('close') chains it again. Mark on first success so the
   // second call short-circuits instead of repeating the LLM call.
   let extraObj = {};
-  try { extraObj = node.extra ? JSON.parse(node.extra) : {}; } catch {}
+  try { extraObj = node.extra ? JSON.parse(node.extra) : {}; } catch (e) { console.warn('[sessions] JSON.parse failed: ' + e.message); }
   if (extraObj.summarized_at) {
     if (log) log.info(`[graphcorn] summary already written for ${id} at ${extraObj.summarized_at}, skipping`);
     return;
@@ -410,7 +410,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     return { skipped: 'no-session-node' };
   }
   let extraObj = {};
-  try { extraObj = node.extra ? JSON.parse(node.extra) : {}; } catch {}
+  try { extraObj = node.extra ? JSON.parse(node.extra) : {}; } catch (e) { console.warn('[sessions] JSON.parse failed: ' + e.message); }
   if (extraObj.distilled_at) {
     if (log) log.info(`[distill] ${id} already distilled at ${extraObj.distilled_at}, skipping`);
     return { skipped: 'already-distilled' };
@@ -652,12 +652,12 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
           try {
             insE.run(newId, projectIdForEdges, 'uses');
             graphEvents.emit('change', { op: 'edge:create', edge: { source: newId, target: projectIdForEdges, type: 'uses' }, source: 'graphcorn-distill' });
-          } catch {}
+          } catch (e) { console.warn('[sessions] insE.run failed: ' + e.message); }
         }
         try {
           insE.run(newId, id, 'first_seen_in');
           graphEvents.emit('change', { op: 'edge:create', edge: { source: newId, target: id, type: 'first_seen_in' }, source: 'graphcorn-distill' });
-        } catch {}
+        } catch (e) { console.warn('[sessions] insE.run failed: ' + e.message); }
         graphEvents.emit('change', { op: 'node:create', node: { id: newId, label, type: nodeType, description }, source: 'graphcorn-distill' });
         createdCount.value++;
       } catch (e) {
@@ -703,7 +703,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       const nodeRow = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(targetId === tempId ? tempId : targetId);
       if (nodeRow) {
         let ext = {};
-        try { ext = nodeRow.extra ? JSON.parse(nodeRow.extra) : {}; } catch {}
+        try { ext = nodeRow.extra ? JSON.parse(nodeRow.extra) : {}; } catch (e) { console.warn('[sessions] JSON.parse failed: ' + e.message); }
         delete ext.ttl;
         delete ext.tempCreated;
         delete ext.sessionId;
@@ -764,13 +764,13 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         try {
           const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(t.id);
           if (row) {
-            let ext = {}; try { ext = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+            let ext = {}; try { ext = row.extra ? JSON.parse(row.extra) : {}; } catch (e) { console.warn('[sessions] JSON.parse failed: ' + e.message); }
             delete ext.ttl;
             delete ext.tempCreated;
             delete ext.sessionId;
             db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(ext), t.id);
           }
-        } catch {}
+        } catch (e) { console.warn('[sessions] db.prepare failed: ' + e.message); }
         if (log) log.info(`[distill] skipped soft-delete of ${t.type} node ${t.id} (identity guard, cleared temp flag)`);
         continue;
       }

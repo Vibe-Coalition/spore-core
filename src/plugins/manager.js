@@ -36,6 +36,18 @@ class PluginManager {
       return;
     }
 
+    // Refuse to load plugins from inside the agent-writable workspace —
+    // a compromised agent run could otherwise drop a plugin and gain RCE
+    // at the next boot. Plugins must live in an operator-managed location.
+    const workspacePath = this.config.workspacePath ? path.resolve(this.config.workspacePath) : null;
+    if (workspacePath) {
+      const resolvedPlugins = path.resolve(pluginsDir);
+      if (resolvedPlugins === workspacePath || resolvedPlugins.startsWith(workspacePath + path.sep)) {
+        this.log.error(`[plugins] Refusing to load: pluginsDir (${resolvedPlugins}) is inside workspace (${workspacePath}). Plugins must live outside agent-writable paths.`);
+        return;
+      }
+    }
+
     const entries = fs.readdirSync(pluginsDir, { withFileTypes: true });
     const dirs = entries.filter(e => e.isDirectory());
 

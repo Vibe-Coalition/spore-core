@@ -67,14 +67,14 @@ class BackupWorker {
         try {
           const c = this.db.prepare(`SELECT COUNT(*) AS c FROM "${t.name}"`).get().c;
           counts.push(`${t.name}:${c}`);
-        } catch {}
+        } catch (e) { this.log.warn('[backup] db.prepare failed: ' + e.message); }
       }
       let maxUpdated = null;
       for (const col of ['updated', 'updated_at', 'deleted_at', 'created']) {
         try {
           const r = this.db.prepare(`SELECT MAX(${col}) AS m FROM nodes`).get();
           if (r?.m) { maxUpdated = r.m; break; }
-        } catch {}
+        } catch (e) { this.log.warn('[backup] db.prepare failed: ' + e.message); }
       }
       return crypto.createHash('sha1').update(counts.join('|') + '|' + (maxUpdated || '')).digest('hex').slice(0, 16);
     } catch {
@@ -258,7 +258,7 @@ class BackupWorker {
           try {
             const c = this.db.prepare(`SELECT COUNT(*) AS c FROM "${t}"`).get().c;
             rowsRestored += c;
-          } catch {}
+          } catch (e) { this.log.warn('[backup] db.prepare failed: ' + e.message); }
           tablesRestored++;
         }
         this.db.exec('COMMIT');
@@ -266,7 +266,7 @@ class BackupWorker {
         this.db.exec('ROLLBACK');
         throw e;
       } finally {
-        try { this.db.exec(`PRAGMA foreign_keys = ${prevFk ? 'ON' : 'OFF'}`); } catch {}
+        try { this.db.exec(`PRAGMA foreign_keys = ${prevFk ? 'ON' : 'OFF'}`); } catch (e) { this.log.warn('[backup] db.exec failed: ' + e.message); }
       }
 
       // Rebuild FTS indices from restored base tables
@@ -285,7 +285,7 @@ class BackupWorker {
       return { ok: false, error: e.message, preRestoreSnapshot: pre.file };
     } finally {
       if (attached) {
-        try { this.db.exec('DETACH DATABASE bak'); } catch {}
+        try { this.db.exec('DETACH DATABASE bak'); } catch (e) { this.log.warn('[backup] db.exec failed: ' + e.message); }
       }
     }
   }

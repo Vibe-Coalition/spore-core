@@ -17,8 +17,8 @@ const TELEGRAM_MIME = {
 let VoicePipeline = null;
 try {
   ({ VoicePipeline } = require('../voice'));
-} catch {
-  // Voice deps optional
+} catch (e) {
+  console.warn('[telegram] require failed: ' + e.message);
 }
 
 class TelegramGateway {
@@ -902,7 +902,7 @@ class TelegramGateway {
             `Your pairing code is:\n\n  ${code}\n\n` +
             `Share this code with the bot owner to get access.`
           );
-        } catch {}
+        } catch (e) { this.log.warn('[telegram] this.sendMessage failed: ' + e.message); }
         this.log.info(`[telegram] Pairing request from ${name || userId} — code: ${code}`);
       }
       return;
@@ -910,10 +910,15 @@ class TelegramGateway {
 
     // Fallback (no pairing store)
     if (this.pendingDmApprovals.has(userId)) return;
+    // Cap at 1000 entries (insertion-order eviction) — prevents unbounded
+    // growth across many users hitting the no-pairing-store fallback path.
+    if (this.pendingDmApprovals.size >= 1000) {
+      this.pendingDmApprovals.delete(this.pendingDmApprovals.values().next().value);
+    }
     this.pendingDmApprovals.add(userId);
     try {
       await this.sendMessage(chatId, 'This bot is in pairing mode. Ask the owner to add your Telegram user ID to `channels.telegram.allowFrom` or switch `dmPolicy` to `open`.');
-    } catch {}
+    } catch (e) { this.log.warn('[telegram] this.sendMessage failed: ' + e.message); }
   }
 
   _api(method, payload) {
