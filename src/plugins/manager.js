@@ -53,11 +53,21 @@ class PluginManager {
    * settings-save endpoint.
    */
   async persistPluginConfig(pluginId, partial) {
-    if (!this._configPersister) {
-      throw new Error('No config persister registered. Wire it from gateways/web.js.');
-    }
     const oldConfig = { ...(this._appContext?.config?.plugins?.[pluginId] || {}) };
-    const newConfig = await this._configPersister(pluginId, partial);
+    let newConfig;
+    if (this._configPersister) {
+      newConfig = await this._configPersister(pluginId, partial);
+    } else {
+      // No persister registered yet (e.g. plugin's register-time backfill runs
+      // before the web gateway wires its lazy persister). Apply in memory so
+      // getConfig() reflects the change immediately; the next user-driven
+      // settings save will serialize the merged state to disk.
+      const cfg = this._appContext?.config;
+      if (!cfg) throw new Error('No appContext config available for in-memory write');
+      if (!cfg.plugins) cfg.plugins = {};
+      cfg.plugins[pluginId] = { ...oldConfig, ...partial };
+      newConfig = { ...cfg.plugins[pluginId] };
+    }
     await this.dispatchConfigChange(pluginId, oldConfig, newConfig);
     return newConfig;
   }

@@ -5958,7 +5958,6 @@ async function saveSettingsPanel() {
       ['Backups', typeof _bkSaveSettings === 'function' ? _bkSaveSettings : null],
       ['Cluster', typeof _clSaveSettings === 'function' ? _clSaveSettings : null],
       ['Cluster hosts', typeof _clHostsSave === 'function' ? _clHostsSave : null],
-      ['Email', typeof _emailSaveSettings === 'function' ? _emailSaveSettings : null],
     ].filter(([, fn]) => fn);
     const sectionFailures = [];
     for (const [name, fn] of sectionSaves) {
@@ -13979,8 +13978,6 @@ document.addEventListener('click', (e) => {
     _tsLogout();
   } else if (t.id === 'settings-cluster-test') {
     _clTestSsh();
-  } else if (t.id === 'settings-email-test') {
-    _emailSelfTest();
   } else if (t.id === 'settings-cluster-hosts-add') {
     _clHostsAddRow();
   } else if (t.dataset?.clusterHostRm !== undefined) {
@@ -14862,107 +14859,8 @@ async function _clHostsTestRow(row) {
   }
 }
 
-// ── Email ─────────────────────────────────────────────────────────
-const EMAIL_PROVIDER_DEFAULTS = {
-  proton: { smtpHost: 'smtp.protonmail.ch', smtpPort: 587, smtpSecure: false, imapHost: 'imap.protonmail.ch', imapPort: 993, imapSecure: true, keyHint: 'Proton → Settings → IMAP/SMTP → generate an SMTP token. Requires Proton Mail Plus or higher.' },
-  google: { smtpHost: 'smtp.gmail.com', smtpPort: 587, smtpSecure: false, imapHost: 'imap.gmail.com', imapPort: 993, imapSecure: true, keyHint: 'Google account → Security → 2-Step Verification → App passwords. Enable IMAP under Gmail → Settings → Forwarding and POP/IMAP.' },
-};
-
-async function _emailLoadSettings() {
-  try {
-    const r = await fetch(API + '/api/email/settings', { headers: authHeaders() });
-    const d = await r.json();
-    const setVal = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v == null ? '' : String(v); };
-    const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
-    setVal('settings-email-provider', d.emailProvider || '');
-    setVal('settings-email-address', d.emailAddress || '');
-    setVal('settings-email-smtp-host', d.emailSmtpHost || '');
-    setVal('settings-email-smtp-port', d.emailSmtpPort || '');
-    setChk('settings-email-smtp-secure', d.emailSmtpSecure);
-    setVal('settings-email-smtp-username', d.emailSmtpUsername || '');
-    setVal('settings-email-imap-host', d.emailImapHost || '');
-    setVal('settings-email-imap-port', d.emailImapPort || '');
-    setChk('settings-email-imap-secure', d.emailImapSecure !== false);
-    const pwStatus = document.getElementById('settings-email-pw-status');
-    if (pwStatus) pwStatus.textContent = d.hasPassword ? 'Password set — leave blank to keep current.' : 'No password set yet.';
-  } catch (e) {}
-}
-
-function _emailApplyProviderDefaults() {
-  const sel = document.getElementById('settings-email-provider');
-  if (!sel) return;
-  const preset = EMAIL_PROVIDER_DEFAULTS[sel.value];
-  if (!preset) return;
-  const setIfEmpty = (id, v) => { const el = document.getElementById(id); if (el && !el.value) el.value = v; };
-  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
-  setIfEmpty('settings-email-smtp-host', preset.smtpHost);
-  setIfEmpty('settings-email-smtp-port', preset.smtpPort);
-  setChk('settings-email-smtp-secure', preset.smtpSecure);
-  setIfEmpty('settings-email-imap-host', preset.imapHost);
-  setIfEmpty('settings-email-imap-port', preset.imapPort);
-  setChk('settings-email-imap-secure', preset.imapSecure);
-  const pwStatus = document.getElementById('settings-email-pw-status');
-  if (pwStatus) pwStatus.textContent = preset.keyHint;
-}
-document.addEventListener('change', (e) => {
-  if (e.target?.id === 'settings-email-provider') _emailApplyProviderDefaults();
-});
-
-async function _emailSaveSettings() {
-  const btn = document.getElementById('settings-email-save');
-  const out = document.getElementById('settings-email-test-result');
-  if (btn) btn.disabled = true;
-  if (out) { out.textContent = 'saving…'; out.className = 'settings-status-line warn'; }
-  try {
-    const body = {
-      emailProvider: document.getElementById('settings-email-provider')?.value || '',
-      emailAddress: document.getElementById('settings-email-address')?.value || '',
-      emailSmtpHost: document.getElementById('settings-email-smtp-host')?.value || '',
-      emailSmtpPort: Number(document.getElementById('settings-email-smtp-port')?.value) || 587,
-      emailSmtpSecure: !!document.getElementById('settings-email-smtp-secure')?.checked,
-      emailSmtpUsername: document.getElementById('settings-email-smtp-username')?.value || '',
-      emailImapHost: document.getElementById('settings-email-imap-host')?.value || '',
-      emailImapPort: Number(document.getElementById('settings-email-imap-port')?.value) || 993,
-      emailImapSecure: !!document.getElementById('settings-email-imap-secure')?.checked,
-      emailSmtpPassword: document.getElementById('settings-email-smtp-password')?.value || '',
-    };
-    const r = await fetch(API + '/api/email/settings', {
-      method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.error || 'save failed');
-    if (out) { out.textContent = 'saved. Click "Send self-test" to verify.'; out.className = 'settings-status-line ok'; }
-    const pwInput = document.getElementById('settings-email-smtp-password');
-    if (pwInput) pwInput.value = '';
-    _emailLoadSettings();
-  } catch (e) {
-    if (out) { out.textContent = 'save error: ' + (e.message || e); out.className = 'settings-status-line err'; }
-  } finally { if (btn) btn.disabled = false; }
-}
-
-async function _emailSelfTest() {
-  const btn = document.getElementById('settings-email-test');
-  const out = document.getElementById('settings-email-test-result');
-  if (btn) btn.disabled = true;
-  if (out) { out.textContent = 'sending self-test (SMTP) then checking IMAP…'; out.className = 'settings-status-line warn'; }
-  try {
-    const r = await fetch(API + '/api/email/test', { method: 'POST', headers: authHeaders() });
-    const d = await r.json();
-    if (d.ok) {
-      if (out) { out.textContent = `SMTP ✓ sent, IMAP ✓ connected. Check your inbox for the self-test.`; out.className = 'settings-status-line ok'; }
-    } else if (d.stage === 'smtp') {
-      if (out) { out.textContent = `SMTP failed: ${d.error}`; out.className = 'settings-status-line err'; }
-    } else if (d.stage === 'imap') {
-      if (out) { out.textContent = `SMTP ${d.smtp || 'ok'}; IMAP failed: ${d.error}`; out.className = 'settings-status-line err'; }
-    } else {
-      if (out) { out.textContent = `test failed: ${d.error || 'unknown'}`; out.className = 'settings-status-line err'; }
-    }
-  } catch (e) {
-    if (out) { out.textContent = 'test error: ' + (e.message || e); out.className = 'settings-status-line err'; }
-  } finally { if (btn) btn.disabled = false; }
-}
+// Email settings UI extracted to plugins/email/. Settings flow through the
+// standard /api/settings + per-plugin pane render path now.
 
 async function _clRefreshKeyStatus() {
   const status = document.getElementById('settings-cluster-key-status');
@@ -15081,7 +14979,6 @@ if (_origOpenSettings && !window.__maintStatusHooked) {
     _tsRefreshStatus();
     _clLoadSettings();
     _clRefreshKeyStatus();
-    _emailLoadSettings();
     return r;
   };
   window.openSettingsPanel = _wrap;
@@ -18657,65 +18554,9 @@ build/
         <div class="settings-note" id="settings-identity-note"></div>
       </div>
 
-      <div class="settings-section wide" data-target-tab="agent">
-        <h4>Email</h4>
-        <div class="settings-hint" style="margin-top:4px">Give the agent its own mailbox for sending and reading mail. Pick a provider and the SMTP/IMAP defaults fill in; you'll need a per-app password or SMTP token from that provider. Credentials are stored in <code>/app/.env</code>.</div>
-        <div style="margin-top:10px;display:grid;grid-template-columns:1fr 2fr;gap:10px">
-          <label style="font-size:.72rem">Provider
-            <select id="settings-email-provider" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-              <option value="">(disabled)</option>
-              <option value="proton">Proton Mail</option>
-              <option value="google">Google (Gmail / Workspace)</option>
-            </select>
-          </label>
-          <label style="font-size:.72rem">Email address
-            <input id="settings-email-address" type="email" autocomplete="off" placeholder="you@proton.me" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-          </label>
-        </div>
+      <!-- Email settings extracted to plugins/email/ — see Plugins tab. -->
 
-        <div style="margin-top:10px;display:grid;grid-template-columns:3fr 1fr 1fr;gap:10px">
-          <label style="font-size:.72rem">SMTP host
-            <input id="settings-email-smtp-host" type="text" autocomplete="off" placeholder="smtp.protonmail.ch" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-          </label>
-          <label style="font-size:.72rem">Port
-            <input id="settings-email-smtp-port" type="number" min="1" max="65535" step="1" placeholder="587" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-          </label>
-          <label style="font-size:.72rem;display:flex;align-items:end;gap:6px;padding-bottom:7px">
-            <input id="settings-email-smtp-secure" type="checkbox">
-            <span>Implicit TLS</span>
-          </label>
-        </div>
-
-        <div style="margin-top:10px;display:grid;grid-template-columns:3fr 1fr 1fr;gap:10px">
-          <label style="font-size:.72rem">IMAP host
-            <input id="settings-email-imap-host" type="text" autocomplete="off" placeholder="imap.protonmail.ch" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-          </label>
-          <label style="font-size:.72rem">Port
-            <input id="settings-email-imap-port" type="number" min="1" max="65535" step="1" placeholder="993" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-          </label>
-          <label style="font-size:.72rem;display:flex;align-items:end;gap:6px;padding-bottom:7px">
-            <input id="settings-email-imap-secure" type="checkbox" checked>
-            <span>Implicit TLS</span>
-          </label>
-        </div>
-
-        <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <label style="font-size:.72rem">Username
-            <input id="settings-email-smtp-username" type="text" autocomplete="off" placeholder="(blank = use email address)" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-          </label>
-          <label style="font-size:.72rem">Password / SMTP token
-            <input id="settings-email-smtp-password" type="password" autocomplete="off" placeholder="(leave blank to keep current)" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:.72rem;border-radius:4px">
-          </label>
-        </div>
-        <div id="settings-email-pw-status" class="settings-hint" style="margin-top:4px"></div>
-
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="settings-btn-secondary" id="settings-email-test" type="button" style="font-size:.68rem;padding:4px 10px">Send self-test</button>
-        </div>
-        <div id="settings-email-test-result" class="settings-status-line"></div>
-      </div>
-
-      <div class="settings-section wide" id="settings-users-section" data-target-tab="users">
+<div class="settings-section wide" id="settings-users-section" data-target-tab="users">
         <h4>Users</h4>
         <div class="settings-note">Manage who can access this instance. Changes take effect immediately and active sessions are dropped.</div>
         <div id="settings-users-list" class="settings-users-list"></div>

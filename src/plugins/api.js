@@ -45,13 +45,20 @@ class PluginAPI {
   /**
    * Register a tool. Definition must include:
    *   { description: string, inputSchema: object, execute: async (input, ctx) => result }
+   *
+   * By default the tool is exposed to the agent as `plugin_<pluginId>_<name>`
+   * so plugins can't collide. Set `definition.namespaced = false` to keep the
+   * bare name — used when extracting a built-in tool to preserve its public
+   * name (e.g. `email_send` stays `email_send`). Bare-name collisions across
+   * plugins are rejected at runtime by the manager's tool dispatcher.
    */
   registerTool(name, definition) {
     if (!definition.description || !definition.inputSchema || typeof definition.execute !== 'function') {
       throw new Error(`Tool "${name}" must have description, inputSchema, and execute function`);
     }
-    this._tools.push({ name: `plugin_${this.pluginId}_${name}`, definition });
-    this._log.debug(`[plugin:${this.pluginId}] Registered tool: ${name}`);
+    const exposedName = definition.namespaced === false ? name : `plugin_${this.pluginId}_${name}`;
+    this._tools.push({ name: exposedName, definition });
+    this._log.debug(`[plugin:${this.pluginId}] Registered tool: ${exposedName}`);
   }
 
   /**
@@ -150,6 +157,15 @@ class PluginAPI {
   getConfig() {
     const allPluginConfig = this._appContext.config.plugins || {};
     return allPluginConfig[this.pluginId] || {};
+  }
+
+  /**
+   * Read-only access to the full host config. Useful for one-time backfills
+   * of legacy top-level keys into the plugin's namespace during register.
+   * Plugins MUST NOT mutate the returned object — use setConfig for writes.
+   */
+  getHostConfig() {
+    return this._appContext?.config || {};
   }
 
   /**

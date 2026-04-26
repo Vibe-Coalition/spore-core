@@ -64,18 +64,12 @@ const DEFAULTS = {
   clusterTmuxPrefix: 'spore',        // SPORE_CLUSTER_TMUX_PREFIX — namespace for tmux sessions
   clusterHosts: [],                  // SPORE_CLUSTER_HOSTS (JSON array) — additional clusters [{name, host, username}]
 
-  // Email (sending via SMTP + reading via IMAP)
-  emailProvider: null,               // 'proton' | 'google' | null
-  emailAddress: null,                // e.g. you@proton.me
-  emailSmtpHost: null,               // default depends on provider
-  emailSmtpPort: 587,
-  emailSmtpSecure: false,            // true = implicit TLS (port 465); false = STARTTLS (port 587)
-  emailImapHost: null,
-  emailImapPort: 993,
-  emailImapSecure: true,             // IMAP is almost always TLS
-  emailSmtpPassword: null,           // SECRET — Proton SMTP token or Bridge password
-  emailSmtpUsername: null,           // blank = use emailAddress
-  tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscaled at boot
+  // Email config moved to plugins/email/ — populated under config.plugins.email.
+  // The plugin's index.js does a one-time backfill copying any pre-existing
+  // top-level emailProvider/emailAddress/etc. forward into config.plugins.email
+  // on first install. Keep these env-var loaders below for the legacy
+  // copy-forward; plugins/email/index.js consumes them via getHostConfig().
+tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscaled at boot
   tailscaleHostname: null,           // SPORE_TAILSCALE_HOSTNAME — default: spore-<agentId>
   hostReadPaths: [],        // SPORE_HOST_READ_PATHS — host paths mounted at /host/<path>
   extraPaths: [],           // SPORE_EXTRA_PATHS — additional read+write paths (comma-separated)

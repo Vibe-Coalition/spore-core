@@ -980,14 +980,7 @@ function applyPromptSectionsMixin(GraphContext) {
     // Pointer into graph for workflow details
     lines.push('- For SLURM + tmux workflows, read `ref-compute-cluster`. For tailscale CLI + troubleshooting, read `ref-tailscale`. Both connect to your self-node via `documents` edges.');
 
-    // Email — live state lets the agent know whether it has a mailbox + which
-    // one, without round-tripping a tool call.
-    if (c.emailProvider && c.emailSmtpPassword) {
-      const addr = c.emailAddress || '(unset)';
-      lines.push(`- **Email**: configured · \`${addr}\` via ${c.emailProvider}. Tools: email_send / email_list / email_read / email_search. See \`ref-email\` for the usage rules (confirm external recipients first, never attach secrets).`);
-    } else if (c.emailProvider || c.emailAddress) {
-      lines.push('- **Email**: half-configured. Tell the operator to finish Settings → Agent → Email (missing password or provider).');
-    }
+    // Email status moved to the email plugin via api.registerPromptSection.
     return lines.join('\n');
   };
 

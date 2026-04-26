@@ -230,21 +230,11 @@ function migrateReferenceNodes(db, log) {
     log.warn(`[boot] Tailscale/cluster ref migration failed: ${e.message}`);
   }
 
-  // Email ref node (idempotent; runs every boot).
-  try {
-    const migPath = path.join(__dirname, 'migrate-ref-email.sql');
-    if (fs.existsSync(migPath)) {
-      const sql = fs.readFileSync(migPath, 'utf8');
-      const before = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-email'").get()?.c || 0;
-      db.exec(sql);
-      const after = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-email'").get()?.c || 0;
-      if (after > before) log.info(`[boot] Email ref migrated: +${after - before} aspects`);
-    }
-  } catch (e) {
-    log.warn(`[boot] Email ref migration failed: ${e.message}`);
-  }
+  // Email ref node moved to plugins/email/ (extracted in phase 2.2).
+  // The original src/migrate-ref-email.sql stays on disk as audit/restore
+  // until the plugin is verified across all SPORE instances.
 
-  // Local search tools ref node (idempotent; runs every boot). Tells the
+// Local search tools ref node (idempotent; runs every boot). Tells the
   // agent that grep + glob exist as native tools so it stops shelling out
   // to exec+grep/find. New as of the grep/glob tool catalog addition.
   try {

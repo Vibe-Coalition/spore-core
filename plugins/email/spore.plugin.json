@@ -1,0 +1,8 @@
+{
+  "id": "email",
+  "name": "Email (SMTP + IMAP)",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "description": "Gives the agent its own mailbox: send via SMTP, list/read/search via IMAP. Tools: email_send, email_list, email_read, email_search. Includes Proton + Gmail provider defaults; bring your own SMTP token / app password."
+}
