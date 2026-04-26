@@ -250,107 +250,11 @@ function migrateReferenceNodes(db, log) {
     log.warn(`[boot] Search-tools ref migration failed: ${e.message}`);
   }
 
-  // Acorn-context refresh — projectContext shape, plan/execute mode,
-  // QUESTIONS protocol, /scope opt-out, client-side tool routing. Patches
-  // the misleading "paths outside project are rejected" attribute and
-  // adds three new aspects (project_context, mode, client_routing) that
-  // didn't exist when the original ref node was seeded.
-  try {
-    const migPath = path.join(__dirname, 'migrate-ref-acorn-context.sql');
-    if (fs.existsSync(migPath)) {
-      const sql = fs.readFileSync(migPath, 'utf8');
-      const before = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-acorn-context'").get()?.c || 0;
-      db.exec(sql);
-      const after = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-acorn-context'").get()?.c || 0;
-      if (after > before) log.info(`[boot] Acorn-context ref migrated: +${after - before} aspects`);
-    }
-  } catch (e) {
-    log.warn(`[boot] Acorn-context ref migration failed: ${e.message}`);
-  }
+  // Acorn-context (5 ref bundles incl. graphcorn-discovery) extracted to
+  // plugins/acorn-cli/ in phase 2.3a. Source SQL files stay on disk as
+  // audit / restore until verified across all SPORE instances.
 
-  // Plan-mode persona attribute — appended to ref-acorn-context.mode so
-  // graph_query for "plan mode" surfaces the delegate_task researcher
-  // pattern. Cheap append, idempotent.
-  try {
-    const migPath = path.join(__dirname, 'migrate-ref-acorn-personas.sql');
-    if (fs.existsSync(migPath)) {
-      const sql = fs.readFileSync(migPath, 'utf8');
-      const before = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
-      ).get()?.c || 0;
-      db.exec(sql);
-      const after = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
-      ).get()?.c || 0;
-      if (after > before) log.info(`[boot] Acorn-context mode aspect: +${after - before} persona attributes`);
-    }
-  } catch (e) {
-    log.warn(`[boot] Acorn-context personas migration failed: ${e.message}`);
-  }
-
-  // Tooling-questions attribute — also on ref-acorn-context.mode. Tells
-  // the planner to surface tool/framework choices as questions in plan
-  // mode rather than picking silently.
-  try {
-    const migPath = path.join(__dirname, 'migrate-ref-acorn-tooling-questions.sql');
-    if (fs.existsSync(migPath)) {
-      const sql = fs.readFileSync(migPath, 'utf8');
-      const before = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
-      ).get()?.c || 0;
-      db.exec(sql);
-      const after = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='mode'"
-      ).get()?.c || 0;
-      if (after > before) log.info(`[boot] Acorn-context mode aspect: +${after - before} tooling-question attributes`);
-    }
-  } catch (e) {
-    log.warn(`[boot] Acorn-context tooling-questions migration failed: ${e.message}`);
-  }
-
-  // Tool-usage directives on ref-acorn-context.client_routing —
-  // mirrors the runtime-prompt directives (USE THE TOOLS / no exec
-  // find / filter noise dirs) so they survive a graph reset and
-  // surface via graph_query.
-  try {
-    const migPath = path.join(__dirname, 'migrate-ref-acorn-tool-usage.sql');
-    if (fs.existsSync(migPath)) {
-      const sql = fs.readFileSync(migPath, 'utf8');
-      const before = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='client_routing'"
-      ).get()?.c || 0;
-      db.exec(sql);
-      const after = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='client_routing'"
-      ).get()?.c || 0;
-      if (after > before) log.info(`[boot] Acorn-context client_routing: +${after - before} tool-usage attributes`);
-    }
-  } catch (e) {
-    log.warn(`[boot] Acorn-context tool-usage migration failed: ${e.message}`);
-  }
-
-  // graphcorn — discovery_workflow aspect on ref-acorn-context. Tells
-  // the agent the session/project graph anchors exist and how to use
-  // note_discovery vs graph_update. New aspect with 4 attrs covering
-  // the workflow.
-  try {
-    const migPath = path.join(__dirname, 'migrate-ref-graphcorn-discovery.sql');
-    if (fs.existsSync(migPath)) {
-      const sql = fs.readFileSync(migPath, 'utf8');
-      const before = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='discovery_workflow'"
-      ).get()?.c || 0;
-      db.exec(sql);
-      const after = db.prepare(
-        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='discovery_workflow'"
-      ).get()?.c || 0;
-      if (after > before) log.info(`[boot] Acorn-context discovery_workflow (graphcorn): +${after - before} attributes`);
-    }
-  } catch (e) {
-    log.warn(`[boot] graphcorn discovery_workflow migration failed: ${e.message}`);
-  }
-
-  // Web search & fetch reference node — gives the agent a per-tool
+// Web search & fetch reference node — gives the agent a per-tool
   // ref node for web_search/web_fetch (alongside ref-search-tools,
   // ref-bfl-api, ref-elevenlabs-api, etc.) AND a cross-reference on
   // ref-acorn-context.client_routing so acorn agents see "use

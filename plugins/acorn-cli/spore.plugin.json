@@ -1,0 +1,8 @@
+{
+  "id": "acorn-cli",
+  "name": "Acorn CLI",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "description": "The acorn CLI integration: ref-acorn-context (project_context, mode, client_routing, scope, persona patches, tool-usage rules, tooling-questions, discovery_workflow / graphcorn anchoring), the note_discovery tool, the acorn settings pane, and acorn-specific prompt sections. Uninstall to disable acorn entirely; reinstall to re-enable. Note: graphcorn session/project anchoring infrastructure (src/graph/sessions.js, src/graph/projects.js) stays in core."
+}
