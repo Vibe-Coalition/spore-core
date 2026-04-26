@@ -610,19 +610,7 @@ class AgentLoop {
         // hit the output limit. The tool JSON is truncated and unusable.
         // Notify user, add continuation message, and let the model retry with smaller output.
         if (response.stop_reason === 'max_tokens') {
-          this.log.warn(`[agent] Iter ${iterations}: hit max_tokens (${iterUsage.output_tokens || '?'} out) — tool call truncated`);
-          if (opts.onStatus) { try { opts.onStatus({ type: 'truncated', iteration: iterations, outputTokens: iterUsage.output_tokens }); } catch { /* silent: best-effort UI callback */ } }
-
-          // Store what we have (text only, skip truncated tool blocks)
-          if (responseText) {
-            this.sessions.addMessage(sessionKey, 'assistant', responseText);
-            messages.push({ role: 'assistant', content: [{ type: 'text', text: responseText }] });
-          } else {
-            messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Response truncated at output token limit]' }] });
-            this.sessions.addMessage(sessionKey, 'assistant', '[Response truncated at output token limit]');
-          }
-          messages.push({ role: 'user', content: '[SYSTEM: Your last response was truncated at the output token limit. Your tool call was NOT executed because the JSON was incomplete. Break large operations into smaller steps — write files in sections using edit_file to append, or split into multiple files. Do NOT attempt to write an entire large file in one tool call.]' });
-          this.sessions.addMessage(sessionKey, 'user', '[System: output truncated, retry with smaller operations]');
+          this._handleMaxTokens({ iterations, iterUsage, responseText, sessionKey, opts, messages });
           continue;
         }
 
@@ -1222,6 +1210,29 @@ class AgentLoop {
 
     if (opts.onError) opts.onError(e);
     return { action: 'rethrow' };
+  }
+
+  /**
+   * Handle the max_tokens stop reason — the model started a tool call
+   * but ran out of output budget mid-JSON, so the tool block is unusable.
+   * Persists the partial assistant text (or a placeholder), pushes a
+   * system reminder telling the model to break its operation up, and
+   * lets the loop continue.
+   */
+  _handleMaxTokens(ctx) {
+    const { iterations, iterUsage, responseText, sessionKey, opts, messages } = ctx;
+    this.log.warn(`[agent] Iter ${iterations}: hit max_tokens (${iterUsage.output_tokens || '?'} out) — tool call truncated`);
+    if (opts.onStatus) { try { opts.onStatus({ type: 'truncated', iteration: iterations, outputTokens: iterUsage.output_tokens }); } catch { /* silent: best-effort UI callback */ } }
+    // Store what we have (text only, skip truncated tool blocks)
+    if (responseText) {
+      this.sessions.addMessage(sessionKey, 'assistant', responseText);
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: responseText }] });
+    } else {
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Response truncated at output token limit]' }] });
+      this.sessions.addMessage(sessionKey, 'assistant', '[Response truncated at output token limit]');
+    }
+    messages.push({ role: 'user', content: '[SYSTEM: Your last response was truncated at the output token limit. Your tool call was NOT executed because the JSON was incomplete. Break large operations into smaller steps — write files in sections using edit_file to append, or split into multiple files. Do NOT attempt to write an entire large file in one tool call.]' });
+    this.sessions.addMessage(sessionKey, 'user', '[System: output truncated, retry with smaller operations]');
   }
 
   /**
