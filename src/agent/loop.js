@@ -701,96 +701,10 @@ class AgentLoop {
           const PARALLEL_SAFE = new Set(['web_search', 'web_fetch', 'read_file', 'graph_query', 'message_read', 'task_status']);
 
           const executeOneTool = async (toolBlock) => {
-            if (abortSignal?.aborted) {
-              return {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: JSON.stringify({ error: 'Aborted by user.' }),
-              };
-            }
-
-            this.log.info(`Tool call: ${toolBlock.name}(${JSON.stringify(toolBlock.input).substring(0, 100)})`);
-
-            if (toolBlock.input?._parse_error) {
-              this.log.warn(`[agent] Tool ${toolBlock.name}: argument JSON was malformed`);
-              return {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: JSON.stringify({ error: toolBlock.input._parse_error }),
-              };
-            }
-
-            const callHash = this._hashToolCall(toolBlock.name, toolBlock.input);
-            const loopCheck = this._checkToolLoop(loopTracker, callHash, toolBlock.name);
-
-            if (loopCheck.blocked) {
-              this.log.warn(`[loop-detect] CRITICAL: ${loopCheck.message}`);
-              criticalBlock = true;
-              return {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: JSON.stringify({ error: loopCheck.message }),
-              };
-            }
-
-            if (toolBlock.name === 'delegate_task') delegatedThisTurn = true;
-
-            const toolDetail = this._toolInputSummary(toolBlock.name, toolBlock.input);
-            graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
-            if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { } }
-            const toolExecStart = Date.now();
-            // Pass the session's context explicitly so concurrent sessions
-            // don't race on a shared "current session" field in tools.js.
-            const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
-            let result;
-            if (opts.onToolExecute) {
-              result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
-              if (result === null || result === undefined) {
-                result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
-              }
-            } else {
-              result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
-            }
-            let resultContent = JSON.stringify(result);
-
-            const toolExecMs = Date.now() - toolExecStart;
-            this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
-            if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { } }
-
-            if (opts.onStatus && !result.error) {
-              try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch { }
-            }
-
-            toolLog.push({
-              tool: toolBlock.name,
-              input: JSON.stringify(toolBlock.input).substring(0, 300),
-              resultPreview: resultContent.substring(0, 300),
-              succeeded: !result.error,
-            });
-
-            const defaultCap = this.config.maxToolResultChars || 30000;
-            const toolCaps = { read_file: 120000, web_fetch: 30000, exec: 30000, message_read: 15000, graph_query: 15000 };
-            const maxResultChars = toolCaps[toolBlock.name] ?? defaultCap;
-            if (resultContent.length > maxResultChars) {
-              const truncated = resultContent.length;
-              resultContent = resultContent.substring(0, maxResultChars)
-                + `\n\n[OUTPUT TRUNCATED: ${truncated} chars → ${maxResultChars}. Use offset/limit params for large files.]`;
-              this.log.warn(`Tool result truncated: ${toolBlock.name} returned ${truncated} chars`);
-            }
-
-            const resultHash = this._hashResult(resultContent);
-            this._recordToolResult(loopTracker, callHash, resultHash);
-
-            if (loopCheck.warning) {
-              this.log.warn(`[loop-detect] WARNING: ${loopCheck.message}`);
-              resultContent += `\n\n--- WARNING: ${loopCheck.message} ---`;
-            }
-
-            return {
-              type: 'tool_result',
-              tool_use_id: toolBlock.id,
-              content: resultContent,
-            };
+            const r = await this._executeOneTool(toolBlock, { abortSignal, sessionKey, loopTracker, toolLog, opts });
+            if (r.criticalBlock) criticalBlock = true;
+            if (r.delegated) delegatedThisTurn = true;
+            return r.result;
           };
 
           // Partition tools into parallel-safe batches and sequential ones.
@@ -1348,6 +1262,127 @@ class AgentLoop {
       }
     }
     return activeModel;
+  }
+
+  /**
+   * Execute one tool_use block and return the tool_result plus side-effect
+   * flags. Handles abort, malformed input, loop detection, status callbacks,
+   * result truncation, and the loop-tracker bookkeeping. Pure on its inputs
+   * apart from emitting graphEvents and pushing to ctx.toolLog.
+   *
+   * Returns: {
+   *   result: { type, tool_use_id, content }   // tool_result block to send back
+   *   criticalBlock: bool                      // loop detector tripped
+   *   delegated: bool                          // delegate_task was the tool
+   * }
+   */
+  async _executeOneTool(toolBlock, ctx) {
+    const { abortSignal, sessionKey, loopTracker, toolLog, opts } = ctx;
+    let criticalBlock = false;
+    let delegated = false;
+
+    if (abortSignal?.aborted) {
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify({ error: 'Aborted by user.' }),
+        },
+        criticalBlock, delegated,
+      };
+    }
+
+    this.log.info(`Tool call: ${toolBlock.name}(${JSON.stringify(toolBlock.input).substring(0, 100)})`);
+
+    if (toolBlock.input?._parse_error) {
+      this.log.warn(`[agent] Tool ${toolBlock.name}: argument JSON was malformed`);
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify({ error: toolBlock.input._parse_error }),
+        },
+        criticalBlock, delegated,
+      };
+    }
+
+    const callHash = this._hashToolCall(toolBlock.name, toolBlock.input);
+    const loopCheck = this._checkToolLoop(loopTracker, callHash, toolBlock.name);
+
+    if (loopCheck.blocked) {
+      this.log.warn(`[loop-detect] CRITICAL: ${loopCheck.message}`);
+      criticalBlock = true;
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify({ error: loopCheck.message }),
+        },
+        criticalBlock, delegated,
+      };
+    }
+
+    if (toolBlock.name === 'delegate_task') delegated = true;
+
+    const toolDetail = this._toolInputSummary(toolBlock.name, toolBlock.input);
+    graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
+    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { } }
+    const toolExecStart = Date.now();
+    // Pass the session's context explicitly so concurrent sessions
+    // don't race on a shared "current session" field in tools.js.
+    const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
+    let result;
+    if (opts.onToolExecute) {
+      result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
+      if (result === null || result === undefined) {
+        result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
+      }
+    } else {
+      result = await this.tools.executeTool(toolBlock.name, toolBlock.input, toolCtx);
+    }
+    let resultContent = JSON.stringify(result);
+
+    const toolExecMs = Date.now() - toolExecStart;
+    this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
+    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { } }
+
+    if (opts.onStatus && !result.error) {
+      try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch { }
+    }
+
+    toolLog.push({
+      tool: toolBlock.name,
+      input: JSON.stringify(toolBlock.input).substring(0, 300),
+      resultPreview: resultContent.substring(0, 300),
+      succeeded: !result.error,
+    });
+
+    const defaultCap = this.config.maxToolResultChars || 30000;
+    const toolCaps = { read_file: 120000, web_fetch: 30000, exec: 30000, message_read: 15000, graph_query: 15000 };
+    const maxResultChars = toolCaps[toolBlock.name] ?? defaultCap;
+    if (resultContent.length > maxResultChars) {
+      const truncated = resultContent.length;
+      resultContent = resultContent.substring(0, maxResultChars)
+        + `\n\n[OUTPUT TRUNCATED: ${truncated} chars → ${maxResultChars}. Use offset/limit params for large files.]`;
+      this.log.warn(`Tool result truncated: ${toolBlock.name} returned ${truncated} chars`);
+    }
+
+    const resultHash = this._hashResult(resultContent);
+    this._recordToolResult(loopTracker, callHash, resultHash);
+
+    if (loopCheck.warning) {
+      this.log.warn(`[loop-detect] WARNING: ${loopCheck.message}`);
+      resultContent += `\n\n--- WARNING: ${loopCheck.message} ---`;
+    }
+
+    return {
+      result: {
+        type: 'tool_result',
+        tool_use_id: toolBlock.id,
+        content: resultContent,
+      },
+      criticalBlock, delegated,
+    };
   }
 
   // ── Multimodal attachment handling ──────────────────────────────────
