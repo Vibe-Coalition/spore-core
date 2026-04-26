@@ -237,7 +237,24 @@ class PluginManager {
   async initAll(appContext) {
     this._appContext = appContext;
 
-    // Drop plugins whose dependencies aren't installed before init.
+    // First: honor explicit uninstalls. A plugin folder shipped in
+    // plugins/ is auto-loaded by loadAll, but the operator may have
+    // deliberately uninstalled it via the Plugins UI. The
+    // plugin_disabled table sticks across boots; entries in it are
+    // dropped here before init runs.
+    const disabledIds = this._getDisabledPluginIds();
+    const disabledDropped = [];
+    for (const id of disabledIds) {
+      if (this.plugins.has(id)) {
+        this.plugins.delete(id);
+        disabledDropped.push(id);
+      }
+    }
+    if (disabledDropped.length) {
+      this.log.info(`[plugins] Skipping ${disabledDropped.length} explicitly-disabled plugin(s): ${disabledDropped.join(', ')}`);
+    }
+
+    // Then: drop plugins whose dependencies aren't installed.
     // _sortByDependencies (called at load time) only handles ORDERING when
     // the deps exist; here we enforce PRESENCE. A plugin with a missing
     // dependency is skipped with a clear log line so the operator knows
@@ -278,6 +295,37 @@ class PluginManager {
       installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       manifest_version TEXT
     )`);
+  }
+
+  /**
+   * Ensure the bookkeeping table that records EXPLICIT uninstalls so a
+   * bundled plugin doesn't auto-resurrect on next boot just because its
+   * folder is on disk. An entry here means "the operator deliberately
+   * uninstalled this plugin"; the loader skips it. Re-install via the
+   * Plugins UI removes the row.
+   */
+  _ensurePluginDisabledTable(db) {
+    db.exec(`CREATE TABLE IF NOT EXISTS plugin_disabled (
+      plugin_id TEXT PRIMARY KEY,
+      disabled_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+  }
+
+  /**
+   * Read the set of explicitly-disabled plugin ids. The graph DB holds
+   * this; if it isn't ready yet (very early boot), returns an empty set.
+   */
+  _getDisabledPluginIds() {
+    const db = this._appContext?.graph?.db;
+    if (!db) return new Set();
+    try {
+      this._ensurePluginDisabledTable(db);
+      const rows = db.prepare('SELECT plugin_id FROM plugin_disabled').all();
+      return new Set(rows.map(r => r.plugin_id));
+    } catch (e) {
+      this.log.warn('[plugins] Failed to read plugin_disabled: ' + e.message);
+      return new Set();
+    }
   }
 
   /**
@@ -855,6 +903,18 @@ class PluginManager {
     };
     this.plugins.set(manifest.id, plugin);
 
+    // Clear any prior explicit-uninstall marker so this plugin will
+    // boot normally on next restart.
+    const dbPre = this._appContext?.graph?.db;
+    if (dbPre) {
+      try {
+        this._ensurePluginDisabledTable(dbPre);
+        dbPre.prepare('DELETE FROM plugin_disabled WHERE plugin_id = ?').run(manifest.id);
+      } catch (e) {
+        this.log.warn(`[plugins] Failed to clear plugin_disabled for ${manifest.id}: ${e.message}`);
+      }
+    }
+
     try {
       const api = new PluginAPI(manifest.id, manifest, this._appContext, this.log, resolved, this);
       await plugin.registerFn(api);
@@ -926,6 +986,19 @@ class PluginManager {
     } else if (db) {
       // No registered ref bundle, but plugin may still have left rows behind.
       this._runAutoUninstall(db, pluginId);
+    }
+
+    // Persist the uninstall — without this row, the plugin's folder
+    // (which still exists on disk) would auto-reload on next boot,
+    // contradicting the operator's intent. Re-install via the Plugins
+    // UI deletes this row.
+    if (db) {
+      try {
+        this._ensurePluginDisabledTable(db);
+        db.prepare('INSERT OR REPLACE INTO plugin_disabled (plugin_id) VALUES (?)').run(pluginId);
+      } catch (e) {
+        this.log.warn(`[plugins] Failed to record plugin_disabled for ${pluginId}: ${e.message}`);
+      }
     }
 
     this.plugins.delete(pluginId);
