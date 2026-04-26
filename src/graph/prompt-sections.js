@@ -277,6 +277,36 @@ function applyPromptSectionsMixin(GraphContext) {
     return parts.length > 0 ? `## Plugin Context\n${parts.join('\n\n')}` : null;
   };
 
+  /**
+   * Render plugin-contributed prompt sections registered via
+   * api.registerPromptSection(modeName, sectionName, renderFn). Computed
+   * fresh on every call (not part of the static-prompt cache) so hot
+   * install/uninstall takes effect on the next prompt build.
+   *
+   * Each section is wrapped in `## sectionName` and the combined text is
+   * truncated to the shared `plugin` budget.
+   */
+  proto._buildPluginPromptSections = function _buildPluginPromptSections(mode, opts = {}) {
+    if (!this._pluginManager?.getPromptSections) return null;
+    const sections = this._pluginManager.getPromptSections(mode);
+    if (sections.length === 0) return null;
+
+    const parts = [];
+    for (const { pluginId, sectionName, renderFn } of sections) {
+      try {
+        const text = renderFn({ mode, db: this.db, config: this.config, opts });
+        if (text && typeof text === 'string') {
+          parts.push(`## ${sectionName}\n${text}`);
+        }
+      } catch (e) {
+        this.log.warn(`[prompt-sections] plugin ${pluginId}.${sectionName} render failed: ${e.message}`);
+      }
+    }
+    if (parts.length === 0) return null;
+    const combined = parts.join('\n\n');
+    return this._truncateToTokenBudget(combined, GraphContext.SECTION_BUDGETS.plugin);
+  };
+
   proto._buildChannelSection = function _buildChannelSection(channelId, channelName) {
     const parts = [];
 

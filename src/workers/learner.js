@@ -395,6 +395,9 @@ class Learner {
     const sessionId = batch[batch.length - 1]?.opts?.channelName || batch[batch.length - 1]?.opts?.userId || 'conversation';
     this.log.info(`[learner] Extraction started (batch of ${batch.length}, session=${String(sessionId).slice(-30)})`);
     graphEvents.emit('change', { op: 'learner:start', sessionKey: sessionId, batchSize: batch.length, source: 'learner' });
+    if (this._pluginManager) {
+      try { await this._pluginManager.fireWorkerHook('beforeLearn', { sessionId, batchSize: batch.length }); } catch (e) { this.log.warn('[learner] beforeLearn hook failed: ' + e.message); }
+    }
 
     try {
       let combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
@@ -530,6 +533,9 @@ class Learner {
       } catch (e) { this.log.warn('[learner] graphEvents.emit failed: ' + e.message); }
     } finally {
       this._running = false;
+      if (this._pluginManager) {
+        try { await this._pluginManager.fireWorkerHook('afterLearn', { sessionId, batchSize: batch.length, elapsedMs: Date.now() - startedAt }); } catch (e) { this.log.warn('[learner] afterLearn hook failed: ' + e.message); }
+      }
       this._drainQueue();
     }
   }

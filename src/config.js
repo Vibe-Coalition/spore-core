@@ -196,6 +196,8 @@ const DEFAULTS = {
   // Plugins
   pluginsDir: null,            // SPORE_PLUGINS_DIR — defaults to <repo>/shared/plugins
   pluginsEnabled: false,       // SPORE_PLUGINS_ENABLED — opt-in; plugins run as full-privilege Node code
+  pluginsHotReload: false,     // SPORE_PLUGINS_HOT_RELOAD — opt-in; allow runtime install/uninstall via /api/plugins
+  plugins: {},                 // per-plugin config; populated as plugins.<id> = { ... } at runtime
 
   // Credential guard for write tools
   credentialGuard: 'block',    // SPORE_CREDENTIAL_GUARD — 'block' | 'warn' | 'off'
@@ -322,6 +324,7 @@ function loadConfigFresh() {
   if (process.env.SPORE_DISCORD_ADMINS) config.discordAdmins = process.env.SPORE_DISCORD_ADMINS.split(',').map(s => s.trim()).filter(Boolean);
   if (process.env.SPORE_PLUGINS_DIR) config.pluginsDir = process.env.SPORE_PLUGINS_DIR;
   if (process.env.SPORE_PLUGINS_ENABLED) config.pluginsEnabled = /^(1|true|yes|on)$/i.test(process.env.SPORE_PLUGINS_ENABLED);
+  if (process.env.SPORE_PLUGINS_HOT_RELOAD) config.pluginsHotReload = /^(1|true|yes|on)$/i.test(process.env.SPORE_PLUGINS_HOT_RELOAD);
   if (process.env.SPORE_CREDENTIAL_GUARD) config.credentialGuard = process.env.SPORE_CREDENTIAL_GUARD.toLowerCase();
   if (process.env.SPORE_INTERMEDIATE_THROTTLE) config.intermediateTextThrottleSeconds = parseInt(process.env.SPORE_INTERMEDIATE_THROTTLE, 10);
 

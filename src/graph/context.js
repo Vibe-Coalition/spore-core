@@ -377,7 +377,9 @@ class GraphContext {
 
     const cacheKey = mode;
     if (this._staticPromptCache && this._staticPromptCache.mtime === this._graphMtime && this._staticPromptCache.mode === cacheKey) {
-      return this._staticPromptCache.text;
+      const cachedText = this._staticPromptCache.text;
+      const pluginExt = this._buildPluginPromptSections(mode);
+      return pluginExt ? `${cachedText}\n\n${pluginExt}` : cachedText;
     }
 
     const sectionBuilders = {
@@ -400,7 +402,12 @@ class GraphContext {
     const text = sections.join('\n\n');
     this._staticPromptCache = { mtime: this._graphMtime, text, mode: cacheKey };
     this.log.debug(`[context] Static prompt cached — mode=${mode} (${this._estimateTokens(text)} tok)`);
-    return text;
+
+    // Plugin-contributed prompt sections: rendered fresh per call so hot
+    // install/uninstall is reflected on the next build without invalidating
+    // the static-prompt cache for built-in content.
+    const pluginExt = this._buildPluginPromptSections(mode);
+    return pluginExt ? `${text}\n\n${pluginExt}` : text;
   }
 
   buildDynamicContext(opts = {}) {

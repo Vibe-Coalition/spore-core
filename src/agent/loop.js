@@ -225,6 +225,14 @@ class AgentLoop {
     this.tools._currentProjectContext = opts.projectContext || null;
     this.tools._abortSignal = opts._abortSignal || null;
 
+    // Plugin middleware: beforeIngest — observers see the incoming message
+    // and session metadata before the agent starts processing.
+    if (this._pluginManager) {
+      for (const handler of this._pluginManager.getMiddleware('beforeIngest')) {
+        try { await handler({ sessionKey, content: opts.content, trigger: opts.trigger, platform: opts.platform, userId: opts.userId, userName: opts.userName, channelId: opts.channelId }); } catch (e) { this.log.warn('[loop] beforeIngest handler failed: ' + e.message); }
+      }
+    }
+
     const dynamicOpts = {
       channelId: opts.channelId,
       channelName: opts.channelName,
@@ -754,6 +762,15 @@ class AgentLoop {
     this._captureFailureFix(opts, toolLog);
     this._recordRoundCheckpoint(opts, toolLog, finalText);
     this._firePluginAfterTurn(opts, finalText, toolLog);
+
+    // Plugin middleware: afterIngest — fires once the full turn is complete.
+    // Observers see the incoming message, the assistant's final reply, and
+    // every tool call made along the way.
+    if (this._pluginManager) {
+      for (const handler of this._pluginManager.getMiddleware('afterIngest')) {
+        try { await handler({ sessionKey, content: opts.content, finalText, toolLog, trigger: opts.trigger, platform: opts.platform }); } catch (e) { this.log.warn('[loop] afterIngest handler failed: ' + e.message); }
+      }
+    }
 
     if (opts.onComplete) opts.onComplete(finalText, totalUsage);
 
@@ -1436,6 +1453,14 @@ class AgentLoop {
     // Pass the session's context explicitly so concurrent sessions
     // don't race on a shared "current session" field in tools.js.
     const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
+
+    // Plugin middleware: beforeToolExec
+    if (this._pluginManager) {
+      for (const handler of this._pluginManager.getMiddleware('beforeToolExec')) {
+        try { await handler({ name: toolBlock.name, input: toolBlock.input, toolUseId: toolBlock.id, sessionKey }); } catch (e) { this.log.warn('[loop] beforeToolExec handler failed: ' + e.message); }
+      }
+    }
+
     let result;
     if (opts.onToolExecute) {
       result = await opts.onToolExecute(toolBlock.name, toolBlock.input, toolBlock.id);
@@ -1448,6 +1473,13 @@ class AgentLoop {
     let resultContent = JSON.stringify(result);
 
     const toolExecMs = Date.now() - toolExecStart;
+
+    // Plugin middleware: afterToolExec
+    if (this._pluginManager) {
+      for (const handler of this._pluginManager.getMiddleware('afterToolExec')) {
+        try { await handler({ name: toolBlock.name, input: toolBlock.input, toolUseId: toolBlock.id, result, durationMs: toolExecMs, sessionKey }); } catch (e) { this.log.warn('[loop] afterToolExec handler failed: ' + e.message); }
+      }
+    }
     this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
     if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { /* silent: best-effort UI callback */ } }
 

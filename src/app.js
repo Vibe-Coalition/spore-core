@@ -485,6 +485,8 @@ async function boot() {
   }
   tools._pluginManager = plugins;
   agent._pluginManager = plugins;
+  learner._pluginManager = plugins;
+  maintainer._pluginManager = plugins;
 
   const healthServer = startHealthServer(config, log, graph, sessions, gateways, learner, maintainer, tools, agent);
 

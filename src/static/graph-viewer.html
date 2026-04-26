@@ -4879,7 +4879,189 @@ function populateSettingsPanel(data) {
   _applyRoleGatingToSettings();
   _populateProfileSection();
   _populateUsersSection();
+  _populatePluginsTab(data.plugins || { enabled: false, hotReload: false, panes: [], dockItems: [], installed: [] });
 }
+
+// ── Plugins tab ─────────────────────────────────────────────────────
+// Renders the installed-plugins manager card + schema-driven plugin
+// settings panes inside the settings modal. Backed by:
+//   • GET  /api/settings → plugins block
+//   • POST /api/plugins/install
+//   • POST /api/plugins/uninstall/<id>
+//   • PUT  /api/settings → body.plugins.<id> = { ...partial }
+function _populatePluginsTab(plugins) {
+  const stateEl = document.getElementById('settings-plugins-state');
+  const mgrEl   = document.getElementById('settings-plugins-manager');
+  const panesEl = document.getElementById('settings-plugins-panes');
+  const installRow = document.getElementById('settings-plugins-install-row');
+  const installHelp = document.getElementById('settings-plugins-install-help');
+  if (!mgrEl || !panesEl) return;
+
+  const enabled = !!plugins.enabled;
+  const hot = !!plugins.hotReload;
+  if (stateEl) {
+    if (!enabled) {
+      stateEl.textContent = 'Plugin system is disabled. Set SPORE_PLUGINS_ENABLED=true to enable. Plugins run unsandboxed with full process privileges.';
+    } else if (!hot) {
+      stateEl.textContent = 'Plugin system enabled (read-only). Set SPORE_PLUGINS_HOT_RELOAD=true to allow runtime install/uninstall.';
+    } else {
+      stateEl.textContent = 'Plugin system enabled with hot reload. New install/uninstall takes effect without restart; in-place upgrades still need a restart.';
+    }
+  }
+  if (installRow) installRow.style.display = (enabled && hot) ? 'flex' : 'none';
+  if (installHelp) installHelp.style.display = (enabled && hot) ? 'block' : 'none';
+
+  // Manager card: list installed plugins
+  const installed = Array.isArray(plugins.installed) ? plugins.installed : [];
+  if (installed.length === 0) {
+    mgrEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugins installed.</div>';
+  } else {
+    mgrEl.innerHTML = installed.map(p => {
+      const refs = p.hasReferenceNodes ? '<span class="settings-note" style="opacity:.7">ref nodes</span>' : '';
+      const tools = p.toolCount ? `<span class="settings-note" style="opacity:.7">${p.toolCount} tool${p.toolCount > 1 ? 's' : ''}</span>` : '';
+      const gws = p.gatewayCount ? `<span class="settings-note" style="opacity:.7">${p.gatewayCount} gateway${p.gatewayCount > 1 ? 's' : ''}</span>` : '';
+      const bits = [refs, tools, gws].filter(Boolean).join(' · ');
+      const uninstallBtn = hot
+        ? `<button type="button" class="settings-btn-secondary" data-plugin-uninstall="${p.id}">Uninstall</button>`
+        : '';
+      return `<div class="settings-plugin-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--border)">
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1">
+          <div style="display:flex;gap:8px;align-items:baseline">
+            <strong>${_escapeHtml(p.name || p.id)}</strong>
+            <span class="settings-note" style="opacity:.5">${_escapeHtml(p.id)}@${_escapeHtml(p.version || '0.0.0')}</span>
+            <span class="settings-note" style="opacity:.7">${_escapeHtml(p.kind)}</span>
+          </div>
+          ${bits ? `<div style="display:flex;gap:10px">${bits}</div>` : ''}
+        </div>
+        ${uninstallBtn}
+      </div>`;
+    }).join('');
+  }
+
+  // Schema-driven panes — for now, only render panes that target the 'plugins' tab.
+  // (Cross-tab placement — pane.tab === 'agent' filing under the Agent tab — will
+  //  follow in a later pass; the API supports it but the host needs more wiring.)
+  const panes = Array.isArray(plugins.panes) ? plugins.panes.filter(p => !p.tab || p.tab === 'plugins') : [];
+  if (panes.length === 0) {
+    panesEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugin settings to configure.</div>';
+  } else {
+    panesEl.innerHTML = panes.map(_renderPluginPane).join('');
+  }
+}
+
+function _renderPluginPane(pane) {
+  const fields = (pane.schema || []).map(field => _renderPluginField(pane.pluginId, field, pane.values?.[field.key], pane.meta?.[field.key])).join('');
+  const desc = pane.description ? `<div class="settings-note" style="margin-bottom:8px">${_escapeHtml(pane.description)}</div>` : '';
+  const customHtml = pane.html ? `<div data-plugin-custom="${pane.pluginId}">${pane.html}</div>` : '';
+  return `<div class="settings-plugin-pane" data-plugin-pane="${pane.pluginId}" style="margin-bottom:18px;padding:10px 0;border-top:1px solid var(--border)">
+    <h5 style="margin:0 0 6px 0">${_escapeHtml(pane.title)}</h5>
+    ${desc}
+    ${fields}
+    ${customHtml}
+  </div>`;
+}
+
+function _renderPluginField(pluginId, field, value, meta) {
+  const id = `settings-plugin-${pluginId}-${field.key}`;
+  const labelEl = `<label for="${id}" style="display:block;font-size:.78rem;margin-bottom:2px">${_escapeHtml(field.label || field.key)}</label>`;
+  const help = field.help ? `<div class="settings-note" style="opacity:.6;margin-top:2px">${_escapeHtml(field.help)}</div>` : '';
+  const wrap = (inner) => `<div style="margin-bottom:10px" data-plugin-field="${pluginId}.${field.key}" data-plugin-secret="${field.secret ? '1' : '0'}">${labelEl}${inner}${help}</div>`;
+  const v = (value === undefined || value === null) ? (field.default !== undefined ? field.default : '') : value;
+  switch (field.type) {
+    case 'toggle': {
+      const checked = !!v ? 'checked' : '';
+      return wrap(`<input type="checkbox" id="${id}" ${checked} />`);
+    }
+    case 'number':
+      return wrap(`<input type="number" id="${id}" value="${_escapeAttr(String(v))}" style="width:120px" />`);
+    case 'select': {
+      const opts = (field.options || []).map(o => `<option value="${_escapeAttr(o.value)}"${o.value === v ? ' selected' : ''}>${_escapeHtml(o.label || o.value)}</option>`).join('');
+      return wrap(`<select id="${id}">${opts}</select>`);
+    }
+    case 'textarea':
+      return wrap(`<textarea id="${id}" rows="3" style="width:100%;font-family:var(--font-body)">${_escapeHtml(String(v))}</textarea>`);
+    case 'password': {
+      const placeholder = meta?.isSet ? '••• stored — leave blank to keep' : '';
+      return wrap(`<input type="password" id="${id}" placeholder="${placeholder}" style="width:100%;font-family:var(--font-body)" />`);
+    }
+    default:
+      return wrap(`<input type="text" id="${id}" value="${_escapeAttr(String(v))}" style="width:100%;font-family:var(--font-body)" />`);
+  }
+}
+
+function _escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function _escapeAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
+
+function _collectPluginSettingsPayload() {
+  const out = {};
+  document.querySelectorAll('#settings-plugins-panes [data-plugin-field]').forEach(wrap => {
+    const [pluginId, key] = wrap.getAttribute('data-plugin-field').split('.');
+    const isSecret = wrap.getAttribute('data-plugin-secret') === '1';
+    const input = wrap.querySelector('input, select, textarea');
+    if (!input || !key) return;
+    let v;
+    if (input.type === 'checkbox') v = input.checked;
+    else if (input.type === 'number') v = input.value === '' ? null : Number(input.value);
+    else v = input.value;
+    // Skip empty password fields — empty means "keep stored value"
+    if (isSecret && (v === '' || v === null || v === undefined)) return;
+    if (!out[pluginId]) out[pluginId] = {};
+    out[pluginId][key] = v;
+  });
+  return out;
+}
+
+document.addEventListener('click', async (e) => {
+  const t = e.target;
+  if (!(t instanceof Element)) return;
+  // Uninstall
+  const uninstallId = t.getAttribute?.('data-plugin-uninstall');
+  if (uninstallId) {
+    if (!confirm(`Uninstall plugin "${uninstallId}"? Its tools will disappear, its reference nodes will be removed from the graph, and its gateways will shut down. This cannot be undone.`)) return;
+    setSettingsBusy(true, 'Uninstalling…');
+    try {
+      const r = await fetch(API + '/api/plugins/uninstall/' + encodeURIComponent(uninstallId), {
+        method: 'POST', headers: { ...authHeaders() },
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data?.error || 'Uninstall failed');
+      toast(`Uninstalled ${uninstallId} (${data.refNodes || 0} ref nodes, ${data.tools || 0} tools removed)`);
+      // Refresh settings to reflect new state
+      const r2 = await fetch(API + '/api/settings', { headers: { ...authHeaders() } });
+      if (r2.ok) populateSettingsPanel(await r2.json());
+    } catch (err) {
+      toast(err?.message || 'Uninstall failed', true);
+    } finally {
+      setSettingsBusy(false);
+    }
+    return;
+  }
+  // Install
+  if (t.id === 'settings-plugins-install-btn') {
+    const pathInput = document.getElementById('settings-plugins-install-path');
+    const path = pathInput?.value?.trim();
+    if (!path) { toast('Enter a plugin directory path', true); return; }
+    setSettingsBusy(true, 'Installing…');
+    try {
+      const r = await fetch(API + '/api/plugins/install', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data?.error || 'Install failed');
+      toast(`Installed ${data.manifest?.id || 'plugin'}`);
+      if (pathInput) pathInput.value = '';
+      const r2 = await fetch(API + '/api/settings', { headers: { ...authHeaders() } });
+      if (r2.ok) populateSettingsPanel(await r2.json());
+    } catch (err) {
+      toast(err?.message || 'Install failed', true);
+    } finally {
+      setSettingsBusy(false);
+    }
+    return;
+  }
+});
 
 async function _populateUsersSection() {
   const section = document.getElementById('settings-users-section');
@@ -5268,6 +5450,7 @@ const SETTINGS_TABS = [
   { id: 'backups',      label: 'Backups',       forAll: false },
   { id: 'cluster',      label: 'Cluster',       forAll: false },
   { id: 'tools',        label: 'Tools',         forAll: false },
+  { id: 'plugins',      label: 'Plugins',       forAll: false },
   { id: 'users',        label: 'Users',         forAll: false },
   { id: 'advanced',     label: 'Advanced',      forAll: false },
 ];
@@ -5695,6 +5878,7 @@ async function saveSettingsPanel() {
       searxngApiKey: document.getElementById('settings-websearch-searxng-key').value.trim(),
       braveApiKey: document.getElementById('settings-websearch-brave-key').value.trim(),
     },
+    plugins: _collectPluginSettingsPayload(),
   };
 
   setSettingsBusy(true, 'Saving settings...');
@@ -18208,6 +18392,7 @@ build/
         <div class="settings-tab-pane" data-tab="backups"></div>
         <div class="settings-tab-pane" data-tab="cluster"></div>
         <div class="settings-tab-pane" data-tab="tools"></div>
+        <div class="settings-tab-pane" data-tab="plugins"></div>
         <div class="settings-tab-pane" data-tab="users"></div>
         <div class="settings-tab-pane" data-tab="advanced"></div>
       </div>
@@ -18231,6 +18416,24 @@ build/
         <h4>Benchmarks</h4>
         <button class="settings-btn-secondary" id="settings-launch-lme">Run LongMemEval benchmark</button>
         <div class="settings-note">Launches the LongMemEval HUD. Requires Enhanced Recall for best results.</div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="plugins">
+        <h4>Installed plugins</h4>
+        <div id="settings-plugins-state" class="settings-note" style="opacity:.85"></div>
+        <div id="settings-plugins-manager"></div>
+        <div id="settings-plugins-install-row" style="display:none;margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="settings-plugins-install-path" placeholder="/abs/path/to/plugin/dir" style="flex:1;min-width:240px;font-family:var(--font-body)" />
+          <button class="settings-btn-secondary" id="settings-plugins-install-btn" type="button">Install plugin</button>
+        </div>
+        <div class="settings-note" id="settings-plugins-install-help" style="display:none">
+          Install reads the plugin's <code>spore.plugin.json</code> manifest from the given directory, runs its register hook, and executes the install SQL. Operator-managed paths only — paths inside the agent workspace are refused.
+        </div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="plugins">
+        <h4>Plugin settings</h4>
+        <div id="settings-plugins-panes"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="graph-memory">

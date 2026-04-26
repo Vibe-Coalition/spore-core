@@ -931,10 +931,46 @@ class WebGateway {
         acorn: this.config.acornKey ? 'env' : 'disabled',
         browser: process.env.SPORE_BROWSER_BACKEND ? 'env' : (fileConfig.browserBackend ? 'file' : 'default'),
       },
+      plugins: this._buildPluginsSettingsBlock(),
     };
   }
 
+  /**
+   * Collect installed plugins' settings panes for the settings UI. Returns
+   * `{ enabled, hotReload, panes: [{ pluginId, title, tab, schema, values, meta, ... }] }`.
+   * Secret fields are masked: `meta[key].isSet` is the only signal the UI gets.
+   */
+  _buildPluginsSettingsBlock() {
+    const mgr = this.tools?._pluginManager;
+    if (!mgr?.getSettingsPanes) {
+      return { enabled: !!this.config.pluginsEnabled, hotReload: !!this.config.pluginsHotReload, panes: [], dockItems: [], installed: [] };
+    }
+    return {
+      enabled: !!this.config.pluginsEnabled,
+      hotReload: !!this.config.pluginsHotReload,
+      panes: mgr.getSettingsPanes(),
+      dockItems: mgr.getDockItems?.() || [],
+      installed: mgr.listInstalled?.() || [],
+    };
+  }
+
+  /**
+   * Wire `pluginManager.setConfigPersister` so plugin code calling
+   * `api.setConfig(partial)` flows through the same _persistSettingsPatch
+   * path the settings UI uses. Idempotent — registered once per process.
+   */
+  _ensurePluginConfigPersister() {
+    const mgr = this.tools?._pluginManager;
+    if (!mgr?.setConfigPersister) return;
+    if (mgr._configPersister) return; // already wired
+    mgr.setConfigPersister(async (pluginId, partial) => {
+      this._persistSettingsPatch({ plugins: { [pluginId]: partial } });
+      return { ...(this.config.plugins?.[pluginId] || {}) };
+    });
+  }
+
   _persistSettingsPatch(body = {}) {
+    this._ensurePluginConfigPersister();
     const fileConfig = this._readSettingsConfigFile();
     const nextConfig = {
       ...fileConfig,
@@ -1285,8 +1321,49 @@ class WebGateway {
       }
     }
 
+    // Plugins config branch — body.plugins = { [pluginId]: { ...partialPatch } }.
+    // Each pluginId's patch is shallow-merged into nextConfig.plugins[id] and,
+    // after the file write, this.config.plugins[id]. We collect the list of
+    // touched plugin ids so we can fire onConfigChange callbacks AFTER the
+    // file write (so any plugin reacting to its config sees the persisted state).
+    const pluginsTouched = [];
+    if (body.plugins && typeof body.plugins === 'object' && !Array.isArray(body.plugins)) {
+      const nextPlugins = { ...(nextConfig.plugins || {}) };
+      for (const pluginId of Object.keys(body.plugins)) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(pluginId)) continue;
+        const patch = body.plugins[pluginId];
+        if (!patch || typeof patch !== 'object') continue;
+        const before = { ...(nextPlugins[pluginId] || {}) };
+        const next = { ...before };
+        for (const key of Object.keys(patch)) {
+          const v = patch[key];
+          if (v === null) delete next[key];
+          else next[key] = v;
+        }
+        nextPlugins[pluginId] = next;
+        pluginsTouched.push({ pluginId, before, after: next });
+      }
+      nextConfig.plugins = nextPlugins;
+    }
+
     this._writeSettingsConfigFile(nextConfig);
     this._applyEnvUpdates(envUpdates);
+
+    // Apply plugin config to the live config object, then dispatch onConfigChange
+    // hooks. We don't await — plugin reactors are best-effort and shouldn't block
+    // the HTTP response.
+    if (pluginsTouched.length > 0) {
+      if (!this.config.plugins) this.config.plugins = {};
+      const mgr = this.tools?._pluginManager;
+      for (const { pluginId, before, after } of pluginsTouched) {
+        this.config.plugins[pluginId] = after;
+        if (mgr?.dispatchConfigChange) {
+          mgr.dispatchConfigChange(pluginId, before, after).catch(e => {
+            this.log.warn(`[settings] plugin ${pluginId} config-change failed: ${e?.message}`);
+          });
+        }
+      }
+    }
 
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'displayName')) this.config.displayName = runtimePatch.displayName;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'nicknames')) this.config.nicknames = runtimePatch.nicknames;
@@ -3387,6 +3464,120 @@ class WebGateway {
         return;
       }
 
+      // Plugins API — list / install / uninstall. Creator-only.
+      // Install + uninstall are gated behind config.pluginsHotReload (default
+      // off) so an operator must explicitly opt in to runtime plugin lifecycle.
+      // List is always available so the settings UI can show what's loaded.
+      if (urlPath === '/api/plugins/list' && req.method === 'GET') {
+        if (!(await checkAuth(req, res))) return;
+        const mgr = this.tools?._pluginManager;
+        if (!mgr) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Plugin manager unavailable' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          enabled: !!this.config.pluginsEnabled,
+          hotReload: !!this.config.pluginsHotReload,
+          pluginsDir: this.config.pluginsDir || null,
+          installed: mgr.listInstalled(),
+        }));
+        return;
+      }
+
+      if (urlPath === '/api/plugins/install' && req.method === 'POST') {
+        if (!(await checkAuth(req, res))) return;
+        if (!this.config.pluginsHotReload) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Set SPORE_PLUGINS_HOT_RELOAD=true to enable.' }));
+          return;
+        }
+        const mgr = this.tools?._pluginManager;
+        if (!mgr) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Plugin manager unavailable' }));
+          return;
+        }
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        let parsed = {};
+        try { parsed = body ? JSON.parse(body) : {}; } catch { /* silent: malformed JSON → fallback */ }
+        if (!parsed.path || typeof parsed.path !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'path (string) is required' }));
+          return;
+        }
+        try {
+          const manifest = await mgr.installPlugin(parsed.path);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, manifest }));
+        } catch (e) {
+          this.log.error('[plugins:install] failed:', e?.message);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e?.message || 'install failed' }));
+        }
+        return;
+      }
+
+      // Plugin-registered HTTP routes — namespaced under /api/plugins/<pluginId>/<route>.
+      // Resolved AFTER the built-in /api/plugins/* endpoints (list/install/uninstall)
+      // so plugins can't shadow them. Must be authenticated; auth model matches
+      // graph endpoints (any signed-in user, not creator-only).
+      if (urlPath.startsWith('/api/plugins/') && !urlPath.startsWith('/api/plugins/list') && !urlPath.startsWith('/api/plugins/install') && !urlPath.startsWith('/api/plugins/uninstall')) {
+        const mgr = this.tools?._pluginManager;
+        const resolved = mgr?.resolveWebRoute?.(req.method, urlPath);
+        if (resolved) {
+          if (!isAnyAuth(req)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Authentication required' }));
+            return;
+          }
+          try {
+            const query = (() => { try { return new URL(req.url, 'http://x').searchParams; } catch { return new URLSearchParams(); } })();
+            await resolved.handler(req, res, { urlPath, query, user: req._user || null });
+          } catch (e) {
+            this.log.error(`[plugins] route ${resolved.pluginId}${urlPath} failed: ${e?.message}`);
+            if (!res.headersSent) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: e?.message || 'plugin route failed' }));
+            }
+          }
+          return;
+        }
+      }
+
+      if (urlPath.startsWith('/api/plugins/uninstall/') && req.method === 'POST') {
+        if (!(await checkAuth(req, res))) return;
+        if (!this.config.pluginsHotReload) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Set SPORE_PLUGINS_HOT_RELOAD=true to enable.' }));
+          return;
+        }
+        const mgr = this.tools?._pluginManager;
+        if (!mgr) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Plugin manager unavailable' }));
+          return;
+        }
+        const pluginId = decodeURIComponent(urlPath.slice('/api/plugins/uninstall/'.length));
+        if (!/^[a-zA-Z0-9_-]+$/.test(pluginId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid plugin id' }));
+          return;
+        }
+        try {
+          const result = await mgr.uninstallPlugin(pluginId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (e) {
+          this.log.error('[plugins:uninstall] failed:', e?.message);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e?.message || 'uninstall failed' }));
+        }
+        return;
+      }
+
       // Read-only probe endpoints accept any authenticated session (webapp or creator),
       // so the onboarding wizard can test provider keys / model tiers / web search with
       // only the webapp cookie it just obtained from /api/webapp/users.
@@ -4311,6 +4502,23 @@ class WebGateway {
       ws.on('message', async (raw) => {
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
+
+        // Plugin WS dispatch — message types of the form `plugin:<pluginId>:<msgType>`
+        // route to handlers registered via api.registerWsHandler. The pluginId
+        // namespace prevents collisions with built-in types like 'chat:submit'.
+        if (typeof msg.type === 'string' && msg.type.startsWith('plugin:')) {
+          const mgr = this.tools?._pluginManager;
+          const resolved = mgr?.resolveWsHandler?.(msg.type);
+          if (resolved) {
+            try {
+              await resolved.handler(ws, msg, { user: ws._user, sessionId: msg.sessionId, log: this.log });
+            } catch (e) {
+              this.log.warn(`[plugins] WS handler ${msg.type} threw: ${e.message}`);
+            }
+            return;
+          }
+          // Fall through to default unknown-type handling if nothing matched.
+        }
 
         // graphcorn: session:start fires once per acorn launch right
         // after the WS handshake, before the first chat:submit. We

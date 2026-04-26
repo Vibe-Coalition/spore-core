@@ -254,6 +254,9 @@ class Maintainer {
       return null;
     } finally {
       this._running = false;
+      if (this._pluginManager) {
+        try { await this._pluginManager.fireWorkerHook('afterMaintain', { elapsedMs: Date.now() - start, stats: { ...this.stats } }); } catch (e) { this.log.warn('[maintainer] afterMaintain hook failed: ' + e.message); }
+      }
     }
   }
 
