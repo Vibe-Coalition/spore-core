@@ -34,7 +34,7 @@ const _execContext = new AsyncLocalStorage();
 // proposal queue instead of executing directly. Read-only tools (queries,
 // fetches, list operations) never appear here so planning runs unimpeded.
 const MUTATING_TOOLS = new Set([
-  'graph_update', 'graph_delete', 'note_discovery',
+  'graph_update', 'graph_delete',
   'web_serve', 'exec', 'remote_exec',
   'write_file', 'edit_file', 'remote_write_file',
   'email_send', 'message_send', 'message_edit', 'message_react',
@@ -372,28 +372,7 @@ class ToolSystem {
           required: ['nodeId', 'label', 'type'],
         },
       },
-      {
-        name: 'note_discovery',
-        description:
-          'graphcorn — persist a durable discovery to the knowledge graph and link it to the current acorn session AND project. ' +
-          'Use this LIBERALLY when you learn something specific and useful that should survive the session: a config value that worked, a tool quirk, a workflow that fixed something, a port number, a CLI flag that mattered. ' +
-          'Lighter than graph_update — you provide the text, SPORE creates a properly-structured `discovery` node, links it to the session-<id> node (provenance) AND the project node (so future sessions on the same project can find it). ' +
-          'Prefer note_discovery for casual one-line saves; use graph_update when you genuinely need full schema control (custom node type, multiple aspects, explicit edges to specific nodes).',
-        input_schema: {
-          type: 'object',
-          properties: {
-            text:  { type: 'string', description: 'One-line summary of the discovery (e.g. "Expo dev server defaults to port 8081 on Windows; use --port to override").' },
-            kind:  {
-              type: 'string',
-              enum: ['fact', 'gotcha', 'workflow', 'config', 'failure_fix'],
-              description: 'What kind of discovery this is. fact=plain knowledge. gotcha=non-obvious behavior. workflow=a procedure that worked. config=a setting/value. failure_fix=problem→solution pair. Defaults to "fact".',
-            },
-            label: { type: 'string', description: 'Optional short label for the node (e.g. "Expo port default"). Auto-derived from text if omitted.' },
-            relatedTo: { type: 'array', items: { type: 'string' }, description: 'Optional existing node ids this discovery relates to (e.g. ["expo", "react-native"]) — creates `relates_to` edges.' },
-          },
-          required: ['text'],
-        },
-      },
+      // note_discovery moved to plugins/acorn-cli/ in phase 2.3c-2.
       {
         name: 'graph_delete',
         description: 'Delete a node, aspect, attribute, or edge from the knowledge graph. The deletion is reflected in real-time on the graph viewer.',
@@ -1244,8 +1223,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           return await this._queryAboutTool(input);
         case 'graph_update':
           return this._graphUpdateTool(input);
-        case 'note_discovery':
-          return this._noteDiscoveryTool(input);
+        // note_discovery → falls through to plugin dispatch (acorn-cli).
         case 'graph_delete':
           return this._graphDeleteTool(input);
         case 'delegate_task':
@@ -2131,156 +2109,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return 16384;
   }
 
-  // graphcorn — wrapper that creates a `discovery` node with sensible
-  // defaults and auto-links it to the current session + project nodes.
-  // Easier-to-use sibling of graph_update: agent provides text + kind,
-  // we synthesize the rest. Idempotent on dupes (appends to existing).
-  _noteDiscoveryTool(input) {
-    if (!this.learner?.db) return { error: 'Graph writer not available' };
-    const text = String(input?.text || '').trim();
-    if (!text) return { error: 'text is required' };
-    const kind = ['fact', 'gotcha', 'workflow', 'config', 'failure_fix']
-      .includes(input?.kind) ? input.kind : 'fact';
-    const explicitLabel = input?.label && String(input.label).trim();
-    const label = explicitLabel || (text.length > 60 ? text.slice(0, 57).trimEnd() + '…' : text);
-    const relatedTo = Array.isArray(input?.relatedTo) ? input.relatedTo : [];
-
-    const ctx = _execContext.getStore() || {};
-    // For acorn sessions the channelId IS the sessionId (see web.js:4719).
-    // Skip the session/project linking for non-cli platforms — note_discovery
-    // still creates the node, just without the graphcorn anchors.
-    // Falls back to _current* fields when there's no AsyncLocalStorage
-    // store (e.g. when called from end-of-round failure-capture in loop.js
-    // outside of the per-tool ctx.run wrapper).
-    const platform = ctx.platform || this._currentPlatform || null;
-    const sessionId = platform === 'cli'
-      ? (ctx.channelId || this._currentChannelId)
-      : null;
-    const userId = ctx.userId || ctx.userName || this._currentUserId || this._currentUserName || 'anon';
-
-    const db = this.learner.db;
-
-    // Slugify the label to a node id, suffix with a short hash of the
-    // text so two distinct discoveries with the same label don't
-    // collapse. If a node with the exact id already exists (re-noting
-    // the same thing), append the new text as a fresh attribute on
-    // its `details` aspect rather than creating a new node.
-    const slug = label.toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 40) || 'discovery';
-    const crypto = require('crypto');
-    const hash = crypto.createHash('sha256').update(text).digest('hex').slice(0, 6);
-    const id = `discovery-${slug}-${hash}`;
-
-    const existing = db.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
-    let isNew = false;
-    if (!existing) {
-      isNew = true;
-      // graphcorn: in an acorn session, every new node is born temp +
-      // tagged with the sessionId. Session-end distillation reads these
-      // back, picks winners (promotes by clearing ttl), and recycles the
-      // rest. Without a session ctx the discovery is permanent — same
-      // shape as a non-acorn note_discovery call.
-      //
-      // Post-distill race guard — if the session already distilled,
-      // tagging would create an orphan temp (distill won't re-run).
-      let sessionAlreadyDistilled = false;
-      if (sessionId) {
-        try {
-          const sessRow = db.prepare(
-            "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
-          ).get('session-' + String(sessionId));
-          sessionAlreadyDistilled = !!sessRow?.distilled;
-        } catch (e) { this.log.warn('[tools] db.prepare failed: ' + e.message); }
-      }
-      const extraJson = (sessionId && !sessionAlreadyDistilled)
-        ? JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() })
-        : '{}';
-      db.prepare(
-        'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
-        'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
-      ).run(id, label, 'discovery', text, 7, 'graphcorn', 'note_discovery', new Date().toISOString(), extraJson);
-    } else {
-      db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
-    }
-
-    // details aspect — text goes here
-    let detAsp = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'details'").get(id);
-    if (!detAsp) {
-      db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'details', 8, 'graphcorn')").run(id);
-      detAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
-    }
-    // Append the text as an attribute (idempotent — skip if exact text already there)
-    const dup = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? AND content = ?').get(detAsp.id, text);
-    if (!dup) {
-      db.prepare(
-        "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 8, 'note_discovery', 'graphcorn')"
-      ).run(detAsp.id, text);
-    }
-
-    // kind aspect — single attribute
-    let kAsp = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'kind'").get(id);
-    if (!kAsp) {
-      db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'kind', 6, 'graphcorn')").run(id);
-      kAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
-      db.prepare(
-        "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 6, 'note_discovery', 'graphcorn')"
-      ).run(kAsp.id, kind);
-    }
-
-    // Edges: discovery → session + discovery → project + relatedTo
-    const checkE = db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
-    const insE = db.prepare(
-      "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 1, 'graphcorn')"
-    );
-
-    let linkedSession = null;
-    if (sessionId) {
-      const sessId = 'session-' + String(sessionId);
-      if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessId)) {
-        if (!checkE.get(id, sessId, 'recorded_in')) insE.run(id, sessId, 'recorded_in');
-        linkedSession = sessId;
-      }
-    }
-
-    let linkedProject = null;
-    if (sessionId && userId) {
-      // Reuse the projects.js id convention without importing the full module.
-      const cwd = ctx.clientCwd || ctx.cwd || this._currentCwd;
-      if (cwd) {
-        const u = String(userId).toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 32);
-        const h = crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 8);
-        const projId = `project-${u}-${h}`;
-        if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(projId)) {
-          if (!checkE.get(id, projId, 'learned_about')) insE.run(id, projId, 'learned_about');
-          linkedProject = projId;
-        }
-      }
-    }
-
-    let linkedRelated = 0;
-    for (const r of relatedTo) {
-      const rid = String(r || '').toLowerCase().trim();
-      if (!rid) continue;
-      if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(rid)) {
-        if (!checkE.get(id, rid, 'relates_to')) {
-          insE.run(id, rid, 'relates_to');
-          linkedRelated++;
-        }
-      }
-    }
-
-    return {
-      ok: true,
-      nodeId: id,
-      isNew,
-      kind,
-      linkedSession,
-      linkedProject,
-      linkedRelated,
-    };
-  }
+  // _noteDiscoveryTool moved to plugins/acorn-cli/index.js (phase 2.3c-2).
 
   _graphUpdateTool(input) {
     const { nodeId, label, type, description, aspects, edges, project, temp } = input;
