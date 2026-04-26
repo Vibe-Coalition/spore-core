@@ -655,27 +655,7 @@ class AgentLoop {
             }
           }
 
-          messages.push({ role: 'user', content: toolResults });
-
-          // Store compressed tool results in session — full results only needed for current turn
-          const compressedResults = toolResults.map(tr => ({
-            ...tr,
-            content: typeof tr.content === 'string' && tr.content.length > 1500
-              ? tr.content.substring(0, 1500) + `\n[...truncated from ${tr.content.length} chars for session storage]`
-              : tr.content,
-          }));
-          this.sessions.addMessage(sessionKey, 'user', compressedResults);
-
-          // Compress old tool results: model already saw them, no need to resend full text.
-          // Only compress results from PREVIOUS iterations (not the one we just added).
-          if (iterations > 1) {
-            this._compressOldToolResults(messages, toolResults);
-          }
-
-          // Truncate consumed tool results in the DB so future getHistory calls are lighter
-          if (iterations > 1) {
-            this.sessions.truncateConsumedToolResults(sessionKey);
-          }
+          this._persistToolResults(sessionKey, messages, toolResults, iterations);
 
           // Mid-loop token check: use API-reported input tokens (accurate) when available,
           // otherwise estimate from the last two messages we just pushed (assistant + tool results).
@@ -1156,6 +1136,33 @@ class AgentLoop {
 
     if (opts.onError) opts.onError(e);
     return { action: 'rethrow' };
+  }
+
+  /**
+   * After tool dispatch: stitch the tool_results into messages, persist a
+   * compressed copy to session history, then trim historical tool results
+   * from previous iterations (in both the in-memory messages array and
+   * the session DB) so the context window doesn't bloat.
+   *
+   * Mutates `messages` in place. Idempotent across iterations.
+   */
+  _persistToolResults(sessionKey, messages, toolResults, iterations) {
+    messages.push({ role: 'user', content: toolResults });
+    // Store compressed tool results in session — full results only needed for current turn
+    const compressedResults = toolResults.map(tr => ({
+      ...tr,
+      content: typeof tr.content === 'string' && tr.content.length > 1500
+        ? tr.content.substring(0, 1500) + `\n[...truncated from ${tr.content.length} chars for session storage]`
+        : tr.content,
+    }));
+    this.sessions.addMessage(sessionKey, 'user', compressedResults);
+    // Compress old tool results: model already saw them, no need to resend full text.
+    // Only compress results from PREVIOUS iterations (not the one we just added).
+    if (iterations > 1) {
+      this._compressOldToolResults(messages, toolResults);
+      // Truncate consumed tool results in the DB so future getHistory calls are lighter
+      this.sessions.truncateConsumedToolResults(sessionKey);
+    }
   }
 
   /**
