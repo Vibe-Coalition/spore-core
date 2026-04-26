@@ -15,10 +15,16 @@ const DEFAULT_MODEL = 'gemini-embedding-2-preview';
  * Returns a float array (the embedding vector).
  */
 async function embedText(text, apiKey, model = DEFAULT_MODEL) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${apiKey}`;
+  // Send the API key as a header rather than a URL query param so it
+  // doesn't leak into fetch error messages (undici TypeErrors include
+  // the URL in the cause chain) or any URL-bearing log.
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
     body: JSON.stringify({
       model: `models/${model}`,
       content: { parts: [{ text: text.slice(0, 2048) }] }

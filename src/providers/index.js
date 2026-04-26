@@ -1036,7 +1036,10 @@ class GeminiClient {
 
   async _create(params) {
     const model = stripPrefix(params.model);
-    const url = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
+    // Send the API key as a header rather than a URL query param so it
+    // doesn't leak into fetch error messages (undici TypeErrors include
+    // the URL in the cause chain) or any URL-bearing log.
+    const url = `${this.baseURL}/models/${model}:generateContent`;
 
     // Convert Anthropic-style system+messages to Gemini format
     const systemText = Array.isArray(params.system)
@@ -1068,7 +1071,10 @@ class GeminiClient {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
