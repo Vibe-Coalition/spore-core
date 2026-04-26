@@ -6,8 +6,8 @@ const path = require('path');
 let SlackGateway = null;
 try {
   ({ SlackGateway } = require('./slack'));
-} catch {
-  // @slack/bolt not installed — Slack gateway unavailable
+} catch (e) {
+  console.warn('[manager] require failed: ' + e.message);
 }
 
 class GatewayManager {

@@ -10,8 +10,8 @@ let prismMedia = null;
 try {
   voiceModule = require('@discordjs/voice');
   prismMedia = require('prism-media');
-} catch {
-  // Voice deps optional — voice commands will gracefully refuse
+} catch (e) {
+  console.warn('[discord-voice] require failed: ' + e.message);
 }
 
 class DiscordVoice {
@@ -237,7 +237,7 @@ class DiscordVoice {
       try {
         const member = await guild.members.fetch(userId);
         userName = member.displayName || member.user.username || userName;
-      } catch { }
+      } catch (e) { this.log.warn('[discord-voice] guild.members.fetch failed: ' + e.message); }
 
       const channelId = session.channel?.id || guildId;
       const channelName = session.channel?.name || 'voice';
@@ -321,12 +321,12 @@ class DiscordVoice {
     if (!session) return;
 
     for (const [, stream] of session.subscriptions) {
-      try { stream.destroy(); } catch { }
+      try { stream.destroy(); } catch (e) { this.log.warn('[discord-voice] stream.destroy failed: ' + e.message); }
     }
     session.subscriptions.clear();
 
-    try { session.player?.stop(true); } catch { }
-    try { session.connection?.destroy(); } catch { }
+    try { session.player?.stop(true); } catch (e) { this.log.warn('[discord-voice] stop failed: ' + e.message); }
+    try { session.connection?.destroy(); } catch (e) { this.log.warn('[discord-voice] destroy failed: ' + e.message); }
 
     this._sessions.delete(guildId);
   }

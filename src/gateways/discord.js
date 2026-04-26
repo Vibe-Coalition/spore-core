@@ -252,7 +252,7 @@ class DiscordGateway {
       try {
         const ch = this._getChannel(message.channelId);
         if (ch.lastBotMessageId === repliedTo) return 'reply';
-      } catch {}
+      } catch (e) { this.log.warn('[discord] this._getChannel failed: ' + e.message); }
     }
 
     const botName = this.client.user?.username?.toLowerCase() || '';
@@ -441,7 +441,7 @@ class DiscordGateway {
               usage: result.usage,
               iterations: result.iterations,
             });
-          } catch {}
+          } catch (e) { this.log.warn('[discord] feed.log failed: ' + e.message); }
         }
       } else if (trigger === 'lull' || trigger === 'task_complete' || trigger === 'proactive') {
         this.log.debug(`${trigger} in #${last.channelName}: no visible response`);
@@ -642,7 +642,7 @@ class DiscordGateway {
       const channel = await this.client.channels.fetch(channelId);
       const msg = await channel.messages.fetch(entry.messageId);
       await msg.delete();
-    } catch { }
+    } catch (e) { this.log.warn('[discord] this._progressMessages.get failed: ' + e.message); }
     this._progressMessages.delete(channelId);
   }
 

@@ -96,7 +96,7 @@ class ChatroomGateway {
     if (this._lullTimer) clearTimeout(this._lullTimer);
     if (this._directDebounceTimer) clearTimeout(this._directDebounceTimer);
     if (this._ws) {
-      try { this._ws.close(1000); } catch {}
+      try { this._ws.close(1000); } catch (e) { this.log.warn('[chatroom] this._ws.close failed: ' + e.message); }
       this._ws = null;
     }
   }

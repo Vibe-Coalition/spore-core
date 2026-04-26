@@ -185,7 +185,7 @@ class SlackGateway {
     try {
       const info = await client.users.info({ user: userId });
       userName = info.user?.profile?.display_name || info.user?.real_name || info.user?.name || userId;
-    } catch {}
+    } catch (e) { this.log.warn('[slack] client.users.info failed: ' + e.message); }
 
     // Resolve channel name
     let channelName = channelId;
@@ -197,7 +197,7 @@ class SlackGateway {
           : await client.conversations.info({ channel: channelId });
         channelName = info.channel?.name || channelId;
         ch.name = channelName;
-      } catch {}
+      } catch (e) { this.log.warn('[slack] client.conversations.info failed: ' + e.message); }
     } else {
       channelName = ch.name;
     }
@@ -338,14 +338,14 @@ class SlackGateway {
             thread_ts: last.threadTs || undefined,
           });
           thinkingTs = res.ts;
-        } catch {}
+        } catch (e) { this.log.warn('[slack] client.chat.postMessage failed: ' + e.message); }
       }, this.config.stallSoftMs || 10000);
 
       stallHardTimer = setTimeout(async () => {
         if (thinkingTs) {
           try {
             await client.chat.update({ channel: channelId, ts: thinkingTs, text: '🐢 still thinking…' });
-          } catch {}
+          } catch (e) { this.log.warn('[slack] client.chat.update failed: ' + e.message); }
         }
       }, this.config.stallHardMs || 30000);
     }
@@ -354,7 +354,7 @@ class SlackGateway {
       if (stallSoftTimer) clearTimeout(stallSoftTimer);
       if (stallHardTimer) clearTimeout(stallHardTimer);
       if (thinkingTs && client) {
-        try { await client.chat.delete({ channel: channelId, ts: thinkingTs }); } catch {}
+        try { await client.chat.delete({ channel: channelId, ts: thinkingTs }); } catch (e) { this.log.warn('[slack] client.chat.delete failed: ' + e.message); }
         thinkingTs = null;
       }
     };
@@ -434,7 +434,7 @@ class SlackGateway {
               usage: result.usage,
               iterations: result.iterations,
             });
-          } catch {}
+          } catch (e) { this.log.warn('[slack] feed.log failed: ' + e.message); }
         }
       } else if (isPassive) {
         this.log.debug(`[slack] ${trigger} in #${last.channelName}: no visible response`);
@@ -797,7 +797,7 @@ class SlackGateway {
       if (!app) return;
       try {
         await app.client.chat.postMessage({ channel: channelId, text: typeof text === 'string' ? text : text.text });
-      } catch {}
+      } catch (e) { this.log.warn('[slack] app.client.chat.postMessage failed: ' + e.message); }
     };
 
     ch.queue.push({
@@ -833,7 +833,7 @@ class SlackGateway {
       if (!app) return;
       try {
         await app.client.chat.postMessage({ channel: channelId, text: typeof text === 'string' ? text : text.text });
-      } catch {}
+      } catch (e) { this.log.warn('[slack] app.client.chat.postMessage failed: ' + e.message); }
     };
 
     const prompt = `[proactive thought: ${context}${topic ? ` (topic: ${topic})` : ''}]`;
@@ -953,7 +953,7 @@ class SlackGateway {
   async disconnect() {
     if (this.app) {
       this.log.info('[slack] Disconnecting...');
-      try { await this.app.stop(); } catch {}
+      try { await this.app.stop(); } catch (e) { this.log.warn('[slack] this.app.stop failed: ' + e.message); }
       this.app = null;
     }
   }
