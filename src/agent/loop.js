@@ -537,39 +537,8 @@ class AgentLoop {
           }
         }
 
-        // Check for user interjection before calling Claude.
-        // Instead of merging into tool_result arrays (where it gets ignored),
-        // inject as a clean assistant ack + user message pair so the model
-        // sees the interjection as the most recent thing.
-        const interjections = this._pendingInterjections.get(sessionKey);
-        if (interjections && interjections.length > 0) {
-          this._pendingInterjections.delete(sessionKey);
-          this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
-          // Ensure messages end with an assistant turn so we can add a fresh
-          // user message. Whether there are tool_results still pending or not,
-          // we prepend an assistant ack that reminds the model to KEEP doing
-          // what it was doing AND fold in the new input.
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg?.role === 'user') {
-            messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Interjection received. I will finish the task I was in the middle of and address the follow-up message(s) together in my next reply. I am NOT abandoning the original request.]' }] });
-          }
-          // Build the user turn: raw message(s) + an explicit reminder so the
-          // model does not drop the original task context. Without this the
-          // model often answers only the latest user message and forgets the
-          // in-flight work.
-          const raw = interjections.length === 1
-            ? interjections[0]
-            : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n\n');
-          const framed = `${raw}\n\n---\n[reminder: keep working on the original request too. Your final reply should cover BOTH the in-flight task's results and a response to this follow-up, in one coherent message.]`;
-          messages.push({ role: 'user', content: framed });
-          // Persist each interjection to session history (raw, no framing)
-          for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
-          // Give the agent headroom to respond
-          iterations = Math.max(0, iterations - 4);
-          if (opts.onStatus) {
-            try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { /* silent: best-effort UI callback */ }
-          }
-        }
+        // Pending interjections (extracted to keep _runLoop slim)
+        iterations = this._injectPendingInterjections(sessionKey, messages, opts, iterations);
 
         const iterStart = Date.now();
         this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
@@ -1274,6 +1243,47 @@ class AgentLoop {
 
     if (opts.onError) opts.onError(e);
     return { action: 'rethrow' };
+  }
+
+  /**
+   * Splice any user interjections that arrived during streaming into the
+   * messages array. Rather than merging them into the still-open
+   * tool_result block (where they'd be ignored), we inject a clean
+   * assistant ack + user message pair so the model sees the interjection
+   * as the most recent thing while still being reminded to finish the
+   * original task. Mutates `messages` in place and returns the adjusted
+   * iteration count (with headroom restored so the agent has room to
+   * respond to both threads).
+   */
+  _injectPendingInterjections(sessionKey, messages, opts, iterations) {
+    const interjections = this._pendingInterjections.get(sessionKey);
+    if (!(interjections && interjections.length > 0)) return iterations;
+    this._pendingInterjections.delete(sessionKey);
+    this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
+    // Ensure messages end with an assistant turn so we can add a fresh
+    // user message. Whether there are tool_results still pending or not,
+    // we prepend an assistant ack that reminds the model to KEEP doing
+    // what it was doing AND fold in the new input.
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.role === 'user') {
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Interjection received. I will finish the task I was in the middle of and address the follow-up message(s) together in my next reply. I am NOT abandoning the original request.]' }] });
+    }
+    // Build the user turn: raw message(s) + an explicit reminder so the
+    // model does not drop the original task context. Without this the
+    // model often answers only the latest user message and forgets the
+    // in-flight work.
+    const raw = interjections.length === 1
+      ? interjections[0]
+      : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n\n');
+    const framed = `${raw}\n\n---\n[reminder: keep working on the original request too. Your final reply should cover BOTH the in-flight task's results and a response to this follow-up, in one coherent message.]`;
+    messages.push({ role: 'user', content: framed });
+    // Persist each interjection to session history (raw, no framing)
+    for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
+    if (opts.onStatus) {
+      try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { /* silent: best-effort UI callback */ }
+    }
+    // Give the agent headroom to respond
+    return Math.max(0, iterations - 4);
   }
 
   /**
