@@ -24,6 +24,7 @@ const path = require('path');
 const fs = require('fs');
 const { feed } = require('../graph');
 const { resolveSourcePolicy } = require('./privacy');
+const { MessageQueue } = require('./message-queue');
 // Branding strings used in status messages. Falls back to Anima defaults
 // when brand.json isn't present in the image (e.g. agents created without
 // the per-anima brand.json mount). Without this fallback, requiring this
@@ -49,11 +50,14 @@ class SlackGateway {
     this.app = null;
     this.botUserId = null;
 
-    // Per-channel queues: channelId → { queue, processing, debounceTimer, lullTimer,
-    //   lastBotMessageTs, lastBotResponseTime, lastBotThreadTs, name }
-    this._channels = new Map();
-    this._maxQueueSize = config.maxQueuePerChannel || 3;
-    this._debounceMs = config.messageDebounceMs || 800;
+    // Per-channel queues live in MessageQueue. Slack-specific fields
+    // (lastBotMessageTs, lastBotThreadTs, lastBotResponseTime, name) are
+    // attached lazily by _getChannel below.
+    this._queue = new MessageQueue({
+      config,
+      log: logger,
+      processOnce: (channelId, ch) => this._processQueueOnce(channelId, ch),
+    });
 
     // Message dedup: prevents re-processing replayed events
     this._seenMessages = new Set();
@@ -86,19 +90,16 @@ class SlackGateway {
   }
 
   _getChannel(channelId) {
-    if (!this._channels.has(channelId)) {
-      this._channels.set(channelId, {
-        queue: [],
-        processing: false,
-        debounceTimer: null,
-        lullTimer: null,
-        lastBotMessageTs: null,
-        lastBotResponseTime: null,
-        lastBotThreadTs: null,
-        name: channelId,
-      });
+    const ch = this._queue.getChannel(channelId);
+    // Slack-specific fields — initialized lazily on first access so the
+    // base record stays minimal.
+    if (ch.lastBotMessageTs === undefined) {
+      ch.lastBotMessageTs = null;
+      ch.lastBotResponseTime = null;
+      ch.lastBotThreadTs = null;
+      ch.name = channelId;
     }
-    return this._channels.get(channelId);
+    return ch;
   }
 
   /**
@@ -241,27 +242,18 @@ class SlackGateway {
     const labeledContent = isDm ? content : `[${userName}]: ${content}`;
 
     if (trigger && policy.respond) {
-      if (ch.lullTimer) { clearTimeout(ch.lullTimer); ch.lullTimer = null; }
-      if (ch.queue.length >= this._maxQueueSize) {
-        this.log.warn(`[slack] Queue full for #${channelName}, dropping oldest`);
-        ch.queue.shift();
-      }
-      ch.queue.push({
+      this._queue.enqueueTriggered(channelId, {
         content: labeledContent,
         channelId, channelName, userId, userName, isDm, threadTs, eventTs,
         trigger, client, say,
         _rawFiles: message.files || [],
-      });
-
-      if (ch.debounceTimer) clearTimeout(ch.debounceTimer);
-      ch.debounceTimer = setTimeout(() => this._processQueue(channelId), this._debounceMs);
+      }, { channelLabel: `[slack] #${channelName}` });
     } else {
       this.agent.sessions.addMessage(sessionKey, 'user', labeledContent);
       this.log.debug(`[slack] Observed message from ${userName} in #${channelName} (no trigger)`);
-
-      ch.lullTimer = setTimeout(() => {
+      this._queue.scheduleLull(channelId, () => {
         this._maybeLullResponse(channelId, channelName, isDm, userId, userName, client, say, threadTs);
-      }, 15_000);
+      });
     }
   }
 
@@ -295,45 +287,17 @@ class SlackGateway {
   }
 
   async _maybeLullResponse(channelId, channelName, isDm, userId, userName, client, say, threadTs) {
-    const ch = this._getChannel(channelId);
-    if (ch.processing) return;
-
-    ch.queue.push({
-      content: '[conversation paused — lull check]',
-      channelId, channelName, userId, userName, isDm, threadTs,
-      trigger: 'lull', client, say,
+    this._queue.enqueueLull(channelId, {
+      channelId, channelName, userId, userName, isDm, threadTs, client, say,
     });
-
-    this._processQueue(channelId);
   }
 
   async _processQueue(channelId) {
-    const ch = this._getChannel(channelId);
-    if (ch.processing || ch.queue.length === 0) return;
-    ch.processing = true;
-
-    try {
-      await this._processQueueOnce(channelId, ch);
-    } catch (e) {
-      this.log.error(`[slack] Failed to process queue for ${channelId}:`, e.message);
-    } finally {
-      ch.processing = false;
-      if (ch.queue.length > 0) {
-        const drainDelay = ch.queue[0].trigger === 'lull' ? 2000 : 200;
-        setTimeout(() => this._processQueue(channelId), drainDelay);
-      }
-    }
+    return this._queue.processQueue(channelId);
   }
 
   async _processQueueOnce(channelId, ch) {
-    const items = ch.queue.splice(0);
-    const merged = items.map(i => i.content).join('\n');
-    const last = items[items.length - 1];
-
-    const TRIGGER_PRIORITY = ['mention', 'reply', 'dm', 'name', 'task_complete', 'continuation', 'lull', 'proactive'];
-    const allTriggers = items.map(i => i.trigger).filter(Boolean);
-    const trigger = TRIGGER_PRIORITY.find(p => allTriggers.includes(p)) || allTriggers[0] || 'unknown';
-    const isPassive = trigger === 'lull' || trigger === 'task_complete' || trigger === 'proactive';
+    const { items, merged, last, trigger, isPassive } = this._queue.drain(ch);
 
     const client = last.client;
 
@@ -776,7 +740,7 @@ class SlackGateway {
    */
   getActiveChannelIds() {
     const results = [];
-    for (const [channelId, ch] of this._channels.entries()) {
+    for (const [channelId, ch] of this._queue.entries()) {
       results.push({ id: channelId, name: ch.name || channelId });
     }
     return results.slice(0, 20);
