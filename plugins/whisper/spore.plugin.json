@@ -1,0 +1,9 @@
+{
+  "id": "whisper",
+  "name": "Whisper STT",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Speech-to-text via OpenAI Whisper. Two paths: (1) server-side OpenAI Whisper API as a fallback STT provider when no Deepgram key is set, (2) browser-side local Whisper running whisper-tiny.en via Transformers.js in a Web Worker (WebGPU → WASM fallback). Loads dynamically into graph-viewer.html when installed; uninstalling removes both paths and disables the openai option from the STT provider dropdown."
+}

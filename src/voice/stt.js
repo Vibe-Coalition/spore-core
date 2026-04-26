@@ -83,68 +83,10 @@ class DeepgramSTT {
    */
 }
 
-class OpenAISTT {
-  constructor(apiKey, opts = {}) {
-    this.apiKey = apiKey;
-    this.model = opts.model || 'whisper-1';
-  }
-
-  /**
-   * Batch transcription via OpenAI Whisper API.
-   * Accepts audio buffer. The API expects multipart form data.
-   * @param {Buffer} audioBuffer
-   * @param {string} mimeType
-   * @returns {Promise<{text: string, confidence: number}>}
-   */
-  async transcribe(audioBuffer, mimeType = 'audio/ogg') {
-    const ext = mimeType.includes('ogg') ? 'ogg'
-      : mimeType.includes('wav') ? 'wav'
-      : mimeType.includes('webm') ? 'webm'
-      : mimeType.includes('mp3') ? 'mp3'
-      : 'ogg';
-    const filename = `audio.${ext}`;
-
-    const boundary = '----VoiceBoundary' + Date.now();
-    const parts = [];
-
-    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mimeType}\r\n\r\n`);
-    parts.push(audioBuffer);
-    parts.push(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${this.model}\r\n--${boundary}--\r\n`);
-
-    const body = Buffer.concat(parts.map(p => typeof p === 'string' ? Buffer.from(p) : p));
-
-    return new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'api.openai.com',
-        path: '/v1/audio/transcriptions',
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-        },
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => { data += chunk; });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(data);
-            if (res.statusCode >= 400) {
-              return reject(new Error(parsed.error?.message || `OpenAI STT ${res.statusCode}`));
-            }
-            resolve({ text: parsed.text || '', confidence: 1.0 });
-          } catch (e) {
-            reject(new Error(`OpenAI STT parse error: ${e.message}`));
-          }
-        });
-      });
-
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
-  }
-}
+// OpenAISTT moved to plugins/whisper/lib/openai-whisper.js (Phase B).
+// The plugin registers the 'openai' STT provider via
+// api.registerSTTProvider — when installed, createSTT below picks it
+// up automatically.
 
 /**
  * Factory — create the right STT provider.
@@ -176,18 +118,14 @@ function createSTT(config, manager) {
       }
     }
   }
-  // Transitional: in-tree fallback. Honors `sttProvider: 'openai'`
-  // explicitly even when Deepgram is configured.
-  if (preferred === 'openai' && config.openaiApiKey) {
-    return new OpenAISTT(config.openaiApiKey, config.voice);
-  }
+  // Transitional: in-tree DeepgramSTT fallback (the class still lives
+  // here until Phase C extracts it). OpenAI Whisper has already moved
+  // to the whisper plugin; without that plugin installed, openai is
+  // simply unavailable.
   if (config.deepgramApiKey) {
     return new DeepgramSTT(config.deepgramApiKey, config.voice);
-  }
-  if (config.openaiApiKey) {
-    return new OpenAISTT(config.openaiApiKey, config.voice);
   }
   return null;
 }
 
-module.exports = { DeepgramSTT, OpenAISTT, createSTT };
+module.exports = { DeepgramSTT, createSTT };
