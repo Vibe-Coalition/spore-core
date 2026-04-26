@@ -389,6 +389,10 @@ async function boot() {
   agent._pluginManager = plugins;
   learner._pluginManager = plugins;
   maintainer._pluginManager = plugins;
+  // GraphContext._buildPluginPromptSections + _buildPluginSection both gate
+  // on this — without it, every plugin-contributed prompt section silently
+  // disappears regardless of mode/registration. Was missed in phase 1 wiring.
+  graph._pluginManager = plugins;
 
   const healthServer = startHealthServer(config, log, graph, sessions, gateways, learner, maintainer, tools, agent);
 
