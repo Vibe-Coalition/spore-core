@@ -775,12 +775,16 @@ module.exports = function register(api) {
   });
 
   // Prompt sections — Project Context (every acorn turn) + Plan Mode (when
-  // projectContext.mode === 'plan'). Both renderFns return null on non-acorn
-  // turns so they no-op for web/discord/etc. Each returns a fully-formatted
-  // block including its own `## ` heading; _buildPluginPromptSections sees
-  // the leading `## ` and skips its auto-prefix.
-  api.registerPromptSection('full', 'Project Context', ({ opts }) => buildProjectContextSection(api, opts));
-  api.registerPromptSection('full', 'Plan Mode',       ({ opts }) => buildPlanModeSection(api, opts));
+  // projectContext.mode === 'plan'). Registered with the `*` wildcard so
+  // they appear in EVERY prompt mode. Acorn turns route through chat mode
+  // for tighter token budgets, but the agent still needs the project /
+  // session context to behave correctly. Both renderFns return null on
+  // non-acorn turns so they no-op for web/discord/etc. Each returns a
+  // fully-formatted block including its own `## ` heading;
+  // _buildPluginPromptSections sees the leading `## ` and skips its
+  // auto-prefix.
+  api.registerPromptSection('*', 'Project Context', ({ opts }) => buildProjectContextSection(api, opts));
+  api.registerPromptSection('*', 'Plan Mode',       ({ opts }) => buildPlanModeSection(api, opts));
 
   // afterTurn lifecycle hook — fires once per agent turn after _firePluginAfterTurn.
   // Implements failure-fix discovery synthesis + per-turn breadcrumb on the
