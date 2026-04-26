@@ -3163,6 +3163,15 @@ class WebGateway {
           }
           const resolved = mgr.resolveWebRoute(req.method, alias.aliasPath);
           if (resolved) {
+            // Mirror the auth model from the regular /api/plugins/<id>/...
+            // dispatch site below: non-public routes require signed-in
+            // user. Acorn-cli's /auth opts out via { public: true } so
+            // unauthenticated Go binaries can post a key for a token.
+            if (!resolved.public && !isAnyAuth(req)) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Authentication required' }));
+              return;
+            }
             try {
               const query = (() => { try { return new URL(req.url, 'http://x').searchParams; } catch { return new URLSearchParams(); } })();
               await resolved.handler(req, res, { urlPath: alias.aliasPath, query, user: req._user || null });
@@ -3699,7 +3708,7 @@ class WebGateway {
         return;
       }
 
-      if (urlPath === '/api/tokens' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/tailscale') || urlPath.startsWith('/api/cluster') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch')) {
+      if (urlPath === '/api/tokens' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/cluster') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch')) {
         if (!(await checkAuth(req, res))) return;
         const currentDb = this.graph?.db || graphDb;
         this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
@@ -6341,148 +6350,10 @@ class WebGateway {
       return;
     }
 
-    // ── Tailscale ─────────────────────────────────────────────────────
-    const TS_SOCKET = '/data/tailscale/ts.sock';
-    // The node process runs as unprivileged `spore`. Tailscale's `up` /
-    // `logout` / `set` require root (or an already-persisted operator
-    // setting, which itself can only be set by root). Sudoers grants
-    // passwordless /usr/bin/tailscale to spore — use it unconditionally
-    // so we don't depend on the operator-persist side channel.
-    const _tsRun = (args, timeoutMs = 10000) => new Promise((resolve) => {
-      const { spawn } = require('child_process');
-      const proc = spawn('sudo', ['-n', 'tailscale', '--socket', TS_SOCKET, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-      let out = '', err = '';
-      proc.stdout.on('data', c => { out += c.toString(); });
-      proc.stderr.on('data', c => { err += c.toString(); });
-      const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) { this.log.warn('[web] proc.kill failed: ' + e.message); } }, timeoutMs);
-      proc.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout: out, stderr: err }); });
-      proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: e.message }); });
-    });
-
-    if (urlPath === '/api/tailscale/status' && req.method === 'GET') {
-      try {
-        const r = await _tsRun(['status', '--json'], 8000);
-        if (r.code !== 0) {
-          // daemon not running or socket missing
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ backend: 'Stopped', error: (r.stderr || '').trim().slice(0, 300), authUrl: this._tsAuthUrl || null }));
-          return;
-        }
-        let j = null;
-        try { j = JSON.parse(r.stdout); } catch (e) {
-          res.writeHead(500); res.end(JSON.stringify({ error: 'tailscale status parse: ' + e.message })); return;
-        }
-        const peers = [];
-        for (const key of Object.keys(j.Peer || {})) {
-          const p = j.Peer[key];
-          peers.push({ hostName: p.HostName, dnsName: p.DNSName, addrs: p.TailscaleIPs || [], online: !!p.Online, os: p.OS, tags: p.Tags || [] });
-        }
-        peers.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          backend: j.BackendState || 'Unknown',
-          tailnetIp: (j.Self?.TailscaleIPs || [])[0] || null,
-          hostname: j.Self?.HostName || null,
-          dnsName: j.Self?.DNSName || null,
-          peers,
-          peerCount: peers.length,
-          onlineCount: peers.filter(p => p.online).length,
-          authUrl: (j.BackendState === 'NeedsLogin' ? (this._tsAuthUrl || null) : null),
-        }));
-      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
-      return;
-    }
-
-    if (urlPath === '/api/tailscale/login' && req.method === 'POST') {
-      this.log.info('[tailscale] login endpoint hit — initiating `tailscale up`');
-      try {
-        // If already logged in, short-circuit.
-        const status = await _tsRun(['status', '--json'], 5000);
-        if (status.code === 0) {
-          try {
-            const j = JSON.parse(status.stdout);
-            if (j.BackendState === 'Running') {
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ status: 'already-connected', tailnetIp: (j.Self?.TailscaleIPs || [])[0] || null }));
-              return;
-            }
-          } catch { /* silent: malformed JSON → fallback */ }
-        }
-
-        // Spawn `tailscale up` non-blocking, parse out the login URL from stderr.
-        const { spawn } = require('child_process');
-        const hostname = this.config.tailscaleHostname || `spore-${this.config.agentId || 'agent'}`;
-        // `--reset` clears any half-persisted flag state from a previous
-        // partial login attempt, so our flag set becomes canonical. Runs
-        // under `sudo -n tailscale` because `up` needs root (or a
-        // previously-persisted operator, which we don't rely on).
-        const args = [
-          '-n', 'tailscale',
-          '--socket', TS_SOCKET, 'up',
-          '--reset',
-          '--hostname', hostname,
-          '--operator', 'spore',
-          '--accept-routes',
-          '--ssh',
-          '--timeout=0',
-        ];
-        // Kill any stale previous login attempt
-        if (this._tsLoginProc && !this._tsLoginProc.killed) {
-          try { this._tsLoginProc.kill('SIGTERM'); } catch (e) { this.log.warn('[web] this._tsLoginProc.kill failed: ' + e.message); }
-        }
-        this._tsAuthUrl = null;
-        const proc = spawn('sudo', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-        this._tsLoginProc = proc;
-        this._tsAuthUrlExpiresAt = Date.now() + 10 * 60_000;
-
-        const urlRegex = /https:\/\/login\.tailscale\.com\/a\/[A-Za-z0-9]+/;
-        const capture = (chunk) => {
-          const m = chunk.toString().match(urlRegex);
-          if (m && !this._tsAuthUrl) {
-            this._tsAuthUrl = m[0];
-            this.log.info(`[tailscale] login URL captured`);
-          }
-        };
-        proc.stdout.on('data', capture);
-        proc.stderr.on('data', capture);
-        proc.on('close', (code) => {
-          this.log.info(`[tailscale] up process exited ${code}`);
-          this._tsLoginProc = null;
-          // Clear auth URL once login completes successfully (status will now be Running)
-          if (code === 0) this._tsAuthUrl = null;
-        });
-
-        // Poll for URL up to 6s
-        let waited = 0;
-        while (!this._tsAuthUrl && waited < 6000) {
-          await new Promise(r => setTimeout(r, 200));
-          waited += 200;
-        }
-
-        if (!this._tsAuthUrl) {
-          // No URL printed — either daemon issue or already connecting
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'no-url-yet', message: 'tailscale up running; poll /api/tailscale/status' }));
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'pending-auth', authUrl: this._tsAuthUrl, expiresAt: this._tsAuthUrlExpiresAt }));
-      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
-      return;
-    }
-
-    if (urlPath === '/api/tailscale/logout' && req.method === 'POST') {
-      try {
-        const r = await _tsRun(['logout'], 15000);
-        this._tsAuthUrl = null;
-        if (this._tsLoginProc && !this._tsLoginProc.killed) {
-          try { this._tsLoginProc.kill('SIGTERM'); } catch (e) { this.log.warn('[web] this._tsLoginProc.kill failed: ' + e.message); }
-        }
-        res.writeHead(r.code === 0 ? 200 : 500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: r.code === 0, stderr: (r.stderr || '').trim().slice(0, 300) }));
-      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
-      return;
-    }
+    // /api/tailscale/{status,login,logout} moved to plugins/tailscale/.
+    // Path-aliased: /api/tailscale/* rewrites to /api/plugins/tailscale/*
+    // via the registerPathAlias hook. When the plugin is uninstalled
+    // the alias disappears and these URLs 404.
 
     // ── Cluster settings ─────────────────────────────────────────────
     if (urlPath === '/api/cluster/settings' && req.method === 'GET') {

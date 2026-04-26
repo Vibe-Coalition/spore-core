@@ -208,26 +208,27 @@ function migrateReferenceNodes(db, log) {
     }
   }
 
-  // Idempotently ensure the Tailscale + SLURM-cluster reference nodes exist
-  // on every boot. Old installs predate these refs; the migration uses
-  // explicit WHERE NOT EXISTS guards so re-running is a no-op.
+  // ref-tailscale moved to plugins/tailscale/sql/install.sql.
+  // ref-compute-cluster stays in core; the migrate file now only
+  // creates that one. Run idempotently on every boot to handle old
+  // installs that predate the ref-cluster node.
   try {
     const migPath = path.join(__dirname, 'migrate-ref-tailscale-cluster.sql');
     if (fs.existsSync(migPath)) {
       const sql = fs.readFileSync(migPath, 'utf8');
       const before = db.prepare(
-        "SELECT (SELECT COUNT(*) FROM nodes WHERE id IN ('ref-tailscale','ref-compute-cluster')) AS nodes_present, (SELECT COUNT(*) FROM aspects WHERE node_id IN ('ref-tailscale','ref-compute-cluster')) AS aspects_present"
+        "SELECT (SELECT COUNT(*) FROM nodes WHERE id = 'ref-compute-cluster') AS nodes_present, (SELECT COUNT(*) FROM aspects WHERE node_id = 'ref-compute-cluster') AS aspects_present"
       ).get();
       db.exec(sql);
       const after = db.prepare(
-        "SELECT (SELECT COUNT(*) FROM nodes WHERE id IN ('ref-tailscale','ref-compute-cluster')) AS nodes_present, (SELECT COUNT(*) FROM aspects WHERE node_id IN ('ref-tailscale','ref-compute-cluster')) AS aspects_present"
+        "SELECT (SELECT COUNT(*) FROM nodes WHERE id = 'ref-compute-cluster') AS nodes_present, (SELECT COUNT(*) FROM aspects WHERE node_id = 'ref-compute-cluster') AS aspects_present"
       ).get();
       if (after.nodes_present > before.nodes_present || after.aspects_present > before.aspects_present) {
-        log.info(`[boot] Tailscale/cluster refs migrated: +${after.nodes_present - before.nodes_present} nodes, +${after.aspects_present - before.aspects_present} aspects`);
+        log.info(`[boot] Compute-cluster ref migrated: +${after.nodes_present - before.nodes_present} nodes, +${after.aspects_present - before.aspects_present} aspects`);
       }
     }
   } catch (e) {
-    log.warn(`[boot] Tailscale/cluster ref migration failed: ${e.message}`);
+    log.warn(`[boot] Compute-cluster ref migration failed: ${e.message}`);
   }
 
   // Email ref node moved to plugins/email/ (extracted in phase 2.2).

@@ -18436,6 +18436,10 @@ build/
       <div class="settings-section wide" data-target-tab="cluster">
         <h4>Compute cluster</h4>
         <div class="settings-note" style="margin-top:4px">Tailscale + SLURM cluster access. Log in once via SSO; the state persists across container restarts.</div>
+        <!-- Tailscale-only sub-block: hidden by data-plugin-required when
+             the tailscale plugin isn't installed. _hidePluginUiIfMissing
+             walks all such elements on settings-pane open. -->
+        <div data-plugin-required="tailscale">
           <div id="settings-tailscale-status" style="margin-top:8px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;font-size:.72rem;display:flex;align-items:center;justify-content:space-between;gap:8px">
             <span id="settings-tailscale-line">loading…</span>
             <span style="display:flex;gap:4px">
@@ -18448,6 +18452,7 @@ build/
             <a id="settings-tailscale-authurl-link" href="#" target="_blank" rel="noopener noreferrer" style="word-break:break-all;color:var(--accent);text-decoration:underline"></a>
             <div style="margin-top:6px;color:var(--text-dim)">Polling status until connected…</div>
           </div>
+        </div>
 
           <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px">
             <label style="font-size:.7rem">Cluster SSH username
