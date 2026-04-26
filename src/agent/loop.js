@@ -1147,18 +1147,17 @@ class AgentLoop {
    * session node exists.
    */
   _recordRoundCheckpoint(opts, toolLog, finalText) {
-    // Trace condition — user observed sessions (T123901) where the
-    // round checkpoint silently didn't fire despite the conditions
-    // appearing to match. Logging the entry + condition values so we
-    // can catch whatever path is skipping it.
+    // Per-turn trace originally added during the T123901 investigation
+    // (round checkpoint silently not firing). Kept at debug level so the
+    // information is still recoverable but doesn't dominate normal logs.
     try {
-      this.log.info(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
+      this.log.debug(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
     } catch { /* silent: best-effort log */ }
     if (!(opts.platform === 'cli' && opts.channelId && this.learner?.db)) return;
     try {
       const sessions = require('../graph/sessions');
       const turn = sessions.bumpTurnCount(this.learner, opts.channelId);
-      this.log.info(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
+      this.log.debug(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
       const sessId = 'session-' + opts.channelId;
       const sessExists = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
       if (sessExists) {

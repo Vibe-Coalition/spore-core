@@ -58,8 +58,6 @@ function _cosine(a, b) {
   return denom === 0 ? 0 : dot / denom;
 }
 
-let findSimilarNodes = null;
-
 function classifyQueryType(query) {
   const q = query.toLowerCase();
   if (/\bhow\s+many\b|\bhow\s+much\b|\btotal\b|\ball\s+the\b|\blist\s+all\b|\bevery\b|\bhow\s+many\s+\w+\s+(?:did|have|do|was|were|are|has)\b|\bcombined\b|\bin\s+total\b/.test(q))
