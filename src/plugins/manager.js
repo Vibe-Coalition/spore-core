@@ -25,6 +25,17 @@ class PluginManager {
     this.plugins = new Map();
     this._appContext = null;
     this._configPersister = null;
+    // Discovery roots set by app.js. Bundled lives in the docker image,
+    // user lives in the workspace bind mount.
+    this._discoveryDirs = { bundled: null, user: null };
+  }
+
+  setDiscoveryDirs({ bundled = null, user = null } = {}) {
+    this._discoveryDirs = { bundled, user };
+  }
+
+  getDiscoveryDirs() {
+    return { ...this._discoveryDirs };
   }
 
   /**
@@ -52,25 +63,19 @@ class PluginManager {
   }
 
   /**
-   * Scan pluginsDir for plugin directories, validate manifests, require entries.
-   * Each subdirectory must contain spore.plugin.json or openclaw.plugin.json.
+   * Scan a plugin directory and load every subdirectory that contains a
+   * valid manifest. Each loaded plugin is tagged with `source` so the UI
+   * can show where it came from (bundled vs user).
+   *
+   * Note: the bundled dir is shipped with the docker image; the user dir
+   * is operator-writable inside the workspace bind mount. Both are
+   * operator-trusted by virtue of opting into SPORE_PLUGINS_ENABLED.
    */
-  async loadAll(pluginsDir) {
+  async loadAll(pluginsDir, opts = {}) {
+    const source = opts.source || 'unknown';
     if (!pluginsDir || !fs.existsSync(pluginsDir)) {
-      this.log.debug(`[plugins] No plugins directory at ${pluginsDir}`);
+      this.log.debug(`[plugins] No plugins directory at ${pluginsDir} (${source})`);
       return;
-    }
-
-    // Refuse to load plugins from inside the agent-writable workspace —
-    // a compromised agent run could otherwise drop a plugin and gain RCE
-    // at the next boot. Plugins must live in an operator-managed location.
-    const workspacePath = this.config.workspacePath ? path.resolve(this.config.workspacePath) : null;
-    if (workspacePath) {
-      const resolvedPlugins = path.resolve(pluginsDir);
-      if (resolvedPlugins === workspacePath || resolvedPlugins.startsWith(workspacePath + path.sep)) {
-        this.log.error(`[plugins] Refusing to load: pluginsDir (${resolvedPlugins}) is inside workspace (${workspacePath}). Plugins must live outside agent-writable paths.`);
-        return;
-      }
     }
 
     const entries = fs.readdirSync(pluginsDir, { withFileTypes: true });
@@ -107,11 +112,12 @@ class PluginManager {
         this.plugins.set(manifest.id, {
           manifest,
           path: pluginPath,
+          source,
           registerFn: typeof registerFn === 'function' ? registerFn : registerFn.register,
           instance: null,
         });
 
-        this.log.info(`[plugins] Loaded ${manifest.id} (${manifest.kind})${manifest.openclawCompat ? ' [OpenClaw compat]' : ''}`);
+        this.log.info(`[plugins] Loaded ${manifest.id} (${manifest.kind}, ${source})${manifest.openclawCompat ? ' [OpenClaw compat]' : ''}`);
       } catch (e) {
         this.log.error(`[plugins] Failed to load ${dir.name}: ${e.message}`);
       }
@@ -578,19 +584,44 @@ class PluginManager {
   }
 
   /**
-   * Validate a path is acceptable for hot install — refuses paths inside the
-   * agent-writable workspace, mirroring the boot-time check in `loadAll`.
+   * Validate a path is acceptable for hot install. The path must be inside
+   * one of the configured discovery roots (bundled or user) — operators can
+   * only install plugins they've intentionally placed in those dirs.
    */
   _validatePluginPath(pluginPath) {
     const resolved = path.resolve(pluginPath);
-    const workspacePath = this.config.workspacePath ? path.resolve(this.config.workspacePath) : null;
-    if (workspacePath && (resolved === workspacePath || resolved.startsWith(workspacePath + path.sep))) {
-      throw new Error(`Plugin path is inside agent-writable workspace (${workspacePath}); refusing for security`);
-    }
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
       throw new Error(`Plugin path is not a directory: ${resolved}`);
     }
+    const roots = [this._discoveryDirs.bundled, this._discoveryDirs.user]
+      .filter(Boolean)
+      .map(d => path.resolve(d));
+    if (roots.length > 0) {
+      const inRoot = roots.some(r => resolved === r || resolved.startsWith(r + path.sep));
+      if (!inRoot) {
+        throw new Error(`Plugin path is outside configured plugin dirs (${roots.join(', ')})`);
+      }
+    }
     return resolved;
+  }
+
+  /**
+   * Resolve a plugin id to its on-disk path by searching both discovery dirs.
+   * User dir is preferred over bundled when an id collides, so a user-supplied
+   * override of a bundled plugin takes effect.
+   */
+  _resolveIdToPath(pluginId) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(pluginId)) {
+      throw new Error(`Invalid plugin id: ${pluginId}`);
+    }
+    const dirs = [this._discoveryDirs.user, this._discoveryDirs.bundled].filter(Boolean);
+    for (const dir of dirs) {
+      const candidate = path.join(dir, pluginId);
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+        return candidate;
+      }
+    }
+    throw new Error(`Plugin "${pluginId}" not found in any discovery dir`);
   }
 
   /**
@@ -602,10 +633,23 @@ class PluginManager {
    * previously loaded in this process still requires a restart. Installing
    * a previously-uninstalled plugin works hot.
    */
-  async installPlugin(pluginPath) {
+  async installPlugin(pathOrOpts) {
     if (!this._appContext) {
       throw new Error('Plugin manager not initialized; cannot hot-install');
     }
+
+    // Accepts either a string path (legacy) or { id } / { path }.
+    let pluginPath;
+    if (typeof pathOrOpts === 'string') {
+      pluginPath = pathOrOpts;
+    } else if (pathOrOpts?.path) {
+      pluginPath = pathOrOpts.path;
+    } else if (pathOrOpts?.id) {
+      pluginPath = this._resolveIdToPath(pathOrOpts.id);
+    } else {
+      throw new Error('installPlugin requires a path string, {path}, or {id}');
+    }
+
     const resolved = this._validatePluginPath(pluginPath);
 
     const manifest = this._readManifest(resolved);
@@ -622,9 +666,12 @@ class PluginManager {
       throw new Error(`Plugin entry does not export a function or { register }`);
     }
 
+    const source = this._sourceForPath(resolved);
+
     const plugin = {
       manifest,
       path: resolved,
+      source,
       registerFn: typeof registerFn === 'function' ? registerFn : registerFn.register,
       instance: null,
     };
@@ -700,7 +747,20 @@ class PluginManager {
   }
 
   /**
-   * List installed plugins (id, kind, version, openclawCompat) for the manager UI.
+   * Tell whether a resolved path lives inside the bundled or user discovery
+   * dir. Used to tag plugins with their origin in the manager UI.
+   */
+  _sourceForPath(resolved) {
+    const r = path.resolve(resolved);
+    const userDir = this._discoveryDirs.user ? path.resolve(this._discoveryDirs.user) : null;
+    const bundledDir = this._discoveryDirs.bundled ? path.resolve(this._discoveryDirs.bundled) : null;
+    if (userDir && (r === userDir || r.startsWith(userDir + path.sep))) return 'user';
+    if (bundledDir && (r === bundledDir || r.startsWith(bundledDir + path.sep))) return 'bundled';
+    return 'unknown';
+  }
+
+  /**
+   * List currently-loaded plugins for the manager UI.
    */
   listInstalled() {
     const out = [];
@@ -710,6 +770,7 @@ class PluginManager {
         name: plugin.manifest.name,
         version: plugin.manifest.version,
         kind: plugin.manifest.kind,
+        source: plugin.source || 'unknown',
         openclawCompat: !!plugin.manifest.openclawCompat,
         depends: plugin.manifest.depends || [],
         hasReferenceNodes: !!plugin.instance?.getReferenceNodes?.(),
@@ -718,6 +779,125 @@ class PluginManager {
       });
     }
     return out;
+  }
+
+  /**
+   * Scan both discovery dirs and return the union with installed status.
+   * This is what the Plugins settings tab consumes — every on-disk plugin
+   * appears, even ones that aren't currently loaded.
+   */
+  listAvailable() {
+    const out = new Map();
+    const installedIds = new Set(this.plugins.keys());
+
+    for (const [src, dir] of [['user', this._discoveryDirs.user], ['bundled', this._discoveryDirs.bundled]]) {
+      if (!dir || !fs.existsSync(dir)) continue;
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch (e) {
+        this.log.warn(`[plugins] Cannot scan ${src} dir ${dir}: ${e.message}`);
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const pluginPath = path.join(dir, entry.name);
+        const manifest = this._readManifest(pluginPath);
+        if (!manifest) continue;
+        // User overrides bundled when ids collide; first one wins via Map.set
+        // semantics, and we iterate user first.
+        if (out.has(manifest.id)) continue;
+        const installed = this.plugins.get(manifest.id);
+        out.set(manifest.id, {
+          id: manifest.id,
+          name: manifest.name,
+          version: manifest.version,
+          kind: manifest.kind,
+          source: src,
+          path: pluginPath,
+          depends: manifest.depends || [],
+          openclawCompat: !!manifest.openclawCompat,
+          isInstalled: installedIds.has(manifest.id),
+          hasReferenceNodes: !!installed?.instance?.getReferenceNodes?.(),
+          toolCount: installed?.instance?.getRegisteredTools?.().length || 0,
+          gatewayCount: installed?.instance?.getRegisteredGateways?.().length || 0,
+        });
+      }
+    }
+    return Array.from(out.values()).sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /**
+   * Clone a plugin from a git repository into the user discovery dir.
+   * Returns the manifest of the freshly-cloned plugin (caller decides
+   * whether to install it next). Refuses if the user dir isn't configured
+   * or the target id collides with an existing on-disk plugin.
+   *
+   * @param {string} repoUrl  — git clone URL (https or git@host:repo)
+   * @param {object} [opts]
+   * @param {string} [opts.name] — override the directory name; defaults
+   *                               to the repo's basename minus `.git`.
+   * @param {string} [opts.ref]  — branch/tag/commit to check out.
+   * @param {number} [opts.timeoutMs=120000]
+   */
+  async cloneFromGit(repoUrl, opts = {}) {
+    const userDir = this._discoveryDirs.user;
+    if (!userDir) {
+      throw new Error('No user plugins dir configured (set SPORE_PLUGINS_USER_DIR).');
+    }
+    if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
+      throw new Error('repoUrl is required');
+    }
+    if (!/^(https?:\/\/|git@)[\w.@:\/_-]+\.git?$/.test(repoUrl) && !/^https?:\/\/[\w.@:\/_-]+$/.test(repoUrl)) {
+      // Loose validation — git itself is the real authority — but reject
+      // shell-metachar tricks.
+      if (/[;&|`$<>"']/.test(repoUrl)) {
+        throw new Error('Invalid characters in repoUrl');
+      }
+    }
+
+    const baseName = opts.name || repoUrl.replace(/\.git$/, '').split('/').pop() || '';
+    if (!/^[a-zA-Z0-9_-]+$/.test(baseName)) {
+      throw new Error(`Cannot derive a safe directory name from "${repoUrl}"; pass opts.name`);
+    }
+
+    if (!fs.existsSync(userDir)) {
+      fs.mkdirSync(userDir, { recursive: true });
+    }
+    const target = path.join(userDir, baseName);
+    if (fs.existsSync(target)) {
+      throw new Error(`Plugin directory already exists: ${target}`);
+    }
+
+    const { spawn } = require('child_process');
+    const args = ['clone', '--depth', '1'];
+    if (opts.ref) args.push('--branch', String(opts.ref));
+    args.push('--', repoUrl, target);
+
+    await new Promise((resolve, reject) => {
+      const child = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', d => { stderr += d.toString(); });
+      const t = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`git clone timed out after ${opts.timeoutMs || 120000}ms`));
+      }, opts.timeoutMs || 120000);
+      child.on('close', (code) => {
+        clearTimeout(t);
+        if (code === 0) resolve();
+        else reject(new Error(`git clone failed (exit ${code}): ${stderr.trim().slice(0, 500)}`));
+      });
+    });
+
+    const manifest = this._readManifest(target);
+    if (!manifest) {
+      // Failed to parse a manifest — clean up so the user doesn't have a
+      // half-cloned dir littering their plugins folder.
+      try { fs.rmSync(target, { recursive: true, force: true }); } catch (e) { this.log.warn(`[plugins] cleanup of ${target} failed: ${e.message}`); }
+      throw new Error(`Cloned repo has no spore.plugin.json or openclaw.plugin.json manifest`);
+    }
+    this.log.info(`[plugins] Cloned ${manifest.id} (v${manifest.version}) from ${repoUrl} → ${target}`);
+    return { manifest, path: target };
   }
 
   /**

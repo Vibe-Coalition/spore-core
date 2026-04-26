@@ -943,14 +943,16 @@ class WebGateway {
   _buildPluginsSettingsBlock() {
     const mgr = this.tools?._pluginManager;
     if (!mgr?.getSettingsPanes) {
-      return { enabled: !!this.config.pluginsEnabled, hotReload: !!this.config.pluginsHotReload, panes: [], dockItems: [], installed: [] };
+      return { enabled: !!this.config.pluginsEnabled, hotReload: !!this.config.pluginsHotReload, panes: [], dockItems: [], available: [], dirs: { bundled: null, user: null } };
     }
+    const dirs = mgr.getDiscoveryDirs?.() || {};
     return {
       enabled: !!this.config.pluginsEnabled,
       hotReload: !!this.config.pluginsHotReload,
+      dirs: { bundled: dirs.bundled || null, user: dirs.user || null },
       panes: mgr.getSettingsPanes(),
       dockItems: mgr.getDockItems?.() || [],
-      installed: mgr.listInstalled?.() || [],
+      available: mgr.listAvailable?.() || [],
     };
   }
 
@@ -3476,12 +3478,14 @@ class WebGateway {
           res.end(JSON.stringify({ error: 'Plugin manager unavailable' }));
           return;
         }
+        const dirs = mgr.getDiscoveryDirs?.() || {};
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           enabled: !!this.config.pluginsEnabled,
           hotReload: !!this.config.pluginsHotReload,
-          pluginsDir: this.config.pluginsDir || null,
+          dirs: { bundled: dirs.bundled || null, user: dirs.user || null },
           installed: mgr.listInstalled(),
+          available: mgr.listAvailable?.() || [],
         }));
         return;
       }
@@ -3503,19 +3507,62 @@ class WebGateway {
         for await (const chunk of req) body += chunk;
         let parsed = {};
         try { parsed = body ? JSON.parse(body) : {}; } catch { /* silent: malformed JSON → fallback */ }
-        if (!parsed.path || typeof parsed.path !== 'string') {
+        // Accept { id } (resolves against discovery dirs) or { path } (legacy).
+        const arg = parsed.id ? { id: parsed.id } : (parsed.path ? { path: parsed.path } : null);
+        if (!arg) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'path (string) is required' }));
+          res.end(JSON.stringify({ error: 'id (preferred) or path is required' }));
           return;
         }
         try {
-          const manifest = await mgr.installPlugin(parsed.path);
+          const manifest = await mgr.installPlugin(arg);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, manifest }));
         } catch (e) {
           this.log.error('[plugins:install] failed:', e?.message);
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e?.message || 'install failed' }));
+        }
+        return;
+      }
+
+      // Clone a plugin from a git repo into the user discovery dir.
+      // Doesn't auto-install — caller follows up with /api/plugins/install
+      // once they've reviewed the cloned manifest. This separation lets the
+      // UI show "cloned, not yet installed" state.
+      if (urlPath === '/api/plugins/clone' && req.method === 'POST') {
+        if (!(await checkAuth(req, res))) return;
+        if (!this.config.pluginsHotReload) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Set SPORE_PLUGINS_HOT_RELOAD=true to enable.' }));
+          return;
+        }
+        const mgr = this.tools?._pluginManager;
+        if (!mgr?.cloneFromGit) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Plugin manager unavailable' }));
+          return;
+        }
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        let parsed = {};
+        try { parsed = body ? JSON.parse(body) : {}; } catch { /* silent: malformed JSON → fallback */ }
+        if (!parsed.repo || typeof parsed.repo !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'repo (git URL) is required' }));
+          return;
+        }
+        try {
+          const result = await mgr.cloneFromGit(parsed.repo, {
+            name: parsed.name,
+            ref: parsed.ref,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, manifest: result.manifest, path: result.path }));
+        } catch (e) {
+          this.log.error('[plugins:clone] failed:', e?.message);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e?.message || 'clone failed' }));
         }
         return;
       }

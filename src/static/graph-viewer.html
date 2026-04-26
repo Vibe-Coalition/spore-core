@@ -4891,10 +4891,10 @@ function populateSettingsPanel(data) {
 //   • PUT  /api/settings → body.plugins.<id> = { ...partial }
 function _populatePluginsTab(plugins) {
   const stateEl = document.getElementById('settings-plugins-state');
+  const dirsEl  = document.getElementById('settings-plugins-dirs');
   const mgrEl   = document.getElementById('settings-plugins-manager');
   const panesEl = document.getElementById('settings-plugins-panes');
-  const installRow = document.getElementById('settings-plugins-install-row');
-  const installHelp = document.getElementById('settings-plugins-install-help');
+  const cloneRow = document.getElementById('settings-plugins-clone-row');
   if (!mgrEl || !panesEl) return;
 
   const enabled = !!plugins.enabled;
@@ -4903,39 +4903,24 @@ function _populatePluginsTab(plugins) {
     if (!enabled) {
       stateEl.textContent = 'Plugin system is disabled. Set SPORE_PLUGINS_ENABLED=true to enable. Plugins run unsandboxed with full process privileges.';
     } else if (!hot) {
-      stateEl.textContent = 'Plugin system enabled (read-only). Set SPORE_PLUGINS_HOT_RELOAD=true to allow runtime install/uninstall.';
+      stateEl.textContent = 'Plugin system enabled (read-only). Set SPORE_PLUGINS_HOT_RELOAD=true to allow runtime install/uninstall and git clone.';
     } else {
-      stateEl.textContent = 'Plugin system enabled with hot reload. New install/uninstall takes effect without restart; in-place upgrades still need a restart.';
+      stateEl.textContent = 'Plugin system enabled with hot reload. Install/uninstall takes effect without restart; updating an existing plugin still needs a restart.';
     }
   }
-  if (installRow) installRow.style.display = (enabled && hot) ? 'flex' : 'none';
-  if (installHelp) installHelp.style.display = (enabled && hot) ? 'block' : 'none';
+  if (dirsEl) {
+    const bundled = plugins.dirs?.bundled || '(unset)';
+    const user = plugins.dirs?.user || '(unset — set SPORE_PLUGINS_USER_DIR to enable git clone)';
+    dirsEl.innerHTML = `Discovery dirs: <code>${_escapeHtml(bundled)}</code> (bundled) · <code>${_escapeHtml(user)}</code> (user)`;
+  }
+  if (cloneRow) cloneRow.style.display = (enabled && hot && plugins.dirs?.user) ? 'block' : 'none';
 
-  // Manager card: list installed plugins
-  const installed = Array.isArray(plugins.installed) ? plugins.installed : [];
-  if (installed.length === 0) {
-    mgrEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugins installed.</div>';
+  // Unified list: everything on disk, with install/uninstall toggle per row.
+  const available = Array.isArray(plugins.available) ? plugins.available : [];
+  if (available.length === 0) {
+    mgrEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugins found in either discovery dir.</div>';
   } else {
-    mgrEl.innerHTML = installed.map(p => {
-      const refs = p.hasReferenceNodes ? '<span class="settings-note" style="opacity:.7">ref nodes</span>' : '';
-      const tools = p.toolCount ? `<span class="settings-note" style="opacity:.7">${p.toolCount} tool${p.toolCount > 1 ? 's' : ''}</span>` : '';
-      const gws = p.gatewayCount ? `<span class="settings-note" style="opacity:.7">${p.gatewayCount} gateway${p.gatewayCount > 1 ? 's' : ''}</span>` : '';
-      const bits = [refs, tools, gws].filter(Boolean).join(' · ');
-      const uninstallBtn = hot
-        ? `<button type="button" class="settings-btn-secondary" data-plugin-uninstall="${p.id}">Uninstall</button>`
-        : '';
-      return `<div class="settings-plugin-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--border)">
-        <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1">
-          <div style="display:flex;gap:8px;align-items:baseline">
-            <strong>${_escapeHtml(p.name || p.id)}</strong>
-            <span class="settings-note" style="opacity:.5">${_escapeHtml(p.id)}@${_escapeHtml(p.version || '0.0.0')}</span>
-            <span class="settings-note" style="opacity:.7">${_escapeHtml(p.kind)}</span>
-          </div>
-          ${bits ? `<div style="display:flex;gap:10px">${bits}</div>` : ''}
-        </div>
-        ${uninstallBtn}
-      </div>`;
-    }).join('');
+    mgrEl.innerHTML = available.map(_renderPluginRow.bind(null, hot)).join('');
   }
 
   // Schema-driven panes — for now, only render panes that target the 'plugins' tab.
@@ -4947,6 +4932,40 @@ function _populatePluginsTab(plugins) {
   } else {
     panesEl.innerHTML = panes.map(_renderPluginPane).join('');
   }
+}
+
+function _renderPluginRow(hotReload, p) {
+  const sourceTag = `<span class="settings-note" style="opacity:.55">${_escapeHtml(p.source || 'unknown')}</span>`;
+  const stateTag = p.isInstalled
+    ? '<span class="settings-note" style="color:var(--accent);opacity:.85">installed</span>'
+    : '<span class="settings-note" style="opacity:.55">available</span>';
+
+  const bits = [];
+  if (p.hasReferenceNodes) bits.push('<span class="settings-note" style="opacity:.7">ref nodes</span>');
+  if (p.toolCount) bits.push(`<span class="settings-note" style="opacity:.7">${p.toolCount} tool${p.toolCount > 1 ? 's' : ''}</span>`);
+  if (p.gatewayCount) bits.push(`<span class="settings-note" style="opacity:.7">${p.gatewayCount} gateway${p.gatewayCount > 1 ? 's' : ''}</span>`);
+  if ((p.depends || []).length) bits.push(`<span class="settings-note" style="opacity:.55">depends: ${p.depends.map(_escapeHtml).join(', ')}</span>`);
+
+  let actionBtn = '';
+  if (hotReload) {
+    actionBtn = p.isInstalled
+      ? `<button type="button" class="settings-btn-secondary" data-plugin-uninstall="${_escapeAttr(p.id)}">Uninstall</button>`
+      : `<button type="button" class="settings-btn-secondary" data-plugin-install="${_escapeAttr(p.id)}">Install</button>`;
+  }
+
+  return `<div class="settings-plugin-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--border)">
+    <div style="display:flex;flex-direction:column;gap:3px;min-width:0;flex:1">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+        <strong>${_escapeHtml(p.name || p.id)}</strong>
+        <span class="settings-note" style="opacity:.5">${_escapeHtml(p.id)}@${_escapeHtml(p.version || '0.0.0')}</span>
+        <span class="settings-note" style="opacity:.7">${_escapeHtml(p.kind)}</span>
+        ${sourceTag}
+        ${stateTag}
+      </div>
+      ${bits.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap">${bits.join('')}</div>` : ''}
+    </div>
+    ${actionBtn}
+  </div>`;
 }
 
 function _renderPluginPane(pane) {
@@ -5011,13 +5030,21 @@ function _collectPluginSettingsPayload() {
   return out;
 }
 
+async function _refreshSettingsFromServer() {
+  try {
+    const r = await fetch(API + '/api/settings', { headers: { ...authHeaders() } });
+    if (r.ok) populateSettingsPanel(await r.json());
+  } catch { /* silent: best-effort refresh */ }
+}
+
 document.addEventListener('click', async (e) => {
   const t = e.target;
   if (!(t instanceof Element)) return;
-  // Uninstall
+
+  // Per-row Uninstall
   const uninstallId = t.getAttribute?.('data-plugin-uninstall');
   if (uninstallId) {
-    if (!confirm(`Uninstall plugin "${uninstallId}"? Its tools will disappear, its reference nodes will be removed from the graph, and its gateways will shut down. This cannot be undone.`)) return;
+    if (!confirm(`Uninstall plugin "${uninstallId}"? Its tools will disappear, its reference content will be removed from the graph, and its gateways will shut down.`)) return;
     setSettingsBusy(true, 'Uninstalling…');
     try {
       const r = await fetch(API + '/api/plugins/uninstall/' + encodeURIComponent(uninstallId), {
@@ -5025,10 +5052,8 @@ document.addEventListener('click', async (e) => {
       });
       const data = await r.json();
       if (!r.ok || !data.ok) throw new Error(data?.error || 'Uninstall failed');
-      toast(`Uninstalled ${uninstallId} (${data.refNodes || 0} ref nodes, ${data.tools || 0} tools removed)`);
-      // Refresh settings to reflect new state
-      const r2 = await fetch(API + '/api/settings', { headers: { ...authHeaders() } });
-      if (r2.ok) populateSettingsPanel(await r2.json());
+      toast(`Uninstalled ${uninstallId}`);
+      await _refreshSettingsFromServer();
     } catch (err) {
       toast(err?.message || 'Uninstall failed', true);
     } finally {
@@ -5036,26 +5061,50 @@ document.addEventListener('click', async (e) => {
     }
     return;
   }
-  // Install
-  if (t.id === 'settings-plugins-install-btn') {
-    const pathInput = document.getElementById('settings-plugins-install-path');
-    const path = pathInput?.value?.trim();
-    if (!path) { toast('Enter a plugin directory path', true); return; }
+
+  // Per-row Install (resolves id against discovery dirs)
+  const installId = t.getAttribute?.('data-plugin-install');
+  if (installId) {
     setSettingsBusy(true, 'Installing…');
     try {
       const r = await fetch(API + '/api/plugins/install', {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path }),
+        body: JSON.stringify({ id: installId }),
       });
       const data = await r.json();
       if (!r.ok || !data.ok) throw new Error(data?.error || 'Install failed');
-      toast(`Installed ${data.manifest?.id || 'plugin'}`);
-      if (pathInput) pathInput.value = '';
-      const r2 = await fetch(API + '/api/settings', { headers: { ...authHeaders() } });
-      if (r2.ok) populateSettingsPanel(await r2.json());
+      toast(`Installed ${data.manifest?.id || installId}`);
+      await _refreshSettingsFromServer();
     } catch (err) {
       toast(err?.message || 'Install failed', true);
+    } finally {
+      setSettingsBusy(false);
+    }
+    return;
+  }
+
+  // Clone from git
+  if (t.id === 'settings-plugins-clone-btn') {
+    const repoInput = document.getElementById('settings-plugins-clone-repo');
+    const nameInput = document.getElementById('settings-plugins-clone-name');
+    const repo = repoInput?.value?.trim();
+    if (!repo) { toast('Enter a git repository URL', true); return; }
+    setSettingsBusy(true, 'Cloning…');
+    try {
+      const r = await fetch(API + '/api/plugins/clone', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo, name: nameInput?.value?.trim() || undefined }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data?.error || 'Clone failed');
+      toast(`Cloned ${data.manifest?.id || 'plugin'} — click Install to load it`);
+      if (repoInput) repoInput.value = '';
+      if (nameInput) nameInput.value = '';
+      await _refreshSettingsFromServer();
+    } catch (err) {
+      toast(err?.message || 'Clone failed', true);
     } finally {
       setSettingsBusy(false);
     }
@@ -18419,15 +18468,20 @@ build/
       </div>
 
       <div class="settings-section wide" data-target-tab="plugins">
-        <h4>Installed plugins</h4>
+        <h4>Plugins</h4>
         <div id="settings-plugins-state" class="settings-note" style="opacity:.85"></div>
-        <div id="settings-plugins-manager"></div>
-        <div id="settings-plugins-install-row" style="display:none;margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-          <input type="text" id="settings-plugins-install-path" placeholder="/abs/path/to/plugin/dir" style="flex:1;min-width:240px;font-family:var(--font-body)" />
-          <button class="settings-btn-secondary" id="settings-plugins-install-btn" type="button">Install plugin</button>
-        </div>
-        <div class="settings-note" id="settings-plugins-install-help" style="display:none">
-          Install reads the plugin's <code>spore.plugin.json</code> manifest from the given directory, runs its register hook, and executes the install SQL. Operator-managed paths only — paths inside the agent workspace are refused.
+        <div id="settings-plugins-dirs" class="settings-note" style="opacity:.55;margin-top:4px"></div>
+        <div id="settings-plugins-manager" style="margin-top:10px"></div>
+        <div id="settings-plugins-clone-row" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+          <h5 style="margin:0 0 6px 0">Add plugin from Git</h5>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="text" id="settings-plugins-clone-repo" placeholder="https://github.com/owner/spore-plugin-foo.git" style="flex:1;min-width:280px;font-family:var(--font-body)" />
+            <input type="text" id="settings-plugins-clone-name" placeholder="dir name (optional)" style="width:160px;font-family:var(--font-body)" />
+            <button class="settings-btn-secondary" id="settings-plugins-clone-btn" type="button">Clone</button>
+          </div>
+          <div class="settings-note" style="opacity:.6;margin-top:4px">
+            Shallow-clones into the user plugins dir. After clone, the plugin appears in the list above as "available" — click Install to load it.
+          </div>
         </div>
       </div>
 

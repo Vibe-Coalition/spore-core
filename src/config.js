@@ -194,7 +194,8 @@ const DEFAULTS = {
   discordAdmins: [],           // SPORE_DISCORD_ADMINS — comma-separated user/role IDs for privileged commands
 
   // Plugins
-  pluginsDir: null,            // SPORE_PLUGINS_DIR — defaults to <repo>/plugins
+  pluginsDir: null,            // SPORE_PLUGINS_DIR — bundled dir, ships with image; defaults to <repo>/plugins
+  pluginsUserDir: null,        // SPORE_PLUGINS_USER_DIR — operator-writable dir for installed plugins; defaults to <workspace>/plugins
   pluginsEnabled: false,       // SPORE_PLUGINS_ENABLED — opt-in; plugins run as full-privilege Node code
   pluginsHotReload: false,     // SPORE_PLUGINS_HOT_RELOAD — opt-in; allow runtime install/uninstall via /api/plugins
   plugins: {},                 // per-plugin config; populated as plugins.<id> = { ... } at runtime
@@ -323,6 +324,7 @@ function loadConfigFresh() {
   if (process.env.HEALTH_BIND_ADDR) config.healthBindAddr = process.env.HEALTH_BIND_ADDR;
   if (process.env.SPORE_DISCORD_ADMINS) config.discordAdmins = process.env.SPORE_DISCORD_ADMINS.split(',').map(s => s.trim()).filter(Boolean);
   if (process.env.SPORE_PLUGINS_DIR) config.pluginsDir = process.env.SPORE_PLUGINS_DIR;
+  if (process.env.SPORE_PLUGINS_USER_DIR) config.pluginsUserDir = process.env.SPORE_PLUGINS_USER_DIR;
   if (process.env.SPORE_PLUGINS_ENABLED) config.pluginsEnabled = /^(1|true|yes|on)$/i.test(process.env.SPORE_PLUGINS_ENABLED);
   if (process.env.SPORE_PLUGINS_HOT_RELOAD) config.pluginsHotReload = /^(1|true|yes|on)$/i.test(process.env.SPORE_PLUGINS_HOT_RELOAD);
   if (process.env.SPORE_CREDENTIAL_GUARD) config.credentialGuard = process.env.SPORE_CREDENTIAL_GUARD.toLowerCase();
