@@ -18457,12 +18457,14 @@ build/
         </label>
       </div>
 
-      <!-- Compute cluster card. Stays in core. SSH-over-tailnet works
-           best when the tailscale plugin is installed + connected, but
-           the fields are useful storage either way. -->
-      <div class="settings-section wide" data-target-tab="cluster">
+      <!-- Compute cluster card. Owned by the compute-cluster plugin:
+           when uninstalled the section disappears via
+           data-plugin-required (mirrors the Tailscale card pattern).
+           Reachability further depends on the Tailscale plugin being
+           installed + connected, but config storage is plugin-only. -->
+      <div class="settings-section wide" data-target-tab="cluster" data-plugin-required="compute-cluster">
         <h4>Compute cluster</h4>
-        <div class="settings-note" style="margin-top:4px">SLURM cluster access over the tailnet. Reachability depends on the Tailscale plugin being installed and connected; these fields are pure config storage otherwise.</div>
+        <div class="settings-note" style="margin-top:4px">SLURM cluster access over SSH (typically over a tailnet). Reachability further depends on the Tailscale plugin being installed and connected.</div>
           <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px">
             <label style="font-size:.7rem">Cluster SSH username
               <input id="settings-cluster-username" type="text" autocomplete="off" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">

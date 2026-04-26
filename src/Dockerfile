@@ -85,7 +85,6 @@ COPY static/ ./static/
 COPY plugins/ ./plugins/
 COPY lib/ ./lib/
 COPY reference-nodes.sql ./
-COPY migrate-ref-tailscale-cluster.sql ./
 COPY migrate-ref-email.sql ./
 
 RUN groupadd -g 2000 spore && useradd -r -u 2000 -g 2000 spore \

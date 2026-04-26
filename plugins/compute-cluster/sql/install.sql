@@ -1,8 +1,8 @@
--- ref-compute-cluster reference node — installed unconditionally on
--- boot. ref-tailscale (which used to live above this section) moved
--- to plugins/tailscale/sql/install.sql; that plugin's lifecycle owns
--- it now. Idempotent — every insert guarded by WHERE NOT EXISTS so
--- re-running is a no-op.
+-- compute-cluster plugin install — agent-facing reference docs about
+-- the SLURM cluster integration: SSH workflow, tmux/sbatch usage,
+-- key auth, multi-cluster configuration. Idempotent — every insert
+-- guarded by WHERE NOT EXISTS so re-running across schema-version
+-- bumps doesn't duplicate rows.
 
 -- ═══════════════════════════════════════════════════════════════
 -- NODE: Compute Cluster (SLURM) — enhanced with concrete workflows
