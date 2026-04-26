@@ -634,11 +634,16 @@ class PluginManager {
   }
 
   /**
-   * Fire a worker hook event (e.g. afterLearn, beforeLearn).
+   * Fire a worker hook event (e.g. afterLearn, beforeLearn). Walks every
+   * loaded plugin instead of only kind='worker-hook' plugins — same
+   * rationale as getMiddleware/getLifecycleHooks: worker hooks can be
+   * registered alongside any primary kind (e.g. acorn-cli is kind 'tool'
+   * but registers an afterLearn handler).
    */
   async fireWorkerHook(event, data) {
-    for (const api of this.getPlugins('worker-hook')) {
-      for (const handler of api.getWorkerHooks(event)) {
+    for (const [, plugin] of this.plugins) {
+      const handlers = plugin.instance?.getWorkerHooks?.(event) || [];
+      for (const handler of handlers) {
         try {
           await handler(data);
         } catch (e) {

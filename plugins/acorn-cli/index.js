@@ -786,6 +786,36 @@ module.exports = function register(api) {
   api.registerPromptSection('*', 'Project Context', ({ opts }) => buildProjectContextSection(api, opts));
   api.registerPromptSection('*', 'Plan Mode',       ({ opts }) => buildPlanModeSection(api, opts));
 
+  // afterLearn worker hook — fires once after the learner finishes a batch.
+  // For acorn turns (sessionIdOpt non-null), auto-link every newly-created
+  // entity to the session-<id> node via a `discovered_in` edge so a
+  // later graph_query "what did session X teach us" returns them.
+  // No-op for non-acorn extractions.
+  api.registerWorkerHook('afterLearn', ({ sessionIdOpt, newNodeIds }) => {
+    if (!sessionIdOpt || !Array.isArray(newNodeIds) || newNodeIds.length === 0) return;
+    const learner = api._appContext?.learner;
+    const db = learner?.db;
+    if (!db) return;
+    const sessId = 'session-' + String(sessionIdOpt);
+    const sessExists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
+    if (!sessExists) return;
+    const checkE = db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
+    const insE = db.prepare(
+      "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, 'discovered_in', 1, 'graphcorn-learner')"
+    );
+    let added = 0;
+    for (const nid of newNodeIds) {
+      if (nid === sessId) continue;
+      if (!checkE.get(nid, sessId, 'discovered_in')) {
+        insE.run(nid, sessId);
+        added++;
+      }
+    }
+    if (added > 0) {
+      api.getLogger().debug(`Added ${added} discovered_in edge(s) to ${sessId}`);
+    }
+  });
+
   // afterTurn lifecycle hook — fires once per agent turn after _firePluginAfterTurn.
   // Implements failure-fix discovery synthesis + per-turn breadcrumb on the
   // session node's `rounds` aspect. Both gate internally on platform === 'cli'
@@ -797,5 +827,5 @@ module.exports = function register(api) {
     recordRoundCheckpoint(api, opts, toolLog || [], finalText);
   });
 
-  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + afterTurn + prompt sections registered.');
+  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + afterTurn + afterLearn + prompt sections registered.');
 };
