@@ -206,12 +206,36 @@ class Learner {
       this.log.info('[learner] Graph writer connected');
 
       this._refreshSharedGraphWriters();
+      this._cleanupOrphanFts();
 
       return true;
     } catch (e) {
       this.log.error('[learner] Failed to open graph for writing:', e.message);
       return false;
     }
+  }
+
+  /**
+   * One-time cleanup of episodes_fts rows whose base episode was deleted.
+   * SQLite reuses INTEGER PRIMARY KEY ids on insert — without this sweep,
+   * a fresh episode reusing a deleted id fails with "constraint failed"
+   * when the FTS insert collides with the orphan rowid.
+   */
+  _cleanupOrphanFts() {
+    const cleanOne = (db, label) => {
+      try {
+        const has = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='episodes_fts'").get();
+        if (!has) return;
+        const r = db.prepare(
+          'DELETE FROM episodes_fts WHERE rowid NOT IN (SELECT id FROM episodes)'
+        ).run();
+        if (r.changes > 0) this.log.info(`[learner] Cleaned ${r.changes} orphan episodes_fts rows in ${label}`);
+      } catch (e) {
+        this.log.warn(`[learner] orphan FTS cleanup failed in ${label}: ${e.message}`);
+      }
+    };
+    cleanOne(this.db, 'main');
+    for (const [slug, sdb] of Object.entries(this._sharedDbs || {})) cleanOne(sdb, slug);
   }
 
   setLLMBusy(busy) {
@@ -1774,7 +1798,11 @@ ${structuredTemplate}`;
 
       const epId = this.db.prepare('SELECT last_insert_rowid() as id').get().id;
       try {
-        this.db.prepare('INSERT INTO episodes_fts(rowid, content) VALUES (?, ?)').run(epId, content);
+        // OR REPLACE handles the case where this rowid was previously used
+        // by a now-deleted episode and never cleaned up from the FTS table.
+        // SQLite reuses INTEGER PRIMARY KEY ids on insert; the FTS rowid
+        // is unique so the new row would collide with the orphan otherwise.
+        this.db.prepare('INSERT OR REPLACE INTO episodes_fts(rowid, content) VALUES (?, ?)').run(epId, content);
       } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
       return epId;
     } catch (e) {
