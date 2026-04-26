@@ -346,11 +346,18 @@ class SessionManager {
 
     if (writes.length === 0) return 0;
 
+    // node:sqlite's DatabaseSync has no .transaction() helper (that's
+    // better-sqlite3-specific) — wrap manually so all UPDATEs share one
+    // WAL fsync.
     const upd = this.db.prepare('UPDATE messages SET content = ? WHERE id = ?');
-    const applyAll = this.db.transaction((items) => {
-      for (const w of items) upd.run(w.content, w.id);
-    });
-    applyAll(writes);
+    this.db.exec('BEGIN');
+    try {
+      for (const w of writes) upd.run(w.content, w.id);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      try { this.db.exec('ROLLBACK'); } catch {}
+      throw e;
+    }
 
     this.log.debug(`[tool-truncate] Truncated ${writes.length} consumed tool results in ${key}`);
     return writes.length;
