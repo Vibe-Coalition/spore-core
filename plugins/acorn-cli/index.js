@@ -49,6 +49,14 @@ function backfillLegacyConfig(api) {
       any = true;
     }
   }
+  // Plugin owns SPORE_ACORN_KEY directly — config.js no longer mirrors
+  // the env var into a top-level slot. If the legacy slot didn't carry
+  // a value (fresh install without prior settings UI), fall back to
+  // the env var. After backfill, the plugin owns the slot for good.
+  if (!patch.key && process.env.SPORE_ACORN_KEY) {
+    patch.key = process.env.SPORE_ACORN_KEY;
+    any = true;
+  }
   if (any) {
     api.setConfig(patch).catch(e => api.getLogger().warn('legacy backfill failed: ' + e.message));
     api.getLogger().info(`Migrated ${Object.keys(patch).length} legacy acorn config key(s) into plugins.acorn-cli`);
@@ -65,14 +73,12 @@ function acornKeyMatches(typed, stored) {
 }
 
 // ── Resolve the operator-configured key ─────────────────────────────
-// During the transitional period before phase 2.3g, the Acorn settings
-// UI in the host (graph-viewer.html) writes to config.acornKey at the
-// top level. We accept either: plugin slot first, then legacy fallback.
+// Plugin owns the slot exclusively. backfillLegacyConfig handles the
+// one-time migration from any pre-existing top-level acornKey field
+// or the SPORE_ACORN_KEY env var.
 function resolveAcornKey(api) {
   const cfg = api.getConfig();
-  if (cfg.key) return cfg.key;
-  const host = api.getHostConfig();
-  return host.acornKey || null;
+  return cfg.key || null;
 }
 
 // ── HTTP route handlers ─────────────────────────────────────────────
@@ -986,6 +992,50 @@ module.exports = function register(api) {
     noteProjectActivity(api, opts, finalText, toolLog || []);
   });
 
+  // Settings pane — surfaces `enabled` toggle + `key` (auto-generated
+  // when enabled-but-empty via the onConfigChange hook below). Lives in
+  // the Plugins tab alongside email and any other plugin's pane. Replaces
+  // the legacy Acorn settings card that lived in graph-viewer.html.
+  api.registerSettingsPane({
+    title: 'Acorn',
+    description: 'Acorn CLI auth — pass the team key to acorn-cli to let it sign in to this SPORE. Tick "Enabled" with an empty key field and save to mint a fresh UUID; clear and save again to regenerate.',
+    schema: [
+      { key: 'enabled', label: 'Enable Acorn auth', type: 'toggle' },
+      { key: 'key',     label: 'Team key',          type: 'password', secret: true,
+        help: 'Auto-generated when enabled and empty. Existing CLI users lose access if regenerated.' },
+    ],
+  });
+
+  // onConfigChange — auto-mint a fresh UUID when the operator enables
+  // the plugin without supplying a key (the "ergonomic on-by-default"
+  // flow). Runs after the settings save persists `enabled: true, key: ''`,
+  // mints a UUID, and writes it back via setConfig — re-fires this hook
+  // but with `key` now populated, so the second pass exits early.
+  api.onConfigChange(async (oldConfig, newConfig) => {
+    if (newConfig?.enabled === true && !newConfig.key) {
+      const fresh = crypto.randomUUID();
+      try {
+        await api.setConfig({ key: fresh });
+        api.getLogger().info('Auto-minted fresh team key (enabled with no key supplied).');
+      } catch (e) {
+        api.getLogger().warn('Auto-mint failed: ' + e.message);
+      }
+    }
+  });
+
+  // webappSelfRegisterCheck lifecycle hook — gates the
+  // /api/webapp/users/self-register endpoint with the acorn team key.
+  // Returns { allowed: true } on a valid key, or { allowed: false,
+  // code, reason } otherwise. When the plugin is uninstalled the hook
+  // disappears and core defaults to "self-registration disabled" (503).
+  api.registerLifecycleHook('webappSelfRegisterCheck', ({ parsed }) => {
+    const stored = resolveAcornKey(api);
+    if (!stored) return { allowed: false, code: 503, reason: 'Self-registration is not enabled on this instance.' };
+    const typed = String(parsed?.acornKey || '').trim();
+    if (!acornKeyMatches(typed, stored)) return { allowed: false, code: 401, reason: 'Invalid team key' };
+    return { allowed: true };
+  });
+
   // shouldSkipRecall lifecycle hook — short-circuits the expensive
   // per-turn recall pipeline for cli-platform coding turns. Returns
   // true to skip; any other return is treated as "don't skip". Core's
@@ -1065,5 +1115,5 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + afterToolExec(graph_update) + prompt sections registered.');
+  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + webappSelfRegisterCheck + afterToolExec(graph_update) + settings pane + prompt sections registered.');
 };

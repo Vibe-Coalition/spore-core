@@ -53,7 +53,7 @@
     <div id="create-fields" class="hidden">
       <label for="p2">Confirm password</label>
       <input type="password" id="p2" name="password2" autocomplete="new-password">
-      <label for="akey">Acorn team key</label>
+      <label for="akey">Team key</label>
       <input type="password" id="akey" name="acornKey" autocomplete="off">
     </div>
     <button type="submit" class="btn" id="submit-btn">Sign in</button>
@@ -184,7 +184,7 @@
         const acornKey = document.getElementById('akey').value.trim();
         if (password.length < 8) throw new Error('Password must be at least 8 characters');
         if (password !== password2) throw new Error('Passwords do not match');
-        if (!acornKey) throw new Error('Acorn team key is required');
+        if (!acornKey) throw new Error('Team key is required');
         const r = await fetch(API + '/api/webapp/users/self-register', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password, acornKey }),

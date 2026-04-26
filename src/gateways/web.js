@@ -78,14 +78,6 @@ function _buildThemeInlineStyle(dataDir) {
   return Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';');
 }
 
-function _acornKeyMatches(typed, stored) {
-  if (!typed || !stored) return false;
-  const a = Buffer.from(String(typed));
-  const b = Buffer.from(String(stored));
-  if (a.length !== b.length) return false;
-  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
-}
-
 function _isOnboardingNeeded(dataDir, config) {
   const prefsPath = path.join(dataDir, 'preferences.json');
   let prefs = {};
@@ -885,10 +877,6 @@ class WebGateway {
         },
         custom: customProviders,
       },
-      acorn: {
-        enabled: !!this.config.acornKey,
-        key: this.config.acornKey || '',
-      },
       webSearch: {
         searxngUrl: this.config.searxngUrl || '',
         searxngApiKey: this.config.searxngApiKey ? '***hidden***' : '',
@@ -928,7 +916,6 @@ class WebGateway {
         enhancedRecall: Object.prototype.hasOwnProperty.call(fileConfig, 'enhancedRecall') ? 'file' : 'default',
         models: 'env',
         providers: 'env',
-        acorn: this.config.acornKey ? 'env' : 'disabled',
         browser: process.env.SPORE_BROWSER_BACKEND ? 'env' : (fileConfig.browserBackend ? 'file' : 'default'),
       },
       plugins: this._buildPluginsSettingsBlock(),
@@ -1192,27 +1179,6 @@ class WebGateway {
       }
     }
 
-    if (body.acorn && typeof body.acorn === 'object') {
-      const enabled = !!body.acorn.enabled;
-      const requestedKey = String(body.acorn.key || '').trim();
-      let nextKey = '';
-      let generated = false;
-      if (enabled) {
-        if (requestedKey) {
-          nextKey = requestedKey;
-        } else if (this.config.acornKey) {
-          nextKey = this.config.acornKey;
-        } else {
-          // First-time enable with no key supplied → mint a fresh team key.
-          nextKey = crypto.randomUUID();
-          generated = true;
-        }
-      }
-      envUpdates.SPORE_ACORN_KEY = nextKey || null;
-      runtimePatch.acornKey = nextKey || null;
-      if (generated) runtimePatch._acornKeyGenerated = true;
-    }
-
     if (body.browser && typeof body.browser === 'object'
       && Object.prototype.hasOwnProperty.call(body.browser, 'backend')) {
       const backend = this._normalizeBrowserBackendSetting(body.browser.backend);
@@ -1390,7 +1356,6 @@ class WebGateway {
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelBaseUrl')) this.config.localModelBaseUrl = runtimePatch.localModelBaseUrl;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'geminiApiKey')) this.config.geminiApiKey = runtimePatch.geminiApiKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'customProviders')) this.config.customProviders = runtimePatch.customProviders;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'acornKey')) this.config.acornKey = runtimePatch.acornKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'browserBackend')) this.config.browserBackend = runtimePatch.browserBackend;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'publicUrl')) this.config.publicUrl = runtimePatch.publicUrl;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngUrl')) this.config.searxngUrl = runtimePatch.searxngUrl;
@@ -1434,9 +1399,7 @@ class WebGateway {
       }
     }
 
-    const state = this._getSettingsState();
-    if (runtimePatch._acornKeyGenerated) state._acornKeyGenerated = true;
-    return state;
+    return this._getSettingsState();
   }
 
   _applyOnboardingToGraph(db, payload = {}) {
@@ -2826,9 +2789,12 @@ class WebGateway {
         return;
       }
 
-      // Self-register: anyone with the Acorn team key can create a webapp user
-      // without operator intervention. Always issues a 'webapp' role session
-      // (never creator), regardless of how many users exist.
+      // Self-register: anyone with a valid team-key (acorn-cli plugin)
+      // or other plugin-provided gate can create a webapp user without
+      // operator intervention. Always issues a 'webapp' role session
+      // (never creator). The team-key check is delegated to plugin
+      // `webappSelfRegisterCheck` lifecycle hooks; if NO plugin
+      // handles the check, self-registration is disabled (503).
       if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
@@ -2836,10 +2802,22 @@ class WebGateway {
         try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
         const username = String(parsed.username || '').trim();
         const password = String(parsed.password || '');
-        const acornKey = String(parsed.acornKey || '').trim();
-        if (!this.config.acornKey) {
+        const mgr = this.tools?._pluginManager;
+        const checkHooks = mgr?.getLifecycleHooks?.('webappSelfRegisterCheck') || [];
+        if (!checkHooks.length) {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
+        }
+        let gate = { allowed: false, code: 503, reason: 'Self-registration not gated by any plugin.' };
+        for (const h of checkHooks) {
+          let out;
+          try { out = h({ parsed, req }); } catch (e) { this.log.warn('[plugins] webappSelfRegisterCheck failed: ' + e.message); continue; }
+          if (out?.allowed === true) { gate = { allowed: true }; break; }
+          if (out && out.allowed === false) gate = { allowed: false, code: out.code || 401, reason: out.reason || 'Invalid credentials' };
+        }
+        if (!gate.allowed) {
+          res.writeHead(gate.code || 401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: gate.reason })); return;
         }
         if (!username || username.length > 64 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -2848,10 +2826,6 @@ class WebGateway {
         if (password.length < 8) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Password must be at least 8 characters' })); return;
-        }
-        if (!_acornKeyMatches(acornKey, this.config.acornKey)) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid team key' })); return;
         }
         const existing = loadWebappUsers();
         const dup = existing.find(u => u.username === username);
@@ -3045,13 +3019,7 @@ class WebGateway {
             if (graphDb) this._applyOnboardingToGraph(graphDb, parsed);
           } catch (e) { this.log.warn(`[onboarding] graph sync skipped: ${e.message}`); }
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            ok: true,
-            theme,
-            // Surface the freshly-minted Acorn team key so the wizard can show it once.
-            acornKey: newState.acorn?.enabled ? newState.acorn.key : null,
-            acornKeyGenerated: !!newState._acornKeyGenerated,
-          }));
+          res.end(JSON.stringify({ ok: true, theme }));
         } catch (e) {
           this.log.warn(`[onboarding] complete failed: ${e.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });

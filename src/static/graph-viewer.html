@@ -15,47 +15,60 @@
   @font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/spacegrotesk.woff2?v=20260425b') format('woff2'); }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    /* ── Base palette (Petri dark — warm earth) ── */
-    --bg: #16140f; --surface: #1f1c16; --panel: #1a1812; --element: #2a2620;
-    --border: #2c2820; --border-active: #4a4438; --border-subtle: #221f18;
-    --graph-hair: #2c2820; --graph-cream: var(--bg);
+    /* ── Base palette (Petri dark — warm earth, per dir-petri.jsx PETRI_THEMES.dark) ── */
+    --bg: #131511; --surface: #1a1d17; --panel: #21241d; --element: #2a2d24;
+    --border: #2c2f26; --border-active: #4a4d42; --border-subtle: #1f221b;
+    --graph-hair: #2c2f26;
+    /* Graph canvas sits on `panel` — slightly elevated above the artboard so
+       the graph reads as a distinct surface (matches prototype skin.bg). */
+    --graph-bg: #21241d; --graph-cream: var(--graph-bg);
+    /* Atmospheric glows layered over the graph canvas — three soft radial
+       gradients in warm / accent / slate. Alphas from prototype (0x22, 0x28, 0x22). */
+    --graph-glow-1: rgba(227, 139, 95, 0.13);
+    --graph-glow-2: rgba(142, 183, 124, 0.16);
+    --graph-glow-3: rgba(58, 106, 163, 0.13);
     /* Polarity-aware highlight base: white in dark mode, ink in light.
        Used by subtle hover/divider overlays so they flip cleanly across
        themes — see the `rgba(var(--hl-rgb), X)` rules below. */
     --hl-rgb: 255, 255, 255;
-    --text: #bdb6a3; --text-dim: #8a8676; --text-bright: #ece4cf; --text-muted: #5c5849;
-    --accent: #e08a4e; --accent2: #7aa583; --accent3: #c4a574;
-    --danger: #d94e3a; --warn: #e08a4e; --success: #7aa583; --info: #7aa3c4;
+    --text: #b5b0a0; --text-dim: #706c62; --text-bright: #ece7d5; --text-muted: #5c5849;
+    /* Accent is leaf green per the Petri prototype (the README mis-spec'd
+       this as amber/rust; prototype is the canonical reference). Brand mark
+       in brand.js stays amber #c8762c — locked, theme-agnostic. */
+    --accent: #8eb77c; --accent2: #7aa583; --accent3: #e38b5f;
+    --danger: #d94e3a; --warn: #e38b5f; --success: #8eb77c; --info: #7aa7d6;
 
     /* ── Markdown tokens ── */
-    --md-heading: #ece4cf; --md-heading-marker: #e08a4e;
-    --md-link: #7aa3c4; --md-link-text: #e08a4e;
-    --md-code: #9ec49e; --md-code-bg: rgba(158,196,158,.08);
-    --md-code-block-bg: rgba(0,0,0,.4); --md-code-block-border: #2c2820;
-    --md-blockquote: #8a8676; --md-blockquote-border: #e08a4e;
-    --md-emph: #e08a4e; --md-strong: #f4c89a;
-    --md-list-marker: #e08a4e; --md-hr: #2c2820;
-    --md-table-header-bg: rgba(224,138,78,.06); --md-table-border: #2c2820;
+    --md-heading: #ece7d5; --md-heading-marker: #8eb77c;
+    --md-link: #7aa7d6; --md-link-text: #e38b5f;
+    --md-code: #8eb77c; --md-code-bg: rgba(142,183,124,.08);
+    --md-code-block-bg: rgba(0,0,0,.4); --md-code-block-border: #2c2f26;
+    --md-blockquote: #8a8676; --md-blockquote-border: #8eb77c;
+    --md-emph: #e38b5f; --md-strong: #f4c89a;
+    --md-list-marker: #8eb77c; --md-hr: #2c2f26;
+    --md-table-header-bg: rgba(142,183,124,.06); --md-table-border: #2c2f26;
 
     /* ── Diff tokens ── */
-    --diff-added: #9ec49e; --diff-added-bg: rgba(158,196,158,.08);
+    --diff-added: #8eb77c; --diff-added-bg: rgba(142,183,124,.08);
     --diff-removed: #e89488; --diff-removed-bg: rgba(232,148,136,.07);
-    --diff-context: #8a8676; --diff-hunk: #e08a4e;
+    --diff-context: #8a8676; --diff-hunk: #e38b5f;
     --diff-line-num: #5c5849;
 
-    /* ── Graph nodes (Petri type-color system) ── */
-    --node-self: #7aa583; --node-person: #b48dc4; --node-channel: #c4a574;
-    --node-concept: #e08a4e; --node-rule: #7aa3c4; --node-project: #9ec49e;
-    --node-tool: #c4a574; --node-memory: #b48dc4; --node-skill: #9ec49e;
-    --node-capability: #7aa3c4; --node-event: #e08a4e; --node-preference: #b48dc4;
-    --node-organization: #c4a574; --node-topic: #8a8676; --node-location: #9ec49e;
-    --node-default: #8a8676;
+    /* ── Graph nodes (Petri TYPE_COLORS, dark) ──
+       8 hue families from dir-petri.jsx: coral, slate, plum, leaf,
+       ochre, rose, teal, clay — extended types map onto the same palette. */
+    --node-self: #e38b5f; --node-person: #7aa7d6; --node-channel: #e3b567;
+    --node-concept: #c29ad0; --node-rule: #6fb1b1; --node-project: #d89f6a;
+    --node-tool: #e3b567; --node-memory: #c29ad0; --node-skill: #8eb77c;
+    --node-capability: #6fb1b1; --node-event: #e38b5f; --node-preference: #d67a7a;
+    --node-organization: #d89f6a; --node-topic: #706c62; --node-location: #6fb1b1;
+    --node-default: #706c62;
     --chat-width: 460px;
     --chat-anim: 280ms cubic-bezier(.4, 0, .2, 1);
     /* ── Fonts (Petri direction) ── */
     --font-body: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-    --font-serif: var(--font-serif);
+    --font-serif: 'Fraunces', 'Newsreader', Georgia, serif;
   }
   html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font-body) !important; font-weight: 400; font-variation-settings: 'wght' 450; }
   /* Force the body font onto common UI chrome with !important so any
@@ -306,7 +319,10 @@
     flex-shrink: 0;
     width: var(--chat-width); min-width: 0; max-width: 70vw;
     height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh;
-    background: var(--panel);
+    /* Paper layer (one tier below --panel). Matches PetriChat's
+       `background: t.paper` — flat, no gradient. Atmospheric glow lives
+       only on the graph canvas in the prototype. */
+    background: var(--surface);
     border: none; border-left: 1px solid var(--border); border-radius: 0;
     box-shadow: none;
     display: flex; flex-direction: column; overflow: hidden;
@@ -777,22 +793,6 @@
   .settings-section.is-readonly textarea {
     opacity: .55; cursor: not-allowed;
   }
-  .settings-acorn-key-row {
-    display: flex; gap: 6px; align-items: stretch; margin-top: 4px;
-  }
-  .settings-acorn-key-row input { flex: 1; min-width: 0; }
-  .settings-acorn-key-row .settings-test-btn { flex: 0 0 auto; }
-  .acorn-flash {
-    margin-top: 10px; padding: 10px 12px; border-radius: 8px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    border: 1px solid var(--accent); color: var(--text-bright); font-size: .78rem;
-  }
-  .acorn-flash strong { color: var(--accent); }
-  .acorn-flash code {
-    display: block; margin-top: 4px; padding: 6px 8px; background: var(--panel);
-    border-radius: 4px; word-break: break-all; font-family: var(--font-body); font-size: .8rem;
-    color: var(--text-bright);
-  }
   .settings-test-btn {
     background: transparent; border: 1px solid var(--border); color: var(--text-dim);
     padding: 4px 10px; border-radius: 6px; cursor: pointer;
@@ -950,9 +950,22 @@
   #chat-messages::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
 
   .chat-msg {
-    max-width: 95%; padding: 10px 14px; border-radius: 10px;
+    max-width: 95%; padding: 10px 14px; border-radius: 14px;
     font-size: 0.82rem; line-height: 1.6; word-wrap: break-word; overflow-wrap: break-word;
     min-width: 0; overflow: hidden; flex-shrink: 0;
+    color: var(--text-bright);
+  }
+  /* Petri PetriChat bubble treatment: user gets a warm-tinted card (coral
+     wash on paper) so the message reads as "yours" without a hard border;
+     assistant floats as plain text on the rail. Padding stays consistent
+     across roles so avatar→text alignment doesn't jog between turns. */
+  .chat-msg.user {
+    background: color-mix(in srgb, var(--accent3) 9%, var(--panel));
+    border: none;
+  }
+  .chat-msg.assistant, .chat-msg.streaming {
+    background: transparent;
+    border: none;
   }
   /* Chat row — wraps avatar + bubble for user/assistant turns. System and
      ask_user messages stay un-wrapped (they're center-aligned cards). */
@@ -1372,6 +1385,8 @@
 
   #chat-input-area {
     padding: 10px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px;
+    /* Footer band sits one tier above the chat rail (panel > surface).
+       The pill inside drops back to surface, mirroring PetriChat. */
     background: var(--panel);
   }
   #chat-attachments {
@@ -1394,35 +1409,51 @@
     font-family: var(--font-body); text-align: center; padding: 4px;
     word-break: break-all;
   }
-  #chat-text-row { display: flex; gap: 4px; }
+  /* Petri input pill — single rounded surface housing attach, textarea,
+     mic, and send. Mirrors PetriChat's input row at dir-petri.jsx:505 —
+     `background: t.paper, borderRadius: 16, border: 1px hair`. */
+  #chat-text-row {
+    display: flex; gap: 6px; align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 4px 6px 4px 10px;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  #chat-text-row:focus-within {
+    border-color: var(--border-active);
+    box-shadow: 0 0 0 1px var(--border-active);
+  }
   #chat-input {
-    flex: 1; background: var(--element); border: 1px solid var(--border); color: var(--text);
-    padding: 9px 12px; border-radius: 8px; font-family: var(--font-body); font-size: 0.8rem;
-    outline: none; resize: none; min-height: 36px; max-height: 120px; line-height: 1.5;
-    transition: border-color .2s;
+    flex: 1; background: transparent; border: none; color: var(--text-bright);
+    padding: 6px 4px; font-family: var(--font-body); font-size: 0.82rem;
+    outline: none; resize: none; min-height: 28px; max-height: 120px; line-height: 1.5;
   }
-  #chat-input:focus { border-color: var(--border-active); box-shadow: 0 0 0 1px var(--border-active); }
   #chat-input::placeholder { color: var(--text-muted); }
+  /* Send button — ink chip with paper text. Mirrors PetriChat's
+     `background: t.ink, color: t.bg` with mono micro-caps. */
   #chat-send {
-    background: var(--accent); color: #fff; border: none; border-radius: 8px;
-    padding: 0 16px; font-size: 0.78rem;
-    font-weight: 500; cursor: pointer; white-space: nowrap; min-width: 56px;
-    transition: background-color .15s, opacity .15s;
+    background: var(--text-bright); color: var(--bg); border: none; border-radius: 12px;
+    padding: 6px 14px; font-family: var(--font-mono); font-size: 0.62rem;
+    font-weight: 500; letter-spacing: 0.1em; text-transform: lowercase;
+    cursor: pointer; white-space: nowrap;
+    transition: opacity .15s;
   }
-  #chat-send:hover { background: color-mix(in srgb, var(--accent) 88%, #fff); }
-  #chat-send:disabled { opacity: 0.45; cursor: not-allowed; background: var(--accent); }
+  #chat-send:hover { opacity: 0.85; }
+  #chat-send:disabled { opacity: 0.35; cursor: not-allowed; }
+  /* Ghost mic button inside the pill — no border/bg, mono micro-caps. */
   #chat-text-row #btn-mic {
-    background: var(--surface); color: var(--text-dim);
-    border: 1px solid var(--border); border-radius: 8px;
-    padding: 0 14px; font-family: var(--font-body); font-size: 0.66rem;
-    font-weight: 500; cursor: pointer; white-space: nowrap; min-width: 50px;
-    letter-spacing: 0.18em; text-transform: lowercase; transition: all .15s;
+    background: transparent; color: var(--text-dim);
+    border: none; border-radius: 10px;
+    padding: 4px 10px; font-family: var(--font-mono); font-size: 0.6rem;
+    font-weight: 500; cursor: pointer; white-space: nowrap;
+    letter-spacing: 0.12em; text-transform: lowercase; transition: color .15s, background .15s;
     display: inline-flex; align-items: center; justify-content: center;
     user-select: none; -webkit-user-select: none;
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
     touch-action: none;
   }
-  #chat-text-row #btn-mic:hover { border-color: var(--accent2); color: var(--accent2); }
+  #chat-text-row #btn-mic:hover { color: var(--accent3); background: rgba(var(--hl-rgb), .04); }
   #chat-text-row #btn-mic.recording { background: #ff4444; border-color: #ff4444; color: #fff; animation: micPulse 1s infinite; }
   #chat-text-row #btn-mic.muted { background: #ff4444; border-color: #ff4444; color: #fff; opacity: 0.85; }
   #chat-stop {
@@ -1431,17 +1462,17 @@
     font-weight: 600; cursor: pointer; white-space: nowrap; min-width: 46px;
   }
   #chat-stop:hover { opacity: 0.85; }
+  /* Ghost attach button inside the pill — no border/bg, paperclip icon. */
   #chat-text-row #btn-attach {
-    background: var(--surface); color: var(--text-dim);
-    border: 1px solid var(--border); border-radius: 8px;
-    width: 36px; min-width: 36px; height: 36px; padding: 0;
+    background: transparent; color: var(--text-dim);
+    border: none; border-radius: 10px;
+    width: 28px; min-width: 28px; height: 28px; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
-    font-size: 16px; line-height: 1; cursor: pointer;
-    transition: background .12s, border-color .12s, color .12s;
-    align-self: flex-end;
+    font-size: 15px; line-height: 1; cursor: pointer;
+    transition: color .12s, background .12s;
   }
   #chat-text-row #btn-attach:hover {
-    background: var(--element); border-color: var(--accent); color: var(--accent);
+    background: rgba(var(--hl-rgb), .04); color: var(--accent3);
   }
   #btn-clear-chat {
     width: 28px; height: 28px; padding: 0;
@@ -1482,7 +1513,21 @@
   #file-input { display: none; }
 
   /* ── Graph Canvas (center) ── */
-  #canvas { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; font-family: var(--font-body); }
+  /* Petri canvas surface — panel-elevated --graph-bg with three soft
+     radial-gradient glows in warm / accent / slate. Mirrors the
+     atmospheric glow in dir-petri.jsx PetriGraph. Applied to #canvas
+     itself so it shows under every view mode (graph, list, typemap,
+     work). Tokens carry the values so it flips cleanly on theme change. */
+  #canvas {
+    flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column;
+    font-family: var(--font-body);
+    background-color: var(--graph-bg);
+    background-image:
+      radial-gradient(circle at 22% 32%, var(--graph-glow-1) 0%, transparent 42%),
+      radial-gradient(circle at 78% 68%, var(--graph-glow-2) 0%, transparent 48%),
+      radial-gradient(circle at 55% 85%, var(--graph-glow-3) 0%, transparent 40%);
+    transition: background-color 200ms ease;
+  }
   #canvas > svg, #canvas #graph-svg, #canvas #view-typemap-svg { width: 100%; flex: 1; min-height: 0; }
   #graph-svg.is-marquee-selecting { cursor: crosshair; }
   .graph-selection-rect {
@@ -1550,13 +1595,15 @@
   #canvas.cv-tab-active #lme-hud { display: none; }
   #canvas.cv-tab-active #terminal-pane { display: none !important; }
 
-  /* ── View mode switcher + list/typemap views ── */
+  /* ── View mode switcher — anchored top-right, persistent across all
+     views. Hosts the theme toggle as a trailing button after a divider,
+     mirroring the prototype's floating toolbar pattern. */
   #view-mode-bar {
-    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-    z-index: 50; display: flex; gap: 2px;
+    position: absolute; top: 12px; right: 12px;
+    z-index: 50; display: flex; align-items: center; gap: 2px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 3px;
     font-family: var(--font-body); font-size: .82rem; font-weight: 500;
-    box-shadow: 0 4px 12px rgba(0,0,0,.4);
+    box-shadow: 0 4px 12px rgba(0,0,0,.18);
   }
   #view-mode-bar .vm-pill {
     position: absolute; top: 3px; bottom: 3px; left: 0; width: 0;
@@ -1574,6 +1621,21 @@
   }
   #view-mode-bar button:hover { color: var(--text); }
   #view-mode-bar button.active { color: var(--accent); background: transparent; transform: translateY(-.5px); }
+  #view-mode-bar .vm-divider {
+    width: 1px; height: 18px; background: var(--border); margin: 0 4px;
+    flex-shrink: 0;
+  }
+  #view-mode-bar #theme-toggle {
+    /* Override the inline style this button ships with so it integrates
+       into the mode bar instead of looking like a 30px boxed button. */
+    all: unset; cursor: pointer; padding: 5px 9px; border-radius: 6px;
+    color: var(--text-dim); font-family: var(--font-mono); font-size: .82rem;
+    line-height: 1; transition: color .15s, background .15s;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  #view-mode-bar #theme-toggle:hover {
+    color: var(--text); background: rgba(var(--hl-rgb), .04);
+  }
 
   /* Hide graph-related elements in non-graph modes via opacity (animatable) */
   #graph-svg, #search, #event-feed, #stats {
@@ -1595,8 +1657,11 @@
   #canvas:not(.view-graph) #btn-new-node,
   #canvas:not(.view-graph) #controls > span { display: none !important; }
 
+  /* View containers fill the canvas top-to-bottom. The floating
+     #view-mode-bar at top: 12px floats over them on its own paper layer;
+     content inside each view applies its own padding-top to clear it. */
   #view-list, #view-typemap, #view-work {
-    position: absolute; inset: 0; padding-top: 56px; box-sizing: border-box;
+    position: absolute; inset: 0; box-sizing: border-box;
     opacity: 0; pointer-events: none; transform: translateY(6px);
     transition: opacity .24s ease, transform .28s cubic-bezier(.4,.05,.2,1);
   }
@@ -1609,20 +1674,27 @@
     opacity: 1; pointer-events: auto; transform: translateY(0);
   }
 
-  /* List view */
+  /* List view — aside is a translucent paper rail floating over the
+     atmospheric canvas, picking up subtle warmth from the gradient
+     beneath. Mirrors the floating-panel aesthetic in dir-petri.jsx
+     PetriInspector / PetriActivityStrip. */
   #view-list-aside {
     width: 38%; min-width: 280px; max-width: 460px; border-right: 1px solid var(--border);
-    background: var(--bg, #0a0a0f); display: flex; flex-direction: column; overflow: hidden;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    display: flex; flex-direction: column; overflow: hidden;
   }
   #view-list-search {
-    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    padding: 60px 14px 12px 14px; border-bottom: 1px solid var(--border);
   }
   #view-list-search input {
-    width: 100%; box-sizing: border-box; padding: 7px 10px; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 6px; color: var(--text-bright);
-    font-size: .82rem; outline: none;
+    width: 100%; box-sizing: border-box; padding: 9px 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    color: var(--text-bright); font-size: .82rem; outline: none;
+    transition: border-color .15s, box-shadow .15s;
   }
-  #view-list-search input:focus { border-color: var(--accent); }
+  #view-list-search input:focus { border-color: var(--border-active); box-shadow: 0 0 0 1px var(--border-active); }
+  #view-list-search input::placeholder { color: var(--text-muted); }
   #view-list-tree {
     flex: 1; overflow-y: auto; padding: 8px 4px;
     scrollbar-width: thin; scrollbar-color: var(--border) transparent;
@@ -1658,7 +1730,7 @@
   .vlt-shape { width: 10px; height: 10px; flex-shrink: 0; }
 
   #view-list-detail {
-    flex: 1; overflow-y: auto; padding: 18px 22px;
+    flex: 1; overflow-y: auto; padding: 60px 22px 18px 22px;
     scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
   #view-list-detail::-webkit-scrollbar { width: 4px; }
@@ -1666,19 +1738,23 @@
   #view-list-detail::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
   #view-list-detail::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
 
-  /* People & projects view — card dashboard */
+  /* People & projects view — toolbar is a transparent strip; only the
+     search pill carries chrome. The hairline divider separates header
+     from body without painting a solid bar over the canvas glow. */
   #view-work-toolbar {
-    padding: 10px 14px; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 12px; flex-shrink: 0;
-    background: var(--bg, #0a0a0f);
+    padding: 60px 22px 14px 22px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px; flex-shrink: 0;
+    background: transparent;
   }
   #vw-search {
     flex: 1; max-width: 340px; box-sizing: border-box;
-    padding: 6px 12px; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; color: var(--text);
-    font-family: var(--font-body); font-size: .7rem; outline: none;
+    padding: 9px 16px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; color: var(--text-bright);
+    font-family: var(--font-body); font-size: .8rem; outline: none;
+    transition: border-color .15s, box-shadow .15s;
   }
-  #vw-search:focus { border-color: var(--accent2); }
+  #vw-search:focus { border-color: var(--border-active); box-shadow: 0 0 0 1px var(--border-active); }
+  #vw-search::placeholder { color: var(--text-muted); }
   #vw-count {
     font-family: var(--font-body); font-size: .62rem;
     color: var(--text-dim); opacity: .75; letter-spacing: .04em;
@@ -1849,7 +1925,7 @@
   .vld-mini svg { width: 100%; height: 100%; display: block; }
 
   /* Type Map view — minimal, monospace, fits the rest of the app */
-  #view-typemap { background: var(--bg, #07070c); }
+  #view-typemap { background: transparent; }
   #view-typemap-svg { width: 100%; height: 100%; display: block; }
   #view-typemap-search {
     position: absolute; top: 16px; right: 16px; z-index: 40;
@@ -1947,7 +2023,7 @@
     background: color-mix(in srgb, var(--accent2) 14%, transparent); color: var(--accent2, #7fb3ff);
   }
   #tm-window-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
-  #tm-window-svg { width: 100%; height: 100%; display: block; cursor: grab; background: var(--bg); }
+  #tm-window-svg { width: 100%; height: 100%; display: block; cursor: grab; background: transparent; }
   #tm-window-svg:active { cursor: grabbing; }
   #tm-window-empty {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -2536,17 +2612,21 @@
   .toast.show { opacity: 1; }
   .toast.error { border-color: var(--danger); color: var(--danger); }
 
-  /* Search */
+  /* Search — inline inside #controls in graph mode. The existing
+     `#canvas:not(.view-graph) #search { opacity: 0; ... }` rule fades it
+     out in non-graph views. */
   #search {
-    position: absolute; top: 16px; right: 16px; z-index: 10;
+    display: inline-flex; align-items: center;
     font-family: var(--font-body);
   }
   #search input {
     background: var(--surface); border: 1px solid var(--border); color: var(--text);
     padding: 6px 12px; border-radius: 6px; width: 200px;
     font-family: var(--font-body); font-size: 0.78rem; outline: none;
+    transition: border-color .15s;
   }
-  #search input:focus { border-color: var(--accent2); }
+  #search input:focus { border-color: var(--border-active); }
+  #search input::placeholder { color: var(--text-muted); }
 
   /* ── Graph animations ──────────────────────────────────────────────
      Design principles:
@@ -3232,7 +3312,6 @@
   #cv-pending-badge,
   .cv-dock-btn,
   .vw-section-title,
-  .acorn-flash,
   .ob-welcome-text p,
   .ob-step .ob-desc,
   .ob-custom-header,
@@ -3508,6 +3587,8 @@
       <button data-vm="list">list</button>
       <button data-vm="typemap">type map</button>
       <button data-vm="work">people &amp; projects</button>
+      <span class="vm-divider" aria-hidden="true"></span>
+      <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">☀</button>
     </div>
     <svg id="graph-svg"></svg>
 
@@ -3591,8 +3672,7 @@
       </select>
       <button id="btn-center" title="Reset zoom">center</button>
       <button id="btn-new-node" class="btn-new" title="Create new node">+ node</button>
-      <span style="width:1px;height:16px;background:var(--border);opacity:.4"></span>
-      <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme" style="background:transparent;border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.95rem;width:30px;height:30px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1;transition:border-color .15s ease,background-color .15s ease">☀</button>
+      <div id="search"><input type="text" placeholder="search nodes..." id="search-input"></div>
       <div style="position:relative;display:inline-block" id="tools-menu-wrap">
         <button id="btn-tools-menu" title="Tools &amp; settings">menu</button>
         <div id="tools-menu" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px;z-index:999;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
@@ -3608,7 +3688,6 @@
         <div id="graph-picker" class="picker-dropdown"></div>
       </div>
     </div>
-    <div id="search"><input type="text" placeholder="search nodes..." id="search-input"></div>
     <div id="stats"></div>
     <!-- LongMemEval floating HUD -->
     <div id="lme-hud">
@@ -4219,80 +4298,90 @@ const THEMES = {
   light: {
     label: 'Light',
     icon: '☀',
-    swatch: '#efe7d6',
+    swatch: '#ece7dc',
     vars: {
-      // Tier 1 — semantic foundation. Aligned to the design handoff's
-      // warm-paper palette (bg #efe7d6 / panel #f7f1e3 / cream #f5ead2 /
-      // hair #d7ceba) instead of the prior near-white surface that read
-      // as harsh against the rest of the cream-toned UI.
-      '--bg': '#efe7d6',
-      '--surface': '#f7f1e3',
-      '--panel': '#ebe4d0',
-      '--element': '#ddd5be',
-      '--border': '#d7ceba',
-      '--border-active': '#b9af9a',
-      '--border-subtle': '#e6e0d2',
-      '--graph-hair': '#d7ceba',
-      '--graph-cream': '#f5ead2',
-      '--hl-rgb': '26, 24, 21',  // ink, polarity-flipped from dark mode
-      '--text': '#3c3a35',
-      '--text-bright': '#2c2925',
-      '--text-dim': '#8a847a',
+      // Tier 1 — semantic foundation. The prototype's literal `paper #f7f2e6`
+      // and `panel #fbf7ec` read as warm in its sparse layout (atmospheric
+      // gradients tint most surfaces, lots of bg breathing room). In our
+      // full-bleed UI the same hex values render closer to bright cream.
+      // Compensate by deepening surface/panel ~4% and pulling the warmth
+      // up — keeps the prototype's intent (warm paper) while reading as
+      // such across the dense chrome we have.
+      '--bg': '#ece7dc',
+      '--surface': '#f3eddc',
+      '--panel': '#f7f1e0',
+      '--element': '#f7f1e0',
+      '--border': 'rgba(29,33,27,0.12)',
+      '--border-active': 'rgba(29,33,27,0.32)',
+      '--border-subtle': 'rgba(29,33,27,0.08)',
+      '--graph-hair': 'rgba(29,33,27,0.12)',
+      '--graph-bg': '#f7f1e0',
+      '--graph-cream': '#f7f1e0',
+      // Atmospheric glows on the graph canvas, light-mode hues. Lower
+      // alpha than dark so they don't overpower the paper surface.
+      '--graph-glow-1': 'rgba(184, 84, 42, 0.10)',
+      '--graph-glow-2': 'rgba(90, 122, 74, 0.12)',
+      '--graph-glow-3': 'rgba(58, 106, 163, 0.08)',
+      '--hl-rgb': '29, 33, 27',  // ink, polarity-flipped from dark mode
+      '--text': '#4a4e46',
+      '--text-bright': '#1d211b',
+      '--text-dim': '#8a8c82',
       '--text-muted': '#b1aa9c',
-      '--accent': '#c2542d',
+      // Accent is leaf green per the Petri prototype (PETRI_THEMES.light.accent).
+      // Warm/coral lives on accent3, mirroring the dark palette's structure.
+      '--accent': '#5a7a4a',
       '--accent2': '#3e6b47',
-      '--accent3': '#b97e3a',
+      '--accent3': '#b8542a',
       '--danger': '#b8341c',
-      '--warn': '#c2842d',
-      '--success': '#3e6b47',
-      '--info': '#3a6b8c',
+      '--warn': '#b8542a',
+      '--success': '#5a7a4a',
+      '--info': '#3a6aa3',
       // Tier 2 — markdown
-      '--md-heading': '#1f1d1a',
-      '--md-heading-marker': '#c2542d',
-      '--md-link': '#3a6b8c',
-      '--md-link-text': '#c2542d',
-      '--md-code': '#3e6b47',
-      '--md-code-bg': 'rgba(62,107,71,.08)',
-      '--md-code-block-bg': 'rgba(31,29,26,.04)',
-      '--md-code-block-border': '#e6e0d2',
+      '--md-heading': '#1d211b',
+      '--md-heading-marker': '#5a7a4a',
+      '--md-link': '#3a6aa3',
+      '--md-link-text': '#b8542a',
+      '--md-code': '#5a7a4a',
+      '--md-code-bg': 'rgba(90,122,74,.08)',
+      '--md-code-block-bg': 'rgba(29,33,27,.04)',
+      '--md-code-block-border': 'rgba(29,33,27,0.12)',
       '--md-blockquote': '#6b6760',
-      '--md-blockquote-border': '#c2542d',
-      '--md-emph': '#c2542d',
+      '--md-blockquote-border': '#5a7a4a',
+      '--md-emph': '#b8542a',
       '--md-strong': '#8a3a1f',
-      '--md-list-marker': '#c2542d',
-      '--md-hr': '#e6e0d2',
-      '--md-table-header-bg': 'rgba(194,84,45,.06)',
-      '--md-table-border': '#e6e0d2',
+      '--md-list-marker': '#5a7a4a',
+      '--md-hr': 'rgba(29,33,27,0.12)',
+      '--md-table-header-bg': 'rgba(90,122,74,.06)',
+      '--md-table-border': 'rgba(29,33,27,0.12)',
       // Tier 3 — diffs
-      '--diff-added': '#2d5a3c',
-      '--diff-added-bg': 'rgba(62,107,71,.10)',
+      '--diff-added': '#5a7a4a',
+      '--diff-added-bg': 'rgba(90,122,74,.10)',
       '--diff-removed': '#8a3a1f',
       '--diff-removed-bg': 'rgba(184,52,28,.08)',
       '--diff-context': '#6b6760',
-      '--diff-hunk': '#c2542d',
+      '--diff-hunk': '#b8542a',
       '--diff-line-num': '#b8b3a8',
     },
-    // Tier 4 — Petri type-color system, light-mode tones tuned to read on
-    // warm paper (#f3efe6). Each is the Petri "type → color" mapping rather
-    // than a recolored zinc set — fern for self, rust for concept, slate for
-    // system, etc.
+    // Tier 4 — Petri TYPE_COLORS (light), exact values from dir-petri.jsx.
+    // 8 hue families: coral, slate, plum, leaf, ochre, rose, teal, clay.
+    // Extended types beyond the prototype's 8 reuse the closest family.
     nodeVars: {
-      '--node-self': '#3e6b47',
-      '--node-person': '#7a4d8c',
-      '--node-default': '#6b6760',
-      '--node-concept': '#c2542d',
-      '--node-channel': '#b97e3a',
-      '--node-rule': '#3a6b8c',
-      '--node-project': '#5c8c5c',
-      '--node-tool': '#8c6b3a',
-      '--node-memory': '#7a4d8c',
-      '--node-skill': '#5c8c5c',
-      '--node-capability': '#3a6b8c',
-      '--node-event': '#c2542d',
-      '--node-preference': '#7a4d8c',
-      '--node-organization': '#8c6b3a',
-      '--node-topic': '#6b6760',
-      '--node-location': '#5c8c5c',
+      '--node-self': '#b8542a',
+      '--node-person': '#3a6aa3',
+      '--node-channel': '#c08a2e',
+      '--node-concept': '#8a4a9c',
+      '--node-rule': '#2f6a6a',
+      '--node-project': '#b07030',
+      '--node-tool': '#c08a2e',
+      '--node-memory': '#8a4a9c',
+      '--node-skill': '#5a7a4a',
+      '--node-capability': '#2f6a6a',
+      '--node-event': '#b8542a',
+      '--node-preference': '#9c4a4a',
+      '--node-organization': '#b07030',
+      '--node-topic': '#8a8c82',
+      '--node-location': '#2f6a6a',
+      '--node-default': '#8a8c82',
     },
   },
 };
@@ -4835,10 +4924,6 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-provider-local-key').value = data.providers?.local?.apiKey || '';
   document.getElementById('settings-provider-gemini-key').value = data.providers?.gemini?.apiKey || '';
 
-  document.getElementById('settings-acorn-enabled').checked = !!data.acorn?.enabled;
-  document.getElementById('settings-acorn-key').value = data.acorn?.key || '';
-  document.getElementById('settings-acorn-key').type = 'password';
-  document.getElementById('settings-acorn-key-show').textContent = 'show';
   document.getElementById('settings-browser-backend').value = data.browser?.backend || 'zendriver';
 
   document.getElementById('settings-websearch-searxng-url').value = data.webSearch?.searxngUrl || '';
@@ -4855,10 +4940,6 @@ function populateSettingsPanel(data) {
     `Provider URLs, keys, and model routing persist to the instance .env and apply to future requests. Source: ${data.sources?.providers || 'env'}.`;
   document.getElementById('settings-routing-note').textContent =
     `Choose a provider prefix and model ID for each tier. Anthropic/Claude uses the raw model name without a prefix. Source: ${data.sources?.models || 'env'}.`;
-  document.getElementById('settings-acorn-note').textContent =
-    data.acorn?.enabled
-      ? 'Acorn authentication is enabled for this instance.'
-      : 'Acorn authentication is disabled for this instance.';
   document.getElementById('settings-browser-note').textContent =
     `Default browser backend for future browser launches: ${data.browser?.backend || 'zendriver'}.`;
 
@@ -5440,32 +5521,6 @@ async function _settingsAutoDetectModelLimits(data) {
   }
 }
 
-function _showAcornFlash(key, label = 'Your Acorn team key:') {
-  const note = document.getElementById('settings-acorn-note');
-  if (!note) return;
-  // Replace note content with the flash; restored on next populate.
-  note.innerHTML = '';
-  const flash = document.createElement('div');
-  flash.className = 'acorn-flash';
-  flash.innerHTML = `
-    <strong>${label}</strong>
-    <code data-flash-key></code>
-    <div style="display:flex; gap:8px; margin-top:8px; align-items:center">
-      <button type="button" class="settings-test-btn" data-flash-copy>copy</button>
-      <span data-flash-state style="font-size:.7rem; color:var(--text-dim)"></span>
-    </div>
-  `;
-  flash.querySelector('[data-flash-key]').textContent = key;
-  flash.querySelector('[data-flash-copy]').addEventListener('click', async () => {
-    const ok = await _copyToClipboard(key);
-    flash.querySelector('[data-flash-state]').textContent = ok ? 'copied ✓' : 'copy failed — select manually';
-  });
-  note.appendChild(flash);
-  // Also unmask the input so they see it there too
-  const input = document.getElementById('settings-acorn-key');
-  if (input) { input.value = key; input.type = 'text'; document.getElementById('settings-acorn-key-show').textContent = 'hide'; }
-}
-
 // Hide settings sections whose owning plugin isn't installed. Sections
 // declare ownership via `data-plugin-required="<plugin-id>"`. Cached for
 // the lifetime of the panel; "everything optional" — when the plugin is
@@ -5489,28 +5544,6 @@ async function _hidePluginUiIfMissing() {
   });
 }
 
-let _acornBtnsBound = false;
-function _bindAcornButtons() {
-  if (_acornBtnsBound) return;
-  _acornBtnsBound = true;
-  const input = document.getElementById('settings-acorn-key');
-  document.getElementById('settings-acorn-key-show')?.addEventListener('click', () => {
-    if (!input) return;
-    if (input.type === 'password') { input.type = 'text'; document.getElementById('settings-acorn-key-show').textContent = 'hide'; }
-    else { input.type = 'password'; document.getElementById('settings-acorn-key-show').textContent = 'show'; }
-  });
-  document.getElementById('settings-acorn-key-copy')?.addEventListener('click', async () => {
-    if (!input?.value) return;
-    const ok = await _copyToClipboard(input.value);
-    toast(ok ? 'Acorn key copied' : 'Copy failed — select manually', !ok);
-  });
-  document.getElementById('settings-acorn-key-regen')?.addEventListener('click', () => {
-    if (!confirm('Regenerate the Acorn team key? Existing CLI users will lose access until they get the new key.')) return;
-    if (input) input.value = '';
-    document.getElementById('settings-acorn-enabled').checked = true;
-    saveSettingsPanel();
-  });
-}
 
 // ── Settings tabs ────────────────────────────────────────────────────
 // Each settings-section carries data-target-tab="<id>". On panel open we
@@ -5609,7 +5642,6 @@ async function openSettingsPanel() {
 
   overlay.classList.add('settings-pane-open');
   _initSettingsFloatingPane();
-  _bindAcornButtons();
   _bindResetGraphButton();
   _hidePluginUiIfMissing();
   if (typeof _focusFloatingWindow === 'function') _focusFloatingWindow('settings-pane');
@@ -5941,15 +5973,6 @@ async function saveSettingsPanel() {
       },
       custom: collectSettingsCustomProviders(),
     },
-    // Only emit the legacy `acorn` block when the plugin is installed —
-    // otherwise an unrelated settings save would null out the operator's
-    // stored acornKey on uninstall.
-    ...(_pluginInstalledIdsCache?.has('acorn-cli') ? {
-      acorn: {
-        enabled: document.getElementById('settings-acorn-enabled').checked,
-        key: document.getElementById('settings-acorn-key').value.trim(),
-      },
-    } : {}),
     browser: {
       backend: document.getElementById('settings-browser-backend').value,
     },
@@ -6000,12 +6023,9 @@ async function saveSettingsPanel() {
     populateSettingsPanel(data.settings);
     if (theme && theme !== _currentTheme) applyGraphTheme(theme);
     updateErBadge(!!data.settings?.memory?.enhancedRecall);
-    if (data.settings?._acornKeyGenerated && data.settings?.acorn?.key) {
-      _showAcornFlash(data.settings.acorn.key, 'Acorn key generated:');
-    }
     setSettingsBusy(false, 'Saved');
     toast('Settings saved');
-    if (!data.settings?._acornKeyGenerated) closeSettingsPanel();
+    closeSettingsPanel();
   } catch (e) {
     setSettingsBusy(false, e?.message || 'Failed to save settings');
     toast(e?.message || 'Failed to save settings', true);
@@ -6874,8 +6894,6 @@ function _obCollectPayload() {
     displayName, nicknames,
     providers, models, modelLimits, voice, webSearch,
     browser: { backend: browserBackend },
-    // Enable Acorn by default; backend will mint a fresh team key on first enable.
-    acorn: { enabled: true },
   };
 }
 
@@ -6894,54 +6912,12 @@ async function _obFinish() {
     if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
     _userRole = 'creator';
     _currentUserName = _obData.account?.username || 'Operator';
-    if (d.acornKey) {
-      _obShowAcornReveal(d.acornKey);
-    } else {
-      document.getElementById('onboarding-overlay').classList.add('hidden');
-      showApp();
-    }
+    document.getElementById('onboarding-overlay').classList.add('hidden');
+    showApp();
   } catch (e) {
     errEl.textContent = String(e.message || e);
     btn.disabled = false;
   }
-}
-
-function _obShowAcornReveal(key) {
-  const body = document.getElementById('onboarding-body');
-  const foot = document.getElementById('onboarding-foot');
-  document.querySelectorAll('.ob-step').forEach(s => s.classList.remove('active'));
-  let panel = document.getElementById('ob-acorn-reveal');
-  if (!panel) {
-    panel = document.createElement('section');
-    panel.id = 'ob-acorn-reveal';
-    panel.className = 'ob-step active';
-    panel.innerHTML = `
-      <h3>You're all set 🎉</h3>
-      <div class="ob-desc">Below is your Acorn team key — it lets the Acorn CLI talk to this instance. <strong>Save it now</strong>; for security we won't show it in plain text again, but the operator can always re-reveal it from Settings → Acorn.</div>
-      <div class="acorn-flash">
-        <strong>SPORE_ACORN_KEY</strong>
-        <code id="ob-acorn-key-out"></code>
-        <div style="display:flex; gap:8px; margin-top:10px">
-          <button type="button" class="ob-btn" id="ob-acorn-copy">copy to clipboard</button>
-          <span id="ob-acorn-copy-state" style="font-size:.74rem; align-self:center; color:var(--text-dim)"></span>
-        </div>
-      </div>
-    `;
-    body.appendChild(panel);
-  } else {
-    panel.classList.add('active');
-  }
-  document.getElementById('ob-acorn-key-out').textContent = key;
-  // Replace footer with single Continue button
-  foot.innerHTML = `<div class="left"></div><div class="right"><button type="button" class="ob-btn primary" id="ob-acorn-continue">Continue to app</button></div>`;
-  document.getElementById('ob-acorn-continue').addEventListener('click', () => {
-    document.getElementById('onboarding-overlay').classList.add('hidden');
-    showApp();
-  });
-  document.getElementById('ob-acorn-copy').addEventListener('click', async () => {
-    const ok = await _copyToClipboard(key);
-    document.getElementById('ob-acorn-copy-state').textContent = ok ? 'copied ✓' : 'copy failed — select manually';
-  });
 }
 
 // User wizard — slim 4-step variant for self-registered guests.
@@ -18882,22 +18858,6 @@ build/
           </div>
         </div>
         <div class="settings-note" id="settings-provider-note"></div>
-      </div>
-
-      <div class="settings-section wide" data-target-tab="advanced" data-plugin-required="acorn-cli">
-        <h4>Acorn</h4>
-        <div class="settings-check">
-          <input id="settings-acorn-enabled" type="checkbox">
-          <label for="settings-acorn-enabled" style="margin:0">Enable Acorn access for this instance</label>
-        </div>
-        <label for="settings-acorn-key">Acorn Team Key</label>
-        <div class="settings-acorn-key-row">
-          <input id="settings-acorn-key" type="password" placeholder="auto-generated when enabled" autocomplete="off">
-          <button type="button" class="settings-test-btn" id="settings-acorn-key-show" title="Show / hide">show</button>
-          <button type="button" class="settings-test-btn" id="settings-acorn-key-copy" title="Copy to clipboard">copy</button>
-          <button type="button" class="settings-test-btn" id="settings-acorn-key-regen" title="Generate a new key (invalidates the old one)">regen</button>
-        </div>
-        <div class="settings-note" id="settings-acorn-note">Tick to enable; on save a key is auto-generated and shown here. Existing CLI users will need the new key if you regen.</div>
       </div>
 
       <div class="settings-section wide" data-target-tab="advanced">
