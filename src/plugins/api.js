@@ -26,6 +26,7 @@ class PluginAPI {
     this._dockItems = [];
     this._webRoutes = [];
     this._wsHandlers = new Map();
+    this._pathAliases = [];
     this._configChangeFn = null;
     this._shutdownFn = null;
   }
@@ -336,6 +337,51 @@ class PluginAPI {
 
   getWsHandler(msgType) {
     return this._wsHandlers.get(msgType);
+  }
+
+  getWsHandlers() {
+    return this._wsHandlers;
+  }
+
+  /**
+   * Register a public-URL alias for the plugin's `/api/plugins/<pluginId>/`
+   * namespace. After this, requests to `/api/<prefix>/<rest>` are
+   * rewritten to `/api/plugins/<pluginId>/<rest>` and dispatched to the
+   * plugin's web routes.
+   *
+   * Use this for plugins that have a legacy or external wire-protocol
+   * URL contract — e.g. acorn-cli's Go binaries hardcode `/api/acorn/auth`,
+   * so the plugin registers `acorn` as an alias prefix and core does
+   * the rewrite on its behalf. When the plugin is uninstalled, the
+   * alias disappears and `/api/<prefix>/*` simply 404s like any other
+   * unknown path.
+   *
+   * Options:
+   *   cors      — `true` to send permissive CORS headers (Access-Control-
+   *               Allow-Origin: *, Allow-Methods: GET, POST, OPTIONS,
+   *               Allow-Headers: Content-Type, Authorization). Use for
+   *               cross-origin clients (web apps + native binaries).
+   *               Default: false.
+   *   notFoundCode — string code to return when the alias matches but
+   *               no specific route under it does (e.g. 'ACORN_NOT_FOUND').
+   *               Default: undefined (returns generic 404).
+   *
+   * @param {string} prefix — URL segment after /api/, no leading slash.
+   * @param {object} [opts]
+   */
+  registerPathAlias(prefix, opts = {}) {
+    if (!prefix || typeof prefix !== 'string') throw new Error('registerPathAlias requires a string prefix');
+    if (prefix.includes('/')) throw new Error('Path alias prefix must be a single URL segment (no slashes)');
+    this._pathAliases.push({
+      prefix,
+      cors: !!opts.cors,
+      notFoundCode: opts.notFoundCode || null,
+    });
+    this._log.debug(`[plugin:${this.pluginId}] Registered path alias: /api/${prefix}/* → /api/plugins/${this.pluginId}/*${opts.cors ? ' [cors]' : ''}`);
+  }
+
+  getPathAliases() {
+    return this._pathAliases;
   }
 
   getWsHandlers() {

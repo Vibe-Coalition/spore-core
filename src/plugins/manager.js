@@ -578,6 +578,37 @@ class PluginManager {
   }
 
   /**
+   * Resolve a public-URL alias for an incoming request. Walks every
+   * plugin's registered path aliases and, on prefix match, returns
+   * the rewrite target + CORS opts so the gateway can dispatch into
+   * the plugin's normal `/api/plugins/<id>/...` routes.
+   *
+   * Returns `{ pluginId, aliasPath, cors, notFoundCode }` or null.
+   * `aliasPath` is the rewritten path the gateway should resolveWebRoute
+   * against. The original `/api/<prefix>/<rest>` URL is preserved by the
+   * gateway for logging/debugging.
+   */
+  resolvePathAlias(urlPath) {
+    if (!urlPath || typeof urlPath !== 'string') return null;
+    if (!urlPath.startsWith('/api/')) return null;
+    for (const [pluginId, plugin] of this.plugins) {
+      const aliases = plugin.instance?.getPathAliases?.() || [];
+      for (const alias of aliases) {
+        const root = `/api/${alias.prefix}`;
+        if (urlPath === root || urlPath.startsWith(root + '/')) {
+          return {
+            pluginId,
+            aliasPath: `/api/plugins/${pluginId}` + urlPath.slice(root.length),
+            cors: alias.cors,
+            notFoundCode: alias.notFoundCode,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Collect every plugin's settings pane (if registered) along with its
    * current config slot, masked for secret fields. Used by the settings UI.
    */

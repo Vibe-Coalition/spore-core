@@ -3085,35 +3085,35 @@ class WebGateway {
         return;
       }
 
-      // ── CORS for Acorn API endpoints (companion web app + Go CLI) ──
-      // Stays in core unconditionally — the Go client expects /api/acorn/*
-      // as its protocol contract regardless of whether the acorn-cli plugin
-      // is installed. CORS plus the dispatch routing below preserve the
-      // contract while letting the plugin own the actual handlers.
-      if (urlPath.startsWith('/api/acorn/')) {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-        if (req.method === 'OPTIONS') {
-          res.writeHead(204);
-          res.end();
-          return;
-        }
-
-        // Path alias: rewrite /api/acorn/<rest> to /api/plugins/acorn-cli/<rest>
-        // and dispatch to the plugin's web route if one is registered. This
-        // preserves the legacy URL space for existing acorn-cli Go binaries
-        // while letting the plugin own the actual handlers.
+      // ── Plugin path aliases (e.g. acorn-cli registers /api/acorn/* →
+      // /api/plugins/acorn-cli/*) ──
+      // Plugins call api.registerPathAlias('<prefix>', { cors, notFoundCode })
+      // to claim a top-level URL space. Useful for legacy / external
+      // wire-protocol clients that hardcode a particular URL contract.
+      // When the plugin is uninstalled the alias disappears and the URL
+      // 404s like any other unknown path. CORS pre-flight is handled
+      // here for aliases that opt in.
+      {
         const mgr = this.tools?._pluginManager;
-        if (mgr?.resolveWebRoute) {
-          const aliasPath = '/api/plugins/acorn-cli' + urlPath.slice('/api/acorn'.length);
-          const resolved = mgr.resolveWebRoute(req.method, aliasPath);
+        const alias = mgr?.resolvePathAlias?.(urlPath);
+        if (alias) {
+          if (alias.cors) {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+            if (req.method === 'OPTIONS') {
+              res.writeHead(204);
+              res.end();
+              return;
+            }
+          }
+          const resolved = mgr.resolveWebRoute(req.method, alias.aliasPath);
           if (resolved) {
             try {
               const query = (() => { try { return new URL(req.url, 'http://x').searchParams; } catch { return new URLSearchParams(); } })();
-              await resolved.handler(req, res, { urlPath: aliasPath, query, user: req._user || null });
+              await resolved.handler(req, res, { urlPath: alias.aliasPath, query, user: req._user || null });
             } catch (e) {
-              this.log.error(`[plugins] route ${resolved.pluginId}${aliasPath} failed: ${e?.message}`);
+              this.log.error(`[plugins] route ${resolved.pluginId}${alias.aliasPath} failed: ${e?.message}`);
               if (!res.headersSent) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: e?.message || 'plugin route failed' }));
@@ -3121,27 +3121,15 @@ class WebGateway {
             }
             return;
           }
+          // Alias matched but no specific route — return 404 with hint.
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: `No route registered for ${urlPath}`,
+            plugin: alias.pluginId,
+            ...(alias.notFoundCode ? { code: alias.notFoundCode } : {}),
+          }));
+          return;
         }
-      }
-
-      // /api/acorn/auth + /api/acorn/sessions extracted to plugins/acorn-cli/
-      // (phase 2.3c). The pre-route alias above (in the CORS block) rewrites
-      // /api/acorn/<rest> to /api/plugins/acorn-cli/<rest> and dispatches to
-      // the plugin if installed. The 503 fallback below catches the case
-      // where the plugin isn't installed.
-
-      // Final fallback for /api/acorn/* — if no in-tree handler matched and
-      // no plugin alias dispatched, the acorn-cli plugin isn't installed.
-      // Return a clear 503 so Go clients can show an actionable error
-      // instead of the generic 404 they'd otherwise see.
-      if (urlPath.startsWith('/api/acorn/')) {
-        res.writeHead(503, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          error: 'Acorn capability not installed',
-          code: 'ACORN_NOT_INSTALLED',
-          hint: 'The SPORE operator must enable plugins (SPORE_PLUGINS_ENABLED=true) and install the acorn-cli plugin via the Plugins settings tab.',
-        }));
-        return;
       }
 
       if (urlPath === '/api/ws-token') {

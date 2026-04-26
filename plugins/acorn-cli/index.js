@@ -869,6 +869,18 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/auth',     { public: true, handler: (req, res) => handleAuth(api, req, res) });
   api.registerWebRoute('GET',  '/sessions', { public: true, handler: (req, res) => handleSessions(api, req, res) });
 
+  // Public-URL alias: existing acorn-cli Go binaries hardcode
+  // /api/acorn/auth and /api/acorn/sessions in their wire protocol.
+  // Core's request handler walks all plugins' aliases at request time,
+  // applies CORS for cross-origin clients, and rewrites
+  // /api/acorn/<rest> → /api/plugins/acorn-cli/<rest>. When the plugin
+  // is uninstalled the alias disappears with the rest of the plugin
+  // and `/api/acorn/*` 404s like any other unknown path.
+  api.registerPathAlias('acorn', {
+    cors: true,
+    notFoundCode: 'ACORN_ROUTE_NOT_FOUND',
+  });
+
   // note_discovery tool — bare name (namespaced:false) preserves the
   // public contract for the agent. Reads ctx.platform / ctx.channelId /
   // ctx.projectContext.cwd to detect the acorn session and link the
@@ -1122,5 +1134,5 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + webappSelfRegisterCheck + afterToolExec(graph_update) + settings pane + prompt sections registered.');
+  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + /api/acorn alias + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + webappSelfRegisterCheck + afterToolExec(graph_update) + settings pane + prompt sections registered.');
 };
