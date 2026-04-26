@@ -1320,11 +1320,20 @@ class AgentLoop {
       try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch (e) { this.log.warn('[loop] this._emitCodeEvent failed: ' + e.message); }
     }
 
+    // Normalize the failure signal across tool result shapes:
+    //   • Local-tool error path returns { error: '...' } → succeeded=false.
+    //   • Acorn-CLI shell.go returns { output, exitCode: N } with no error key
+    //     even for non-zero exits — succeeded would be true. Surface exitCode
+    //     so plugin middleware (e.g. acorn-cli failure_fix) can detect those.
+    const exitCode = (result && typeof result === 'object')
+      ? (result.exitCode ?? result.exit_code ?? null)
+      : null;
     toolLog.push({
       tool: toolBlock.name,
       input: JSON.stringify(toolBlock.input).substring(0, 300),
       resultPreview: resultContent.substring(0, 300),
       succeeded: !result.error,
+      exitCode,
     });
 
     const defaultCap = this.config.maxToolResultChars || 30000;

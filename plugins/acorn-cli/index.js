@@ -382,8 +382,13 @@ function captureFailureFix(api, opts, toolLog) {
       } catch { /* silent: malformed JSON → fallback */ }
       if (!cmd) continue;
       const parsed = parseCmd(cmd);
-      if (t.succeeded === false) {
-        buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300) });
+      // A tool "failed" if the host reported it (succeeded:false from a
+      // result.error key) OR if exec returned a non-zero exit code (acorn-
+      // cli's shell.go returns {output, exitCode:N} without an error key,
+      // so the original succeeded check missed those).
+      const failed = t.succeeded === false || (typeof t.exitCode === 'number' && t.exitCode !== 0);
+      if (failed) {
+        buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300), exitCode: t.exitCode ?? null });
         if (buf.length > 10) buf.shift();
       } else {
         const fiveTurnsAgo = turn - 5;
@@ -400,7 +405,8 @@ function captureFailureFix(api, opts, toolLog) {
           // legacy AsyncLocalStorage / _currentXxx workaround the in-tree
           // code used — we have the wide ctx right here.
           try {
-            const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${match.preview ? '≠0' : '?'}). Fixed by: ${cmd.slice(0, 200)}`;
+            const exitStr = (typeof match.exitCode === 'number') ? String(match.exitCode) : '≠0';
+            const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${exitStr}). Fixed by: ${cmd.slice(0, 200)}`;
             const ctx = {
               platform: 'cli',
               channelId: sessKey,
@@ -471,7 +477,8 @@ function recordRoundCheckpoint(api, opts, toolLog, finalText) {
         const inp = parseInput(t);
         const cmd = inp?.command || '';
         if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
-        if (t.succeeded === false) failedExecs++;
+        // Count both host-reported failures and non-zero exits.
+        if (t.succeeded === false || (typeof t.exitCode === 'number' && t.exitCode !== 0)) failedExecs++;
       }
     }
     const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
