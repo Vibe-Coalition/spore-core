@@ -338,6 +338,16 @@ class PluginManager {
   /**
    * Iterate plugins that registered reference nodes; for each, run install SQL
    * exactly once per (pluginId, schemaVersion). Idempotent across boots.
+   *
+   * Run-once semantics: if `plugin_installs` already records the current
+   * schema_version, the install is skipped on subsequent boots. Plugin
+   * data is expected to persist between boots; a missing node means
+   * something deleted it out-of-band, which is the operator's call to
+   * uninstall + reinstall (or restore from backup) — we don't auto-heal.
+   *
+   * Schema-version bumps trigger the uninstall-then-install path so a
+   * fresh install of the new version doesn't race idempotency guards
+   * against stale rows.
    */
   _runReferenceNodeInstalls() {
     const graph = this._appContext?.graph;
@@ -366,8 +376,6 @@ class PluginManager {
         }
 
         if (existing && existing.schema_version < refs.schemaVersion) {
-          // Schema upgrade: tear down old data first so the new install SQL
-          // doesn't race idempotency guards against stale rows.
           this.log.info(`[plugins] ${id} ref nodes upgrading v${existing.schema_version} → v${refs.schemaVersion}`);
           this._executeUninstallFor(id, api, db);
         }

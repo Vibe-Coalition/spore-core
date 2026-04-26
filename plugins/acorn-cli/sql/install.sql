@@ -24,7 +24,9 @@ VALUES ('ref-acorn-context', 'Acorn Client Context', 'reference',
   'How Acorn sessions map to a scoped project on the user''s machine and how to work within that client-side environment.',
   8, '{{plugin_id}}');
 
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'scope', 9, '{{plugin_id}}');
+INSERT INTO aspects (node_id, name, weight, extracted_with)
+  SELECT 'ref-acorn-context', 'scope', 9, '{{plugin_id}}'
+  WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='scope');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope'),
          'Acorn sessions are bound to a specific project CWD on the user''s machine. Stay inside that project unless the user explicitly redirects you.',
@@ -50,7 +52,9 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='scope')
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='scope') AND content LIKE 'When you mention files%');
 
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'workflow', 8, '{{plugin_id}}');
+INSERT INTO aspects (node_id, name, weight, extracted_with)
+  SELECT 'ref-acorn-context', 'workflow', 8, '{{plugin_id}}'
+  WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-acorn-context' AND name='workflow'),
          'Acorn CLI and Acorn Companion connect to the same server runtime, but each session preserves its own project scope and local-machine context.',
