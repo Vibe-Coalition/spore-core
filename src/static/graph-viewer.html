@@ -18433,27 +18433,36 @@ build/
 
       </div>
 
+      <!-- Tailscale card. Owned by the tailscale plugin: when uninstalled
+           the entire section disappears via data-plugin-required.
+           Holds the SSO login flow + the per-container hostname. -->
+      <div class="settings-section wide" data-target-tab="cluster" data-plugin-required="tailscale">
+        <h4>Tailscale</h4>
+        <div class="settings-note" style="margin-top:4px">Mesh-VPN access via tailscaled. Log in once via SSO; state persists at <code>/data/tailscale</code> across container restarts.</div>
+        <div id="settings-tailscale-status" style="margin-top:8px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;font-size:.72rem;display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span id="settings-tailscale-line">loading…</span>
+          <span style="display:flex;gap:4px">
+            <button class="settings-btn-secondary" id="settings-tailscale-login" type="button" style="font-size:.66rem;padding:3px 8px">Log in to Tailscale</button>
+            <button class="settings-btn-secondary" id="settings-tailscale-logout" type="button" style="font-size:.66rem;padding:3px 8px;display:none">Logout</button>
+          </span>
+        </div>
+        <div id="settings-tailscale-authurl" style="display:none;margin-top:8px;padding:10px;background:var(--bg-2);border:1px dashed var(--accent2);border-radius:4px;font-size:.7rem">
+          <div style="margin-bottom:6px;font-weight:600;color:var(--accent2)">Open this URL in your browser and complete SSO:</div>
+          <a id="settings-tailscale-authurl-link" href="#" target="_blank" rel="noopener noreferrer" style="word-break:break-all;color:var(--accent);text-decoration:underline"></a>
+          <div style="margin-top:6px;color:var(--text-dim)">Polling status until connected…</div>
+        </div>
+        <label style="display:block;font-size:.7rem;margin-top:14px">Hostname for this container on the tailnet
+          <input id="settings-tailscale-hostname" type="text" autocomplete="off" placeholder="spore-<agent>" style="display:block;margin-top:3px;width:100%;max-width:520px;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+          <div class="settings-note" style="margin-top:3px">Sent as <code>tailscale up --hostname &lt;value&gt;</code>. Defaults to <code>spore-&lt;agentId&gt;</code>.</div>
+        </label>
+      </div>
+
+      <!-- Compute cluster card. Stays in core. SSH-over-tailnet works
+           best when the tailscale plugin is installed + connected, but
+           the fields are useful storage either way. -->
       <div class="settings-section wide" data-target-tab="cluster">
         <h4>Compute cluster</h4>
-        <div class="settings-note" style="margin-top:4px">Tailscale + SLURM cluster access. Log in once via SSO; the state persists across container restarts.</div>
-        <!-- Tailscale-only sub-block: hidden by data-plugin-required when
-             the tailscale plugin isn't installed. _hidePluginUiIfMissing
-             walks all such elements on settings-pane open. -->
-        <div data-plugin-required="tailscale">
-          <div id="settings-tailscale-status" style="margin-top:8px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;font-size:.72rem;display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <span id="settings-tailscale-line">loading…</span>
-            <span style="display:flex;gap:4px">
-              <button class="settings-btn-secondary" id="settings-tailscale-login" type="button" style="font-size:.66rem;padding:3px 8px">Log in to Tailscale</button>
-              <button class="settings-btn-secondary" id="settings-tailscale-logout" type="button" style="font-size:.66rem;padding:3px 8px;display:none">Logout</button>
-            </span>
-          </div>
-          <div id="settings-tailscale-authurl" style="display:none;margin-top:8px;padding:10px;background:var(--bg-2);border:1px dashed var(--accent2);border-radius:4px;font-size:.7rem">
-            <div style="margin-bottom:6px;font-weight:600;color:var(--accent2)">Open this URL in your browser and complete SSO:</div>
-            <a id="settings-tailscale-authurl-link" href="#" target="_blank" rel="noopener noreferrer" style="word-break:break-all;color:var(--accent);text-decoration:underline"></a>
-            <div style="margin-top:6px;color:var(--text-dim)">Polling status until connected…</div>
-          </div>
-        </div>
-
+        <div class="settings-note" style="margin-top:4px">SLURM cluster access over the tailnet. Reachability depends on the Tailscale plugin being installed and connected; these fields are pure config storage otherwise.</div>
           <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px">
             <label style="font-size:.7rem">Cluster SSH username
               <input id="settings-cluster-username" type="text" autocomplete="off" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
@@ -18461,11 +18470,8 @@ build/
             <label style="font-size:.7rem">Login host (MagicDNS)
               <input id="settings-cluster-login-host" type="text" autocomplete="off" placeholder="login.tailnet.ts.net" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
             </label>
-            <label style="font-size:.7rem">tmux session prefix
+            <label style="font-size:.7rem;grid-column:1/-1">tmux session prefix
               <input id="settings-cluster-tmux-prefix" type="text" autocomplete="off" placeholder="spore" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-            </label>
-            <label style="font-size:.7rem;grid-column:1/-1">Tailscale hostname for this container
-              <input id="settings-tailscale-hostname" type="text" autocomplete="off" placeholder="spore-<agent>" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
             </label>
           </div>
           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
