@@ -83,7 +83,7 @@ class SSHManager {
               else if (msg.type === 'session.error') handlers.onError?.(msg.error);
             }
           }
-        } catch {}
+        } catch (e) { this.log.warn('[ssh-manager] JSON.parse failed: ' + e.message); }
       }
     });
 
@@ -189,7 +189,7 @@ class SSHManager {
       const dir = path.dirname(this._storeFile);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(this._storeFile, JSON.stringify({ hosts: this.hosts }, null, 2));
-    } catch {}
+    } catch (e) { this.log.warn('[ssh-manager] path.dirname failed: ' + e.message); }
   }
 
   // ── Audit ───────────────────────────────────────────────────────────
@@ -199,7 +199,7 @@ class SSHManager {
       const dir = path.dirname(this._auditLogPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       this._auditStream = fs.createWriteStream(this._auditLogPath, { flags: 'a' });
-    } catch {}
+    } catch (e) { this.log.warn('[ssh-manager] path.dirname failed: ' + e.message); }
   }
 
   audit(sessionId, event, detail) {
@@ -352,7 +352,7 @@ class SSHManager {
       return Promise.resolve(existing);
     }
     if (existing) {
-      try { existing.conn.end(); } catch {}
+      try { existing.conn.end(); } catch (e) { this.log.warn('[ssh-manager] existing.conn.end failed: ' + e.message); }
       this._connPool.delete(hostId);
     }
 
@@ -406,7 +406,7 @@ class SSHManager {
       for (const [id, entry] of this._connPool) {
         if (now - entry.lastUsed > IDLE_MS) {
           this.log.info(`[ssh] Pool: closing idle connection ${id}`);
-          try { entry.conn.end(); } catch {}
+          try { entry.conn.end(); } catch (e) { this.log.warn('[ssh-manager] entry.conn.end failed: ' + e.message); }
           this._connPool.delete(id);
         }
       }
@@ -530,7 +530,7 @@ class SSHManager {
     return new Promise((resolve, reject) => {
       let _stream = null;
       const timer = setTimeout(() => {
-        if (_stream) { try { _stream.close(); } catch {} try { _stream.destroy(); } catch {} }
+        if (_stream) { try { _stream.close(); } catch { /* silent: best-effort close */ } try { _stream.destroy(); } catch (e) { this.log.warn('[ssh-manager] _stream.destroy failed: ' + e.message); } }
         reject(new Error(`Command timed out after ${timeout}ms (remote process killed)`));
       }, timeout);
 
@@ -631,7 +631,7 @@ class SSHManager {
     if (!this._tunnels) return false;
     const t = this._tunnels.get(localPort);
     if (!t) return false;
-    try { t.server.close(); } catch {}
+    try { t.server.close(); } catch { /* silent: best-effort close */ }
     if (t._conn && t._onConnClose) {
       t._conn.removeListener('end', t._onConnClose);
       t._conn.removeListener('error', t._onConnClose);
@@ -660,14 +660,14 @@ class SSHManager {
     if (this._tunnels) {
       for (const [port] of this._tunnels) this._closeTunnelByPort(port);
     }
-    for (const [, s] of this._activeSessions) { try { s.stream.end(); s.conn.end(); } catch {} }
+    for (const [, s] of this._activeSessions) { try { s.stream.end(); s.conn.end(); } catch (e) { this.log.warn('[ssh-manager] s.stream.end failed: ' + e.message); } }
     this._activeSessions.clear();
     if (this._connPool) {
-      for (const [, entry] of this._connPool) { try { entry.conn.end(); } catch {} }
+      for (const [, entry] of this._connPool) { try { entry.conn.end(); } catch (e) { this.log.warn('[ssh-manager] entry.conn.end failed: ' + e.message); } }
       this._connPool.clear();
     }
     if (this._poolTimer) { clearInterval(this._poolTimer); this._poolTimer = null; }
-    if (this._sidecarConn) try { this._sidecarConn.end(); } catch {}
+    if (this._sidecarConn) try { this._sidecarConn.end(); } catch (e) { this.log.warn('[ssh-manager] _sidecarConn.end failed: ' + e.message); }
     if (this._auditStream) this._auditStream.end();
   }
 }

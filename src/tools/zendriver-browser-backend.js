@@ -292,11 +292,11 @@ class ZendriverBrowserBackend {
     if (!this._proc) return;
     try {
       if (this._running) {
-        try { await this._send('close', {}); } catch { }
+        try { await this._send('close', {}); } catch (e) { this.log.warn('[zendriver-browser-backend] _send failed: ' + e.message); }
       }
-      try { await this._send('shutdown', {}); } catch { }
+      try { await this._send('shutdown', {}); } catch (e) { this.log.warn('[zendriver-browser-backend] _send failed: ' + e.message); }
       this._proc.kill('SIGTERM');
-    } catch { }
+    } catch (e) { this.log.warn('[zendriver-browser-backend] _send failed: ' + e.message); }
   }
 }
 

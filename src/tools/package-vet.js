@@ -199,7 +199,7 @@ async function vetNpmPackage(name, version) {
         if (hasCritical) riskLevel = RISK_LEVEL.BLOCK;
         else if (riskLevel !== RISK_LEVEL.BLOCK) riskLevel = RISK_LEVEL.WARN;
       }
-    } catch { /* audit check is best-effort */ }
+    } catch (e) { console.warn('[package-vet] fetchNpmAudit failed: ' + e.message); }
 
     if (findings.length === 0) {
       findings.push('No issues detected');
@@ -341,7 +341,7 @@ async function vetPipPackage(name, version) {
         }
         riskLevel = RISK_LEVEL.BLOCK;
       }
-    } catch { /* best-effort */ }
+    } catch (e) { console.warn('[package-vet] fetchOsvVulns failed: ' + e.message); }
 
     // 8. setup.py / setup.cfg install hooks aren't easily detectable from PyPI,
     // but we can flag packages that bundle native extensions
