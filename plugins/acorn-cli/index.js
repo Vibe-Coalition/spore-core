@@ -201,7 +201,11 @@ async function handleSessions(api, req, res) {
 // and auto-links it to the current acorn session + project nodes via
 // recorded_in / learned_about edges. Direct SQL (no sessions.js dependency)
 // so the tool can ship before the sessions/projects modules move.
-async function noteDiscovery(api, input, ctx) {
+// Sync function — all DB ops are synchronous (better-sqlite3 / node:sqlite
+// prepared statements). Was previously marked async with no await calls,
+// which made the failure_fix capture's Promise-detection branch swallow
+// the result.
+function noteDiscovery(api, input, ctx) {
   const learner = api._appContext?.learner;
   if (!learner?.db) return { error: 'Graph writer not available' };
   const text = String(input?.text || '').trim();
@@ -413,9 +417,7 @@ function captureFailureFix(api, opts, toolLog) {
               userId: opts.userId || 'anon',
               projectContext: opts.projectContext || null,
             };
-            const r = noteDiscovery(api, { text, kind: 'failure_fix' }, ctx);
-            // noteDiscovery returns synchronously (no await needed).
-            const result = (r && typeof r.then === 'function') ? null : r;
+            const result = noteDiscovery(api, { text, kind: 'failure_fix' }, ctx);
             if (result?.ok) {
               api.getLogger().info(`failure_fix captured: ${result.nodeId} (${match.token} → ${parsed.token})`);
             }
