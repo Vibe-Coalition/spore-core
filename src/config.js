@@ -264,8 +264,9 @@ function loadConfigFresh() {
 
   // Per-model context overrides — JSON map of `<modelRef>: {contextWindow, compactAt}`
   if (process.env.SPORE_MODEL_LIMITS) {
-    try { config.modelLimits = JSON.parse(process.env.SPORE_MODEL_LIMITS); }
-    catch { /* keep defaults */ }
+    try { config.modelLimits = JSON.parse(process.env.SPORE_MODEL_LIMITS); } catch {
+      // silent: malformed JSON → fallback
+    }
   }
   // Section-budget overrides — JSON map of `<sectionKey>: <tokens>`. Merged
   // with anything already provided in spore.json. Validation (unknown-key
@@ -275,7 +276,7 @@ function loadConfigFresh() {
     try {
       const fromEnv = JSON.parse(process.env.SPORE_SECTION_BUDGETS);
       config.sectionBudgets = { ...(config.sectionBudgets || {}), ...fromEnv };
-    } catch { /* malformed — keep file value */ }
+    } catch { /* silent: malformed JSON → fallback */ }
   }
   if (process.env.SPORE_TOTAL_BUDGET) {
     const n = parseInt(process.env.SPORE_TOTAL_BUDGET, 10);

@@ -135,13 +135,13 @@ function _parseToolInput(rawArgs, toolName) {
   const raw = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {});
   try {
     return _postProcessToolInput(toolName, JSON.parse(raw || '{}'));
-  } catch {}
+  } catch (e) { console.warn('[index] _postProcessToolInput failed: ' + e.message); }
 
   const repaired = _repairToolJson(raw);
   if (repaired && repaired !== raw) {
     try {
       return _postProcessToolInput(toolName, JSON.parse(repaired || '{}'));
-    } catch {}
+    } catch (e) { console.warn('[index] _postProcessToolInput failed: ' + e.message); }
   }
 
   return {
@@ -487,7 +487,7 @@ function _extractInlineToolCalls(text) {
           input: _postProcessToolInput(parsed.name, parsed.arguments || {}),
         });
         return '';
-      } catch {}
+      } catch { /* silent: malformed JSON → fallback */ }
     }
     // Qwen XML-like format: <function=name><parameter=k>v</parameter>...</function>
     const fnMatch = body.match(/<function=([^>]+)>([\s\S]*?)<\/function>/);
@@ -742,7 +742,7 @@ class OAICompatClient {
 
     const listeners = { text: [], event: [], end: [] };
     const emit = (type, data) => {
-      for (const fn of listeners[type] || []) { try { fn(data); } catch {} }
+      for (const fn of listeners[type] || []) { try { fn(data); } catch (e) { console.warn('[index] fn failed: ' + e.message); } }
     };
 
     // Shared abort controller — wired to both the public .abort() and the fetch signal
@@ -1343,7 +1343,7 @@ class MultiProvider {
         }
         if (count > 0 && log) log.info(`[providers] Loaded ${count} provider(s) from manager`);
       }
-    } catch {}
+    } catch (e) { console.warn('[index] Promise failed: ' + e.message); }
   }
 
   /**
@@ -1398,7 +1398,7 @@ class MultiProvider {
           process.env[envName] = val;
           if (log) log.info(`[vault] Loaded ${envName} from vault`);
         }
-      } catch {}
+      } catch (e) { console.warn('[index] Promise failed: ' + e.message); }
     }
   }
 }

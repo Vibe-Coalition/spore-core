@@ -87,7 +87,7 @@ function updateWebCapabilityNode(config, db, log) {
         if (!domain) domain = u.hostname;
         if (!config.ingressHttps) https = u.protocol === 'https:';
         if (!urlPath && u.pathname && u.pathname !== '/') urlPath = u.pathname.replace(/\/$/, '');
-      } catch { /* leave defaults */ }
+      } catch (e) { console.warn('[app] URL failed: ' + e.message); }
     }
 
     if (publicUrl) {
@@ -509,7 +509,7 @@ async function boot() {
     if (fs.existsSync(toolsDir)) {
       const regPath = path.join(toolsDir, 'TOOLS_REGISTRY.json');
       let registry = {};
-      try { registry = JSON.parse(fs.readFileSync(regPath, 'utf8')); } catch {}
+      try { registry = JSON.parse(fs.readFileSync(regPath, 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
 
       // Also discover scripts not in the registry
       const scriptExts = ['.py', '.sh', '.js'];
@@ -538,10 +538,10 @@ async function boot() {
   if (config.webPort) {
     try {
       let savedDir;
-      try { savedDir = fs.readFileSync(path.join(config.dataDir, '.web-serve-dir'), 'utf8').trim(); } catch {}
+      try { savedDir = fs.readFileSync(path.join(config.dataDir, '.web-serve-dir'), 'utf8').trim(); } catch (e) { console.warn('[app] fs.readFileSync failed: ' + e.message); }
 
       let backendCfg;
-      try { backendCfg = JSON.parse(fs.readFileSync(path.join(config.dataDir, '.backend-config.json'), 'utf8')); } catch {}
+      try { backendCfg = JSON.parse(fs.readFileSync(path.join(config.dataDir, '.backend-config.json'), 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
 
       if (backendCfg?.command) {
         const result = tools._webServeTool({
@@ -719,7 +719,7 @@ async function boot() {
       clearInterval(heartbeatTimer);
       clearInterval(wakeupSweepTimer);
       clearInterval(janitorTimer);
-      try { backup.stop(); } catch {}
+      try { backup.stop(); } catch (e) { console.warn('[app] backup.stop failed: ' + e.message); }
       tools._killAllTracked();
       await plugins.shutdownAll();
       await gateways.disconnectAll();
@@ -820,7 +820,7 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
         const result = await Promise.race([resultPromise, timeoutPromise]);
 
         // Clean up the ephemeral session
-        try { sessions.clearSession(invokeSessionKey); } catch {}
+        try { sessions.clearSession(invokeSessionKey); } catch (e) { console.warn('[app] sessions.clearSession failed: ' + e.message); }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({

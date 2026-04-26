@@ -21,7 +21,7 @@ function edgeTtsTmpDir() {
       fs.mkdirSync(d, { recursive: true, mode: 0o700 });
       return d;
     }
-  } catch {}
+  } catch (e) { console.warn('[tts] fs.existsSync failed: ' + e.message); }
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'u';
   const d = path.join(os.tmpdir(), `spore-edge-tts-${uid}`);
   fs.mkdirSync(d, { recursive: true, mode: 0o700 });
@@ -193,7 +193,7 @@ class EdgeTTS {
     } finally {
       // Always clean up — execFile timeouts and read errors leave the
       // partial .mp3 on disk otherwise.
-      try { fs.unlinkSync(tmpFile); } catch {}
+      try { fs.unlinkSync(tmpFile); } catch { /* silent: best-effort cleanup */ }
     }
   }
 

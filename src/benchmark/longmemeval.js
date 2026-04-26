@@ -361,7 +361,7 @@ class LongMemEvalRunner {
         observedAt,
         turnIdx: this._stats.exchangesProcessed,
       });
-    } catch {}
+    } catch (e) { this.log.warn('[longmemeval] this.learner.storeEpisode failed: ' + e.message); }
   }
 
   /** Poll until the learner queue is fully drained. */

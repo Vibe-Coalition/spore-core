@@ -105,7 +105,7 @@ async function download(variant, outDir) {
     });
     res.on('error', (err) => {
       ws.end();
-      try { fs.unlinkSync(destPath + '.tmp'); } catch {}
+      try { fs.unlinkSync(destPath + '.tmp'); } catch { /* silent: best-effort cleanup */ }
       reject(err);
     });
   });
