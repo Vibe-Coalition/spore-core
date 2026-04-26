@@ -806,27 +806,15 @@ class WebGateway {
       'SPORE_PROACTIVE_MAX_DAY',
       'SPORE_PROACTIVE_CHANNELS',
     ].some(k => !!process.env[k]);
-    // STT providers come from plugins (whisper, deepgram, …). The
-    // legacy in-tree fallback (DEEPGRAM_API_KEY / OPENAI_API_KEY env
-    // vars piped into config.deepgramApiKey / config.openaiApiKey)
-    // still provides a "configured" signal even when no plugin is
-    // installed yet — Phase A keeps that path so existing instances
-    // don't lose voice the moment they pull this commit.
+    // STT providers come from plugins (whisper, deepgram, …). When no
+    // STT plugin is installed, voice is disabled — voiceProviders is
+    // empty and the dropdown shows the disabled placeholder.
     const mgr = this.tools?._pluginManager;
-    const pluginProviders = mgr?.getSTTProviders?.() || [];
-    const legacyDg = !!this.config.deepgramApiKey;
-    const legacyOai = !!this.config.openaiApiKey;
-    const voiceProviders = pluginProviders.map(p => ({
+    const voiceProviders = (mgr?.getSTTProviders?.() || []).map(p => ({
       name: p.name,
       pluginId: p.pluginId,
       configured: p.configured,
     }));
-    if (!voiceProviders.find(p => p.name === 'deepgram') && legacyDg) {
-      voiceProviders.push({ name: 'deepgram', pluginId: null, configured: true });
-    }
-    if (!voiceProviders.find(p => p.name === 'openai') && legacyOai) {
-      voiceProviders.push({ name: 'openai', pluginId: null, configured: true });
-    }
     const sttConfigured = voiceProviders.some(p => p.configured);
     const pipeline = this._ensureVoicePipeline();
     const customProviders = Object.entries(this.config.customProviders || {})

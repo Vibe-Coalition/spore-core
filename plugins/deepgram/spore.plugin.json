@@ -1,0 +1,9 @@
+{
+  "id": "deepgram",
+  "name": "Deepgram STT",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Speech-to-text via Deepgram Nova-3. Lower latency + higher accuracy on English than Whisper; preferred when a key is available. Server-side only — no browser-side fallback. Reads the API key from plugins.deepgram.apiKey or the legacy DEEPGRAM_API_KEY env var. When uninstalled, the 'deepgram' option disappears from the STT provider dropdown."
+}
