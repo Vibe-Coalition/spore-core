@@ -1,9 +1,0 @@
-{
-  "id": "graphcorn-discovery",
-  "name": "Graphcorn Discovery Workflow",
-  "version": "1.0.0",
-  "kind": "tool",
-  "entry": "./index.js",
-  "depends": ["acorn-cli"],
-  "description": "Adds the discovery_workflow aspect to ref-acorn-context, teaching the agent how to use note_discovery vs graph_update during acorn sessions and how the session/project graph anchors knowledge."
-}

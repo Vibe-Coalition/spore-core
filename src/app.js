@@ -339,13 +339,26 @@ function migrateReferenceNodes(db, log) {
     log.warn(`[boot] Acorn-context tool-usage migration failed: ${e.message}`);
   }
 
-  // graphcorn — discovery_workflow aspect on ref-acorn-context.
-  // Extracted into the `graphcorn-discovery` plugin (plugins/graphcorn-discovery/).
-  // Existing installs keep their seed-tagged rows; the plugin's install SQL
-  // retags them on first install. Fresh installs that want this content
-  // must enable plugins (SPORE_PLUGINS_ENABLED=true) and install the plugin.
-  // The original SQL is kept at src/migrate-ref-graphcorn-discovery.sql for
-  // restoration / audit; deleted in a follow-up after live verification.
+  // graphcorn — discovery_workflow aspect on ref-acorn-context. Tells
+  // the agent the session/project graph anchors exist and how to use
+  // note_discovery vs graph_update. New aspect with 4 attrs covering
+  // the workflow.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-graphcorn-discovery.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='discovery_workflow'"
+      ).get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare(
+        "SELECT COUNT(*) AS c FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id='ref-acorn-context' AND asp.name='discovery_workflow'"
+      ).get()?.c || 0;
+      if (after > before) log.info(`[boot] Acorn-context discovery_workflow (graphcorn): +${after - before} attributes`);
+    }
+  } catch (e) {
+    log.warn(`[boot] graphcorn discovery_workflow migration failed: ${e.message}`);
+  }
 
   // Web search & fetch reference node — gives the agent a per-tool
   // ref node for web_search/web_fetch (alongside ref-search-tools,
@@ -459,14 +472,22 @@ async function boot() {
   const gateways = new GatewayManager(config, log, agent, tools);
 
   // Plugin system — opt-in. Plugins run as full-privilege Node code with no
-  // sandbox, so loading is gated behind SPORE_PLUGINS_ENABLED and the default
-  // directory lives outside the agent-writable workspace.
+  // sandbox, so loading is gated behind SPORE_PLUGINS_ENABLED.
+  // Two discovery roots:
+  //   • Bundled (read-only at runtime): config.pluginsDir, defaults to <repo>/plugins.
+  //     Ships with the docker image; vetted plugins live here.
+  //   • User (operator-writable): config.pluginsUserDir, defaults to
+  //     <workspace>/plugins. Operator drops or git-clones plugins here.
   const plugins = new PluginManager(config, log);
   if (config.pluginsEnabled) {
-    const pluginsDir = config.pluginsDir || path.join(__dirname, '..', 'plugins');
-    await plugins.loadAll(pluginsDir);
+    const bundledDir = config.pluginsDir || path.join(__dirname, '..', 'plugins');
+    const userDir = config.pluginsUserDir
+      || (config.workspacePath ? path.join(config.workspacePath, 'plugins') : null);
+    plugins.setDiscoveryDirs({ bundled: bundledDir, user: userDir });
+    if (bundledDir) await plugins.loadAll(bundledDir, { source: 'bundled' });
+    if (userDir)    await plugins.loadAll(userDir,    { source: 'user' });
     await plugins.initAll({ config, log, graph, sessions, tools, agent, learner, gateways });
-    if (plugins.plugins.size > 0) log.info(`[plugins] ${plugins.plugins.size} plugin(s) active from ${pluginsDir}`);
+    if (plugins.plugins.size > 0) log.info(`[plugins] ${plugins.plugins.size} plugin(s) active`);
   } else {
     log.info('[plugins] Disabled (set SPORE_PLUGINS_ENABLED=true to enable). Plugins run unsandboxed with full process privileges.');
   }
