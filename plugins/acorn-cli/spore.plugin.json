@@ -4,5 +4,6 @@
   "version": "1.0.0",
   "kind": "tool",
   "entry": "./index.js",
-  "description": "The acorn CLI integration: ref-acorn-context (project_context, mode, client_routing, scope, persona patches, tool-usage rules, tooling-questions, discovery_workflow / graphcorn anchoring), the note_discovery tool, the acorn settings pane, and acorn-specific prompt sections. Uninstall to disable acorn entirely; reinstall to re-enable. Note: graphcorn session/project anchoring infrastructure (src/graph/sessions.js, src/graph/projects.js) stays in core."
+  "depends": ["session-graph"],
+  "description": "The acorn CLI integration: /api/acorn/auth + /api/acorn/sessions HTTP routes (the Go-binary protocol contract), session:start / session:end WS handlers, the acorn settings pane, acorn-specific prompt sections (Project Context, Plan Mode), the webapp self-register team-key gate, and the graph_update temp-tagging middleware. Depends on session-graph for the underlying session-node persistence + note_discovery tool + recall-skip heuristic + per-turn breadcrumb helpers. Uninstall to disable acorn entirely; uninstall session-graph first if it has no other dependents."
 }

@@ -1,29 +1,31 @@
 // Acorn CLI plugin.
 //
-// Self-contained — when uninstalled, no acorn-specific behavior runs in
-// SPORE core. Bundles:
-//   • Reference-node SQL (5 ref-acorn-* migrations + graphcorn-discovery)
-//   • /api/acorn/auth      → /api/plugins/acorn-cli/auth
-//   • /api/acorn/sessions  → /api/plugins/acorn-cli/sessions
-//   • note_discovery tool
-//   • Project Context + Plan Mode prompt sections
-//   • afterTurn hook: failure_fix synthesis + round_checkpoint breadcrumbs
-//   • afterLearn hook: discovered_in edge creation for new entities
-//   • beforeMessage hook: project-node upsert + cachedProject* opts patch
-//   • WS handlers: session:start / session:end / session:observe /
-//     session:unobserve / chat:history-request (acorn role-aware) /
-//     plus the legacy /api/acorn/* alias in core that rewrites to
-//     /api/plugins/acorn-cli/* so existing Go binaries keep working.
-//   • lib/sessions.js: session-node persistence (upsert / finalize /
-//     turn count / summarize / distill).
-//   • lib/projects.js: project-node persistence (per-(user, cwd) cache).
+// Depends on the `session-graph` plugin (manifest's `depends` field) for
+// the generic primitives — session/project node persistence, the
+// note_discovery tool, the per-turn breadcrumb + failure-fix capture
+// helpers, and the recall-skip heuristic. Acorn-cli imports those via
+// require('../session-graph/lib/...') and wires them into the agent
+// loop via the lifecycle hooks below.
 //
-// Still in core (not strictly acorn-coupled, just close):
-//   • _sessionClients map + orphaned-tool re-delivery (used by acorn
-//     fan-out but is a generic WS routing primitive).
-//   • Acorn role advertisement in WS handshake (capability frame).
-//   • Self-register (uses acornKey as a team-key gate; future cleanup
-//     can lift this into the plugin).
+// Acorn-cli's own surface (the parts that are genuinely
+// acorn-specific):
+//   • Reference-node SQL (5 ref-acorn-* migrations + graphcorn-discovery)
+//   • /api/acorn/auth + /api/acorn/sessions HTTP routes — the Go-binary
+//     wire-protocol contract (registerPathAlias rewrites /api/acorn/*
+//     to /api/plugins/acorn-cli/*).
+//   • WS handlers: session:start / session:end (Go-binary wire frames).
+//   • Project Context + Plan Mode prompt sections (acorn-specific UX:
+//     PHASE 1-6 plan mode, QUESTIONS marker, ACORN.md handling).
+//   • Settings pane (team key — auto-mints when enabled with no key).
+//   • Lifecycle hooks that call into session-graph's lib helpers:
+//       - afterTurn: failure-fix + round checkpoints + project activity
+//       - afterLearn: discovered_in edges + session-temp tagging
+//       - beforeMessage: project-node upsert + cachedProject* opts
+//       - shouldSkipRecall: looksLikeCodingTurn gate for cli sessions
+//       - webappSelfRegisterCheck: team-key gate for self-register
+//       - isNodeManaged: claims session/project node ownership
+//       - wsClose: ungraceful-close distillation chain
+//   • afterToolExec middleware: temp-tagging on graph_update creates.
 
 const crypto = require('crypto');
 
@@ -164,7 +166,7 @@ async function handleSessions(api, req, res) {
   const authHeader = req.headers['authorization'] || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   const session = token ? webSessions.get(token) : null;
-  if (!session || session.type !== 'acorn') {
+  if (!session || session.type !== 'cli') {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid or missing token' }));
     return;
@@ -214,341 +216,22 @@ async function handleSessions(api, req, res) {
   }
 }
 
-// ── note_discovery tool ─────────────────────────────────────────────
-// graphcorn — wrapper that creates a `discovery` node with sensible defaults
-// and auto-links it to the current acorn session + project nodes via
-// recorded_in / learned_about edges. Direct SQL (no sessions.js dependency)
-// so the tool can ship before the sessions/projects modules move.
-// Sync function — all DB ops are synchronous (better-sqlite3 / node:sqlite
-// prepared statements). Was previously marked async with no await calls,
-// which made the failure_fix capture's Promise-detection branch swallow
-// the result.
-function noteDiscovery(api, input, ctx) {
-  const learner = api._appContext?.learner;
-  if (!learner?.db) return { error: 'Graph writer not available' };
-  const text = String(input?.text || '').trim();
-  if (!text) return { error: 'text is required' };
-  const kind = ['fact', 'gotcha', 'workflow', 'config', 'failure_fix']
-    .includes(input?.kind) ? input.kind : 'fact';
-  const explicitLabel = input?.label && String(input.label).trim();
-  const label = explicitLabel || (text.length > 60 ? text.slice(0, 57).trimEnd() + '…' : text);
-  const relatedTo = Array.isArray(input?.relatedTo) ? input.relatedTo : [];
+// ── Generic primitives moved to session-graph plugin ────────────────
+// Acorn-cli's manifest declares `"depends": ["session-graph"]` so these
+// modules are always available at require time:
+//   ../session-graph/lib/sessions.js     — session-node CRUD
+//   ../session-graph/lib/projects.js     — project-node CRUD
+//   ../session-graph/lib/discovery.js    — noteDiscovery (also exposed
+//                                          as the note_discovery tool
+//                                          by session-graph itself)
+//   ../session-graph/lib/checkpoints.js  — captureFailureFix +
+//                                          recordRoundCheckpoint
+//   ../session-graph/lib/heuristics.js   — looksLikeCodingTurn
+const sessionsLib    = require('../session-graph/lib/sessions');
+const projectsLib    = require('../session-graph/lib/projects');
+const checkpointsLib = require('../session-graph/lib/checkpoints');
+const heuristicsLib  = require('../session-graph/lib/heuristics');
 
-  // Read session/project context from the wide ctx that core's tool
-  // dispatcher passes to plugin tools (Phase 2.3b).
-  const platform = ctx?.platform || null;
-  const sessionId = platform === 'cli' ? (ctx?.channelId || null) : null;
-  const userId = ctx?.userId || ctx?.userName || 'anon';
-  const cwd = ctx?.projectContext?.cwd || ctx?.projectContext?.clientCwd || null;
-
-  const db = learner.db;
-
-  // Slugify the label to a node id, suffix with a short hash of the
-  // text so two distinct discoveries with the same label don't collapse.
-  // If a node with the exact id already exists, append the new text as
-  // a fresh attribute on its `details` aspect rather than creating a
-  // new node.
-  const slug = label.toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40) || 'discovery';
-  const hash = crypto.createHash('sha256').update(text).digest('hex').slice(0, 6);
-  const id = `discovery-${slug}-${hash}`;
-
-  const existing = db.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
-  let isNew = false;
-  if (!existing) {
-    isNew = true;
-    // graphcorn: in an acorn session, every new node is born temp +
-    // tagged with the sessionId. Session-end distillation reads these
-    // back, picks winners (promotes by clearing ttl), and recycles the
-    // rest. Without a session ctx the discovery is permanent.
-    let sessionAlreadyDistilled = false;
-    if (sessionId) {
-      try {
-        const sessRow = db.prepare(
-          "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
-        ).get('session-' + String(sessionId));
-        sessionAlreadyDistilled = !!sessRow?.distilled;
-      } catch (e) { api.getLogger().warn('distill-check failed: ' + e.message); }
-    }
-    const extraJson = (sessionId && !sessionAlreadyDistilled)
-      ? JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() })
-      : '{}';
-    db.prepare(
-      'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
-      'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
-    ).run(id, label, 'discovery', text, 7, 'graphcorn', 'note_discovery', new Date().toISOString(), extraJson);
-  } else {
-    db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
-  }
-
-  // details aspect — text goes here
-  let detAsp = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'details'").get(id);
-  if (!detAsp) {
-    db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'details', 8, 'graphcorn')").run(id);
-    detAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
-  }
-  const dup = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? AND content = ?').get(detAsp.id, text);
-  if (!dup) {
-    db.prepare(
-      "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 8, 'note_discovery', 'graphcorn')"
-    ).run(detAsp.id, text);
-  }
-
-  // kind aspect — single attribute
-  let kAsp = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'kind'").get(id);
-  if (!kAsp) {
-    db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'kind', 6, 'graphcorn')").run(id);
-    kAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
-    db.prepare(
-      "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 6, 'note_discovery', 'graphcorn')"
-    ).run(kAsp.id, kind);
-  }
-
-  // Edges: discovery → session + discovery → project + relatedTo
-  const checkE = db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
-  const insE = db.prepare(
-    "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 1, 'graphcorn')"
-  );
-
-  let linkedSession = null;
-  if (sessionId) {
-    const sessId = 'session-' + String(sessionId);
-    if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessId)) {
-      if (!checkE.get(id, sessId, 'recorded_in')) insE.run(id, sessId, 'recorded_in');
-      linkedSession = sessId;
-    }
-  }
-
-  let linkedProject = null;
-  if (sessionId && userId && cwd) {
-    // Reuse the projects.js id convention without importing the full module
-    // (sessions.js + projects.js move to plugin/lib in a later sub-phase).
-    const u = String(userId).toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 32);
-    const h = crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 8);
-    const projId = `project-${u}-${h}`;
-    if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(projId)) {
-      if (!checkE.get(id, projId, 'learned_about')) insE.run(id, projId, 'learned_about');
-      linkedProject = projId;
-    }
-  }
-
-  let linkedRelated = 0;
-  for (const r of relatedTo) {
-    const rid = String(r || '').toLowerCase().trim();
-    if (!rid) continue;
-    if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(rid)) {
-      if (!checkE.get(id, rid, 'relates_to')) {
-        insE.run(id, rid, 'relates_to');
-        linkedRelated++;
-      }
-    }
-  }
-
-  return { ok: true, nodeId: id, isNew, kind, linkedSession, linkedProject, linkedRelated };
-}
-
-// ── Failure-fix capture (per-session ring buffer) ──────────────────
-// When a tool exec fails in an acorn turn and a similar exec succeeds
-// shortly after (same command token + overlapping path/url target),
-// synthesize a `failure_fix` discovery so the operator doesn't have to
-// relearn how to escape that specific gotcha next session. Cross-round
-// (within last 5 turns + 30 min wall clock) so it catches both immediate
-// retries and "tried other stuff first" resolutions.
-//
-// State lives at module scope so the ring buffer survives across turns
-// (re-instantiating per turn would lose the failures we're trying to
-// match against). Cap at 200 sessions; LRU-evict the oldest.
-const _sessionFailures = new Map();
-
-function captureFailureFix(api, opts, toolLog) {
-  if (!(opts.platform === 'cli' && opts.channelId && toolLog?.length)) return;
-  const learner = api._appContext?.learner;
-  if (!learner?.db) return;
-  try {
-    const sessKey = String(opts.channelId);
-    const buf = _sessionFailures.get(sessKey) || [];
-    const now = Date.now();
-    // Read the turn count back from the lifecycle aspect on the session node.
-    let turn = 0;
-    try {
-      const sessId = 'session-' + sessKey;
-      const row = learner.db.prepare(
-        "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'turn_count:%'"
-      ).get(sessId);
-      const m = row && String(row.content).match(/turn_count:\s*(\d+)/);
-      if (m) turn = parseInt(m[1], 10);
-    } catch { /* silent: best-effort lookup */ }
-
-    // Helper: extract the first command token + a "target" (first
-    // path-shaped or URL-shaped argument) for similarity matching.
-    const parseCmd = (cmd) => {
-      if (typeof cmd !== 'string') return { token: '', target: '' };
-      const trimmed = cmd.trim().replace(/^cd\s+\S+\s*&&\s*/, '');
-      const parts = trimmed.split(/\s+/);
-      let token = (parts[0] || '').toLowerCase();
-      if ((token === 'npx' || token === 'pnpx' || token === 'bunx' || token === 'yarn' || token === 'pnpm' || token === 'bun' || token === 'npm') && parts[1]) {
-        token = token + ' ' + parts[1].toLowerCase();
-      }
-      const target = parts.slice(1).find(p => /[\\/.]/.test(p) || p.startsWith('http')) || '';
-      return { token, target };
-    };
-
-    for (const t of toolLog) {
-      if (t.tool !== 'exec') continue;
-      let cmd = '';
-      try {
-        const inp = typeof t.input === 'string' ? JSON.parse(t.input) : t.input;
-        cmd = inp?.command || '';
-      } catch { /* silent: malformed JSON → fallback */ }
-      if (!cmd) continue;
-      const parsed = parseCmd(cmd);
-      // A tool "failed" if the host reported it (succeeded:false from a
-      // result.error key) OR if exec returned a non-zero exit code (acorn-
-      // cli's shell.go returns {output, exitCode:N} without an error key,
-      // so the original succeeded check missed those).
-      const failed = t.succeeded === false || (typeof t.exitCode === 'number' && t.exitCode !== 0);
-      if (failed) {
-        buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300), exitCode: t.exitCode ?? null });
-        if (buf.length > 10) buf.shift();
-      } else {
-        const fiveTurnsAgo = turn - 5;
-        const thirtyMinAgo = now - 30 * 60 * 1000;
-        const match = buf.find(f =>
-          f.token === parsed.token &&
-          f.turn >= fiveTurnsAgo &&
-          f.ts >= thirtyMinAgo &&
-          (!parsed.target || !f.target || parsed.target.includes(f.target) || f.target.includes(parsed.target))
-        );
-        if (match) {
-          // Synthesize the failure_fix discovery via the plugin's own
-          // noteDiscovery handler with a synthesized ctx. No need for the
-          // legacy AsyncLocalStorage / _currentXxx workaround the in-tree
-          // code used — we have the wide ctx right here.
-          try {
-            const exitStr = (typeof match.exitCode === 'number') ? String(match.exitCode) : '≠0';
-            const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${exitStr}). Fixed by: ${cmd.slice(0, 200)}`;
-            const ctx = {
-              platform: 'cli',
-              channelId: sessKey,
-              userId: opts.userId || 'anon',
-              projectContext: opts.projectContext || null,
-            };
-            const result = noteDiscovery(api, { text, kind: 'failure_fix' }, ctx);
-            if (result?.ok) {
-              api.getLogger().info(`failure_fix captured: ${result.nodeId} (${match.token} → ${parsed.token})`);
-            }
-          } catch (e) {
-            api.getLogger().warn(`failure_fix capture failed: ${e.message}`);
-          }
-          buf.splice(buf.indexOf(match), 1);
-        }
-      }
-    }
-    if (!_sessionFailures.has(sessKey) && _sessionFailures.size >= 200) {
-      _sessionFailures.delete(_sessionFailures.keys().next().value);
-    }
-    _sessionFailures.set(sessKey, buf);
-  } catch (e) {
-    api.getLogger().warn(`failure capture loop failed: ${e.message}`);
-  }
-}
-
-// ── Round-checkpoint (breadcrumb on session node's `rounds` aspect) ─
-// Each finished round leaves a breadcrumb on the session node's `rounds`
-// aspect: turn N | user prompt | tools | files | exec cmds | reply.
-// Capped at the last 50 entries so the session node doesn't balloon.
-// Also bumps the turn_count attribute on lifecycle. Only for acorn turns
-// where the session node exists.
-function recordRoundCheckpoint(api, opts, toolLog, finalText) {
-  const learner = api._appContext?.learner;
-  if (!(opts.platform === 'cli' && opts.channelId && learner?.db)) return;
-  try {
-    const sessions = require('./lib/sessions');
-    const turn = sessions.bumpTurnCount(learner, opts.channelId);
-    const sessId = 'session-' + opts.channelId;
-    const sessExists = learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
-    if (!sessExists) return;
-    let asp = learner.db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'rounds'").get(sessId);
-    if (!asp) {
-      learner.db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'rounds', 7, 'graphcorn')").run(sessId);
-      asp = { id: learner.db.prepare('SELECT last_insert_rowid() AS id').get().id };
-    }
-    const parseInput = (t) => {
-      if (t == null || t.input == null) return null;
-      if (typeof t.input === 'object') return t.input;
-      try { return JSON.parse(t.input); } catch { return null; }
-    };
-    const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
-    const fileSet = new Set();
-    const execCmds = [];
-    let failedExecs = 0;
-    for (const t of toolLog) {
-      if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
-        const inp = parseInput(t);
-        const p = inp?.path;
-        if (typeof p === 'string') fileSet.add(p);
-      }
-      if (t.tool === 'exec') {
-        const inp = parseInput(t);
-        const cmd = inp?.command || '';
-        if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
-        // Count both host-reported failures and non-zero exits.
-        if (t.succeeded === false || (typeof t.exitCode === 'number' && t.exitCode !== 0)) failedExecs++;
-      }
-    }
-    const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
-    const execPart = execCmds.length
-      ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 6).join(' ; ')}${execCmds.length > 6 ? ' …' : ''}`
-      : '';
-    const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 250);
-    const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
-    const replyPreview = replySnip.length > 800 ? replySnip.slice(0, 797) + '…' : replySnip;
-    const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
-    learner.db.prepare(
-      "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
-    ).run(asp.id, content);
-    // Trim to last 50 attributes on this aspect so the session node
-    // doesn't grow unbounded over long conversations.
-    const overflow = learner.db.prepare(
-      'SELECT id FROM attributes WHERE aspect_id = ? ORDER BY id DESC LIMIT -1 OFFSET 50'
-    ).all(asp.id);
-    if (overflow.length) {
-      const ids = overflow.map(r => r.id);
-      learner.db.prepare(`DELETE FROM attributes WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
-    }
-  } catch (e) {
-    api.getLogger().warn(`round checkpoint failed: ${e.message}`);
-  }
-}
-
-// ── Recall-skip heuristic (was in src/graph/context.js) ────────────
-// Acorn coding turns don't need the per-turn graph recall pipeline:
-// they need filesystem tools, not "remember our chat from last week".
-// Recall = ~45-65 DB hits + LLM round-trip on every message — pure
-// overhead for focused refactor work. Conservative: any positive
-// signal trips skip; everything else still gets full recall.
-// Aggregation/recall-shaped queries are filtered upstream by queryType,
-// so this only sees specific/task-shaped ones.
-const _CODING_FILE_RE = /[\/\\]?[A-Za-z0-9_.\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs|go|rs|java|kt|c|cc|cpp|h|hpp|cs|rb|php|lua|sh|bash|zsh|fish|sql|html|css|scss|less|md|json|jsonc|toml|yaml|yml|xml|ini|env|dockerfile|makefile|gradle|cmake|proto|graphql|gql|svelte|vue)\b/i;
-const _CODING_VERB_RE = /\b(?:read|edit|write|create|delete|rename|move|copy|fix|refactor|build|run|exec|test|debug|grep|find|search|implement|add|remove|update|patch|merge|rebase|commit|push|deploy|install|compile|lint|format|stub|mock|wire|hook|port|migrate|generate|scaffold)\b/i;
-const _CODING_TOOL_RE = /\b(?:read_file|write_file|edit_file|exec|glob|grep|web_fetch|web_search|bash|terminal|file)\b/i;
-const _CODE_FENCE_RE = /```/;
-const _COMMAND_RE = /^\s*[\$>]?\s*(?:npm|yarn|pnpm|bun|go|cargo|pip|pip3|python|python3|node|deno|make|just|docker|git|ls|cd|cat|grep|sed|awk|find|curl|wget)\s/i;
-function looksLikeCodingTurn(text) {
-  if (!text || typeof text !== 'string') return false;
-  if (_CODE_FENCE_RE.test(text)) return true;
-  if (_CODING_FILE_RE.test(text)) return true;
-  if (_CODING_TOOL_RE.test(text)) return true;
-  if (_COMMAND_RE.test(text)) return true;
-  // Verb check is the loosest — only count it when paired with some
-  // code-context cue (short and direct, OR includes another code-
-  // shaped fragment). Pure prose like "I should refactor my schedule"
-  // shouldn't trip this.
-  if (_CODING_VERB_RE.test(text) && (text.length < 240 || /\.[a-z]{1,5}\b/i.test(text))) return true;
-  return false;
-}
 
 // ── Project activity note (per-turn breadcrumb on project node) ────
 // Appends a one-line activity note to the project node so cross-session
@@ -563,7 +246,7 @@ function noteProjectActivity(api, opts, finalText, toolLog) {
   if (!opts?.projectContext || !learner) return;
   if (!finalText && !(toolLog && toolLog.length)) return;
   try {
-    const projects = require('./lib/projects');
+    const projects = projectsLib;
     const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
     const tools = (toolLog && toolLog.length)
       ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]`
@@ -588,7 +271,7 @@ function sessionStartHandler(api, ws, msg) {
   const config = ctx?.config || {};
   if (!learner) return;
   try {
-    const sessions = require('./lib/sessions');
+    const sessions = sessionsLib;
     const r = sessions.upsertSessionNode(learner, {
       sessionId: msg.sessionId,
       userId:    ws._user || msg.userName || 'anon',
@@ -617,7 +300,7 @@ function sessionEndHandler(api, ws, msg) {
   const log = api.getLogger();
   if (!learner) return;
   try {
-    const sessions = require('./lib/sessions');
+    const sessions = sessionsLib;
     sessions.finalizeSessionNode(learner, msg.sessionId, { endedAt: msg.endedAt });
     log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
     const llmClient = ctx?.tools?.anthropicClient;
@@ -881,33 +564,12 @@ module.exports = function register(api) {
     notFoundCode: 'ACORN_ROUTE_NOT_FOUND',
   });
 
-  // note_discovery tool — bare name (namespaced:false) preserves the
-  // public contract for the agent. Reads ctx.platform / ctx.channelId /
-  // ctx.projectContext.cwd to detect the acorn session and link the
-  // discovery node to session + project graph anchors.
-  api.registerTool('note_discovery', {
-    namespaced: false,
-    description:
-      'graphcorn — persist a durable discovery to the knowledge graph and link it to the current acorn session AND project. ' +
-      'Use this LIBERALLY when you learn something specific and useful that should survive the session: a config value that worked, a tool quirk, a workflow that fixed something, a port number, a CLI flag that mattered. ' +
-      'Lighter than graph_update — you provide the text, SPORE creates a properly-structured `discovery` node, links it to the session-<id> node (provenance) AND the project node (so future sessions on the same project can find it). ' +
-      'Prefer note_discovery for casual one-line saves; use graph_update when you genuinely need full schema control (custom node type, multiple aspects, explicit edges to specific nodes).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        text:  { type: 'string', description: 'One-line summary of the discovery (e.g. "Expo dev server defaults to port 8081 on Windows; use --port to override").' },
-        kind:  {
-          type: 'string',
-          enum: ['fact', 'gotcha', 'workflow', 'config', 'failure_fix'],
-          description: 'What kind of discovery this is. fact=plain knowledge. gotcha=non-obvious behavior. workflow=a procedure that worked. config=a setting/value. failure_fix=problem→solution pair. Defaults to "fact".',
-        },
-        label: { type: 'string', description: 'Optional short label for the node (e.g. "Expo port default"). Auto-derived from text if omitted.' },
-        relatedTo: { type: 'array', items: { type: 'string' }, description: 'Optional existing node ids this discovery relates to (e.g. ["expo", "react-native"]) — creates `relates_to` edges.' },
-      },
-      required: ['text'],
-    },
-    execute: (input, ctx) => noteDiscovery(api, input, ctx),
-  });
+  // The `note_discovery` tool is now owned by the session-graph plugin
+  // (which acorn-cli depends on via the manifest's `depends` field).
+  // The tool's behavior is identical — it reads ctx.platform /
+  // ctx.channelId / ctx.projectContext.cwd to detect the session and
+  // link the discovery node — so the agent contract is preserved
+  // verbatim. Acorn-cli no longer registers it here.
 
   // Prompt sections — Project Context (every acorn turn) + Plan Mode (when
   // projectContext.mode === 'plan'). Registered with the `*` wildcard so
@@ -965,33 +627,86 @@ module.exports = function register(api) {
   });
 
   // afterLearn worker hook — fires once after the learner finishes a batch.
-  // For acorn turns (sessionIdOpt non-null), auto-link every newly-created
-  // entity to the session-<id> node via a `discovered_in` edge so a
-  // later graph_query "what did session X teach us" returns them.
-  // No-op for non-acorn extractions.
+  // For acorn turns (sessionIdOpt non-null), this hook does TWO things:
+  //   1. Tag every newly-created non-identity node as session-temp:
+  //      sets extra = { ttl: 'temp', sessionId, tempCreated } so
+  //      session-end distillation can pick winners. Identity nodes
+  //      (people, agent self-node, the operator's user node) are
+  //      excluded — they're global identity and must NOT be sacrificed
+  //      to distillation.
+  //   2. Add a `discovered_in` edge from each new node to the
+  //      session-<id> node so a later graph_query "what did session X
+  //      teach us" returns them.
+  // Skip if the session was already distilled (race: extraction queued
+  // mid-session but executed post session-end). Tagging with the stale
+  // sessionId would create an orphan that sits temp until the 48h
+  // janitor — better to leave it permanent.
   api.registerWorkerHook('afterLearn', ({ sessionIdOpt, newNodeIds }) => {
     if (!sessionIdOpt || !Array.isArray(newNodeIds) || newNodeIds.length === 0) return;
-    const learner = api._appContext?.learner;
+    const ctx = api._appContext;
+    const learner = ctx?.learner;
     const db = learner?.db;
     if (!db) return;
     const sessId = 'session-' + String(sessionIdOpt);
-    const sessExists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
-    if (!sessExists) return;
+    const sessRow = db.prepare(
+      "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+    ).get(sessId);
+    if (!sessRow) return; // session node missing — skip both tag + edges
+    const sessionAlreadyDistilled = !!sessRow.distilled;
+
+    // Resolve identity-node ids so the temp-tag step skips them.
+    const config = ctx?.config || {};
+    const agentSelfId = config.agentId || 'spore';
+
+    const getNode = db.prepare('SELECT type, extra FROM nodes WHERE id = ?');
+    const updExtra = db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?');
     const checkE = db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
     const insE = db.prepare(
       "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, 'discovered_in', 1, 'graphcorn-learner')"
     );
-    let added = 0;
+
+    let tagged = 0;
+    let edgesAdded = 0;
     for (const nid of newNodeIds) {
       if (nid === sessId) continue;
+      const row = getNode.get(nid);
+      if (!row) continue;
+      const isIdentity = row.type === 'person' || nid === agentSelfId;
+      // Step 1: temp-tag if applicable.
+      if (!sessionAlreadyDistilled && !isIdentity) {
+        let extra = {};
+        try { extra = row.extra ? JSON.parse(row.extra) : {}; } catch { extra = {}; }
+        if (!extra.sessionId) {
+          extra.ttl = 'temp';
+          extra.sessionId = sessionIdOpt;
+          if (!extra.tempCreated) extra.tempCreated = new Date().toISOString();
+          updExtra.run(JSON.stringify(extra), nid);
+          tagged++;
+        }
+      }
+      // Step 2: discovered_in edge.
       if (!checkE.get(nid, sessId, 'discovered_in')) {
         insE.run(nid, sessId);
-        added++;
+        edgesAdded++;
       }
     }
-    if (added > 0) {
-      api.getLogger().debug(`Added ${added} discovered_in edge(s) to ${sessId}`);
+    if (tagged > 0 || edgesAdded > 0) {
+      api.getLogger().debug(`afterLearn: tagged ${tagged} session-temp + ${edgesAdded} discovered_in edges → ${sessId}`);
     }
+  });
+
+  // isNodeManaged lifecycle hook — claims ownership of nodes the
+  // plugin's session/distillation lifecycle manages. Core checks this
+  // before allowing manual ttl mutations (e.g. graph_update temp:false
+  // that would prematurely promote a session-tagged temp node mid-
+  // session). Returns true for: any node with extra.sessionId set,
+  // session-anchor nodes, project-anchor nodes.
+  api.registerLifecycleHook('isNodeManaged', ({ nodeId, extra }) => {
+    if (extra?.sessionId) return true;
+    const id = String(nodeId || '');
+    if (id.startsWith('session-')) return true;
+    if (id.startsWith('project-')) return true;
+    return false;
   });
 
   // afterTurn lifecycle hook — fires once per agent turn after _firePluginAfterTurn.
@@ -1003,8 +718,8 @@ module.exports = function register(api) {
   // _recordRoundCheckpoint, and _noteProjectActivity methods that lived in
   // src/agent/loop.js.
   api.registerLifecycleHook('afterTurn', ({ opts, finalText, toolLog }) => {
-    captureFailureFix(api, opts, toolLog || []);
-    recordRoundCheckpoint(api, opts, toolLog || [], finalText);
+    checkpointsLib.captureFailureFix(api, opts, toolLog || []);
+    checkpointsLib.recordRoundCheckpoint(api, opts, toolLog || [], finalText);
     noteProjectActivity(api, opts, finalText, toolLog || []);
   });
 
@@ -1062,7 +777,7 @@ module.exports = function register(api) {
   api.registerLifecycleHook('shouldSkipRecall', ({ opts, queryType }) => {
     return opts?.platform === 'cli'
       && queryType !== 'aggregation'
-      && looksLikeCodingTurn(opts?.messageContent);
+      && heuristicsLib.looksLikeCodingTurn(opts?.messageContent);
   });
 
   // beforeMessage lifecycle hook — fires once at the top of _runLoop's
@@ -1077,7 +792,7 @@ module.exports = function register(api) {
     const learner = api._appContext?.learner;
     if (!opts?.projectContext || !learner) return null;
     try {
-      const projects = require('./lib/projects');
+      const projects = projectsLib;
       const r = projects.upsertProject(learner, opts.userId || 'anon', opts.projectContext);
       if (!r) return null;
       return {
@@ -1115,7 +830,7 @@ module.exports = function register(api) {
     const config = ctx?.config || {};
     if (!learner) return;
     try {
-      const sessions = require('./lib/sessions');
+      const sessions = sessionsLib;
       const llmClient = ctx?.tools?.anthropicClient;
       for (const sid of sessionIds) {
         try {
@@ -1134,5 +849,5 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + /api/acorn alias + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + webappSelfRegisterCheck + afterToolExec(graph_update) + settings pane + prompt sections registered.');
+  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/acorn alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + webappSelfRegisterCheck + afterToolExec(graph_update) + settings pane + prompt sections registered.');
 };

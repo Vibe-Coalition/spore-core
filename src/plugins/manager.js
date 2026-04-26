@@ -237,6 +237,22 @@ class PluginManager {
   async initAll(appContext) {
     this._appContext = appContext;
 
+    // Drop plugins whose dependencies aren't installed before init.
+    // _sortByDependencies (called at load time) only handles ORDERING when
+    // the deps exist; here we enforce PRESENCE. A plugin with a missing
+    // dependency is skipped with a clear log line so the operator knows
+    // what's broken (rather than the dependent plugin failing mysteriously
+    // with `Cannot read properties of undefined`).
+    const dropped = [];
+    for (const [id, plugin] of this.plugins) {
+      const missing = (plugin.manifest.depends || []).filter(dep => !this.plugins.has(dep));
+      if (missing.length) {
+        this.log.warn(`[plugins] Skipping ${id} — missing dependencies: ${missing.join(', ')}. Install ${missing.length === 1 ? 'it' : 'them'} first.`);
+        dropped.push(id);
+      }
+    }
+    for (const id of dropped) this.plugins.delete(id);
+
     for (const [id, plugin] of this.plugins) {
       try {
         const api = new PluginAPI(id, plugin.manifest, appContext, this.log, plugin.path, this);
@@ -823,6 +839,20 @@ class PluginManager {
   async uninstallPlugin(pluginId) {
     const plugin = this.plugins.get(pluginId);
     if (!plugin) throw new Error(`Plugin ${pluginId} is not installed`);
+
+    // Block uninstall when other installed plugins depend on this one —
+    // would otherwise leave them in a broken state (their `require` calls
+    // into this plugin's lib/ fail at load time on the next restart).
+    // Operator must uninstall the dependents first, or pass the (future)
+    // `cascade: true` flag on the uninstall request.
+    const dependents = [];
+    for (const [otherId, other] of this.plugins) {
+      if (otherId === pluginId) continue;
+      if ((other.manifest.depends || []).includes(pluginId)) dependents.push(otherId);
+    }
+    if (dependents.length) {
+      throw new Error(`Cannot uninstall ${pluginId} — required by: ${dependents.join(', ')}. Uninstall ${dependents.length === 1 ? 'that plugin' : 'those plugins'} first.`);
+    }
 
     const api = plugin.instance;
     const removed = { tools: 0, gateways: 0, refNodes: 0 };

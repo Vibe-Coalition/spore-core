@@ -545,7 +545,7 @@ class Learner {
         try {
           await this._pluginManager.fireWorkerHook('afterLearn', {
             sessionId,                                  // log/display hint
-            sessionIdOpt: lastSessionIdOpt,             // acorn session id from opts.sessionId
+            sessionIdOpt: lastSessionIdOpt,             // session id from opts.sessionId (set by plugin worker hooks)
             batchSize: batch.length,
             elapsedMs: Date.now() - startedAt,
             newNodeIds: lastWrote?.newNodeIds || [],    // ids of nodes the learner just created
@@ -1098,21 +1098,24 @@ The JSON schema for updates becomes:
           }
           // If the LLM re-extracts an existing temp node as non-ephemeral
           // (worth keeping long-term), promote it by clearing the ttl marker.
-          //
-          // EXCEPTION: graphcorn-owned nodes (extra.sessionId set) are
-          // governed by session-end distillation — the learner must NOT
-          // clear their ttl mid-session or they'll escape distill's
-          // candidate sweep. Real impact: session T115505 had its own
-          // session node un-tempted here because the LLM re-extracted
-          // the session as an entity; every session-tagged temp the
-          // learner saw that session also got silently promoted, so
-          // distill found "no session-temp nodes" and the session's
-          // knowledge was lost.
+          // Plugin lifecycle hook `isNodeManaged` lets a plugin claim
+          // ownership of a node so the learner skips the promotion
+          // (e.g. acorn-cli's session-anchor nodes are governed by
+          // session-end distillation — promoting them mid-session would
+          // make them escape distill's candidate sweep).
           if (ent.ephemeral === false) {
             try {
               const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(resolved);
               let extraObj = {}; try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[learner] JSON.parse failed: ' + e.message); }
-              if (extraObj.ttl === 'temp' && !extraObj.sessionId) {
+              let isManaged = false;
+              if (this._pluginManager) {
+                const hooks = this._pluginManager.getLifecycleHooks?.('isNodeManaged') || [];
+                for (const h of hooks) {
+                  try { if (h({ nodeId: resolved, extra: extraObj })) { isManaged = true; break; } }
+                  catch (e) { this.log.warn('[learner] isNodeManaged hook failed: ' + e.message); }
+                }
+              }
+              if (extraObj.ttl === 'temp' && !isManaged) {
                 delete extraObj.ttl; delete extraObj.tempCreated;
                 this.db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), resolved);
                 this.log.info(`[learner] Promoted temp node to permanent: ${resolved}`);
@@ -1120,41 +1123,14 @@ The JSON schema for updates becomes:
             } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
           }
         } else {
-          // graphcorn: when called inside an acorn session, most new
-          // learner-extracted nodes are born temp + tagged with
-          // sessionId so session-end distillation can pick winners.
-          // EXCEPT identity nodes — people (especially the user) and
-          // the agent's self-node are global identity and must NOT be
-          // sacrificed to distillation. Session #1 created "yam" as
-          // type=person and the distiller nuked it (FK'd on edges).
-          const isIdentityNode =
-            ent.type === 'person' ||
-            id === (this.config.agentId || 'spore') ||
-            (opts.userId && id === String(opts.userId).toLowerCase()) ||
-            (opts.userName && id === String(opts.userName).toLowerCase());
-
-          // Post-distill race guard — if the learner extraction was
-          // queued DURING the session but is running AFTER its
-          // distillation finished, we cannot rely on distill to clean
-          // up temps any more. Tagging with the stale sessionId
-          // creates an orphan that sits temp until the 48h janitor.
-          // Detection: look up session-<id>'s extra.distilled_at. If
-          // set, the session is closed — skip the temp tag so this
-          // late-arriving node lands as permanent.
-          let sessionAlreadyDistilled = false;
-          if (opts.sessionId) {
-            try {
-              const sessRow = this.db.prepare(
-                "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
-              ).get('session-' + String(opts.sessionId));
-              sessionAlreadyDistilled = !!sessRow?.distilled;
-            } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
-          }
-
+          // New node — only set the temp flag if the extractor marked
+          // the entity ephemeral. Plugin-driven defaults (e.g.
+          // acorn-cli's "born temp tied to sessionId so session-end
+          // distillation can pick winners") are applied post-hoc by
+          // the plugin's afterLearn worker hook, which receives
+          // `newNodeIds` and tags them via UPDATE nodes SET extra=...
           let extraObj;
-          if (opts.sessionId && !isIdentityNode && !sessionAlreadyDistilled) {
-            extraObj = { ttl: 'temp', sessionId: opts.sessionId, tempCreated: new Date().toISOString() };
-          } else if (ent.ephemeral === true) {
+          if (ent.ephemeral === true) {
             extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
           } else {
             extraObj = {};

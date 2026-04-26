@@ -2154,16 +2154,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(id);
           let extraObj = {};
           try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[tools] JSON.parse failed: ' + e.message); }
-          // Graphcorn-owned nodes: session-end distillation owns their
-          // ttl lifecycle. Refuse agent-driven set/clear-temp overrides
-          // when extra.sessionId is present OR the id matches the
-          // session anchor pattern — prevents accidental promotion /
-          // demotion of structural graphcorn state.
-          const isGraphcornManaged = !!extraObj.sessionId || String(id).startsWith('session-');
-          if (isGraphcornManaged) {
-            // Silently ignore the temp flag change for graphcorn nodes;
-            // description updates above still go through.
-          } else {
+          // Plugin lifecycle hook `isNodeManaged` lets a plugin claim
+          // ownership of a node so core skips manual ttl mutations on
+          // it. Plugins return true when the node is part of their
+          // own lifecycle (e.g. acorn-cli's session-anchor nodes,
+          // where session-end distillation owns ttl). Description
+          // updates above still go through; only the ttl/temp flag
+          // is gated.
+          let isManaged = false;
+          const mgr = this._pluginManager;
+          if (mgr) {
+            const hooks = mgr.getLifecycleHooks?.('isNodeManaged') || [];
+            for (const h of hooks) {
+              try { if (h({ nodeId: id, extra: extraObj })) { isManaged = true; break; } }
+              catch (e) { this.log.warn('[tools] isNodeManaged hook failed: ' + e.message); }
+            }
+          }
+          if (!isManaged) {
             if (setTemp) {
               if (extraObj.ttl !== 'temp') {
                 extraObj.ttl = 'temp';
