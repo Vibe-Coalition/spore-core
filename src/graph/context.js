@@ -800,7 +800,15 @@ class GraphContext {
       .filter(k => !GraphContext.STATIC_KEYS.has(k) && sectionMap[k])
       .map(k => sectionMap[k]);
 
-    return [...staticSections, ...dynamicSections].join('\n\n');
+    // Plugin-contributed prompt sections (registerPromptSection). These are
+    // computed fresh per call — not part of any cache — so install/uninstall
+    // and per-turn opts changes are reflected immediately. Distinct from
+    // _buildPluginSection above (legacy context-engine surface) which lives
+    // in the orderedKeys section map. Appended after dynamic so plugin
+    // content doesn't get truncated by the section-budget pass.
+    const pluginExt = this._buildPluginPromptSections(mode, opts);
+
+    return [...staticSections, ...dynamicSections, pluginExt].filter(Boolean).join('\n\n');
   }
 
   // ── Cache Management ──────────────────────────────────────────────────────
