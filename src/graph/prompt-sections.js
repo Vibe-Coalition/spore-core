@@ -54,7 +54,7 @@ function applyPromptSectionsMixin(GraphContext) {
           }
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[prompt-sections] messageContent.toLowerCase failed: ' + e.message); }
 
     if (episodes.length === 0) return null;
 
@@ -270,7 +270,8 @@ function applyPromptSectionsMixin(GraphContext) {
         }) : null;
         if (result && typeof result === 'string') parts.push(result);
         else if (result?.text) parts.push(result.text);
-      } catch {
+      } catch (e) {
+        this.log.warn('[prompt-sections] engine.assemble failed: ' + e.message);
       }
     }
     return parts.length > 0 ? `## Plugin Context\n${parts.join('\n\n')}` : null;
@@ -581,7 +582,7 @@ function applyPromptSectionsMixin(GraphContext) {
           lines.push('The skills library is currently empty. Be the first to contribute!');
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[prompt-sections] require failed: ' + e.message); }
 
     const selfModNode = this.getNode('self-modification');
     if (selfModNode) {
@@ -939,12 +940,12 @@ function applyPromptSectionsMixin(GraphContext) {
         try {
           const { execFileSync } = require('child_process');
           fp = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { timeout: 2000, encoding: 'utf8' }).trim();
-        } catch {}
+        } catch (e) { this.log.warn('[prompt-sections] require failed: ' + e.message); }
         lines.push(`- **Cluster SSH key**: installed at /data/.ssh/id_cluster${fp ? ` (\`${fp.split(' ').slice(0, 2).join(' ')}\`)` : ''}. Used automatically by remote_exec and the cluster test endpoint.`);
       } else {
         lines.push('- **Cluster SSH key**: *not installed*. Operator needs to paste/upload/generate one in Settings → Compute Cluster → Cluster SSH key and install the public half on the login node\'s ~/.ssh/authorized_keys.');
       }
-    } catch {}
+    } catch (e) { this.log.warn('[prompt-sections] require failed: ' + e.message); }
 
     // Pointer into graph for workflow details
     lines.push('- For SLURM + tmux workflows, read `ref-compute-cluster`. For tailscale CLI + troubleshooting, read `ref-tailscale`. Both connect to your self-node via `documents` edges.');
@@ -1100,7 +1101,7 @@ function applyPromptSectionsMixin(GraphContext) {
         let sessionExists = false;
         try {
           sessionExists = !!this.db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessNodeId);
-        } catch {}
+        } catch (e) { this.log.warn('[prompt-sections] db.prepare failed: ' + e.message); }
         if (sessionExists) {
           parts.push('');
           parts.push('## This Session');
@@ -1142,9 +1143,9 @@ function applyPromptSectionsMixin(GraphContext) {
     // 'ask first then plan' constraint that prevents the agent from
     // dumping QUESTIONS: and PLAN_READY in the same response.
     if (opts.projectContext) {
-      try { this.log.info(`[plan-mode] projectContext.mode=${opts.projectContext.mode || 'unset'} platform=${opts.platform || 'unset'}`); } catch {}
+      try { this.log.info(`[plan-mode] projectContext.mode=${opts.projectContext.mode || 'unset'} platform=${opts.platform || 'unset'}`); } catch (e) { this.log.warn('[prompt-sections] log.info failed: ' + e.message); }
     } else if (opts.platform === 'cli') {
-      try { this.log.warn('[plan-mode] cli turn but projectContext is missing — agent will see no Project Context section'); } catch {}
+      try { this.log.warn('[plan-mode] cli turn but projectContext is missing — agent will see no Project Context section'); } catch (e) { this.log.warn('[prompt-sections] log.warn failed: ' + e.message); }
     }
     if (opts.projectContext && opts.projectContext.mode === 'plan') {
       parts.push('## Plan Mode (acorn CLI)');

@@ -159,8 +159,9 @@ class GraphContext {
             const insert = this.db.prepare('INSERT INTO attr_fts(rowid, content) VALUES (?, ?)');
             let indexed = 0;
             for (const a of attrs) {
-              try { insert.run(Number(a.rowid), String(a.content)); indexed++; }
-              catch (_) { /* skip unbindable rows */ }
+              try { insert.run(Number(a.rowid), String(a.content)); indexed++; } catch (_) {
+                this.log.warn('[context] insert.run failed: ' + _.message);
+              }
             }
             this.log.info?.(`[graph] attr_fts indexed ${indexed}/${attrs.length} attributes`);
           }
@@ -278,7 +279,7 @@ class GraphContext {
     // Detach removed projects
     for (const sg of [...this._sharedGraphs]) {
       if (!wantedSlugs.has(sg.slug)) {
-        try { this.db.exec(`DETACH DATABASE ${sg.alias}`); } catch {}
+        try { this.db.exec(`DETACH DATABASE ${sg.alias}`); } catch (e) { this.log.warn('[context] db.exec failed: ' + e.message); }
         this._sharedGraphs = this._sharedGraphs.filter(s => s.slug !== sg.slug);
         this.log.info(`[shared-graph] Detached project "${sg.slug}"`);
       }
@@ -300,7 +301,7 @@ class GraphContext {
       if (existing) {
         if (existing._ino === diskIno) continue;
         // File was replaced — detach stale handle and re-attach below
-        try { this.db.exec(`DETACH DATABASE ${existing.alias}`); } catch {}
+        try { this.db.exec(`DETACH DATABASE ${existing.alias}`); } catch (e) { this.log.warn('[context] db.exec failed: ' + e.message); }
         this._sharedGraphs = this._sharedGraphs.filter(s => s.slug !== slug);
         this.log.info(`[shared-graph] File replaced for "${slug}" (ino ${existing._ino} → ${diskIno}), re-attaching`);
       }
@@ -496,7 +497,7 @@ class GraphContext {
                       if (row) allResults.set(nid, this._hydrateNode(row));
                     }
                   }
-                } catch { }
+                } catch (e) { this.log.warn('[context] _searchAttributesFTS failed: ' + e.message); }
               }
 
               const temporal = this._detectTemporalQuery(opts.messageContent);
@@ -692,7 +693,7 @@ class GraphContext {
               nodeIds: opts._precomputedResults.map(n => n.id),
               source: 'retrieval',
             });
-          } catch { }
+          } catch (e) { this.log.warn('[context] graphEvents.emit failed: ' + e.message); }
         }
       } catch (e) {
         this.log.warn(`[graph] buildSystemPromptAsync search phase error: ${e.message}`);
@@ -803,7 +804,7 @@ class GraphContext {
         this._graphMtime = mtime;
         this.log.debug('[context] Cache invalidated — graph modified');
       }
-    } catch { }
+    } catch (e) { this.log.warn('[context] require failed: ' + e.message); }
   }
 
   _getCachedSection(key, buildFn) {

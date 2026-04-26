@@ -81,7 +81,7 @@ class GraphRegistry {
         const db = new DatabaseSync(destPath);
         nodeCount = db.prepare('SELECT COUNT(*) as c FROM nodes').get().c;
         db.close();
-      } catch {}
+      } catch { /* silent: best-effort close */ }
 
       this._registry[slug] = {
         slug,
@@ -166,7 +166,7 @@ class GraphRegistry {
       const db = new DatabaseSync(dbPath);
       nodeCount = db.prepare('SELECT COUNT(*) as c FROM nodes').get().c;
       db.close();
-    } catch {}
+    } catch { /* silent: best-effort close */ }
 
     this._registry[slug] = {
       slug,
@@ -198,7 +198,7 @@ class GraphRegistry {
       const db = new DatabaseSync(destPath);
       nodeCount = db.prepare('SELECT COUNT(*) as c FROM nodes').get().c;
       db.close();
-    } catch {}
+    } catch { /* silent: best-effort close */ }
 
     this._registry[newSlug] = {
       slug: newSlug,
@@ -218,9 +218,9 @@ class GraphRegistry {
     if (slug === this.getActiveSlug()) throw new Error('Cannot delete the active graph. Switch to another graph first.');
 
     const dbPath = path.join(this.graphsDir, `${slug}.db`);
-    try { fs.unlinkSync(dbPath); } catch {}
-    try { fs.unlinkSync(dbPath + '-wal'); } catch {}
-    try { fs.unlinkSync(dbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(dbPath); } catch { /* silent: best-effort cleanup */ }
+    try { fs.unlinkSync(dbPath + '-wal'); } catch { /* silent: best-effort cleanup */ }
+    try { fs.unlinkSync(dbPath + '-shm'); } catch { /* silent: best-effort cleanup */ }
 
     delete this._registry[slug];
     this._save();
@@ -251,7 +251,7 @@ class GraphRegistry {
       this._registry[slug].edgeCount = db.prepare('SELECT COUNT(*) as c FROM edges').get().c;
       db.close();
       this._save();
-    } catch {}
+    } catch { /* silent: best-effort close */ }
   }
 
   _slugify(name) {

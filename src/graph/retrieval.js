@@ -224,7 +224,7 @@ function applyRetrievalMixin(GraphContext) {
       try {
         const vec = JSON.parse(row.embedding);
         scored.push({ id: row.id, score: _cosine(queryVec, vec) });
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
     }
 
     scored.sort((a, b) => b.score - a.score);
@@ -249,7 +249,7 @@ function applyRetrievalMixin(GraphContext) {
       try {
         const vec = JSON.parse(row.embedding);
         scored.push({ id: row.id, score: _cosine(queryVec, vec) });
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
     }
 
     scored.sort((a, b) => b.score - a.score);
@@ -422,7 +422,7 @@ function applyRetrievalMixin(GraphContext) {
     try {
       const extra = JSON.parse(row.extra || '{}');
       Object.assign(node, extra);
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
 
     node.aliases = this.stmt('getAliases', 'SELECT alias FROM aliases WHERE node_id = ?')
       .all(row.id).map(r => r.alias);
@@ -581,7 +581,7 @@ Rules:
             seen.add(row.id);
             pinned.push(this._hydrateNode(row));
           }
-        } catch { }
+        } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
       }
       if (pinned.length >= 6) break;
     }
@@ -735,7 +735,7 @@ Rules:
     try {
       const extra = JSON.parse(row.extra || '{}');
       Object.assign(node, extra);
-    } catch {}
+    } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
 
     try {
       node.aliases = this.db.prepare(`SELECT alias FROM ${sg.alias}.aliases WHERE node_id = ?`)
@@ -832,7 +832,7 @@ Rules:
           })));
         }
       }
-    } catch {}
+    } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
     return result;
   };
 
@@ -859,7 +859,7 @@ Rules:
               results.push({ id: neighbor, depth });
             }
           }
-        } catch { }
+        } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
       }
       frontier = nextFrontier;
       if (results.length >= maxNodes) break;
@@ -1040,7 +1040,7 @@ Rules:
             seenIds.add(localKey);
           }
         }
-      } catch {}
+      } catch (e) { this.log.warn('[retrieval] _searchSharedGraphs failed: ' + e.message); }
     }
 
     if (queryType === 'aggregation' || queryType === 'preference') {
@@ -1121,7 +1121,7 @@ Rules:
           if (node) { results.push(node); seenIds.add(nid); }
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
 
     if (temporalHints.hasTemporal) {
       const refDate = opts._referenceDate || todayStr;
@@ -1144,7 +1144,7 @@ Rules:
             seenIds.add(row.id);
           }
         }
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
     }
 
     if (queryType === 'preference') {
@@ -1166,7 +1166,7 @@ Rules:
             seenIds.add(row.id);
           }
         }
-      } catch { }
+      } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
     }
 
     if (results.length === 0) return null;
@@ -1257,7 +1257,7 @@ Rules:
             allNodeIds.add(neighborId);
             neighborCount++;
           }
-        } catch { }
+        } catch (e) { this.log.warn('[retrieval] getEdges failed: ' + e.message); }
       }
     }
 
@@ -1290,7 +1290,7 @@ Rules:
           parts.push('- **Relationships**: ' + edgeRelations.slice(0, 8).join('; '));
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] Map failed: ' + e.message); }
 
     try {
       const derivedFacts = this.db.prepare(
@@ -1305,7 +1305,7 @@ Rules:
           parts.push(`- _Inferred: ${df.content}_`);
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
 
     try {
       const nodeIdList = [...allNodeIds];
@@ -1325,7 +1325,7 @@ Rules:
           parts.push(`- _Reflection${r.label ? ` [${r.label}]` : ''}: ${r.content}_`);
         }
       }
-    } catch { }
+    } catch (e) { this.log.warn('[retrieval] nodeIdList.map failed: ' + e.message); }
 
     return parts.join('\n');
   };
