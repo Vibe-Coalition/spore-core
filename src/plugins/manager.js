@@ -468,12 +468,29 @@ class PluginManager {
   }
 
   /**
-   * Get all middleware hooks of a given type.
+   * Get all middleware hooks of a given type. Walks every loaded plugin —
+   * not just plugins of kind 'middleware' — because middleware can be
+   * registered alongside any primary kind (e.g. the acorn-cli 'tool'
+   * plugin registers an afterToolExec middleware).
    */
   getMiddleware(hook) {
     const handlers = [];
-    for (const api of this.getPlugins('middleware')) {
-      handlers.push(...api.getMiddleware(hook));
+    for (const [, plugin] of this.plugins) {
+      const list = plugin.instance?.getMiddleware?.(hook);
+      if (list && list.length) handlers.push(...list);
+    }
+    return handlers;
+  }
+
+  /**
+   * Get all agent-loop lifecycle hooks for an event ('afterTurn' / 'beforeRound').
+   * Walks every loaded plugin; lifecycle hooks aren't tied to a plugin kind.
+   */
+  getLifecycleHooks(event) {
+    const handlers = [];
+    for (const [, plugin] of this.plugins) {
+      const list = plugin.instance?.getLifecycleHooks?.(event);
+      if (list && list.length) handlers.push(...list);
     }
     return handlers;
   }

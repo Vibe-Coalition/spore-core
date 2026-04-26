@@ -370,7 +370,7 @@ class GraphContext {
     'anti', 'tooling', 'reflections', 'gaps', 'plugin',
   ]);
 
-  buildStaticPrompt(mode = 'full') {
+  buildStaticPrompt(mode = 'full', opts = {}) {
     this._refreshCacheIfNeeded();
     const B = this._sectionBudgets;
     const orderedKeys = GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full;
@@ -378,7 +378,10 @@ class GraphContext {
     const cacheKey = mode;
     if (this._staticPromptCache && this._staticPromptCache.mtime === this._graphMtime && this._staticPromptCache.mode === cacheKey) {
       const cachedText = this._staticPromptCache.text;
-      const pluginExt = this._buildPluginPromptSections(mode);
+      // Plugin sections compute fresh per call (not cached) — opts-conditional
+      // content (e.g. acorn plugin's Project Context block gated on
+      // opts.platform === 'cli') is reflected on every build.
+      const pluginExt = this._buildPluginPromptSections(mode, opts);
       return pluginExt ? `${cachedText}\n\n${pluginExt}` : cachedText;
     }
 
@@ -405,8 +408,9 @@ class GraphContext {
 
     // Plugin-contributed prompt sections: rendered fresh per call so hot
     // install/uninstall is reflected on the next build without invalidating
-    // the static-prompt cache for built-in content.
-    const pluginExt = this._buildPluginPromptSections(mode);
+    // the static-prompt cache for built-in content. opts is forwarded so
+    // plugin renderFns can branch on platform / projectContext / sessionId.
+    const pluginExt = this._buildPluginPromptSections(mode, opts);
     return pluginExt ? `${text}\n\n${pluginExt}` : text;
   }
 

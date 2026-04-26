@@ -19,6 +19,7 @@ class PluginAPI {
     this._gateways = [];
     this._workerHooks = new Map();
     this._middleware = new Map();
+    this._lifecycleHooks = new Map();
     this._promptSections = [];
     this._referenceNodes = null;
     this._settingsPane = null;
@@ -95,6 +96,32 @@ class PluginAPI {
     if (!this._middleware.has(hook)) this._middleware.set(hook, []);
     this._middleware.get(hook).push(handler);
     this._log.debug(`[plugin:${this.pluginId}] Registered middleware: ${hook}`);
+  }
+
+  /**
+   * Register an agent-loop lifecycle hook. Distinct from middleware (which
+   * fires around tool exec / inference) and worker hooks (which fire from
+   * learner/maintainer): lifecycle hooks fire from the agent loop on a
+   * per-turn basis. Currently supported events:
+   *
+   *   • 'afterTurn'  — fires at the end of a completed turn. Receives
+   *                    `{ opts, finalText, toolLog, learner, log }`. Used for
+   *                    failure-capture and round-checkpointing without core
+   *                    needing to know which plugin owns the behavior.
+   *   • 'beforeRound' — fires at the top of _runLoop before the first
+   *                     inference. Receives `{ opts, learner, log }`.
+   *
+   * Handlers are sync-or-async; errors are caught at the loop boundary.
+   */
+  registerLifecycleHook(event, handler) {
+    if (typeof handler !== 'function') throw new Error('registerLifecycleHook requires a function');
+    if (!this._lifecycleHooks.has(event)) this._lifecycleHooks.set(event, []);
+    this._lifecycleHooks.get(event).push(handler);
+    this._log.debug(`[plugin:${this.pluginId}] Registered lifecycle hook: ${event}`);
+  }
+
+  getLifecycleHooks(event) {
+    return this._lifecycleHooks.get(event) || [];
   }
 
   /**

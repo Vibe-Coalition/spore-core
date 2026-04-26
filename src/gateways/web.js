@@ -3117,7 +3117,11 @@ class WebGateway {
         return;
       }
 
-      // ── CORS for Acorn API endpoints (companion web app) ──
+      // ── CORS for Acorn API endpoints (companion web app + Go CLI) ──
+      // Stays in core unconditionally — the Go client expects /api/acorn/*
+      // as its protocol contract regardless of whether the acorn-cli plugin
+      // is installed. CORS plus the dispatch routing below preserve the
+      // contract while letting the plugin own the actual handlers.
       if (urlPath.startsWith('/api/acorn/')) {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -3126,6 +3130,29 @@ class WebGateway {
           res.writeHead(204);
           res.end();
           return;
+        }
+
+        // Path alias: rewrite /api/acorn/<rest> to /api/plugins/acorn-cli/<rest>
+        // and dispatch to the plugin's web route if one is registered. This
+        // preserves the legacy URL space for existing acorn-cli Go binaries
+        // while letting the plugin own the actual handlers.
+        const mgr = this.tools?._pluginManager;
+        if (mgr?.resolveWebRoute) {
+          const aliasPath = '/api/plugins/acorn-cli' + urlPath.slice('/api/acorn'.length);
+          const resolved = mgr.resolveWebRoute(req.method, aliasPath);
+          if (resolved) {
+            try {
+              const query = (() => { try { return new URL(req.url, 'http://x').searchParams; } catch { return new URLSearchParams(); } })();
+              await resolved.handler(req, res, { urlPath: aliasPath, query, user: req._user || null });
+            } catch (e) {
+              this.log.error(`[plugins] route ${resolved.pluginId}${aliasPath} failed: ${e?.message}`);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: e?.message || 'plugin route failed' }));
+              }
+            }
+            return;
+          }
         }
       }
 
@@ -3207,6 +3234,20 @@ class WebGateway {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Failed to list sessions' }));
         }
+        return;
+      }
+
+      // Final fallback for /api/acorn/* — if no in-tree handler matched and
+      // no plugin alias dispatched, the acorn-cli plugin isn't installed.
+      // Return a clear 503 so Go clients can show an actionable error
+      // instead of the generic 404 they'd otherwise see.
+      if (urlPath.startsWith('/api/acorn/')) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Acorn capability not installed',
+          code: 'ACORN_NOT_INSTALLED',
+          hint: 'The SPORE operator must enable plugins (SPORE_PLUGINS_ENABLED=true) and install the acorn-cli plugin via the Plugins settings tab.',
+        }));
         return;
       }
 
@@ -4565,6 +4606,31 @@ class WebGateway {
             return;
           }
           // Fall through to default unknown-type handling if nothing matched.
+        }
+
+        // Acorn session:* alias — preserves the legacy WS protocol contract
+        // for Go clients while letting the acorn-cli plugin own the actual
+        // handlers. Rewrites the bare `session:start` / `session:end` /
+        // `session:observe` / `session:unobserve` types to the plugin-
+        // namespaced form and dispatches to the plugin if installed. Falls
+        // through to the in-tree handlers below in transitional builds; in
+        // the fully-decoupled build the in-tree handlers are gone and this
+        // alias is the only path.
+        if (typeof msg.type === 'string' && msg.type.startsWith('session:')) {
+          const mgr = this.tools?._pluginManager;
+          const aliasType = `plugin:acorn-cli:${msg.type}`;
+          const resolved = mgr?.resolveWsHandler?.(aliasType);
+          if (resolved) {
+            try {
+              await resolved.handler(ws, msg, { user: ws._user, sessionId: msg.sessionId, log: this.log });
+            } catch (e) {
+              this.log.warn(`[plugins] WS handler ${aliasType} threw: ${e.message}`);
+            }
+            return;
+          }
+          // Plugin not installed — fall through to in-tree handlers (still
+          // present in this transitional build). When those are removed and
+          // no plugin matches either, the frame is silently ignored.
         }
 
         // graphcorn: session:start fires once per acorn launch right

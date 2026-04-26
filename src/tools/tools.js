@@ -1366,10 +1366,22 @@ Set wait:false when you've submitted a long background job and just want to retu
 
         default: {
           if (this._pluginManager) {
+            // Plugin tools and middleware get the full per-session tool context
+            // so they can read platform / sessionToken / projectContext / userId
+            // without falling back to the host's _current* legacy fields.
+            const sessionCtx = this._sessionContexts?.get(sessionKey) || {};
             const pluginResult = await this._pluginManager.executePluginTool(normalizedName, input, {
-              trigger: this._currentTrigger,
-              channelId: this._currentChannelId,
-              platform: this._currentPlatform,
+              sessionKey,
+              trigger:        sessionCtx.trigger        ?? this._currentTrigger ?? null,
+              channelId:      sessionCtx.channelId      ?? this._currentChannelId ?? null,
+              platform:       sessionCtx.platform       ?? this._currentPlatform ?? null,
+              userId:         sessionCtx.userId         ?? this._currentUserId ?? null,
+              userName:       sessionCtx.userName       ?? this._currentUserName ?? null,
+              userRole:       sessionCtx.userRole       ?? this._currentUserRole ?? null,
+              userMessage:    sessionCtx.userMessage    ?? this._currentUserMessage ?? null,
+              sessionToken:   sessionCtx.sessionToken   ?? this._currentSessionToken ?? null,
+              projectContext: sessionCtx.projectContext ?? this._currentProjectContext ?? null,
+              abortSignal:    sessionCtx.abortSignal    ?? this._abortSignal ?? null,
             });
             if (pluginResult !== null) return pluginResult;
           }

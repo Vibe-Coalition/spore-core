@@ -345,8 +345,11 @@ class AgentLoop {
         this.log.info(`[plan-mode] system prompt OK — all 4 markers present, ${systemPrompt.length} bytes total`);
       }
     }
-    // Split for prompt caching: static part can be cached by the API between calls
-    const staticPrompt = this.graph.buildStaticPrompt(promptMode);
+    // Split for prompt caching: static part can be cached by the API between calls.
+    // opts forwarded so plugin-contributed prompt sections can branch on
+    // platform / projectContext / sessionId without breaking the static cache
+    // (plugin sections are computed fresh, not cached).
+    const staticPrompt = this.graph.buildStaticPrompt(promptMode, opts);
     const dynamicContext = systemPrompt.length > staticPrompt.length ? systemPrompt.slice(staticPrompt.length) : null;
 
     // 2. Add the user message to session history (text only — images are ephemeral)
@@ -1060,6 +1063,35 @@ class AgentLoop {
         engine.afterTurn(turnData).catch(() => { /* silent: plugin best-effort */ });
       }
     }
+    // Plugin lifecycle hooks (registerLifecycleHook('afterTurn', ...)). Distinct
+    // from context-engine afterTurn above — these are plain handlers that get
+    // the full opts so plugins can stand in for `_captureFailureFix` /
+    // `_recordRoundCheckpoint` etc. without core knowing they exist.
+    for (const handler of this._pluginManager.getLifecycleHooks?.('afterTurn') || []) {
+      try { handler({ opts, finalText, toolLog, learner: this.learner, log: this.log }); } catch (e) { this.log.warn('[loop] afterTurn lifecycle hook failed: ' + e.message); }
+    }
+  }
+
+  /**
+   * Build the wide ctx passed to plugin tool/middleware handlers. Pulls from
+   * the per-session tool context map first (set in _runLoop), falls back to
+   * `opts` so the ctx is populated even before _sessionContexts is attached.
+   */
+  _buildPluginToolCtx(sessionKey, toolCtx, opts) {
+    const sessionCtx = this.tools?._sessionContexts?.get(sessionKey) || toolCtx || {};
+    return {
+      sessionKey,
+      trigger:        sessionCtx.trigger        ?? opts?.trigger        ?? null,
+      channelId:      sessionCtx.channelId      ?? opts?.channelId      ?? null,
+      platform:       sessionCtx.platform       ?? opts?.platform       ?? null,
+      userId:         sessionCtx.userId         ?? opts?.userId         ?? null,
+      userName:       sessionCtx.userName       ?? opts?.userName       ?? null,
+      userRole:       sessionCtx.userRole       ?? opts?.userRole       ?? null,
+      userMessage:    sessionCtx.userMessage    ?? opts?.content        ?? null,
+      sessionToken:   sessionCtx.sessionToken   ?? opts?.sessionToken   ?? null,
+      projectContext: sessionCtx.projectContext ?? opts?.projectContext ?? null,
+      abortSignal:    sessionCtx.abortSignal    ?? opts?._abortSignal   ?? null,
+    };
   }
 
   /**
@@ -1454,10 +1486,13 @@ class AgentLoop {
     // don't race on a shared "current session" field in tools.js.
     const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
 
-    // Plugin middleware: beforeToolExec
+    // Plugin middleware: beforeToolExec — handlers get the same wide ctx the
+    // plugin tool dispatcher gets, so a plugin observing graph_update can read
+    // sessionToken / projectContext / platform without touching `this.tools`.
     if (this._pluginManager) {
+      const pluginCtx = this._buildPluginToolCtx(sessionKey, toolCtx, opts);
       for (const handler of this._pluginManager.getMiddleware('beforeToolExec')) {
-        try { await handler({ name: toolBlock.name, input: toolBlock.input, toolUseId: toolBlock.id, sessionKey }); } catch (e) { this.log.warn('[loop] beforeToolExec handler failed: ' + e.message); }
+        try { await handler({ name: toolBlock.name, input: toolBlock.input, toolUseId: toolBlock.id, sessionKey, ctx: pluginCtx }); } catch (e) { this.log.warn('[loop] beforeToolExec handler failed: ' + e.message); }
       }
     }
 
@@ -1474,10 +1509,14 @@ class AgentLoop {
 
     const toolExecMs = Date.now() - toolExecStart;
 
-    // Plugin middleware: afterToolExec
+    // Plugin middleware: afterToolExec — handlers can mutate the graph as a
+    // side-effect (e.g. acorn plugin tags new nodes after graph_update). The
+    // wide ctx mirrors what executePluginTool passes so middleware doesn't
+    // need to reach into the tools host for session metadata.
     if (this._pluginManager) {
+      const pluginCtx = this._buildPluginToolCtx(sessionKey, toolCtx, opts);
       for (const handler of this._pluginManager.getMiddleware('afterToolExec')) {
-        try { await handler({ name: toolBlock.name, input: toolBlock.input, toolUseId: toolBlock.id, result, durationMs: toolExecMs, sessionKey }); } catch (e) { this.log.warn('[loop] afterToolExec handler failed: ' + e.message); }
+        try { await handler({ name: toolBlock.name, input: toolBlock.input, toolUseId: toolBlock.id, result, durationMs: toolExecMs, sessionKey, ctx: pluginCtx }); } catch (e) { this.log.warn('[loop] afterToolExec handler failed: ' + e.message); }
       }
     }
     this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
