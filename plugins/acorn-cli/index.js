@@ -198,6 +198,7 @@ const sessionsLib    = require('../session-graph/lib/sessions');
 const projectsLib    = require('../session-graph/lib/projects');
 const checkpointsLib = require('../session-graph/lib/checkpoints');
 const heuristicsLib  = require('../session-graph/lib/heuristics');
+const scriptsLib     = require('../session-graph/lib/scripts');
 
 
 // ── Project activity note (per-turn breadcrumb on project node) ────
@@ -386,7 +387,43 @@ function buildProjectContextSection(api, opts) {
     parts.push(`**Sandbox**: ALL file operations (read_file, write_file, edit_file, exec) are sandboxed to ${pc.cwd}. Paths outside that directory will be REJECTED by the tool executor on the user's machine. If the user explicitly asks you to touch a path outside ${pc.cwd}, tell them to run \`/scope expanded\` first to lift the sandbox. Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart. Write everything to ${pc.cwd}.`);
   }
   parts.push('**Work style**: One or two tool calls per turn, not six. After each file write or command, briefly tell the user what you did and what is next. Do NOT batch many write_file calls in a single response — the user cannot see progress and it takes too long to generate.');
-  parts.push('**Ad-hoc helper scripts go in `.acorn/scratch/`, never the project root.** One-off helpers (LAN IP detection, QR generation, log parsers, build wrappers) write to `.acorn/scratch/foo.js` — not `_foo.js` in the repo root. The project node\'s `scratch_helpers` aspect (check via `graph_query`) lists what prior sessions already wrote; read + adapt before creating a duplicate.');
+  // Project memory summary — counts only, never bodies. Cheap: pulls
+  // from the project node's scripts_index aspect + the codeindex
+  // staleness flag we plumbed through ProjectContext. Lets the agent
+  // see "7 scripts saved, code graph indexed at <sha>" before any
+  // tool call, so it can pick the right next move (list_project_scripts,
+  // architecture, search_symbols, ...) without guessing.
+  try {
+    const learner = api._appContext?.learner;
+    const userId = opts.userId || opts.userName || 'anon';
+    const projectId = pc.cwd ? scriptsLib.projectNodeId(userId, pc.cwd) : null;
+    const summary = [];
+    if (projectId && learner?.db) {
+      const scriptsCount = scriptsLib.listScriptsIndex(learner, projectId).length;
+      if (scriptsCount > 0) summary.push(`scripts: ${scriptsCount} saved (use list_project_scripts to enumerate)`);
+    }
+    if (pc.hasCodeIndex) {
+      const head = pc.indexHead ? `head ${pc.indexHead}` : 'present';
+      summary.push(`code_graph: indexed (${head}) — prefer search_symbols / trace_calls / get_snippet over grep+read_file in plan mode`);
+    }
+    if (summary.length) {
+      parts.push('');
+      parts.push('### Project memory');
+      for (const s of summary) parts.push(`- ${s}`);
+    }
+  } catch (e) {
+    // Non-fatal — the rest of the prompt still renders.
+    api.getLogger().warn('project_memory_summary build failed: ' + e.message);
+  }
+
+  // Helper-script convention. Bodies live in dedicated `script:` graph
+  // nodes (see save_project_script / list_project_scripts /
+  // get_project_script tools); .acorn/scratch/ is the on-disk
+  // execution cache that the CLI rehydrates on demand. The legacy
+  // `scratch_helpers` aspect is the path-only index from the prior
+  // design; `migrateScratchHelpers` copies its contents into
+  // scripts_index on first read.
+  parts.push('**Helper scripts (LAN IP detection, QR generation, log parsers, build wrappers, etc.):** the GRAPH is the source of truth. Save with `save_project_script({name, description, language, body, tags?})` — the body is stored on a dedicated `script:<projectId>:<name>` node and a one-line summary lands on the project\'s `scripts_index` aspect, so future sessions on this project (or a fresh laptop) can recover the script. Discover existing helpers with `list_project_scripts({tag?, language?})` (cheap; index-only, no bodies). Fetch a body with `get_project_script({name})` — the CLI rehydrates `.acorn/scratch/<name>.<ext>` if missing so you can `exec` it directly. After running, call `record_script_outcome({name, ok})` so reliable helpers float to the top and dead ones get pruned. Save body refusals: the regex guard rejects bodies matching common credential shapes (`sk-…`, `ghp_…`, AWS keys, password=…); pass `force:true` to override after verifying it\'s a false positive.');
   parts.push('**Project listing — use the right tool, NEVER `exec find` / `exec ls -laR`**: The Project Tree above (and the cached node, when present) already shows the project structure with build/dependency/cache dirs filtered. If you need MORE detail, use `glob` (auto-skips noise dirs, capped at 500 paths, fast) or `read_file` on a specific path — NOT `exec find` / `exec ls -R` / `exec tree`. Walking a node_modules-heavy project with exec regularly hits the 3-minute tool timeout AND dumps thousands of irrelevant lines. Specifically `exec ls -laR` on a Node project = guaranteed timeout.');
   parts.push('**Output filtering**: When listing files / describing a project / showing exec output, NEVER include build/dependency/cache directory contents in your reply — even if the tool returned them. Suppress: .git, node_modules, .venv / venv, __pycache__, dist, build, target, .next, .cache, .acorn, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode/, *.egg-info, coverage, .nyc_output, .DS_Store. If a tool returned a wall of these, FILTER before pasting. The user does not want to see node_modules in chat.');
   parts.push('**Web lookups**: For things you CAN\'T learn from the user\'s machine — current library versions, framework docs, API changes, error messages you\'ve never seen, "is X deprecated", recent breaking changes — use `web_search` to find candidate URLs, then `web_fetch` the 1-3 most authoritative (official docs > GitHub > Stack Overflow > random blog). Always include the current year for recent topics ("expo router 2026", "Next.js 15 breaking changes") — without it search engines return stale results. Quote exact error strings to pin to actual occurrences. Cite the source URL in your reply so the user can verify. See `ref-web-search` for the full pattern.');
@@ -399,6 +436,7 @@ function buildProjectContextSection(api, opts) {
 
 function buildPlanModeSection(api, opts) {
   if (opts.platform !== 'cli' || !opts.projectContext || opts.projectContext.mode !== 'plan') return null;
+  const pc = opts.projectContext;
   const parts = [];
   parts.push('## Plan Mode (acorn CLI)');
   parts.push('[MODE: Plan only. You are in planning mode. Follow these phases in order:');
@@ -406,8 +444,22 @@ function buildPlanModeSection(api, opts) {
   parts.push('PHASE 1 — ENVIRONMENT AUDIT:');
   parts.push("The Project Context section above includes the local environment (OS, installed tools, project type, file tree). Review what is available. If the task requires tools/runtimes not installed, note them.");
   parts.push('');
-  parts.push('PHASE 2 — CODEBASE SCAN:');
-  parts.push('Use read_file, glob, and grep to understand the existing codebase structure, patterns, conventions, config files, and dependencies.');
+  if (pc.hasCodeIndex) {
+    parts.push('PHASE 2 — CODEBASE SCAN (structural-first):');
+    parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}). Prefer structural queries over reading files — a single search_symbols result is roughly 50× cheaper in tokens than the equivalent grep + read_file pair. Order:`);
+    parts.push('  1. `architecture` — once, to learn module clusters, entry points, hot paths, and tech stack. Read the `notes` field for any partial-coverage caveats (regex-extracted JS, missing language extractor, etc.).');
+    parts.push('  2. For each concept named in the user\'s request, `search_symbols({ name: "<concept>" })` (optionally narrow by `kind`, `file`, or `language`).');
+    parts.push('  3. For each plausible target symbol, `trace_calls({ name: "<name>", direction: "callers", depth: 3 })` to learn who depends on it. Use `direction: "callees"` to learn what it depends on.');
+    parts.push('  4. Only after the structural pass is exhausted: `get_snippet({ qname: "..." })` for the 3-5 symbols you will actually modify. Do not read whole files unless the symbol is missing from the index.');
+    parts.push('  5. Before producing the plan, `impact({ paths: [<files you intend to edit>] })` and include the affected-callers count in your risk section. Hot edges (e.g. >20 transitive callers) deserve explicit per-step verification in PHASE 6.');
+    parts.push('Do NOT use `grep`, `glob`, or `read_file` for symbol discovery during PHASE 2 unless a tool returned `{ ok: false, error: "unsupported-language" }` for that file\'s extension, OR a search_symbols query came back empty for a name that you can SEE in the file tree. The index is best-effort: Go is precise (stdlib parser); TS/JS is regex-based and may miss nested classes, decorators, or inline object methods — fall back to grep for those exact cases. If the M2 architecture notes flagged "no CALLS edges yet" or similar coverage gaps, treat trace_calls/impact results as hints, not authoritative.');
+    parts.push('If the index looks stale (last_modified mismatch with current git state, or your search came back surprisingly empty), call `index_codebase({ force: true })` once and continue.');
+  } else {
+    parts.push('PHASE 2 — CODEBASE SCAN:');
+    parts.push('Use read_file, glob, and grep to understand the existing codebase structure, patterns, conventions, config files, and dependencies.');
+    parts.push('');
+    parts.push('(This project does not yet have a structural code index. If you find yourself running more than 3-4 grep+read_file pairs to locate symbols, consider asking the user to run `/index` — it builds a per-project SQLite index of symbols and call edges that makes future plan-mode scans 50× cheaper. Indexing 10k LOC takes seconds.)');
+  }
   parts.push('');
   parts.push('PHASE 3 — RESEARCH (delegate in parallel):');
   parts.push('Identify topics you need external context on — framework comparisons, library docs, API shapes, best practices, current versions, recent breaking changes. For each independent question, DELEGATE a research sub-agent rather than searching yourself:');
