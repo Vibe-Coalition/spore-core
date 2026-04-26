@@ -579,11 +579,17 @@ class WebGateway {
     // but we list children first as a sanity-check shape. Wrapped in
     // try so a missing table on an older schema doesn't abort the
     // whole reset — e.g. derived_facts didn't exist in early builds.
+    //
+    // plugin_installs is included so the manager re-runs each plugin's
+    // install SQL after the wipe — without this, the install marker
+    // stays put while the actual ref nodes are gone, leaving plugins
+    // in an inconsistent "installed but missing" state.
     const userTables = [
       'edges', 'attribute_history', 'attributes', 'aspects', 'gaps',
       'hints', 'derived_facts', 'reflections', 'quality_audits',
       'recycle_bin', 'node_sources', 'edge_sources', 'aliases',
       'node_group_members', 'node_groups', 'episodes', 'meta',
+      'plugin_installs',
       'nodes',
     ];
     const ftsTables = ['attr_fts', 'episodes_fts', 'hints_fts'];
@@ -646,6 +652,21 @@ class WebGateway {
       throw e;
     }
     db.exec('PRAGMA foreign_keys=ON');
+
+    // Re-run each installed plugin's reference-node install SQL so
+    // their nodes/aspects come back. The plugin_installs row was
+    // wiped above, so the manager's run-once gate sees a fresh slate
+    // and re-applies install.sql for every plugin that registered
+    // reference nodes (acorn-cli, future ones). Runs OUTSIDE the
+    // wipe transaction so each plugin's install can manage its own
+    // BEGIN/COMMIT and a single failing plugin doesn't roll back
+    // the rest of the reset.
+    try {
+      const mgr = this.tools?._pluginManager;
+      if (mgr?._runReferenceNodeInstalls) mgr._runReferenceNodeInstalls();
+    } catch (e) {
+      this.log.warn(`[reset-graph] plugin ref-node reinstall failed: ${e.message}`);
+    }
 
     const after = {
       nodes:    db.prepare('SELECT COUNT(*) c FROM nodes').get().c,
