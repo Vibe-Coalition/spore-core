@@ -1,0 +1,9 @@
+{
+  "id": "flux",
+  "name": "FLUX Image Generation",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "FLUX image generation via api.bfl.ai. Adds a `generate_image` tool that wraps the submit + poll-until-ready loop into one call so the agent doesn't have to hand-roll an async polling loop with web_fetch. Reads the API key from plugins.flux.apiKey or the legacy BFL_API_KEY vault credential. Also installs the ref-bfl-api reference node (model list, parameters, display rules) so the agent has documentation when reasoning about image generation. Uninstalling removes the tool and the ref node."
+}

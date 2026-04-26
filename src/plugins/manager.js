@@ -695,6 +695,23 @@ class PluginManager {
     return out;
   }
 
+  /** Mirror of getSTTProviders for TTS. */
+  getTTSProviders() {
+    const cfg = this._appContext?.config || {};
+    const out = [];
+    for (const [pluginId, plugin] of this.plugins) {
+      const providers = plugin.instance?.getTTSProviders?.() || [];
+      for (const p of providers) {
+        let configured = false;
+        try { configured = !!p.isConfigured(cfg); } catch (e) {
+          this.log.warn(`[plugins] TTS isConfigured(${pluginId}/${p.name}) threw: ${e.message}`);
+        }
+        out.push({ pluginId, name: p.name, factory: p.factory, configured });
+      }
+    }
+    return out;
+  }
+
   /**
    * Walk every plugin's `registerFrontendAsset` declarations and
    * return `[{ pluginId, filename, url }]`. Served by web.js's

@@ -28,6 +28,7 @@ class PluginAPI {
     this._wsHandlers = new Map();
     this._pathAliases = [];
     this._sttProviders = [];
+    this._ttsProviders = [];
     this._frontendAssets = [];
     this._configChangeFn = null;
     this._shutdownFn = null;
@@ -414,6 +415,28 @@ class PluginAPI {
 
   getSTTProviders() {
     return this._sttProviders;
+  }
+
+  /**
+   * Register a Text-to-Speech provider. Mirror of registerSTTProvider.
+   * Used by core's voice pipeline to discover available TTS backends.
+   *
+   *   factory(config) → { synthesize(text, opts): Promise<Buffer>, synthesizeOgg(text): Promise<Buffer> }
+   *
+   * `name` is the value `config.voice.ttsProvider` matches against
+   * (e.g. 'elevenlabs', 'openai', 'edge'). `opts.isConfigured(config)`
+   * lets the plugin signal whether its credentials are populated.
+   */
+  registerTTSProvider(name, factory, opts = {}) {
+    if (!name || typeof name !== 'string') throw new Error('registerTTSProvider requires a string name');
+    if (typeof factory !== 'function') throw new Error('registerTTSProvider requires a factory function');
+    const isConfigured = typeof opts.isConfigured === 'function' ? opts.isConfigured : () => true;
+    this._ttsProviders.push({ name, factory, isConfigured });
+    this._log.debug(`[plugin:${this.pluginId}] Registered TTS provider: ${name}`);
+  }
+
+  getTTSProviders() {
+    return this._ttsProviders;
   }
 
   /**

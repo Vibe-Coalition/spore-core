@@ -1,0 +1,9 @@
+{
+  "id": "elevenlabs",
+  "name": "ElevenLabs TTS",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Text-to-speech via ElevenLabs (highest quality, voice cloning). Reads the API key from plugins.elevenlabs.apiKey or the legacy XI_API_KEY env var. When uninstalled, the 'elevenlabs' option disappears from the TTS provider dropdown and voice replies fall back to OpenAI TTS or Edge (free)."
+}

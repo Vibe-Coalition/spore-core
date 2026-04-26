@@ -355,49 +355,14 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), '/app/ — SPORE runtime (mostly read-only)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Never log or print full API key values', 9, 'seed', 'seed');
 
--- NODE: FLUX Image Generation
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-bfl-api', 'FLUX Image Generation', 'reference',
-  'FLUX API for image generation and editing (api.bfl.ai).', 9, 'seed');
+-- ref-bfl-api (FLUX Image Generation) moved to plugins/flux/sql/install.sql.
+-- Without the flux plugin installed, the agent has no FLUX docs in the
+-- graph and cannot call the generate_image tool — image generation is
+-- fully optional.
 
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-bfl-api', 'essentials', 10, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Domain: api.bfl.ai — NOT api.bfl.ml (that hangs)', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Auth header: X-Key: YOUR_BFL_API_KEY (not Bearer)', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Default model: flux-2-pro-preview (use for everything unless told otherwise)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Other models: flux-kontext-pro, flux-kontext-max, flux-pro-1.1, flux-2-pro', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Submit: POST https://api.bfl.ai/v1/{model} with JSON body', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Response has polling_url — ALWAYS use it (may point to regional node like api.us2.bfl.ai)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Poll the polling_url with X-Key header until status="Ready"', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Image URL at result.sample — NOT result.url or result.image_url', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Signed URLs expire ~1hr — download or display promptly', 8, 'seed', 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-bfl-api', 'parameters', 8, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Required: prompt (string)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Optional: width, height, output_format ("jpeg" or "png"), seed', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Image editing: add input_image param (URL, raw base64, or data URI all work)', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Edit prompts: describe what CHANGED, not the full scene', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Typical generation: 5-15 seconds. Poll every 3s, timeout at 60s.', 7, 'seed', 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-bfl-api', 'display_rule', 9, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Always show generated images inline in chat: ![description](result.sample URL)', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Do NOT just report a file path — the user wants to SEE the image', 9, 'seed', 'seed');
-
--- NODE: ElevenLabs TTS & Sound Effects
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-elevenlabs-api', 'ElevenLabs TTS & Sound Effects', 'reference',
-  'ElevenLabs API for text-to-speech and sound effect generation.', 7, 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-elevenlabs-api', 'essentials', 9, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Auth header: xi-api-key: YOUR_XI_API_KEY', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'TTS: POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id} — returns audio bytes directly (no polling)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'SFX: POST https://api.elevenlabs.io/v1/sound-generation with {text, duration_seconds} — returns audio directly', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Best model: eleven_multilingual_v2', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'List voices: GET https://api.elevenlabs.io/v1/voices', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Voice settings: stability (0.3-0.5), similarity_boost (0.7-0.9), style (0.5-0.7), use_speaker_boost: true', 7, 'seed', 'seed');
+-- ref-elevenlabs-api moved to plugins/elevenlabs/sql/install.sql.
+-- Without the elevenlabs plugin installed, ElevenLabs docs disappear
+-- from the graph and TTS falls back to OpenAI / Edge.
 
 -- NODE: Web Server & Routing
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)

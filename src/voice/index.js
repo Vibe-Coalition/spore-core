@@ -7,12 +7,11 @@
  */
 
 const { createSTT } = require('./stt');
-const { ElevenLabsTTS, OpenAITTS, EdgeTTS, createTTS } = require('./tts');
+const { OpenAITTS, EdgeTTS, createTTS } = require('./tts');
 const { VoicePipeline } = require('./pipeline');
 
 module.exports = {
   createSTT,
-  ElevenLabsTTS,
   OpenAITTS,
   EdgeTTS,
   createTTS,

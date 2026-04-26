@@ -28,77 +28,10 @@ function edgeTtsTmpDir() {
   return d;
 }
 
-class ElevenLabsTTS {
-  constructor(apiKey, opts = {}) {
-    this.apiKey = apiKey;
-    this.voiceId = opts.ttsVoice || opts.voiceId || 'JBFqnCBsd6RMkjVDRZzb'; // "George" — warm male
-    this.modelId = opts.ttsModel || 'eleven_turbo_v2_5';
-    this.stability = opts.stability ?? 0.5;
-    this.similarityBoost = opts.similarityBoost ?? 0.75;
-    this.speed = opts.ttsSpeed ?? 1.0;
-  }
-
-  /**
-   * Synthesize text to audio.
-   * @param {string} text
-   * @param {object} opts - { format: 'mp3_44100_128' | 'pcm_16000' | 'opus' }
-   * @returns {Promise<Buffer>} audio data
-   */
-  async synthesize(text, opts = {}) {
-    const format = opts.format || 'mp3_44100_128';
-    const body = JSON.stringify({
-      text,
-      model_id: this.modelId,
-      voice_settings: {
-        stability: this.stability,
-        similarity_boost: this.similarityBoost,
-        speed: this.speed,
-      },
-    });
-
-    const path = `/v1/text-to-speech/${this.voiceId}?output_format=${format}`;
-
-    return new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'api.elevenlabs.io',
-        path,
-        method: 'POST',
-        headers: {
-          'xi-api-key': this.apiKey,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-          'Accept': 'audio/mpeg',
-        },
-      }, (res) => {
-        const chunks = [];
-        res.on('data', chunk => chunks.push(chunk));
-        res.on('end', () => {
-          const buf = Buffer.concat(chunks);
-          if (res.statusCode >= 400) {
-            try {
-              const err = JSON.parse(buf.toString());
-              return reject(new Error(err.detail?.message || err.message || `ElevenLabs ${res.statusCode}`));
-            } catch {
-              return reject(new Error(`ElevenLabs ${res.statusCode}: ${buf.toString().slice(0, 200)}`));
-            }
-          }
-          resolve(buf);
-        });
-      });
-
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
-  }
-
-  /**
-   * Synthesize and return OGG/Opus suitable for Telegram voice notes.
-   */
-  async synthesizeOgg(text) {
-    return this.synthesize(text, { format: 'mp3_44100_128' });
-  }
-}
+// ElevenLabsTTS moved to plugins/elevenlabs/lib/elevenlabs-tts.js. The
+// plugin registers the 'elevenlabs' TTS provider via
+// api.registerTTSProvider — when installed, createTTS below picks it
+// up automatically.
 
 class OpenAITTS {
   constructor(apiKey, opts = {}) {
@@ -204,31 +137,49 @@ class EdgeTTS {
 
 /**
  * Factory — create the right TTS provider.
- * Priority: explicit provider > ElevenLabs (if key) > OpenAI (if key) > Edge TTS (free fallback)
+ *
+ * Walks plugin-registered providers first (via manager.getTTSProviders())
+ * and returns the one whose name matches `config.voice.ttsProvider`.
+ * Falls through to in-tree OpenAI / Edge classes (no plugin owns them
+ * yet — Edge is a free fallback that should always work; OpenAI shares
+ * a key with the LLM inference layer). The ElevenLabs class extracted
+ * to plugins/elevenlabs/ in the TTS plugin extraction pass.
  */
-function createTTS(config) {
-  const provider = config.voice?.ttsProvider;
+function createTTS(config, manager) {
+  const preferred = config?.voice?.ttsProvider;
 
-  if (provider === 'openai' && config.openaiApiKey) {
+  if (manager?.getTTSProviders) {
+    const providers = manager.getTTSProviders();
+    if (preferred) {
+      const named = providers.find(p => p.name === preferred && p.configured);
+      if (named) {
+        try { return named.factory(config); } catch { /* fall through */ }
+      }
+    }
+    // No preferred (or preferred unmatched/misconfigured): if a plugin
+    // registered a provider that's configured, prefer it over the
+    // in-tree paid OpenAI option but still let the operator opt into
+    // 'openai' / 'edge' explicitly via the dropdown.
+    if (!preferred) {
+      const firstConfigured = providers.find(p => p.configured);
+      if (firstConfigured) {
+        try { return firstConfigured.factory(config); } catch { /* fall through */ }
+      }
+    }
+  }
+
+  // In-tree fallbacks. Operator-explicit 'openai' / 'edge' lands here;
+  // 'auto' selects OpenAI (if keyed) or Edge (free, always available).
+  if (preferred === 'openai' && config.openaiApiKey) {
     return new OpenAITTS(config.openaiApiKey, config.voice);
   }
-  if (provider === 'edge') {
+  if (preferred === 'edge') {
     return new EdgeTTS(config.voice);
-  }
-  if (provider === 'elevenlabs' && config.xiApiKey) {
-    return new ElevenLabsTTS(config.xiApiKey, config.voice);
-  }
-
-  // Auto-select: paid providers first, Edge as free fallback
-  if (config.xiApiKey) {
-    return new ElevenLabsTTS(config.xiApiKey, config.voice);
   }
   if (config.openaiApiKey) {
     return new OpenAITTS(config.openaiApiKey, config.voice);
   }
-
-  // Edge TTS — always available, no API key needed
   return new EdgeTTS(config.voice);
 }
 
-module.exports = { ElevenLabsTTS, OpenAITTS, EdgeTTS, createTTS };
+module.exports = { OpenAITTS, EdgeTTS, createTTS };

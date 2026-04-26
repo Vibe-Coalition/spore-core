@@ -14,7 +14,7 @@ class VoicePipeline {
     this.log = logger;
     this.pluginManager = pluginManager;
     this.stt = createSTT(config, pluginManager);
-    this.tts = createTTS(config);
+    this.tts = createTTS(config, pluginManager);
     this.enabled = !!(this.stt && this.tts);
 
     if (this.enabled) {
