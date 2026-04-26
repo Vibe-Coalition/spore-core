@@ -27,16 +27,30 @@ const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 // Compact theme table — kept in sync with THEMES in graph-viewer.html. Only the
 // subset of vars needed by the login overlay is inlined; the viewer's JS applies
 // the full set once `applyGraphTheme` runs post-auth.
+// Two themes only — `dark` (Petri warm-earth baseline; vars are empty so the
+// graph-viewer.html :root defaults take effect) and `light` (Petri warm-paper
+// palette). The compact var set here is the subset used by the pre-auth
+// login overlay; full-fat vars + node colors live in graph-viewer.html's
+// THEMES object and apply post-auth via applyGraphTheme().
 const _THEME_VARS = {
-  midnight: {},
-  dark: {'--bg':'#09090b','--surface':'#18181b','--panel':'#0f0f11','--border':'#27272a','--text':'#d4d4d8','--text-dim':'#71717a','--text-bright':'#fafafa','--accent':'#3b82f6','--accent2':'#8b5cf6','--danger':'#ef4444'},
-  paper: {'--bg':'#f5f3ef','--surface':'#ffffff','--panel':'#f8f6f2','--border':'#c8c0b4','--text':'#1a1a1a','--text-dim':'#6b6560','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#7c3aed','--danger':'#dc2626'},
-  terminal: {'--bg':'#000000','--surface':'#0a0a0a','--panel':'#050505','--border':'#1a3a1a','--text':'#33ff33','--text-dim':'#1a6b1a','--text-bright':'#66ff66','--accent':'#33ff33','--accent2':'#00cc00','--danger':'#ff3333'},
-  ember: {'--bg':'#12100e','--surface':'#1a1614','--panel':'#151210','--border':'#3a2e24','--text':'#e8d5c0','--text-dim':'#7a6a58','--text-bright':'#f5e8d8','--accent':'#f59e0b','--accent2':'#ef4444','--danger':'#ef4444'},
-  arctic: {'--bg':'#e8edf4','--surface':'#f0f4f9','--panel':'#e0e6f0','--border':'#b0bad0','--text':'#0f172a','--text-dim':'#5a6a80','--text-bright':'#000000','--accent':'#2563eb','--accent2':'#4f46e5','--danger':'#dc2626'},
-  neon: {'--bg':'#0a0318','--surface':'#0d0520','--panel':'#080215','--border':'#2a1050','--text':'#e0d0f0','--text-dim':'#6040a0','--text-bright':'#f0e0ff','--accent':'#ff2d95','--accent2':'#00f0ff','--danger':'#ff2d55'},
-  forest: {'--bg':'#080e08','--surface':'#0e1a0e','--panel':'#0a140a','--border':'#1e3a1e','--text':'#c0dcc0','--text-dim':'#4a7a4a','--text-bright':'#d8f0d8','--accent':'#4ade80','--accent2':'#a3e635','--danger':'#ef4444'},
+  dark: {},
+  light: {
+    '--bg': '#f3efe6', '--surface': '#fbf8f0', '--panel': '#ede7d8',
+    '--border': '#e6e0d2',
+    '--text': '#3c3a35', '--text-dim': '#9a948a', '--text-bright': '#1f1d1a',
+    '--accent': '#c2542d', '--accent2': '#3e6b47', '--danger': '#b8341c',
+  },
 };
+
+// Mirror of the client-side normalizer in graph-viewer.html. Maps any
+// legacy theme name (midnight, paper, terminal, ember, arctic, neon,
+// forest, anything else) onto the surviving two — `paper`/`arctic` →
+// `light`, everything else → `dark`. Used everywhere a stored theme
+// name might come back from preferences.json.
+function _normalizeThemeName(name) {
+  if (name === 'light' || name === 'paper' || name === 'arctic') return 'light';
+  return 'dark';
+}
 
 function _readServerTheme(dataDir) {
   // The login overlay reflects the OPERATOR's theme — never a webapp user's
@@ -49,13 +63,13 @@ function _readServerTheme(dataDir) {
       creatorUsernames = users.filter(u => u?.role === 'creator').map(u => u.username);
     } catch {}
     for (const u of creatorUsernames) {
-      if (prefs[u]?.theme && _THEME_VARS[prefs[u].theme]) return prefs[u].theme;
+      if (prefs[u]?.theme) return _normalizeThemeName(prefs[u].theme);
     }
     // No creator theme yet (fresh install pre-onboarding) → fall back to the
     // legacy _lastUsed marker so the operator's wizard pick still lands.
-    if (prefs._lastUsed?.theme && _THEME_VARS[prefs._lastUsed.theme]) return prefs._lastUsed.theme;
+    if (prefs._lastUsed?.theme) return _normalizeThemeName(prefs._lastUsed.theme);
   } catch {}
-  return 'midnight';
+  return 'dark';
 }
 
 function _buildThemeInlineStyle(dataDir) {
@@ -1797,8 +1811,8 @@ class WebGateway {
           onThinkingDelta: (delta) => {
             this._sendToSession(sessionId, { type: 'chat:thinking', text: delta });
           },
-          onToolUse: (toolName) => {
-            this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName });
+          onToolUse: (toolName, toolInput) => {
+            this._sendToSession(sessionId, { type: 'chat:tool', tool: toolName, input: toolInput });
           },
           onStatus: (evt) => {
             try {
@@ -3007,6 +3021,23 @@ class WebGateway {
         return;
       }
 
+      // Self-hosted fonts (Petri direction). Avoids the external Google Fonts
+      // dependency so the redesign actually paints when the user's browser
+      // can't reach fonts.googleapis.com.
+      if (urlPath.startsWith('/fonts/') && /^\/fonts\/[a-zA-Z0-9_.-]+\.woff2?$/.test(urlPath)) {
+        try {
+          const fontPath = path.join(__dirname, '..', 'static', urlPath);
+          const ext = path.extname(fontPath).toLowerCase();
+          res.writeHead(200, {
+            'Content-Type': ext === '.woff2' ? 'font/woff2' : 'font/woff',
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+          });
+          res.end(fs.readFileSync(fontPath));
+        } catch { res.writeHead(404); res.end('Not found'); }
+        return;
+      }
+
       // ── CORS for Acorn API endpoints (companion web app) ──
       if (urlPath.startsWith('/api/acorn/')) {
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -3449,7 +3480,10 @@ class WebGateway {
 
       if (urlPath === '/api/preferences') {
         const PREFS_PATH = path.join(this.config.dataDir, 'preferences.json');
-        const VALID_THEMES = ['midnight', 'dark', 'paper', 'terminal', 'ember', 'arctic', 'neon', 'forest'];
+        // Two-theme system. Legacy values (paper, midnight, terminal, ember,
+        // arctic, neon, forest) are coerced via _normalizeThemeName() so an
+        // old client / saved pref doesn't reject. The PUT path always
+        // stores the normalized name; GETs always return one of {dark, light}.
         const loadPrefs = () => { try { return JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch { return {}; } };
         const authType = isAnyAuth(req);
         if (!authType) { if (!(await tryManagerSSO(req, res))) { res.writeHead(401); res.end('{}'); return; } }
@@ -3468,7 +3502,7 @@ class WebGateway {
           const prefs = loadPrefs();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
-            theme: prefs[username]?.theme || 'midnight',
+            theme: _normalizeThemeName(prefs[username]?.theme),
             displayName: prefs[username]?.displayName || '',
             username,
           }));
@@ -3482,7 +3516,9 @@ class WebGateway {
             const prefs = loadPrefs();
             if (!prefs[username]) prefs[username] = {};
             if (Object.prototype.hasOwnProperty.call(parsed, 'theme')) {
-              const safeTheme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : 'midnight';
+              // Coerce any incoming value (including legacy names) to one
+              // of the two surviving themes via the shared normalizer.
+              const safeTheme = _normalizeThemeName(parsed.theme);
               prefs[username].theme = safeTheme;
               // Only creator-tier sessions can update the global "last used"
               // marker that the login page falls back on.
@@ -4195,6 +4231,19 @@ class WebGateway {
             ).all(sessionKey);
             rows.reverse();
             const history = [];
+            // Markers prefixing harness-injected user messages that the
+            // operator should never see in the chat scrollback. When one
+            // of these is found, ALSO skip the next assistant message \u2014
+            // it's the agent's acknowledgement of the cancellation /
+            // background task / interjection and reads as orphaned chatter
+            // without the prompt that triggered it.
+            const INTERNAL_PROMPT_PREFIXES = [
+              '[BACKGROUND TASK',
+              '[You were working on a task',  // stop / cancel
+              '[INTERJECTION]',               // user mid-flight follow-up
+              '[TASK COMPLETE',               // delegated-task finish
+            ];
+            let _swallowNextAssistant = false;
             for (const row of rows) {
               let text = row.content;
               try {
@@ -4210,8 +4259,17 @@ class WebGateway {
                 }
               } catch { }
               if (!text || !text.trim()) continue;
-              if (text.startsWith('[BACKGROUND TASK')) continue;
+              const isInternalPrompt = INTERNAL_PROMPT_PREFIXES.some(p => text.startsWith(p));
+              if (isInternalPrompt) {
+                _swallowNextAssistant = true;
+                continue;
+              }
               const role = row.role === 'assistant' ? 'assistant' : row.role === 'notification' ? 'notification' : 'user';
+              if (role === 'assistant' && _swallowNextAssistant) {
+                _swallowNextAssistant = false;
+                continue;
+              }
+              if (role !== 'assistant') _swallowNextAssistant = false;
               history.push({ role, text: text.substring(0, 2000), ts: row.created });
             }
             if (history.length) {
@@ -4253,6 +4311,52 @@ class WebGateway {
       ws.on('message', async (raw) => {
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
+
+        // graphcorn: session:start fires once per acorn launch right
+        // after the WS handshake, before the first chat:submit. We
+        // create a session-<id> graph node + edge to the project node
+        // so everything captured during the conversation has a graph
+        // anchor. Idempotent — flaky reconnects re-firing this just
+        // bump mentions on the existing node.
+        if (msg.type === 'session:start' && msg.sessionId) {
+          try {
+            const sessions = require('../graph/sessions');
+            const r = sessions.upsertSessionNode(this.tools?.learner, {
+              sessionId: msg.sessionId,
+              userId:    ws._user || msg.userName || 'anon',
+              userName:  msg.userName,
+              cwd:       msg.cwd,
+              startedAt: msg.startedAt,
+              model:     this.config.normalModel || this.config.model,
+              ...(msg.projectContext || {}),
+            });
+            if (r) this.log.info(`[graphcorn] session:start → ${r.id}${r.isNew ? ' (new)' : ''}${r.projectId ? ' part_of ' + r.projectId : ''}`);
+          } catch (e) {
+            this.log.warn(`[graphcorn] session:start failed: ${e.message}`);
+          }
+          return;
+        }
+        if (msg.type === 'session:end' && msg.sessionId) {
+          try {
+            const sessions = require('../graph/sessions');
+            sessions.finalizeSessionNode(this.tools?.learner, msg.sessionId, { endedAt: msg.endedAt });
+            this.log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
+            // Phase 7 + 8: chain summarize → distill. Both fire-and-forget
+            // so they don't block the WS close. distillSession is
+            // idempotent (extra.distilled_at marker), so if the WS
+            // ALSO drops and re-fires distillation from the close
+            // handler below, the second call is a no-op.
+            const llmClient = this.tools?.anthropicClient;
+            if (llmClient) {
+              sessions.summarizeSessionNode(this.tools.learner, llmClient, this.config, msg.sessionId, this.log)
+                .then(() => sessions.distillSession(this.tools.learner, llmClient, this.config, msg.sessionId, this.log))
+                .catch(e => this.log.warn(`[graphcorn] summary/distill error: ${e.message}`));
+            }
+          } catch (e) {
+            this.log.warn(`[graphcorn] session:end failed: ${e.message}`);
+          }
+          return;
+        }
 
         if (msg.type === 'ping') {
           ws._missedPongs = 0;
@@ -5066,6 +5170,41 @@ class WebGateway {
             }
           }
         }
+
+        // graphcorn Phase 8: ungraceful close also triggers distillation.
+        // The graceful path (session:end frame) sets distilled_at first;
+        // distillSession's idempotency guard makes the close-side call a
+        // no-op when graceful already ran. For network drop / SIGKILL /
+        // alt-tab-and-leave-it, the session:end never arrives and this
+        // is the only chance to distill before the 48h janitor sweep.
+        if (ws._role === 'acorn') {
+          const acornSessionIds = new Set();
+          for (const [sid, clients] of this._sessionClients) {
+            for (const entry of clients) {
+              if (entry.ws === ws) acornSessionIds.add(sid);
+            }
+          }
+          if (acornSessionIds.size > 0) {
+            const sessions = require('../graph/sessions');
+            const llmClient = this.tools?.anthropicClient;
+            for (const sid of acornSessionIds) {
+              try {
+                sessions.finalizeSessionNode(this.tools?.learner, sid, { endedAt: new Date().toISOString() });
+                if (llmClient) {
+                  // Same chain as the graceful path — summarize, then
+                  // distill. Both functions short-circuit if the prior
+                  // session:end already ran them.
+                  sessions.summarizeSessionNode(this.tools.learner, llmClient, this.config, sid, this.log)
+                    .then(() => sessions.distillSession(this.tools.learner, llmClient, this.config, sid, this.log))
+                    .catch(e => this.log.warn(`[graphcorn] ws-close distill error: ${e.message}`));
+                }
+              } catch (e) {
+                this.log.warn(`[graphcorn] ws-close finalize failed: ${e.message}`);
+              }
+            }
+          }
+        }
+
         this._removeClientFromAllSessions(ws);
         if (onGraphEvent) graphEvents.off('change', onGraphEvent);
         if (ws._terminals) {

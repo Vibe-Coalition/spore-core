@@ -34,7 +34,7 @@ const _execContext = new AsyncLocalStorage();
 // proposal queue instead of executing directly. Read-only tools (queries,
 // fetches, list operations) never appear here so planning runs unimpeded.
 const MUTATING_TOOLS = new Set([
-  'graph_update', 'graph_delete',
+  'graph_update', 'graph_delete', 'note_discovery',
   'web_serve', 'exec', 'remote_exec',
   'write_file', 'edit_file', 'remote_write_file',
   'email_send', 'message_send', 'message_edit', 'message_react',
@@ -369,6 +369,28 @@ class ToolSystem {
         },
       },
       {
+        name: 'note_discovery',
+        description:
+          'graphcorn — persist a durable discovery to the knowledge graph and link it to the current acorn session AND project. ' +
+          'Use this LIBERALLY when you learn something specific and useful that should survive the session: a config value that worked, a tool quirk, a workflow that fixed something, a port number, a CLI flag that mattered. ' +
+          'Lighter than graph_update — you provide the text, SPORE creates a properly-structured `discovery` node, links it to the session-<id> node (provenance) AND the project node (so future sessions on the same project can find it). ' +
+          'Prefer note_discovery for casual one-line saves; use graph_update when you genuinely need full schema control (custom node type, multiple aspects, explicit edges to specific nodes).',
+        input_schema: {
+          type: 'object',
+          properties: {
+            text:  { type: 'string', description: 'One-line summary of the discovery (e.g. "Expo dev server defaults to port 8081 on Windows; use --port to override").' },
+            kind:  {
+              type: 'string',
+              enum: ['fact', 'gotcha', 'workflow', 'config', 'failure_fix'],
+              description: 'What kind of discovery this is. fact=plain knowledge. gotcha=non-obvious behavior. workflow=a procedure that worked. config=a setting/value. failure_fix=problem→solution pair. Defaults to "fact".',
+            },
+            label: { type: 'string', description: 'Optional short label for the node (e.g. "Expo port default"). Auto-derived from text if omitted.' },
+            relatedTo: { type: 'array', items: { type: 'string' }, description: 'Optional existing node ids this discovery relates to (e.g. ["expo", "react-native"]) — creates `relates_to` edges.' },
+          },
+          required: ['text'],
+        },
+      },
+      {
         name: 'graph_delete',
         description: 'Delete a node, aspect, attribute, or edge from the knowledge graph. The deletion is reflected in real-time on the graph viewer.',
         input_schema: {
@@ -412,7 +434,7 @@ class ToolSystem {
       },
       {
         name: 'task_status',
-        description: 'Quick non-blocking check on a background task. Only use this if the user explicitly asks about task progress. Results are delivered automatically — you do NOT need to poll.',
+        description: 'Quick non-blocking check on a background task. ONLY use this if the user explicitly asks "where are we on that task?" or similar. **DO NOT POLL.** Task results are delivered AUTOMATICALLY as a new user message when complete (via task_complete trigger). If you have delegated tasks running and no other work, END YOUR TURN — do not call task_status + sleep in a loop. This tool exists solely to answer the operator\'s direct "how\'s it going" questions.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1290,6 +1312,8 @@ Set wait:false when you've submitted a long background job and just want to retu
           return await this._queryAboutTool(input);
         case 'graph_update':
           return this._graphUpdateTool(input);
+        case 'note_discovery':
+          return this._noteDiscoveryTool(input);
         case 'graph_delete':
           return this._graphDeleteTool(input);
         case 'delegate_task':
@@ -2130,7 +2154,29 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _normalizeNodeId(raw) {
-    return raw.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
+    if (raw == null) return '';
+    // Exact-match passthrough — acorn session nodes, discovery nodes,
+    // and some event/service nodes legitimately use `:`, `@`, `_`, `.`
+    // in their IDs (e.g. `session-cli:yam@acorn-companion-...`,
+    // `qr_script_execution`, `expo.dev`). The legacy strict normalizer
+    // stripped all of those away, making such IDs unreachable from
+    // any tool that calls _normalizeNodeId. If the raw string already
+    // corresponds to an existing node, use it verbatim.
+    try {
+      if (this.learner?.db) {
+        const hit = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(String(raw));
+        if (hit) return hit.id;
+      }
+    } catch {}
+    // Otherwise sanitize, but keep the broader set of characters that
+    // real node IDs use. Whitespace → hyphen, strip disallowed chars,
+    // collapse runs of hyphens, trim leading/trailing hyphens.
+    return String(raw)
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9:@._-]/g, '')
+      .replace(/-{2,}/g, '-')
+      .replace(/^-|-$/g, '');
   }
 
   _isProtectedNode(id) {
@@ -2148,6 +2194,157 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (m.includes('sonnet')) return 32000;
     if (m.includes('haiku')) return 16000;
     return 16384;
+  }
+
+  // graphcorn — wrapper that creates a `discovery` node with sensible
+  // defaults and auto-links it to the current session + project nodes.
+  // Easier-to-use sibling of graph_update: agent provides text + kind,
+  // we synthesize the rest. Idempotent on dupes (appends to existing).
+  _noteDiscoveryTool(input) {
+    if (!this.learner?.db) return { error: 'Graph writer not available' };
+    const text = String(input?.text || '').trim();
+    if (!text) return { error: 'text is required' };
+    const kind = ['fact', 'gotcha', 'workflow', 'config', 'failure_fix']
+      .includes(input?.kind) ? input.kind : 'fact';
+    const explicitLabel = input?.label && String(input.label).trim();
+    const label = explicitLabel || (text.length > 60 ? text.slice(0, 57).trimEnd() + '…' : text);
+    const relatedTo = Array.isArray(input?.relatedTo) ? input.relatedTo : [];
+
+    const ctx = _execContext.getStore() || {};
+    // For acorn sessions the channelId IS the sessionId (see web.js:4719).
+    // Skip the session/project linking for non-cli platforms — note_discovery
+    // still creates the node, just without the graphcorn anchors.
+    // Falls back to _current* fields when there's no AsyncLocalStorage
+    // store (e.g. when called from end-of-round failure-capture in loop.js
+    // outside of the per-tool ctx.run wrapper).
+    const platform = ctx.platform || this._currentPlatform || null;
+    const sessionId = platform === 'cli'
+      ? (ctx.channelId || this._currentChannelId)
+      : null;
+    const userId = ctx.userId || ctx.userName || this._currentUserId || this._currentUserName || 'anon';
+
+    const db = this.learner.db;
+
+    // Slugify the label to a node id, suffix with a short hash of the
+    // text so two distinct discoveries with the same label don't
+    // collapse. If a node with the exact id already exists (re-noting
+    // the same thing), append the new text as a fresh attribute on
+    // its `details` aspect rather than creating a new node.
+    const slug = label.toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'discovery';
+    const crypto = require('crypto');
+    const hash = crypto.createHash('sha256').update(text).digest('hex').slice(0, 6);
+    const id = `discovery-${slug}-${hash}`;
+
+    const existing = db.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
+    let isNew = false;
+    if (!existing) {
+      isNew = true;
+      // graphcorn: in an acorn session, every new node is born temp +
+      // tagged with the sessionId. Session-end distillation reads these
+      // back, picks winners (promotes by clearing ttl), and recycles the
+      // rest. Without a session ctx the discovery is permanent — same
+      // shape as a non-acorn note_discovery call.
+      //
+      // Post-distill race guard — if the session already distilled,
+      // tagging would create an orphan temp (distill won't re-run).
+      let sessionAlreadyDistilled = false;
+      if (sessionId) {
+        try {
+          const sessRow = db.prepare(
+            "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+          ).get('session-' + String(sessionId));
+          sessionAlreadyDistilled = !!sessRow?.distilled;
+        } catch {}
+      }
+      const extraJson = (sessionId && !sessionAlreadyDistilled)
+        ? JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() })
+        : '{}';
+      db.prepare(
+        'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
+        'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
+      ).run(id, label, 'discovery', text, 7, 'graphcorn', 'note_discovery', new Date().toISOString(), extraJson);
+    } else {
+      db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+    }
+
+    // details aspect — text goes here
+    let detAsp = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'details'").get(id);
+    if (!detAsp) {
+      db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'details', 8, 'graphcorn')").run(id);
+      detAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+    }
+    // Append the text as an attribute (idempotent — skip if exact text already there)
+    const dup = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? AND content = ?').get(detAsp.id, text);
+    if (!dup) {
+      db.prepare(
+        "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 8, 'note_discovery', 'graphcorn')"
+      ).run(detAsp.id, text);
+    }
+
+    // kind aspect — single attribute
+    let kAsp = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'kind'").get(id);
+    if (!kAsp) {
+      db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'kind', 6, 'graphcorn')").run(id);
+      kAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+      db.prepare(
+        "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 6, 'note_discovery', 'graphcorn')"
+      ).run(kAsp.id, kind);
+    }
+
+    // Edges: discovery → session + discovery → project + relatedTo
+    const checkE = db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
+    const insE = db.prepare(
+      "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 1, 'graphcorn')"
+    );
+
+    let linkedSession = null;
+    if (sessionId) {
+      const sessId = 'session-' + String(sessionId);
+      if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessId)) {
+        if (!checkE.get(id, sessId, 'recorded_in')) insE.run(id, sessId, 'recorded_in');
+        linkedSession = sessId;
+      }
+    }
+
+    let linkedProject = null;
+    if (sessionId && userId) {
+      // Reuse the projects.js id convention without importing the full module.
+      const cwd = ctx.clientCwd || ctx.cwd || this._currentCwd;
+      if (cwd) {
+        const u = String(userId).toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 32);
+        const h = crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 8);
+        const projId = `project-${u}-${h}`;
+        if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(projId)) {
+          if (!checkE.get(id, projId, 'learned_about')) insE.run(id, projId, 'learned_about');
+          linkedProject = projId;
+        }
+      }
+    }
+
+    let linkedRelated = 0;
+    for (const r of relatedTo) {
+      const rid = String(r || '').toLowerCase().trim();
+      if (!rid) continue;
+      if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(rid)) {
+        if (!checkE.get(id, rid, 'relates_to')) {
+          insE.run(id, rid, 'relates_to');
+          linkedRelated++;
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      nodeId: id,
+      isNew,
+      kind,
+      linkedSession,
+      linkedProject,
+      linkedRelated,
+    };
   }
 
   _graphUpdateTool(input) {
@@ -2193,22 +2390,64 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(id);
           let extraObj = {};
           try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
-          if (setTemp) {
-            if (extraObj.ttl !== 'temp') {
-              extraObj.ttl = 'temp';
-              extraObj.tempCreated = new Date().toISOString();
-            }
+          // Graphcorn-owned nodes: session-end distillation owns their
+          // ttl lifecycle. Refuse agent-driven set/clear-temp overrides
+          // when extra.sessionId is present OR the id matches the
+          // session anchor pattern — prevents accidental promotion /
+          // demotion of structural graphcorn state.
+          const isGraphcornManaged = !!extraObj.sessionId || String(id).startsWith('session-');
+          if (isGraphcornManaged) {
+            // Silently ignore the temp flag change for graphcorn nodes;
+            // description updates above still go through.
           } else {
-            delete extraObj.ttl;
-            delete extraObj.tempCreated;
+            if (setTemp) {
+              if (extraObj.ttl !== 'temp') {
+                extraObj.ttl = 'temp';
+                extraObj.tempCreated = new Date().toISOString();
+              }
+            } else {
+              delete extraObj.ttl;
+              delete extraObj.tempCreated;
+            }
+            db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+              .run(JSON.stringify(extraObj), id);
           }
-          db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
-            .run(JSON.stringify(extraObj), id);
         }
       } else {
-        const extraJson = setTemp
-          ? JSON.stringify({ ttl: 'temp', tempCreated: new Date().toISOString() })
-          : '{}';
+        // graphcorn: when graph_update is called inside an acorn session
+        // ctx, default any NEW node to session-temp + tag with sessionId.
+        // Agent can override by passing temp:false explicitly. Existing
+        // explicit temp:true stays temp the same way. Outside an acorn
+        // ctx (web/discord/cron), behavior is unchanged.
+        const ctx = _execContext.getStore() || {};
+        const acornSessionId = (ctx.platform === 'cli' || this._currentPlatform === 'cli')
+          ? (ctx.channelId || this._currentChannelId)
+          : null;
+        // Post-distill race guard — same as _noteDiscoveryTool.
+        let sessionAlreadyDistilled = false;
+        if (acornSessionId) {
+          try {
+            const sessRow = db.prepare(
+              "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+            ).get('session-' + String(acornSessionId));
+            sessionAlreadyDistilled = !!sessRow?.distilled;
+          } catch {}
+        }
+        const effectiveSessionId = sessionAlreadyDistilled ? null : acornSessionId;
+        let extraObj;
+        if (setTemp) {
+          extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
+          if (effectiveSessionId) extraObj.sessionId = effectiveSessionId;
+        } else if (clearTemp) {
+          extraObj = {};
+        } else if (effectiveSessionId) {
+          // Default for an acorn session: born temp, tied to sessionId.
+          // Distillation at session-end picks winners.
+          extraObj = { ttl: 'temp', sessionId: effectiveSessionId, tempCreated: new Date().toISOString() };
+        } else {
+          extraObj = {};
+        }
+        const extraJson = JSON.stringify(extraObj);
         db.prepare(
           'INSERT INTO nodes (id, label, type, description, importance, mentions, extracted_with, extracted_at, provenance, extra) VALUES (?, ?, ?, ?, 5, 1, ?, ?, ?, ?)'
         ).run(id, label, type, description || '', 'spore-tool', new Date().toISOString(), 'self', extraJson);
@@ -2292,8 +2531,22 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const id = this._normalizeNodeId(nodeId);
         if (!id) return { error: 'Invalid nodeId' };
         if (this._isProtectedNode(id)) return { error: `Cannot delete protected node: ${id}` };
-        const existing = db.prepare('SELECT id, label, type FROM nodes WHERE id = ?').get(id);
+        const existing = db.prepare('SELECT id, label, type, extra FROM nodes WHERE id = ?').get(id);
         if (!existing) return { error: `Node not found: ${id}` };
+        // Distilled-knowledge guard — nodes that survived session-end
+        // distillation represent accumulated cross-session learnings.
+        // Deleting them wipes carefully-earned gotchas ("ANSI escape
+        // codes break QR terminal scans", "expo dev server defaults to
+        // 8081"). User hit this: agent called graph_delete({nodeId:
+        // "expo"}) during an unrelated cleanup and nuked all the expo
+        // gotchas from prior sessions. Require `force: true` to
+        // delete anything with extra.distilled_at set.
+        try {
+          const ext = existing.extra ? JSON.parse(existing.extra) : {};
+          if (ext.distilled_at && input?.force !== true) {
+            return { error: `Refusing to delete "${id}" — it carries distilled cross-session knowledge (distilled_at=${ext.distilled_at}). Pass force: true if you really want to delete it. Consider graph_update to remove specific stale attributes instead.` };
+          }
+        } catch {}
         const edges = db.prepare('SELECT source, target, type FROM edges WHERE source = ? OR target = ?').all(id, id);
         db.prepare('DELETE FROM attributes WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = ?)').run(id);
         db.prepare('DELETE FROM aspects WHERE node_id = ?').run(id);
@@ -2355,11 +2608,36 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     const elapsed = Math.round((now - task.startedAt) / 1000);
 
+    // Polling-detection. The agent frequently falls into a
+    // task_status → sleep → task_status loop instead of ending the
+    // turn and waiting for the push (task_complete trigger). Count
+    // consecutive calls per session and escalate the hint into a
+    // prominent warning from the 2nd call onward. Counter resets if
+    // >60s elapses between polls (fresh conversation).
+    if (!this._taskStatusPollState) this._taskStatusPollState = new Map();
+    const sessionKey = this._ctxSessionKey() || '_global';
+    const prev = this._taskStatusPollState.get(sessionKey);
+    let pollCount = 1;
+    if (prev && (now - prev.lastAt) < 60000) pollCount = prev.count + 1;
+    this._taskStatusPollState.set(sessionKey, { count: pollCount, lastAt: now });
+
     if (task.status !== 'running') {
+      // Clear the poll counter on any terminal status — agent got its
+      // answer, polling has ended.
+      this._taskStatusPollState.delete(sessionKey);
       return { status: task.status, taskId, result: task.result, elapsed_seconds: Math.round((task.completedAt - task.startedAt) / 1000) };
     }
 
-    return { status: 'running', taskId, elapsed_seconds: elapsed, hint: 'Task is still running. Results will be delivered automatically when complete.' };
+    const response = { status: 'running', taskId, elapsed_seconds: elapsed };
+    if (pollCount >= 2) {
+      // Escalated: the agent is polling. Put the warning at the TOP
+      // of the response as an unambiguous, forceful string.
+      response._warning = `STOP POLLING. You have called task_status ${pollCount} times in a row for this session. The task_complete event will re-enter this loop AUTOMATICALLY when the task finishes. END YOUR TURN now. task_status+sleep loops are not how the harness works — they just burn tokens.`;
+      response.hint = 'END YOUR TURN — the result will be pushed.';
+    } else {
+      response.hint = 'Task is still running. Results will be delivered automatically when complete — you do NOT need to poll. END your turn and the harness will wake you when the result arrives.';
+    }
+    return response;
   }
 
   _taskCancelTool({ taskId }) {
@@ -2549,6 +2827,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       userId: this._currentUserId || 'operator',
       originalUserMessage: this._currentUserMessage || task,
       originalUserName: this._currentUserName || null,
+      // Snapshot so the completion-delivery turn (see
+      // _deliverTaskResult) can re-feed the same acorn project
+      // context to processMessage. Without this the wake-up turn
+      // wouldn't know the cwd/tools/tree the user was working in.
+      projectContext: this._currentProjectContext || null,
       abortCtrl,
     });
 
@@ -3138,8 +3421,15 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const { channelId, platform, userId: taskUserId } = taskEntry;
       if (!channelId) return;
 
-      // Web panel: broadcast result over WebSocket, then trigger agent to summarize
-      if (platform === 'web') {
+      // Web panel AND acorn CLI both deliver via the same WebSocket
+      // gateway — channelId = sessionId (per-(user,cwd) for acorn,
+      // "web:control-panel" for web), broadcast frames go to all
+      // connected clients (acorn filters by its active sessionId).
+      // Previously CLI fell through to platformManager.getGateway('cli')
+      // which returns null (no CLI gateway exists), so the push
+      // silently dropped and the agent never got woken up.
+      if (platform === 'web' || platform === 'cli') {
+        const isAcorn = platform === 'cli';
         const deliveryUserId = taskUserId || 'operator';
         const elapsed = Math.round((taskEntry.completedAt - taskEntry.startedAt) / 1000);
         const status = taskEntry.status === 'done' ? 'completed' : 'failed';
@@ -3165,7 +3455,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // Queue delivery to prevent concurrent deliveries from interleaving
           if (!this._deliveryQueue) this._deliveryQueue = Promise.resolve();
           this._deliveryQueue = this._deliveryQueue.then(async () => {
-            // Wait for any active session run to finish before attempting delivery
+            // Wait for any active session run to finish before attempting delivery.
+            // For acorn the sessionKey uses the session:false (non-DM) branch
+            // because acorn treats each launch as its own channel — isDm for
+            // session key purposes is just "deliverable independently".
             const sessionKey = this._agent.sessions?.constructor?.buildKey?.(channelId, true, deliveryUserId) || `dm:${deliveryUserId}`;
             const MAX_WAIT = 120000;
             const waitStart = Date.now();
@@ -3185,12 +3478,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               const result = await this._agent.processMessage({
                 content,
                 channelId,
-                channelName: 'control-panel',
+                channelName: isAcorn ? `acorn:${deliveryUserId}` : 'control-panel',
                 userId: deliveryUserId,
                 userName: taskEntry.originalUserName || 'System',
                 trigger: 'task_complete',
-                platform: 'web',
-                isDm: true,
+                platform: isAcorn ? 'cli' : 'web',
+                isDm: !isAcorn, // acorn sessions aren't DM — preserves per-session isolation
+                projectContext: taskEntry.projectContext || null,
                 onTextDelta: (delta) => {
                   this.broadcast({ type: 'chat:delta', text: delta });
                 },
@@ -3212,7 +3506,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                 });
               }
             } catch (e) {
-              this.log.warn(`[subagent:${taskId}] Web result delivery failed: ${e.message}`);
+              this.log.warn(`[subagent:${taskId}] ${isAcorn ? 'CLI' : 'Web'} result delivery failed: ${e.message}`);
               this._agent.sessions?.addMessage(sessionKey, 'user', content);
               if (chatStartSent) this.broadcast({ type: 'chat:done', text: `Background task finished but delivery failed. Send a message to see results.` });
             }
@@ -5758,6 +6052,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     } catch (e) {
       return { error: `Failed to create: ${e.message}` };
     }
+    // Broadcast so clients (acorn CLI in particular) can render a
+    // live task-list side panel. sessionKey lets old/unscoped clients
+    // filter — the acorn CLI listens for task:* frames and only
+    // renders rows tagged with its own session.
+    try {
+      this.broadcast({
+        type: 'task:create',
+        id: slug,
+        subject: subj,
+        description: String(description || '').slice(0, 500),
+        status: 'pending',
+        priority: Number.isFinite(priority) ? priority : 3,
+        blockedBy: Array.isArray(blockedBy) ? blockedBy : [],
+        sessionKey: this._ctxSessionKey() || null,
+        channelId: ctx.channelId || null,
+      });
+    } catch {}
     return { ok: true, id: slug };
   }
 
@@ -5781,6 +6092,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       sessions.db.prepare('INSERT INTO task_comments (task_id, author, body, created) VALUES (?, ?, ?, ?)')
         .run(id, 'agent', String(note).slice(0, 4000), now);
     }
+    // Broadcast a task:update frame. Payload mirrors the task:create
+    // shape so the client can update its row in place. sessionKey
+    // carried from the task row (not ctx) since task_progress can be
+    // called for tasks created in a different context.
+    try {
+      this.broadcast({
+        type: 'task:update',
+        id,
+        subject: row.subject,
+        status: status || row.status,
+        note: note ? String(note).slice(0, 500) : undefined,
+        result: (result != null) ? String(result).slice(0, 500) : undefined,
+        priority: Number.isFinite(priority) ? priority : row.priority,
+        sessionKey: row.session_key || this._ctxSessionKey() || null,
+        channelId: row.channel_id || null,
+      });
+    } catch {}
     // Cascade: if status flipped to done, unblock dependents whose remaining
     // blockers are all done. Cheap even on large task tables — we filter by
     // LIKE on the json column then re-check each candidate in JS.

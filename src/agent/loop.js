@@ -218,6 +218,11 @@ class AgentLoop {
     this.tools._currentUserId = opts.userId || null;
     this.tools._currentUserRole = opts.userRole || null;
     this.tools._currentSessionToken = opts.sessionToken || null;
+    // Capture so delegate_task can stash it onto the _delegatedTasks
+    // entry; when the subagent finishes, _deliverTaskResult re-feeds
+    // it into processMessage so the wake-up turn has the same acorn
+    // project context (cwd, tools, tree) the agent saw at delegation.
+    this.tools._currentProjectContext = opts.projectContext || null;
     this.tools._abortSignal = opts._abortSignal || null;
 
     const dynamicOpts = {
@@ -288,6 +293,32 @@ class AgentLoop {
       cachedProjectStale,
       cachedProjectIsNew,
     });
+    // DEBUG: dump the assembled system prompt + tool list to disk so we can
+    // inspect exactly what hit the model. Toggle with SPORE_DEBUG_DUMP_PROMPT=1.
+    if (process.env.SPORE_DEBUG_DUMP_PROMPT === '1') {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const dir = process.env.SPORE_DEBUG_DUMP_DIR || '/data';
+        const outFile = path.join(dir, 'last-prompt.txt');
+        const toolList = (this.tools?.getToolDefinitions?.() || []).map(t => t.name);
+        const dump = [
+          `# trigger=${opts.trigger} platform=${opts.platform} promptMode=${promptMode}`,
+          `# user=${opts.userId || ''} session=${sessionKey}`,
+          `# tools (${toolList.length}): ${toolList.join(', ')}`,
+          `# systemPrompt length: ${systemPrompt.length} chars`,
+          `# tooling section present: ${systemPrompt.includes('### Tool Selection Rules')}`,
+          `# web_search mentioned: ${systemPrompt.includes('web_search')}`,
+          '',
+          '── SYSTEM PROMPT ──',
+          systemPrompt,
+        ].join('\n');
+        fs.writeFileSync(outFile, dump);
+        this.log.info(`[debug] wrote system prompt to ${outFile} (${systemPrompt.length} chars, mode=${promptMode}, tooling=${systemPrompt.includes('### Tool Selection Rules')})`);
+      } catch (e) {
+        this.log.warn(`[debug] dump failed: ${e.message}`);
+      }
+    }
     // Plan-mode verification logging — confirms the QUESTIONS:/PLAN_READY
     // instructions actually reach the model. Counts marker occurrences
     // in the final assembled system prompt and warns if they're missing
@@ -1035,6 +1066,13 @@ class AgentLoop {
         userName: opts.userName,
         channelName: opts.channelName,
         toolCalls: toolLog.length > 0 ? toolLog : undefined,
+        // graphcorn: pass the sessionId (= opts.channelId for acorn —
+        // see web.js:4719 where agentOpts.channelId is set to the WS
+        // sessionId). The learner uses this to link every newly-
+        // created entity to the session-<id> node via a
+        // `discovered_in` edge. Only fires for cli-platform turns
+        // where the session node was actually created at session:start.
+        sessionId: opts.platform === 'cli' ? opts.channelId : null,
       }).catch(e => this.log.error('[learner] Background extraction error:', e.message));
     }
 
@@ -1051,6 +1089,210 @@ class AgentLoop {
         projects.noteProjectInteraction(this.learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
       } catch (e) {
         this.log.warn(`[project-node] note failed: ${e.message}`);
+      }
+    }
+
+    // graphcorn — failure capture. Per-session ring buffer of recent
+    // failed exec calls; when a SUBSEQUENT successful exec runs a
+    // "similar" command (same first token + similar target) we
+    // synthesize a `failure_fix` discovery so the user doesn't have
+    // to relearn how to escape that specific gotcha next session.
+    // Cross-round (within last 5 turns + 30min wall clock) so it
+    // catches both immediate retries and "tried other stuff first"
+    // resolutions. Server-side only — invisible to the agent.
+    if (opts.platform === 'cli' && opts.channelId && toolLog.length) {
+      try {
+        if (!this._sessionFailures) this._sessionFailures = new Map();
+        const sessKey = String(opts.channelId);
+        const buf = this._sessionFailures.get(sessKey) || [];
+        const now = Date.now();
+        const turn = (() => {
+          // Reuse the turn count we just incremented — read it back
+          // from the lifecycle aspect on the session node.
+          try {
+            const sessId = 'session-' + sessKey;
+            const row = this.learner?.db?.prepare(
+              "SELECT a.content FROM attributes a JOIN aspects asp ON asp.id=a.aspect_id WHERE asp.node_id=? AND asp.name='lifecycle' AND a.content LIKE 'turn_count:%'"
+            ).get(sessId);
+            const m = row && String(row.content).match(/turn_count:\s*(\d+)/);
+            return m ? parseInt(m[1], 10) : 0;
+          } catch { return 0; }
+        })();
+
+        // Helper: extract the first command token + a "target" (first
+        // path-shaped or URL-shaped argument) for similarity matching.
+        const parseCmd = (cmd) => {
+          if (typeof cmd !== 'string') return { token: '', target: '' };
+          const trimmed = cmd.trim().replace(/^cd\s+\S+\s*&&\s*/, '');
+          const parts = trimmed.split(/\s+/);
+          let token = (parts[0] || '').toLowerCase();
+          if ((token === 'npx' || token === 'pnpx' || token === 'bunx' || token === 'yarn' || token === 'pnpm' || token === 'bun' || token === 'npm') && parts[1]) {
+            token = token + ' ' + parts[1].toLowerCase();
+          }
+          const target = parts.slice(1).find(p => /[\\/.]/.test(p) || p.startsWith('http')) || '';
+          return { token, target };
+        };
+
+        for (const t of toolLog) {
+          if (t.tool !== 'exec') continue;
+          // Reconstruct the input — toolLog stores it as JSON string capped at 300
+          let cmd = '';
+          try {
+            const inp = typeof t.input === 'string' ? JSON.parse(t.input) : t.input;
+            cmd = inp?.command || '';
+          } catch {}
+          if (!cmd) continue;
+          const parsed = parseCmd(cmd);
+          if (t.succeeded === false) {
+            // Capture failure for later matching
+            buf.push({ turn, ts: now, cmd, ...parsed, preview: String(t.resultPreview || '').slice(0, 300) });
+            if (buf.length > 10) buf.shift();
+          } else {
+            // Look for a recent similar failure (same token, target overlap or both empty)
+            const fiveTurnsAgo = turn - 5;
+            const thirtyMinAgo = now - 30 * 60 * 1000;
+            const match = buf.find(f =>
+              f.token === parsed.token &&
+              f.turn >= fiveTurnsAgo &&
+              f.ts >= thirtyMinAgo &&
+              (!parsed.target || !f.target || parsed.target.includes(f.target) || f.target.includes(parsed.target))
+            );
+            if (match) {
+              // Synthesize failure_fix discovery via the tool wrapper —
+              // get the session/user context via _execContext.run so
+              // _noteDiscoveryTool's ALS lookup populates correctly.
+              try {
+                const _execContext = this.tools?.constructor?._execContext || null; // not exposed
+                // Simpler: build a synthetic ctx and call the tool directly.
+                const text = `Failed: ${match.cmd.slice(0, 200)} (exit ${match.preview ? '≠0' : '?'}). Fixed by: ${cmd.slice(0, 200)}`;
+                if (this.tools?._noteDiscoveryTool) {
+                  // Use AsyncLocalStorage from the tools module so the
+                  // ctx-derived sessionId/userId/cwd populate correctly.
+                  const { AsyncLocalStorage } = require('async_hooks');
+                  // The tools module's _execContext is a private const;
+                  // we can't get to it from here cleanly. Instead patch
+                  // _currentChannelId / _currentUserId on the tools
+                  // singleton (they're the fallback path inside
+                  // _resolveFallbackCtx).
+                  this.tools._currentChannelId = sessKey;
+                  this.tools._currentUserId = opts.userId || 'anon';
+                  this.tools._currentPlatform = 'cli';
+                  if (opts.projectContext?.cwd) this.tools._currentCwd = opts.projectContext.cwd;
+                  const r = this.tools._noteDiscoveryTool({ text, kind: 'failure_fix' });
+                  if (r?.ok) {
+                    this.log.info(`[graphcorn] failure_fix captured: ${r.nodeId} (${match.token} → ${parsed.token})`);
+                  }
+                }
+              } catch (e) {
+                this.log.warn(`[graphcorn] failure_fix capture failed: ${e.message}`);
+              }
+              // Drop the matched failure so we don't re-fire on a third success
+              buf.splice(buf.indexOf(match), 1);
+            }
+          }
+        }
+        this._sessionFailures.set(sessKey, buf);
+      } catch (e) {
+        this.log.warn(`[graphcorn] failure capture loop failed: ${e.message}`);
+      }
+    }
+
+    // graphcorn — round checkpoint. Each finished round leaves a
+    // breadcrumb on the session node's `rounds` aspect: turn N | tools
+    // used | files touched | first sentence of the assistant reply.
+    // Capped at the last 50 entries so the session node doesn't balloon
+    // (full history still in episodes table). Also bumps the
+    // turn_count attribute on lifecycle. Only for acorn turns where
+    // the session node exists.
+    // Trace condition — user observed sessions (T123901) where the
+    // round checkpoint silently didn't fire despite the conditions
+    // appearing to match. Logging the entry + condition values so we
+    // can catch whatever path is skipping it.
+    try {
+      this.log.info(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
+    } catch {}
+    if (opts.platform === 'cli' && opts.channelId && this.learner?.db) {
+      try {
+        const sessions = require('../graph/sessions');
+        const turn = sessions.bumpTurnCount(this.learner, opts.channelId);
+        this.log.info(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
+        const sessId = 'session-' + opts.channelId;
+        const sessExists = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
+        if (sessExists) {
+          let asp = this.learner.db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'rounds'").get(sessId);
+          if (!asp) {
+            this.learner.db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'rounds', 7, 'graphcorn')").run(sessId);
+            asp = { id: this.learner.db.prepare('SELECT last_insert_rowid() AS id').get().id };
+          }
+          // Build a richer breadcrumb. The old format was just
+          // "tools | files | first sentence" which gave the summarizer
+          // almost nothing to work with. Now we also capture:
+          //   - the user's prompt (truncated) so the summarizer knows
+          //     what was asked, not just what was done
+          //   - exec commands attempted (first ~80 chars each)
+          //   - files touched (already had basenames; now full paths)
+          //   - non-zero exec outcomes (error hint for "what failed")
+          //   - a bigger assistant reply preview (~300 chars)
+          // toolLog entries store input as JSON.stringify(...).slice(0, 300)
+          // — a truncated STRING. Earlier checkpoint code was doing
+          // `t.input?.path` expecting an object, which always returned
+          // undefined → "files: none" even when write_file ran. Parse
+          // the string first; fall through on parse failure.
+          const parseInput = (t) => {
+            if (t == null || t.input == null) return null;
+            if (typeof t.input === 'object') return t.input;
+            try { return JSON.parse(t.input); } catch { return null; }
+          };
+          const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
+          const fileSet = new Set();
+          const execCmds = [];
+          let failedExecs = 0;
+          for (const t of toolLog) {
+            if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
+              const inp = parseInput(t);
+              const p = inp?.path;
+              // Store FULL path (not just basename) so the summarizer
+              // can see .acorn/scratch/ vs project-root pollution.
+              if (typeof p === 'string') fileSet.add(p);
+            }
+            if (t.tool === 'exec') {
+              const inp = parseInput(t);
+              const cmd = inp?.command || '';
+              // Bumped per-command preview from 100 → 200. The prior
+              // cap was chopping multi-part commands mid-flag and
+              // losing the "what was actually run" context.
+              if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
+              if (t.succeeded === false) failedExecs++;
+            }
+          }
+          const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
+          // Show up to 6 exec commands (was 3) so full workflows
+          // survive to the summary.
+          const execPart = execCmds.length
+            ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 6).join(' ; ')}${execCmds.length > 6 ? ' …' : ''}`
+            : '';
+          const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 250);
+          const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
+          // Bumped reply cap 300 → 800. A 300-char window cut off most
+          // multi-part replies right when they got to the substantive
+          // content (post-preamble). 800 captures a solid paragraph.
+          const replyPreview = replySnip.length > 800 ? replySnip.slice(0, 797) + '…' : replySnip;
+          const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
+          this.learner.db.prepare(
+            "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
+          ).run(asp.id, content);
+          // Trim to last 50 attributes on this aspect so the session
+          // node doesn't grow unbounded over long conversations.
+          const overflow = this.learner.db.prepare(
+            'SELECT id FROM attributes WHERE aspect_id = ? ORDER BY id DESC LIMIT -1 OFFSET 50'
+          ).all(asp.id);
+          if (overflow.length) {
+            const ids = overflow.map(r => r.id);
+            this.learner.db.prepare(`DELETE FROM attributes WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+          }
+        }
+      } catch (e) {
+        this.log.warn(`[graphcorn] round checkpoint failed: ${e.message}`);
       }
     }
 
@@ -1484,7 +1726,7 @@ class AgentLoop {
     if (toolBlocks.length > 0 && opts.onToolUse) {
       for (const toolBlock of toolBlocks) {
         if (!toolBlock?.name) continue;
-        try { opts.onToolUse(toolBlock.name); } catch { }
+        try { opts.onToolUse(toolBlock.name, toolBlock.input); } catch { }
       }
     }
 

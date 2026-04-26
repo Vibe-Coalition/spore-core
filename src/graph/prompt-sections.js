@@ -504,6 +504,7 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('  ```');
     lines.push('  Single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, open-ended has no brackets. Answers come back as a follow-up user message.');
     lines.push('- **schedule_wakeup** when you need to check back after a known wait (a deploy settling, a SLURM job starting, a rate-limit cooling). Releases the session immediately and re-enters with your chosen prompt after 60-3600s. Much better than a tight `sleep` loop.');
+    lines.push('- **NEVER poll delegated tasks with `task_status` + `sleep`.** When you have delegated tasks running and no other work pending, END YOUR TURN. The harness re-enters this loop automatically when any delegated task finishes (via a `task_complete` trigger injecting the result as a user message). Calling `task_status` then `sleep` then `task_status` again burns tokens, clutters the UI with noise, and gives you zero info the push delivery doesn\'t already provide. `task_status` is for "the user asked me where we are on the delegated task" — not a wait loop.');
     lines.push('- **task_create / task_progress / task_list** for anything spanning more than one back-and-forth. Commit to a task when you agree to a multi-step job; update it as you finish each step; read back later to pick up where you left off. Tasks survive restarts, so the operator can return a day later and you still know where you stopped. Use `blockedBy` to express dependencies — a task with open blockers is hidden from the default list until its blockers flip to done.');
     lines.push('- **log_watch** (local paths only) when you need continuous visibility into a log file while something runs (training loss, deploy output, startup). Matches arrive as interjections mid-turn. Use tight regex — every match becomes a message. Prefer over repeated `remote_tail` calls. For remote logs, pair `remote_exec` with `tmux_session` + `remote_tail`.');
     lines.push('- **Plan mode** behaves differently per session:');
@@ -1088,6 +1089,33 @@ function applyPromptSectionsMixin(GraphContext) {
         }
       }
 
+      // graphcorn: Session block. When opts.platform === 'cli' and we
+      // have a session id (sessionId == channelId for acorn), tell the
+      // agent it has a session-anchored graph it can write to via
+      // note_discovery. Capability-gated by the channelId existing AND
+      // the session-<id> node being present in the graph (cheap check
+      // — fail-soft if no graphcorn-server on the other side).
+      if (opts.platform === 'cli' && opts.channelId) {
+        const sessNodeId = 'session-' + String(opts.channelId);
+        let sessionExists = false;
+        try {
+          sessionExists = !!this.db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessNodeId);
+        } catch {}
+        if (sessionExists) {
+          parts.push('');
+          parts.push('## This Session');
+          parts.push(`- Session node: \`${sessNodeId}\` — anchor for everything captured this conversation`);
+          if (opts.cachedProjectNodeId) {
+            parts.push(`- Project node: \`${opts.cachedProjectNodeId}\` — sibling anchor for cross-session memory in the same project`);
+          }
+          parts.push("- **Persist what you learn here.** When you discover something durable — a config that worked, a tool quirk, a fix for a tricky failure, a port number, a CLI flag — call `note_discovery({text: \"...\", kind: \"...\"})`. Don't wait for the learner; you know better what mattered. The discovery gets a `recorded_in` edge to this session AND a `learned_about` edge to the project, so future sessions on this project can find it via `graph_query`.");
+          parts.push("- `note_discovery` kinds: `fact` (plain knowledge), `gotcha` (non-obvious behavior), `workflow` (a procedure that worked), `config` (a setting/value), `failure_fix` (problem→solution pair).");
+          parts.push("- Use `graph_update` directly when you want full schema control (custom node type, multiple aspects, explicit edges to specific nodes). Use `note_discovery` for casual one-line saves — way less boilerplate.");
+          parts.push("- Every entity the LEARNER picks up from this conversation also auto-links to the session node via `discovered_in`. So even passive captures are anchored — no orphans.");
+          parts.push("- **Born temporary, distilled at session-end.** Every node you create this session (note_discovery, graph_update, learner-extracted) is born `temp` and tagged with this session id. When the session closes (graceful or ungraceful), a small LLM looks at all of them and **PROMOTES** the keepers to permanent (tools, libraries, frameworks, people, projects, durable workflows, failure→fix pairs), **APPENDS** session-specific lessons onto existing permanent nodes' `gotchas`, and soft-deletes the rest into `recycle_bin` (7-day restore window). So: capture aggressively, don't agonize over signal-vs-noise — distillation is the filter. If you really want a node permanent immediately (rare — only for things you're CERTAIN matter beyond this session), pass `temp: false` to `graph_update`.");
+        }
+      }
+
       parts.push('');
       if (pc.scope === 'expanded') {
         parts.push(`**Sandbox**: the user has run \`/scope expanded\`, lifting the cwd containment for this session. file operations may target any path on the user's machine — but the project root is still ${pc.cwd}, so write project files there unless the user has asked you to touch something elsewhere (shared dotfiles, a sibling repo, their home directory, etc.). Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart.`);
@@ -1095,10 +1123,13 @@ function applyPromptSectionsMixin(GraphContext) {
         parts.push(`**Sandbox**: ALL file operations (read_file, write_file, edit_file, exec) are sandboxed to ${pc.cwd}. Paths outside that directory will be REJECTED by the tool executor on the user's machine. If the user explicitly asks you to touch a path outside ${pc.cwd}, tell them to run \`/scope expanded\` first to lift the sandbox. Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart. Write everything to ${pc.cwd}.`);
       }
       parts.push('**Work style**: One or two tool calls per turn, not six. After each file write or command, briefly tell the user what you did and what is next. Do NOT batch many write_file calls in a single response — the user cannot see progress and it takes too long to generate.');
+      parts.push('**Ad-hoc helper scripts go in `.acorn/scratch/`, never the project root.** One-off helpers (LAN IP detection, QR generation, log parsers, build wrappers) write to `.acorn/scratch/foo.js` — not `_foo.js` in the repo root. The project node\'s `scratch_helpers` aspect (check via `graph_query`) lists what prior sessions already wrote; read + adapt before creating a duplicate.');
       parts.push('**Project listing — use the right tool, NEVER `exec find` / `exec ls -laR`**: The Project Tree above (and the cached node, when present) already shows the project structure with build/dependency/cache dirs filtered. If you need MORE detail, use `glob` (auto-skips noise dirs, capped at 500 paths, fast) or `read_file` on a specific path — NOT `exec find` / `exec ls -R` / `exec tree`. Walking a node_modules-heavy project with exec regularly hits the 3-minute tool timeout AND dumps thousands of irrelevant lines. Specifically `exec ls -laR` on a Node project = guaranteed timeout.');
       parts.push('**Output filtering**: When listing files / describing a project / showing exec output, NEVER include build/dependency/cache directory contents in your reply — even if the tool returned them. Suppress: .git, node_modules, .venv / venv, __pycache__, dist, build, target, .next, .cache, .acorn, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode/, *.egg-info, coverage, .nyc_output, .DS_Store. If a tool returned a wall of these, FILTER before pasting. The user does not want to see node_modules in chat.');
       parts.push('**Web lookups**: For things you CAN\'T learn from the user\'s machine — current library versions, framework docs, API changes, error messages you\'ve never seen, "is X deprecated", recent breaking changes — use `web_search` to find candidate URLs, then `web_fetch` the 1-3 most authoritative (official docs > GitHub > Stack Overflow > random blog). Always include the current year for recent topics ("expo router 2026", "Next.js 15 breaking changes") — without it search engines return stale results. Quote exact error strings to pin to actual occurrences. Cite the source URL in your reply so the user can verify. See `ref-web-search` for the full pattern.');
       parts.push('**Research-and-record loop**: Before working with anything you don\'t already know cold — a CLI flag, library API, error code, framework convention, third-party tool, config schema — `graph_query({ query: "<thing>" })` FIRST to see if a prior session already learned it. If nothing useful comes back, do NOT improvise from training data (it\'s usually months stale and partly wrong): `web_search` (with the year), `web_fetch` the 1-2 best sources (prefer official docs), then SAVE what you learned via `graph_update({ nodeId: "<slug>", label: "...", type: "tool" | "library" | "framework" | "concept", aspects: [{ name: "overview", attributes: ["<key facts>"] }, { name: "gotchas", attributes: ["<non-obvious bits>"] }] })` so the next session in this project finds it via graph_query and skips the lookup. Briefly tell the user "no node for <thing> in the graph — looking it up" so they know you\'re researching, not guessing. Quietly looking it up beats confidently guessing wrong every time.');
+      parts.push('**3-strikes web_search rule (IMPORTANT)**: If you try the same class of exec command twice and it fails/doesn\'t produce the desired outcome, on the THIRD attempt you MUST `web_search` the exact error or the topic BEFORE running another shell command. Example: `expo start` hangs → try once more with different flags (strike 2) → third step is NOT another exec, it\'s `web_search("expo start hangs no output 2026")` + `web_fetch` the top result. Most "hitting a wall" moments are a google-able stale-training-data issue (framework version, changed CLI, deprecated flag) — banging on exec just burns turns. web_search is cheap (2-3 seconds) and almost always informative. Prefer it OVER: guessing, trying "one more variant", asking the user "what do you think is wrong".');
+      parts.push('**Load relevant gotchas at session start**: When the Project Context shows a project using a known framework/tool (expo, react-native, next, tailwind, docker, etc.), BEFORE your first tool call on that topic `graph_query({ query: "<tool name>" })` to load the existing gotchas aspect. This is where prior sessions persist "the QR code needs plain ASCII not ANSI" or "expo dev server defaults to 8081". Skipping this means you\'ll re-hit the same walls earlier sessions already documented for you. For multiple tools, run queries in parallel in the same turn.');
       parts.push('');
     }
 
@@ -1186,15 +1217,28 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push("If you have questions, output ONLY the QUESTIONS: block and STOP — do NOT include PLAN_READY in the same response. Wait for answers before presenting the plan.");
       parts.push('');
       parts.push('PHASE 5 — PLAN:');
-      parts.push('Only after questions are answered (or if you have none), present a detailed plan with prerequisites, step-by-step changes with file paths, new files vs existing files to modify, dependencies to install, commands to run, and how to verify it works.');
+      parts.push('Only after questions are answered (or if you have none), present a detailed plan with prerequisites, step-by-step changes with file paths, new files vs existing files to modify, dependencies to install, and commands to run. Structure the plan as a numbered list of discrete steps — each step should be small enough to task_create as its own checklist row at execution time (see PHASE 6 + the Execution Checklist rule below).');
+      parts.push('');
+      parts.push('PHASE 6 — VERIFICATION:');
+      parts.push('Every plan MUST end with a **VERIFICATION** section listing 2–5 concrete, runnable checks that confirm the change actually works. Each check is a specific command or observation with a pass criterion, e.g.:');
+      parts.push('  - `bun test src/foo.test.ts` should exit 0, 3 tests passing');
+      parts.push('  - `curl -s http://localhost:3000/api/health` should return `{"ok":true}`');
+      parts.push('  - `read_file config.ts` — `port` should be `8081`, not `8080`');
+      parts.push('  - `ls .acorn/scratch/` — `gen-qr.js` should be present');
+      parts.push('Pick checks that use existing project tooling (tests, curl, read_file) and have an unambiguous pass signal. Avoid "it should feel better" or "make sure it looks right" — those are not verifications. If the project has no test runner and no live endpoint, fall back to targeted `read_file` / `exec --version` checks that prove the expected state.');
+      parts.push('');
+      parts.push('Format the VERIFICATION section as a bulleted list under a `## Verification` heading inside the plan. The user will review it alongside the steps before accepting.');
       parts.push('');
       parts.push('RULES (these are HARD constraints, not suggestions):');
       parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT create directories. The user has explicitly chosen plan mode to PREVIEW your approach before any changes land.');
       parts.push('- Do NOT call exec for anything destructive or modifying — no `mkdir`, `npm init`, `git init`, `touch`, `>`, `>>`, `mv`, `cp`, `rm`, `chmod`, `chown`, package installs, or builds. Read-only inspection only.');
       parts.push('- You MAY use: read_file, glob, grep, web_search, web_fetch, delegate_task (persona="researcher" preferred), graph_query, exec (READ-ONLY commands only — `ls`, `cat`, `which`, `--version`, `git status`, `git log`, etc).');
       parts.push('- Do NOT put questions and PLAN_READY in the same response — ask first, then plan after answers.');
+      parts.push('- Do NOT emit PLAN_READY without a `## Verification` section. A plan without verification is incomplete.');
       parts.push("- End your plan with \"PLAN_READY\" on its own line — that's the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.");
       parts.push("- After the user clicks Execute, the SAME plan is replayed as a NEW turn with mode=execute — that's when you actually run write_file etc. Do not pre-emptively try to skip plan mode by writing now.]");
+      parts.push('');
+      parts.push('**Execution Checklist (the execute-mode rule):** When the plan is replayed for execution, your FIRST set of tool calls MUST be `task_create` — one per plan step AND one per verification check. Use short `subject` strings (5–10 words) copied from the plan\'s step headers. As you complete each step, call `task_progress({id, status: "done"})` IMMEDIATELY — do not batch updates at the end. Before starting a step, call `task_progress({id, status: "in_progress"})` so the user can see which one you\'re on. If a step fails, `task_progress({id, status: "error", note: "<what failed>"})` and either propose a fix or ask the user. After all implementation steps are `done`, run the verification checks in order, updating each to `done` or `error`. You may only declare the work complete once every task in the checklist (impl + verification) is `done`. The user watches this checklist to see progress — skipping updates means they can\'t tell where you are.');
       parts.push('');
     }
 

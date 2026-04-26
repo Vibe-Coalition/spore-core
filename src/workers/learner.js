@@ -343,12 +343,17 @@ class Learner {
     const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId };
 
     if (this._running || this._llmBusy) {
+      const reason = this._running ? 'already-running' : 'llm-busy';
       if (this._queue.length >= this._maxQueue) {
         this.stats.skipped++;
+        this.log.info(`[learner] Extraction dropped — ${reason}, queue full (${this._queue.length}/${this._maxQueue})`);
+        graphEvents.emit('change', { op: 'learner:skip', reason: `${reason}-queue-full`, source: 'learner' });
         return;
       }
       this._queue.push({ batch: [entry] });
       this.stats.queued++;
+      this.log.info(`[learner] Extraction queued — ${reason} (queue depth ${this._queue.length}/${this._maxQueue})`);
+      graphEvents.emit('change', { op: 'learner:queue', reason, queueDepth: this._queue.length, source: 'learner' });
       return;
     }
 
@@ -358,9 +363,31 @@ class Learner {
 
   async _processBatchExtraction(batch) {
     this._running = true;
+    // Surface the extraction kickoff so operators know the learner is
+    // actually running — previously the only signal was the final
+    // "Extracted: NeN..." line AFTER the LLM call returned, which made
+    // idle/stalled states invisible.
+    const startedAt = Date.now();
+    const sessionId = batch[batch.length - 1]?.opts?.channelName || batch[batch.length - 1]?.opts?.userId || 'conversation';
+    this.log.info(`[learner] Extraction started (batch of ${batch.length}, session=${String(sessionId).slice(-30)})`);
+    graphEvents.emit('change', { op: 'learner:start', sessionKey: sessionId, batchSize: batch.length, source: 'learner' });
 
     try {
-      const combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
+      let combinedExchange = batch.map(b => b.exchange).join('\n\n---\n\n');
+      // Trailing-token cap. Long acorn turns (lots of tool calls + big
+      // file dumps) made per-turn extraction take many seconds and
+      // burn input tokens on stuff the model already saw. The most
+      // recent ~4k tokens (16k chars) is what matters for THIS turn's
+      // extraction; older context lives in earlier extractions and in
+      // the agent's own running message history. Anything beyond that
+      // is dropped from the head with a marker so the model knows.
+      const COMBINED_CHAR_CAP = 16000;
+      if (combinedExchange.length > COMBINED_CHAR_CAP) {
+        const dropped = combinedExchange.length - COMBINED_CHAR_CAP;
+        combinedExchange =
+          `[earlier ${dropped} chars truncated — extracting from trailing window only]\n` +
+          combinedExchange.slice(-COMBINED_CHAR_CAP);
+      }
       const lastObservedAt = batch[batch.length - 1].observedAt;
       const mergedOpts = batch[batch.length - 1].opts;
 
@@ -392,11 +419,19 @@ class Learner {
         system,
         messages: [{ role: 'user', content: combinedExchange }],
       }), 'learner-extract');
-      if (!response) return;
+      if (!response) {
+        this.log.warn(`[learner] Extraction aborted — LLM returned no response (${Date.now() - startedAt}ms)`);
+        graphEvents.emit('change', { op: 'learner:done', sessionKey: sessionId, error: 'no-response', elapsedMs: Date.now() - startedAt, source: 'learner' });
+        return;
+      }
 
       const text = response.content.find(b => b.type === 'text')?.text || '';
       const extraction = this._parseExtraction(text);
-      if (!extraction) return;
+      if (!extraction) {
+        this.log.warn(`[learner] Extraction aborted — LLM output not parseable as JSON (${Date.now() - startedAt}ms, ${(response.usage?.input_tokens) || 0}in/${(response.usage?.output_tokens) || 0}out)`);
+        graphEvents.emit('change', { op: 'learner:done', sessionKey: sessionId, error: 'parse-fail', elapsedMs: Date.now() - startedAt, source: 'learner' });
+        return;
+      }
 
       const lastEpisodeId = batch[batch.length - 1].episodeId;
 
@@ -411,10 +446,28 @@ class Learner {
 
       const inTok = response.usage?.input_tokens || 0;
       const outTok = response.usage?.output_tokens || 0;
+      const elapsed = Date.now() - startedAt;
 
+      // Always log the outcome, even when empty — a silent learner
+      // pass used to look identical to "learner not running" in the
+      // live logs. The empty case is useful signal: "the LLM saw the
+      // turn and decided nothing new was worth capturing."
       if (wrote.total > 0) {
-        this.log.info(`[learner] Extracted (batch of ${batch.length}): ${wrote.entities}e ${wrote.aspects}a ${wrote.updates || 0}u ${wrote.edges}r ${wrote.gaps || 0}g (${inTok}/${outTok} tokens)`);
+        this.log.info(`[learner] Extracted (batch of ${batch.length}): ${wrote.entities}e ${wrote.aspects}a ${wrote.updates || 0}u ${wrote.edges}r ${wrote.gaps || 0}g (${inTok}/${outTok} tokens, ${elapsed}ms)`);
+      } else {
+        this.log.info(`[learner] Extraction empty (batch of ${batch.length}, ${inTok}/${outTok} tokens, ${elapsed}ms) — nothing new worth capturing`);
       }
+      graphEvents.emit('change', {
+        op: 'learner:done',
+        sessionKey: sessionId,
+        entities: wrote.entities || 0,
+        aspects: wrote.aspects || 0,
+        updates: wrote.updates || 0,
+        edges: wrote.edges || 0,
+        gaps: wrote.gaps || 0,
+        elapsedMs: elapsed,
+        source: 'learner',
+      });
 
       // Verification pass
       try {
@@ -438,6 +491,19 @@ class Learner {
     } catch (e) {
       this.stats.errors++;
       this.log.error('[learner] Batch extraction failed:', e.message);
+      // Always close the learner:start we emitted at line 373 — otherwise
+      // any subscriber tracking active state (e.g. the web UI's self-node
+      // activity pulse) is stuck indefinitely. The two graceful failure
+      // paths above also emit learner:done; this catches the throw path.
+      try {
+        graphEvents.emit('change', {
+          op: 'learner:done',
+          sessionKey: sessionId,
+          error: e?.message || 'exception',
+          elapsedMs: Date.now() - startedAt,
+          source: 'learner',
+        });
+      } catch {}
     } finally {
       this._running = false;
       this._drainQueue();
@@ -985,11 +1051,21 @@ The JSON schema for updates becomes:
           }
           // If the LLM re-extracts an existing temp node as non-ephemeral
           // (worth keeping long-term), promote it by clearing the ttl marker.
+          //
+          // EXCEPTION: graphcorn-owned nodes (extra.sessionId set) are
+          // governed by session-end distillation — the learner must NOT
+          // clear their ttl mid-session or they'll escape distill's
+          // candidate sweep. Real impact: session T115505 had its own
+          // session node un-tempted here because the LLM re-extracted
+          // the session as an entity; every session-tagged temp the
+          // learner saw that session also got silently promoted, so
+          // distill found "no session-temp nodes" and the session's
+          // knowledge was lost.
           if (ent.ephemeral === false) {
             try {
               const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(resolved);
               let extraObj = {}; try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch {}
-              if (extraObj.ttl === 'temp') {
+              if (extraObj.ttl === 'temp' && !extraObj.sessionId) {
                 delete extraObj.ttl; delete extraObj.tempCreated;
                 this.db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), resolved);
                 this.log.info(`[learner] Promoted temp node to permanent: ${resolved}`);
@@ -997,9 +1073,46 @@ The JSON schema for updates becomes:
             } catch {}
           }
         } else {
-          const extraJson = (ent.ephemeral === true)
-            ? JSON.stringify({ ttl: 'temp', tempCreated: new Date().toISOString() })
-            : '{}';
+          // graphcorn: when called inside an acorn session, most new
+          // learner-extracted nodes are born temp + tagged with
+          // sessionId so session-end distillation can pick winners.
+          // EXCEPT identity nodes — people (especially the user) and
+          // the agent's self-node are global identity and must NOT be
+          // sacrificed to distillation. Session #1 created "yam" as
+          // type=person and the distiller nuked it (FK'd on edges).
+          const isIdentityNode =
+            ent.type === 'person' ||
+            id === (this.config.agentId || 'spore') ||
+            (opts.userId && id === String(opts.userId).toLowerCase()) ||
+            (opts.userName && id === String(opts.userName).toLowerCase());
+
+          // Post-distill race guard — if the learner extraction was
+          // queued DURING the session but is running AFTER its
+          // distillation finished, we cannot rely on distill to clean
+          // up temps any more. Tagging with the stale sessionId
+          // creates an orphan that sits temp until the 48h janitor.
+          // Detection: look up session-<id>'s extra.distilled_at. If
+          // set, the session is closed — skip the temp tag so this
+          // late-arriving node lands as permanent.
+          let sessionAlreadyDistilled = false;
+          if (opts.sessionId) {
+            try {
+              const sessRow = this.db.prepare(
+                "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+              ).get('session-' + String(opts.sessionId));
+              sessionAlreadyDistilled = !!sessRow?.distilled;
+            } catch {}
+          }
+
+          let extraObj;
+          if (opts.sessionId && !isIdentityNode && !sessionAlreadyDistilled) {
+            extraObj = { ttl: 'temp', sessionId: opts.sessionId, tempCreated: new Date().toISOString() };
+          } else if (ent.ephemeral === true) {
+            extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
+          } else {
+            extraObj = {};
+          }
+          const extraJson = JSON.stringify(extraObj);
           this.db.prepare(
             'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
           ).run(id, ent.label, ent.type, ent.description || '', 5, 'self', 'spore-learner', new Date().toISOString(), extraJson);
@@ -1262,6 +1375,32 @@ The JSON schema for updates becomes:
           wrote.edges++;
           this.stats.edges++;
           graphEvents.emit('change', { op: 'edge:create', edge: { source: src, target: tgt, type: edge.type }, source: 'learner' });
+        }
+      }
+
+      // graphcorn: auto-link every newly-created entity to the
+      // session-<id> node via a `discovered_in` edge, so we can
+      // graph_query "what did session X teach us". Only fires when
+      // opts.sessionId was passed AND the session node exists in the
+      // graph (skip for non-cli platforms or first-turn races where
+      // session:start hasn't landed yet).
+      if (opts.sessionId && newNodeIds.size > 0) {
+        const sessId = 'session-' + String(opts.sessionId);
+        const sessExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
+        if (sessExists) {
+          const checkE = this.db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
+          const insE = this.db.prepare(
+            "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, 'discovered_in', 1, 'graphcorn-learner')"
+          );
+          for (const nid of newNodeIds) {
+            if (nid === sessId) continue; // shouldn't happen but cheap guard
+            if (!checkE.get(nid, sessId, 'discovered_in')) {
+              insE.run(nid, sessId);
+              wrote.edges++;
+              this.stats.edges++;
+              graphEvents.emit('change', { op: 'edge:create', edge: { source: nid, target: sessId, type: 'discovered_in' }, source: 'learner-graphcorn' });
+            }
+          }
         }
       }
 
