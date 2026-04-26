@@ -340,7 +340,7 @@ class SessionManager {
 
         if (changed) writes.push({ id: row.id, content: JSON.stringify(updated) });
       } catch {
-        // Not JSON or not structured — skip
+        // silent: malformed JSON → fallback
       }
     }
 

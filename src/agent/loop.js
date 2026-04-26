@@ -137,12 +137,12 @@ class AgentLoop {
       if (this.tools._sessionContexts) this.tools._sessionContexts.delete(sessionKey);
       // Kill any per-session log watches so subprocesses don't outlive sessions.
       if (typeof this.tools.killSessionLogWatches === 'function') {
-        try { this.tools.killSessionLogWatches(sessionKey); } catch {}
+        try { this.tools.killSessionLogWatches(sessionKey); } catch (e) { this.log.warn('[loop] this.tools.killSessionLogWatches failed: ' + e.message); }
       }
       // Reject any pending ask_user prompts for this session so the tool
       // handler doesn't hang forever.
       if (typeof this.tools.cancelSessionAskUser === 'function') {
-        try { this.tools.cancelSessionAskUser(sessionKey); } catch {}
+        try { this.tools.cancelSessionAskUser(sessionKey); } catch (e) { this.log.warn('[loop] this.tools.cancelSessionAskUser failed: ' + e.message); }
       }
       // Notify any waiters (e.g. gateway retrying after abort)
       const waiters = this._sessionWaiters.get(sessionKey);
@@ -533,7 +533,7 @@ class AgentLoop {
         // Plugin middleware: beforeInference
         if (this._pluginManager) {
           for (const handler of this._pluginManager.getMiddleware('beforeInference')) {
-            try { await handler({ systemPrompt, messages, iteration: iterations }); } catch { }
+            try { await handler({ systemPrompt, messages, iteration: iterations }); } catch (e) { this.log.warn('[loop] handler failed: ' + e.message); }
           }
         }
 
@@ -567,7 +567,7 @@ class AgentLoop {
           // Give the agent headroom to respond
           iterations = Math.max(0, iterations - 4);
           if (opts.onStatus) {
-            try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { }
+            try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { /* silent: best-effort UI callback */ }
           }
         }
 
@@ -587,7 +587,7 @@ class AgentLoop {
         // Plugin middleware: afterInference
         if (this._pluginManager) {
           for (const handler of this._pluginManager.getMiddleware('afterInference')) {
-            try { await handler({ response, iteration: iterations }); } catch { }
+            try { await handler({ response, iteration: iterations }); } catch (e) { this.log.warn('[loop] handler failed: ' + e.message); }
           }
         }
 
@@ -663,7 +663,7 @@ class AgentLoop {
         // Notify user, add continuation message, and let the model retry with smaller output.
         if (response.stop_reason === 'max_tokens') {
           this.log.warn(`[agent] Iter ${iterations}: hit max_tokens (${iterUsage.output_tokens || '?'} out) — tool call truncated`);
-          if (opts.onStatus) { try { opts.onStatus({ type: 'truncated', iteration: iterations, outputTokens: iterUsage.output_tokens }); } catch { } }
+          if (opts.onStatus) { try { opts.onStatus({ type: 'truncated', iteration: iterations, outputTokens: iterUsage.output_tokens }); } catch { /* silent: best-effort UI callback */ } }
 
           // Store what we have (text only, skip truncated tool blocks)
           if (responseText) {
@@ -723,7 +723,7 @@ class AgentLoop {
           const allParallel = toolBlocks.length > 1 && toolBlocks.every(t => PARALLEL_SAFE.has(t.name));
           if (allParallel) {
             this.log.info(`[agent] Executing ${toolBlocks.length} tools in parallel: ${toolBlocks.map(t => t.name).join(', ')}`);
-            if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: toolBlocks.length, tools: toolBlocks.map(t => t.name) }); } catch { } }
+            if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: toolBlocks.length, tools: toolBlocks.map(t => t.name) }); } catch { /* silent: best-effort UI callback */ } }
             const results = await Promise.all(toolBlocks.map(tb => abortRace(tb)));
             toolResults.push(...results);
           } else {
@@ -738,7 +738,7 @@ class AgentLoop {
               }
               if (batch.length > 1) {
                 this.log.info(`[agent] Parallel batch: ${batch.length} tools (${batch.map(t => t.name).join(', ')})`);
-                if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: batch.length, tools: batch.map(t => t.name) }); } catch { } }
+                if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: batch.length, tools: batch.map(t => t.name) }); } catch { /* silent: best-effort UI callback */ } }
                 const results = await Promise.all(batch.map(tb => abortRace(tb)));
                 toolResults.push(...results);
               } else if (batch.length === 1) {
@@ -875,7 +875,7 @@ class AgentLoop {
           if (apiRetries <= 5) {
             const delay = apiRetries * 5000;
             this.log.warn(`API server error (${e.status}), retry ${apiRetries}/5 in ${delay / 1000}s...`);
-            if (opts.onStatus) { try { opts.onStatus({ type: 'api_retry', status: e.status, attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { } }
+            if (opts.onStatus) { try { opts.onStatus({ type: 'api_retry', status: e.status, attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ } }
             await this._sleep(delay);
             continue;
           }
@@ -899,7 +899,7 @@ class AgentLoop {
               const delay = Math.min(apiRetries * 3000, 15000);
               this.log.warn(`Network error (${(e.message || '').substring(0, 80)}), retry ${apiRetries}/5 in ${delay / 1000}s...`);
               if (opts.onStatus) {
-                try { opts.onStatus({ type: 'api_retry', status: 'network', attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { }
+                try { opts.onStatus({ type: 'api_retry', status: 'network', attempt: apiRetries, maxAttempts: 5, delaySec: delay / 1000 }); } catch { /* silent: best-effort UI callback */ }
               }
               await this._sleep(delay);
               continue;
@@ -1076,7 +1076,7 @@ class AgentLoop {
         try {
           const inp = typeof t.input === 'string' ? JSON.parse(t.input) : t.input;
           cmd = inp?.command || '';
-        } catch {}
+        } catch { /* silent: malformed JSON → fallback */ }
         if (!cmd) continue;
         const parsed = parseCmd(cmd);
         if (t.succeeded === false) {
@@ -1153,7 +1153,7 @@ class AgentLoop {
     // can catch whatever path is skipping it.
     try {
       this.log.info(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
-    } catch {}
+    } catch { /* silent: best-effort log */ }
     if (!(opts.platform === 'cli' && opts.channelId && this.learner?.db)) return;
     try {
       const sessions = require('../graph/sessions');
@@ -1326,7 +1326,7 @@ class AgentLoop {
 
     const toolDetail = this._toolInputSummary(toolBlock.name, toolBlock.input);
     graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
-    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { } }
+    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { /* silent: best-effort UI callback */ } }
     const toolExecStart = Date.now();
     // Pass the session's context explicitly so concurrent sessions
     // don't race on a shared "current session" field in tools.js.
@@ -1344,10 +1344,10 @@ class AgentLoop {
 
     const toolExecMs = Date.now() - toolExecStart;
     this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
-    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { } }
+    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { /* silent: best-effort UI callback */ } }
 
     if (opts.onStatus && !result.error) {
-      try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch { }
+      try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch (e) { this.log.warn('[loop] this._emitCodeEvent failed: ' + e.message); }
     }
 
     toolLog.push({
@@ -1417,7 +1417,7 @@ class AgentLoop {
     const fs = require('fs');
     const path = require('path');
     const uploadDir = path.join(this.config.workspacePath || process.cwd(), 'uploads');
-    try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
+    try { fs.mkdirSync(uploadDir, { recursive: true }); } catch (e) { this.log.warn('[loop] fs.mkdirSync failed: ' + e.message); }
     const saved = [];
     const extByMime = {
       'image/jpeg': 'jpg',
@@ -1781,12 +1781,12 @@ class AgentLoop {
     const responseText = textBlocks.map(b => b.text || '').join('');
 
     if (responseText && opts.onTextDelta) {
-      try { opts.onTextDelta(responseText); } catch { }
+      try { opts.onTextDelta(responseText); } catch { /* silent: best-effort UI callback */ }
     }
     if (toolBlocks.length > 0 && opts.onToolUse) {
       for (const toolBlock of toolBlocks) {
         if (!toolBlock?.name) continue;
-        try { opts.onToolUse(toolBlock.name, toolBlock.input); } catch { }
+        try { opts.onToolUse(toolBlock.name, toolBlock.input); } catch { /* silent: best-effort UI callback */ }
       }
     }
 
@@ -1912,7 +1912,7 @@ class AgentLoop {
       const fallbackStart = Date.now();
       this.log.info(`[stream] ${model} — tool turn using non-stream request`);
       if (opts.onStatus) {
-        try { opts.onStatus({ type: 'mode', mode: 'non_stream_tool_turn', model, reason: 'tool_turn' }); } catch { }
+        try { opts.onStatus({ type: 'mode', mode: 'non_stream_tool_turn', model, reason: 'tool_turn' }); } catch { /* silent: best-effort UI callback */ }
       }
 
       const response = await this._callNonStream(requestOpts, opts);
@@ -1932,7 +1932,7 @@ class AgentLoop {
             tools: toolCount,
             thinkingTokens: 0,
           });
-        } catch { }
+        } catch { /* silent: best-effort UI callback */ }
       }
       return response;
     }
@@ -1941,7 +1941,7 @@ class AgentLoop {
     // Callbacks are optional; when absent we still stream but discard events.
     const stream = this.client.messages.stream(requestOpts);
     if (signal) {
-      const onAbort = () => { try { stream.abort(); } catch { } };
+      const onAbort = () => { try { stream.abort(); } catch { /* silent: best-effort terminate */ } };
       signal.addEventListener('abort', onAbort, { once: true });
       stream.on('end', () => signal.removeEventListener('abort', onAbort));
     }
@@ -1959,7 +1959,7 @@ class AgentLoop {
       const elapsed = Math.round((Date.now() - _streamStart) / 1000);
       this.log.info(`[stream] ${model} — ${elapsed}s, phase=${_phase}, ${_streamChars} chars, ${_streamToolCount} tool(s), ${_thinkingTokens} thinking`);
       if (opts.onStatus) {
-        try { opts.onStatus({ type: 'heartbeat', elapsed, phase: _phase, chars: _streamChars, tools: _streamToolCount, thinkingTokens: _thinkingTokens, toolName: _currentToolName }); } catch { }
+        try { opts.onStatus({ type: 'heartbeat', elapsed, phase: _phase, chars: _streamChars, tools: _streamToolCount, thinkingTokens: _thinkingTokens, toolName: _currentToolName }); } catch { /* silent: best-effort UI callback */ }
       }
     }, heartbeatMs);
     heartbeat.unref?.();
@@ -1976,7 +1976,7 @@ class AgentLoop {
           const chunk = event.delta.thinking || '';
           _thinkingText += chunk;
           if (chunk && opts.onThinkingDelta) {
-            try { opts.onThinkingDelta(chunk); } catch { }
+            try { opts.onThinkingDelta(chunk); } catch { /* silent: best-effort UI callback */ }
           }
           if (_thinkingTokens % 5 === 0 && opts.onStatus) {
             const snippet = _thinkingText.length > 200
@@ -2008,13 +2008,13 @@ class AgentLoop {
         if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
           _phase = 'generating';
         }
-      } catch { }
+      } catch { /* silent: best-effort UI callback */ }
     });
 
     if (opts.onTextDelta) {
       stream.on('text', (text) => {
         _streamChars += text.length;
-        try { opts.onTextDelta(text); } catch { }
+        try { opts.onTextDelta(text); } catch { /* silent: best-effort UI callback */ }
       });
     }
 
@@ -2376,7 +2376,7 @@ class AgentLoop {
             { channelName: 'compaction' }
           ).catch(() => { });
         }
-      } catch { }
+      } catch (e) { this.log.warn('[loop] filter failed: ' + e.message); }
     }
 
     // ── Phase 3: Generate structured summary (iterative if previous exists) ──
