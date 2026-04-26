@@ -41,7 +41,7 @@ class TelegramGateway {
   _ensureVoicePipeline() {
     if (this._voicePipeline) return this._voicePipeline;
     if (!this.config.voice?.enabled || !VoicePipeline) return null;
-    this._voicePipeline = new VoicePipeline(this.config, this.log);
+    this._voicePipeline = new VoicePipeline(this.config, this.log, this.agent?._pluginManager || null);
     return this._voicePipeline.enabled ? this._voicePipeline : null;
   }
 

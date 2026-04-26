@@ -806,7 +806,28 @@ class WebGateway {
       'SPORE_PROACTIVE_MAX_DAY',
       'SPORE_PROACTIVE_CHANNELS',
     ].some(k => !!process.env[k]);
-    const sttConfigured = !!(this.config.deepgramApiKey || this.config.openaiApiKey);
+    // STT providers come from plugins (whisper, deepgram, …). The
+    // legacy in-tree fallback (DEEPGRAM_API_KEY / OPENAI_API_KEY env
+    // vars piped into config.deepgramApiKey / config.openaiApiKey)
+    // still provides a "configured" signal even when no plugin is
+    // installed yet — Phase A keeps that path so existing instances
+    // don't lose voice the moment they pull this commit.
+    const mgr = this.tools?._pluginManager;
+    const pluginProviders = mgr?.getSTTProviders?.() || [];
+    const legacyDg = !!this.config.deepgramApiKey;
+    const legacyOai = !!this.config.openaiApiKey;
+    const voiceProviders = pluginProviders.map(p => ({
+      name: p.name,
+      pluginId: p.pluginId,
+      configured: p.configured,
+    }));
+    if (!voiceProviders.find(p => p.name === 'deepgram') && legacyDg) {
+      voiceProviders.push({ name: 'deepgram', pluginId: null, configured: true });
+    }
+    if (!voiceProviders.find(p => p.name === 'openai') && legacyOai) {
+      voiceProviders.push({ name: 'openai', pluginId: null, configured: true });
+    }
+    const sttConfigured = voiceProviders.some(p => p.configured);
     const pipeline = this._ensureVoicePipeline();
     const customProviders = Object.entries(this.config.customProviders || {})
       .map(([name, provider]) => ({
@@ -834,7 +855,8 @@ class WebGateway {
       },
       voice: {
         enabled: !!this.config.voice?.enabled,
-        sttProvider: this.config.voice?.sttProvider || 'deepgram',
+        sttProvider: this.config.voice?.sttProvider || (voiceProviders.find(p => p.configured)?.name || ''),
+        providers: voiceProviders,
         ttsProvider: this.config.voice?.ttsProvider || '',
         ttsVoice: this.config.voice?.ttsVoice || '',
         ttsModel: this.config.voice?.ttsModel || '',
@@ -843,7 +865,7 @@ class WebGateway {
         sttConfigured,
         note: sttConfigured
           ? (pipeline ? 'Voice pipeline is ready.' : 'Voice is enabled but the pipeline is not ready.')
-          : 'Voice needs an STT key (Deepgram or OpenAI) to become active.',
+          : 'Voice needs an STT plugin installed (whisper or deepgram) — or set DEEPGRAM_API_KEY / OPENAI_API_KEY in .env.',
       },
       runtime: {
         publicUrl: this.config.publicUrl || null,
@@ -3411,6 +3433,65 @@ class WebGateway {
         return;
       }
 
+      // Frontend asset registry — graph-viewer.html boot fetches this list
+      // and inserts <script src=…> for each entry. No auth: graph-viewer.html
+      // itself is served pre-auth (operator hasn't signed in yet at page-
+      // load time), so its bootstrap dependencies must be too. Plugins
+      // declare assets via api.registerFrontendAsset(filename); the manager
+      // serves the file at /api/plugins/<id>/static/<filename>.
+      if (urlPath === '/api/plugins/frontend-assets' && req.method === 'GET') {
+        const mgr = this.tools?._pluginManager;
+        const assets = mgr?.getFrontendAssets?.() || [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ assets }));
+        return;
+      }
+
+      // Plugin static file server: GET /api/plugins/<id>/static/<file>.
+      // Only matches if the plugin has called registerFrontendAsset(<file>).
+      // Path-traversal guarded — filename must be a single segment.
+      if (urlPath.startsWith('/api/plugins/') && urlPath.includes('/static/')) {
+        const m = urlPath.match(/^\/api\/plugins\/([a-zA-Z0-9_-]+)\/static\/([^\/?]+)$/);
+        if (m) {
+          const [, pluginId, filename] = m;
+          const mgr = this.tools?._pluginManager;
+          const assets = mgr?.getFrontendAssets?.() || [];
+          const ok = assets.some(a => a.pluginId === pluginId && a.filename === filename);
+          if (!ok) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Asset not registered' }));
+            return;
+          }
+          const plugin = mgr?.plugins?.get?.(pluginId);
+          if (!plugin?.path) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Plugin path not found' }));
+            return;
+          }
+          const filePath = path.join(plugin.path, 'static', filename);
+          // Path traversal sanity: the resolved file must be inside the
+          // plugin's static/ dir.
+          const expectedRoot = path.join(plugin.path, 'static') + path.sep;
+          const resolvedPath = path.resolve(filePath);
+          if (!resolvedPath.startsWith(expectedRoot) && resolvedPath !== expectedRoot.slice(0, -1)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Forbidden' }));
+            return;
+          }
+          if (!fs.existsSync(resolvedPath)) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'File not found' }));
+            return;
+          }
+          const ext = path.extname(filename).toLowerCase();
+          const mimeMap = { '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.html': 'text/html', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' };
+          const mime = mimeMap[ext] || 'application/octet-stream';
+          res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
+          fs.createReadStream(resolvedPath).pipe(res);
+          return;
+        }
+      }
+
       // Plugins API — list / install / uninstall. Creator-only.
       // Install + uninstall are gated behind config.pluginsHotReload (default
       // off) so an operator must explicitly opt in to runtime plugin lifecycle.
@@ -4267,7 +4348,7 @@ class WebGateway {
     if (!this.config.voice?.enabled) return null;
     try {
       const { VoicePipeline } = require('../voice');
-      this._voicePipeline = new VoicePipeline(this.config, this.log);
+      this._voicePipeline = new VoicePipeline(this.config, this.log, this.tools?._pluginManager);
       return this._voicePipeline.enabled ? this._voicePipeline : null;
     } catch (e) {
       this.log.warn(`[voice] Pipeline init failed: ${e.message}`);

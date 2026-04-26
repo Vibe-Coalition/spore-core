@@ -625,6 +625,50 @@ class PluginManager {
   }
 
   /**
+   * Walk every plugin's STT-provider registrations and return a flat
+   * list `[{ pluginId, name, factory, configured }]`. `configured` is
+   * computed by calling each plugin's `isConfigured(this._appContext.config)`
+   * predicate so the settings UI can show which providers are usable.
+   * Voice/stt.js's `createSTT(config, manager)` consults this list.
+   */
+  getSTTProviders() {
+    const cfg = this._appContext?.config || {};
+    const out = [];
+    for (const [pluginId, plugin] of this.plugins) {
+      const providers = plugin.instance?.getSTTProviders?.() || [];
+      for (const p of providers) {
+        let configured = false;
+        try { configured = !!p.isConfigured(cfg); } catch (e) {
+          this.log.warn(`[plugins] STT isConfigured(${pluginId}/${p.name}) threw: ${e.message}`);
+        }
+        out.push({ pluginId, name: p.name, factory: p.factory, configured });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Walk every plugin's `registerFrontendAsset` declarations and
+   * return `[{ pluginId, filename, url }]`. Served by web.js's
+   * `GET /api/plugins/frontend-assets`. graph-viewer.html fetches the
+   * list on boot and inserts `<script src=url>` for each.
+   */
+  getFrontendAssets() {
+    const out = [];
+    for (const [pluginId, plugin] of this.plugins) {
+      const assets = plugin.instance?.getFrontendAssets?.() || [];
+      for (const filename of assets) {
+        out.push({
+          pluginId,
+          filename,
+          url: `/api/plugins/${pluginId}/static/${filename}`,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Collect every plugin's settings pane (if registered) along with its
    * current config slot, masked for secret fields. Used by the settings UI.
    */

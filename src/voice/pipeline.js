@@ -9,19 +9,20 @@ const { createSTT } = require('./stt');
 const { createTTS } = require('./tts');
 
 class VoicePipeline {
-  constructor(config, logger) {
+  constructor(config, logger, pluginManager = null) {
     this.config = config;
     this.log = logger;
-    this.stt = createSTT(config);
+    this.pluginManager = pluginManager;
+    this.stt = createSTT(config, pluginManager);
     this.tts = createTTS(config);
     this.enabled = !!(this.stt && this.tts);
 
     if (this.enabled) {
       const ttsName = this.tts?.constructor?.name?.replace('TTS', '') || 'unknown';
-      this.log.info(`[voice] Pipeline ready — STT: ${config.voice?.sttProvider || 'deepgram'}, TTS: ${ttsName}`);
+      this.log.info(`[voice] Pipeline ready — STT: ${config.voice?.sttProvider || 'auto'}, TTS: ${ttsName}`);
     } else {
       if (!this.stt) {
-        this.log.info(`[voice] Pipeline disabled — missing STT (need DEEPGRAM_API_KEY or OPENAI_API_KEY)`);
+        this.log.info(`[voice] Pipeline disabled — no STT provider available (install whisper or deepgram plugin, or set DEEPGRAM_API_KEY / OPENAI_API_KEY)`);
       }
     }
   }

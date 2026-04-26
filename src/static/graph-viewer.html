@@ -4068,6 +4068,31 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script>
+// ── Plugin frontend-asset loader ──
+// Plugins declare browser JS via api.registerFrontendAsset(filename).
+// Core serves the file at /api/plugins/<id>/static/<filename> and
+// exposes the registry at /api/plugins/frontend-assets. We fetch the
+// list synchronously-ish (fire-and-forget; assets attach to globals
+// like window.WhisperSTT and the rest of the app reads those globals
+// lazily). When a plugin is uninstalled the entry disappears from the
+// list; on next page load no <script> is created.
+(function loadPluginFrontendAssets() {
+  try {
+    fetch((window.location.pathname.replace(/\/graph\/?$/, '') || '') + '/api/plugins/frontend-assets')
+      .then(r => r.ok ? r.json() : { assets: [] })
+      .then(({ assets }) => {
+        for (const a of (assets || [])) {
+          const s = document.createElement('script');
+          s.src = a.url;
+          s.async = false; // Preserve declared order; later assets may depend on earlier ones.
+          s.dataset.pluginAsset = a.pluginId + '/' + a.filename;
+          document.head.appendChild(s);
+        }
+      })
+      .catch(() => { /* silent: best-effort; missing assets just mean missing features */ });
+  } catch { /* silent: best-effort */ }
+})();
+
 // ── Browser-side Whisper STT via Transformers.js ──
 const WhisperSTT = (() => {
   let worker = null;
@@ -4850,7 +4875,34 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-proactive-max-day').value = data.proactive?.maxPerDay ?? 5;
   document.getElementById('settings-proactive-channels').value = _settingsList(data.proactive?.channels || []);
   document.getElementById('settings-voice-enabled').checked = !!data.voice?.enabled;
-  document.getElementById('settings-stt-provider').value = data.voice?.sttProvider || 'deepgram';
+  // STT provider dropdown — options come from data.voice.providers
+  // (server walks plugin registrations + legacy env fallback).
+  // Empty list = no STT installed; render a single disabled placeholder.
+  const sttSelect = document.getElementById('settings-stt-provider');
+  if (sttSelect) {
+    const providers = Array.isArray(data.voice?.providers) ? data.voice.providers : [];
+    sttSelect.innerHTML = '';
+    if (!providers.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No STT providers installed';
+      opt.disabled = true;
+      sttSelect.appendChild(opt);
+      sttSelect.disabled = true;
+    } else {
+      sttSelect.disabled = false;
+      for (const p of providers) {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        const label = p.name === 'deepgram' ? 'Deepgram'
+                    : p.name === 'openai'   ? 'OpenAI Whisper'
+                    : p.name;
+        opt.textContent = p.configured ? label : `${label} (no key)`;
+        sttSelect.appendChild(opt);
+      }
+      sttSelect.value = data.voice?.sttProvider || providers.find(p => p.configured)?.name || providers[0].name;
+    }
+  }
   document.getElementById('settings-tts-provider').value = data.voice?.ttsProvider || '';
   document.getElementById('settings-tts-voice').value = data.voice?.ttsVoice || '';
   document.getElementById('settings-edge-voice').value = data.voice?.edgeVoice || 'en-US-AriaNeural';
@@ -18786,8 +18838,9 @@ build/
           <div>
             <label for="settings-stt-provider">STT Provider</label>
             <select id="settings-stt-provider">
-              <option value="deepgram">Deepgram</option>
-              <option value="openai">OpenAI</option>
+              <!-- Options populated dynamically from data.voice.providers
+                   (plugin-registered + legacy-env fallback) — see
+                   populateSettingsPanel below. -->
             </select>
           </div>
           <div>

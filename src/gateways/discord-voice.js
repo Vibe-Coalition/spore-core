@@ -30,7 +30,10 @@ class DiscordVoice {
     if (!this.config.voice?.enabled) return null;
     try {
       const { VoicePipeline } = require('../voice');
-      this._pipeline = new VoicePipeline(this.config, this.log);
+      // gateway.tools is set by the host on the parent gateway —
+      // _pluginManager is hung off the tools object during app boot.
+      const mgr = this.gateway?.tools?._pluginManager || this.agent?._pluginManager || null;
+      this._pipeline = new VoicePipeline(this.config, this.log, mgr);
       return this._pipeline;
     } catch (e) {
       this.log.warn(`[voice] Failed to init pipeline: ${e.message}`);

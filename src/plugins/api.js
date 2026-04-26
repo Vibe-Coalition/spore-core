@@ -27,6 +27,8 @@ class PluginAPI {
     this._webRoutes = [];
     this._wsHandlers = new Map();
     this._pathAliases = [];
+    this._sttProviders = [];
+    this._frontendAssets = [];
     this._configChangeFn = null;
     this._shutdownFn = null;
   }
@@ -382,6 +384,63 @@ class PluginAPI {
 
   getPathAliases() {
     return this._pathAliases;
+  }
+
+  /**
+   * Register a Speech-to-Text provider. Used by core's voice pipeline
+   * to discover available STT backends without core knowing which
+   * cloud APIs (Deepgram, OpenAI Whisper, etc.) are wired up.
+   *
+   *   factory(config) → { transcribe(audioBuffer, mimeType): Promise<{text, confidence}> }
+   *
+   * `name` is the value `config.voice.sttProvider` matches against
+   * (e.g. 'deepgram', 'openai'). `opts.isConfigured(config) → bool`
+   * lets the plugin signal whether its credentials are populated;
+   * default = always-true. Manager aggregates all plugins' providers
+   * into a flat list that core walks at VoicePipeline init time.
+   *
+   * @param {string} name
+   * @param {Function} factory
+   * @param {object} [opts]
+   * @param {Function} [opts.isConfigured]
+   */
+  registerSTTProvider(name, factory, opts = {}) {
+    if (!name || typeof name !== 'string') throw new Error('registerSTTProvider requires a string name');
+    if (typeof factory !== 'function') throw new Error('registerSTTProvider requires a factory function');
+    const isConfigured = typeof opts.isConfigured === 'function' ? opts.isConfigured : () => true;
+    this._sttProviders.push({ name, factory, isConfigured });
+    this._log.debug(`[plugin:${this.pluginId}] Registered STT provider: ${name}`);
+  }
+
+  getSTTProviders() {
+    return this._sttProviders;
+  }
+
+  /**
+   * Declare a JS file under `plugins/<pluginId>/static/<filename>` that
+   * `graph-viewer.html` should load when this plugin is installed.
+   *
+   * On boot, the frontend fetches `/api/plugins/frontend-assets`,
+   * receives a list of `{ pluginId, filename, url }`, and inserts a
+   * `<script src=url>` for each. When the plugin uninstalls, the entry
+   * disappears from the list and the script no longer loads on
+   * subsequent page loads. The plugin manager auto-serves files under
+   * `static/` for any plugin that calls this — no separate
+   * `registerWebRoute` needed.
+   *
+   * @param {string} filename — must be a single segment, no slashes.
+   */
+  registerFrontendAsset(filename) {
+    if (!filename || typeof filename !== 'string') throw new Error('registerFrontendAsset requires a string filename');
+    if (filename.includes('/') || filename.includes('\\') || filename.startsWith('.')) {
+      throw new Error('Frontend asset filename must be a single segment (no slashes, no leading dot)');
+    }
+    this._frontendAssets.push(filename);
+    this._log.debug(`[plugin:${this.pluginId}] Registered frontend asset: ${filename}`);
+  }
+
+  getFrontendAssets() {
+    return this._frontendAssets;
   }
 
   getWsHandlers() {

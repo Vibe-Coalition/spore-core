@@ -148,10 +148,39 @@ class OpenAISTT {
 
 /**
  * Factory — create the right STT provider.
- * Deepgram is always tried first (when key is present).
- * OpenAI Whisper is used as a fallback when no Deepgram key is available.
+ *
+ * Walks plugin-registered providers first (via manager.getSTTProviders())
+ * and returns the one whose name matches `config.voice.sttProvider`.
+ * If no preference is set, falls back to the first configured provider.
+ * Plugin-driven path is the canonical one; the in-tree DeepgramSTT /
+ * OpenAISTT classes below are transitional fallbacks that only fire
+ * when no plugin claims the provider name (Phase A of whisper plugin
+ * extraction). They will be removed in Phases B + C.
  */
-function createSTT(config) {
+function createSTT(config, manager) {
+  const preferred = config.voice?.sttProvider;
+  if (manager?.getSTTProviders) {
+    const providers = manager.getSTTProviders();
+    if (preferred) {
+      const named = providers.find(p => p.name === preferred && p.configured);
+      if (named) {
+        try { return named.factory(config); } catch (e) {
+          // Fall through to other providers if this one's factory throws.
+        }
+      }
+    }
+    const firstConfigured = providers.find(p => p.configured);
+    if (firstConfigured) {
+      try { return firstConfigured.factory(config); } catch (e) {
+        // Fall through to in-tree fallback.
+      }
+    }
+  }
+  // Transitional: in-tree fallback. Honors `sttProvider: 'openai'`
+  // explicitly even when Deepgram is configured.
+  if (preferred === 'openai' && config.openaiApiKey) {
+    return new OpenAISTT(config.openaiApiKey, config.voice);
+  }
   if (config.deepgramApiKey) {
     return new DeepgramSTT(config.deepgramApiKey, config.voice);
   }
