@@ -269,26 +269,20 @@ class AgentLoop {
       && !hasTaskWords && !(hasStatusWords && hasActiveTasks);
     const promptMode = isCasualChat ? 'chat' : 'full';
 
-    // Project node — upsert per-(user, cwd) into the graph so prompt
-    // sections can decide whether to inline the full project context
-    // (new project / changed gitHash) or just reference the cached
-    // node by id. Subsequent acorn sessions in the same project pick
-    // up cross-session memory via this node. See graph/projects.js.
+    // beforeMessage lifecycle hook — plugins can inject per-turn data
+    // into dynamicOpts before the prompt builds. Acorn uses this to
+    // upsert the per-(user, cwd) project node and surface
+    // cachedProject* flags so its own Project Context prompt section
+    // can reference the cached node id. Returns null if no plugin
+    // handles it; merged into dynamicOpts below.
     let cachedProjectNodeId = null;
     let cachedProjectStale = false;
     let cachedProjectIsNew = false;
-    if (opts.projectContext && this.learner) {
-      try {
-        const projects = require('../graph/projects');
-        const r = projects.upsertProject(this.learner, opts.userId || 'anon', opts.projectContext);
-        if (r) {
-          cachedProjectNodeId = r.id;
-          cachedProjectStale = r.gitHashChanged;
-          cachedProjectIsNew = r.isNew;
-        }
-      } catch (e) {
-        this.log.warn(`[project-node] upsert failed: ${e.message}`);
-      }
+    const beforePatch = this._firePluginBeforeMessage(opts);
+    if (beforePatch) {
+      cachedProjectNodeId = beforePatch.cachedProjectNodeId || null;
+      cachedProjectStale  = !!beforePatch.cachedProjectStale;
+      cachedProjectIsNew  = !!beforePatch.cachedProjectIsNew;
     }
 
     // Build system prompt using async path (hybrid search + Enhanced Recall)
@@ -761,10 +755,9 @@ class AgentLoop {
 
     // Post-loop fire-and-forget hooks (extracted to keep _runLoop slim)
     this._kickOffLearnerExtraction(opts, finalText, toolLog);
-    this._noteProjectActivity(opts, finalText, toolLog);
-    // _captureFailureFix + _recordRoundCheckpoint moved to plugins/acorn-cli/
-    // (phase 2.3e). They now run via the afterTurn lifecycle hook fired
-    // inside _firePluginAfterTurn below.
+    // _captureFailureFix + _recordRoundCheckpoint + _noteProjectActivity
+    // moved to plugins/acorn-cli/ — they now run via the afterTurn
+    // lifecycle hook fired inside _firePluginAfterTurn below.
     this._firePluginAfterTurn(opts, finalText, toolLog);
 
     // Plugin middleware: afterIngest — fires once the full turn is complete.
@@ -823,25 +816,6 @@ class AgentLoop {
   }
 
   /**
-   * Append a one-line activity note to the project node so cross-session
-   * memory accumulates. Captures user prompt + tool-call summary so the
-   * agent can later graph_query and see "what we worked on last time in
-   * this project". Cheap (one INSERT, capped at 50).
-   */
-  _noteProjectActivity(opts, finalText, toolLog) {
-    if (!(opts.projectContext && this.learner && (finalText || toolLog.length))) return;
-    try {
-      const projects = require('../graph/projects');
-      const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
-      const tools = toolLog.length ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]` : '';
-      const summary = `${userSnip}${tools}`;
-      projects.noteProjectInteraction(this.learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
-    } catch (e) {
-      this.log.warn(`[project-node] note failed: ${e.message}`);
-    }
-  }
-
-  /**
    * Fire each plugin context engine's afterTurn hook with the just-
    * completed turn's data. All calls are fire-and-forget; plugin errors
    * are caught at the engine boundary so one bad plugin can't break the
@@ -864,6 +838,32 @@ class AgentLoop {
     for (const handler of this._pluginManager.getLifecycleHooks?.('afterTurn') || []) {
       try { handler({ opts, finalText, toolLog, learner: this.learner, log: this.log }); } catch (e) { this.log.warn('[loop] afterTurn lifecycle hook failed: ' + e.message); }
     }
+  }
+
+  /**
+   * Fire `beforeMessage` plugin lifecycle hooks at the top of _runLoop,
+   * BEFORE the system prompt is built. Each handler receives `{ opts }`
+   * and may return an object with fields to merge into dynamicOpts
+   * (e.g. acorn-cli returns `{ cachedProjectNodeId, cachedProjectStale,
+   * cachedProjectIsNew }` after upserting the project node). Synchronous
+   * — handlers that need IO must keep work cheap. Returns the merged
+   * patch (or null if no handler ran).
+   */
+  _firePluginBeforeMessage(opts) {
+    if (!this._pluginManager) return null;
+    const handlers = this._pluginManager.getLifecycleHooks?.('beforeMessage') || [];
+    if (!handlers.length) return null;
+    const merged = {};
+    let any = false;
+    for (const handler of handlers) {
+      try {
+        const out = handler({ opts, learner: this.learner, log: this.log });
+        if (out && typeof out === 'object') { Object.assign(merged, out); any = true; }
+      } catch (e) {
+        this.log.warn('[loop] beforeMessage lifecycle hook failed: ' + e.message);
+      }
+    }
+    return any ? merged : null;
   }
 
   /**

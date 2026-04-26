@@ -36,7 +36,9 @@ const projects = require('./projects');
 // Event bus — lets the graph viewer (and any other subscribers) see
 // distillation work live. Without this, summarize/distill runs silently
 // from the viewer's POV; a fresh node appears only after manual refresh.
-const graphEvents = require('./events');
+// Lives in core; container layout is /app/graph/events.js so the
+// relative path from /app/plugins/acorn-cli/lib/ is three up + graph/.
+const graphEvents = require('../../../graph/events');
 
 // Shared helper — uses the same streaming pattern as maintainer.js
 // to avoid nginx 60s idle timeouts on slow reasoning models (GLM 5.1,

@@ -1,21 +1,29 @@
 // Acorn CLI plugin.
 //
-// Currently bundles:
-//   • Reference-node SQL (5 ref-acorn-* migrations folded in — phase 2.3a)
-//   • /api/acorn/auth      → /api/plugins/acorn-cli/auth   (phase 2.3c-1)
-//   • /api/acorn/sessions  → /api/plugins/acorn-cli/sessions (phase 2.3c-1)
-//   • note_discovery tool   (phase 2.3c-2)
+// Self-contained — when uninstalled, no acorn-specific behavior runs in
+// SPORE core. Bundles:
+//   • Reference-node SQL (5 ref-acorn-* migrations + graphcorn-discovery)
+//   • /api/acorn/auth      → /api/plugins/acorn-cli/auth
+//   • /api/acorn/sessions  → /api/plugins/acorn-cli/sessions
+//   • note_discovery tool
+//   • Project Context + Plan Mode prompt sections
+//   • afterTurn hook: failure_fix synthesis + round_checkpoint breadcrumbs
+//   • afterLearn hook: discovered_in edge creation for new entities
+//   • beforeMessage hook: project-node upsert + cachedProject* opts patch
+//   • WS handlers: session:start / session:end / session:observe /
+//     session:unobserve / chat:history-request (acorn role-aware) /
+//     plus the legacy /api/acorn/* alias in core that rewrites to
+//     /api/plugins/acorn-cli/* so existing Go binaries keep working.
+//   • lib/sessions.js: session-node persistence (upsert / finalize /
+//     turn count / summarize / distill).
+//   • lib/projects.js: project-node persistence (per-(user, cwd) cache).
 //
-// Still in core, scheduled for follow-up sub-phases:
-//   • WS handlers (session:start / session:end / session:observe / etc.)
-//   • _sessionClients map + orphaned-tool re-delivery
-//   • WS-close distillation chain
-//   • graph_update acorn-aware branches (need afterToolExec-with-mutation contract)
-//   • src/graph/sessions.js + src/graph/projects.js
-//   • Loop helpers (_captureFailureFix, _recordRoundCheckpoint)
-//   • Acorn-specific prompt sections
-//   • Learner discovered_in edge creation
-//   • acornKey settings UI
+// Still in core (not strictly acorn-coupled, just close):
+//   • _sessionClients map + orphaned-tool re-delivery (used by acorn
+//     fan-out but is a generic WS routing primitive).
+//   • Acorn role advertisement in WS handshake (capability frame).
+//   • Self-register (uses acornKey as a team-key gate; future cleanup
+//     can lift this into the plugin).
 
 const crypto = require('crypto');
 
@@ -447,10 +455,7 @@ function recordRoundCheckpoint(api, opts, toolLog, finalText) {
   const learner = api._appContext?.learner;
   if (!(opts.platform === 'cli' && opts.channelId && learner?.db)) return;
   try {
-    // sessions module still lives in src/graph/sessions.js as of this
-    // commit (will move to plugins/acorn-cli/lib/ in a later sub-phase).
-    // Container path: /app/plugins/acorn-cli → ../../graph/sessions.
-    const sessions = require('../../graph/sessions');
+    const sessions = require('./lib/sessions');
     const turn = sessions.bumpTurnCount(learner, opts.channelId);
     const sessId = 'session-' + opts.channelId;
     const sessExists = learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
@@ -505,6 +510,87 @@ function recordRoundCheckpoint(api, opts, toolLog, finalText) {
     }
   } catch (e) {
     api.getLogger().warn(`round checkpoint failed: ${e.message}`);
+  }
+}
+
+// ── Project activity note (per-turn breadcrumb on project node) ────
+// Appends a one-line activity note to the project node so cross-session
+// memory accumulates. Captures user prompt + tool-call summary so the
+// agent can later graph_query and see "what we worked on last time in
+// this project". Cheap (one INSERT, capped at 50). Replaces the
+// _noteProjectActivity method that lived in src/agent/loop.js before
+// this phase. Gates on projectContext presence so it's a no-op for
+// web/discord turns where opts.projectContext is undefined.
+function noteProjectActivity(api, opts, finalText, toolLog) {
+  const learner = api._appContext?.learner;
+  if (!opts?.projectContext || !learner) return;
+  if (!finalText && !(toolLog && toolLog.length)) return;
+  try {
+    const projects = require('./lib/projects');
+    const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    const tools = (toolLog && toolLog.length)
+      ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]`
+      : '';
+    const summary = `${userSnip}${tools}`;
+    projects.noteProjectInteraction(learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
+  } catch (e) {
+    api.getLogger().warn(`[project-node] note failed: ${e.message}`);
+  }
+}
+
+// ── WS handlers: session:start / session:end ────────────────────────
+// graphcorn: session:start fires once per acorn launch right after the
+// WS handshake, before the first chat:submit. Creates a session-<id>
+// graph node + edge to the project node so everything captured during
+// the conversation has a graph anchor. Idempotent — flaky reconnects
+// re-firing this just bump mentions on the existing node.
+function sessionStartHandler(api, ws, msg) {
+  if (!msg?.sessionId) return;
+  const ctx = api._appContext;
+  const learner = ctx?.tools?.learner || ctx?.learner;
+  const config = ctx?.config || {};
+  if (!learner) return;
+  try {
+    const sessions = require('./lib/sessions');
+    const r = sessions.upsertSessionNode(learner, {
+      sessionId: msg.sessionId,
+      userId:    ws._user || msg.userName || 'anon',
+      userName:  msg.userName,
+      cwd:       msg.cwd,
+      startedAt: msg.startedAt,
+      model:     config.normalModel || config.model,
+      ...(msg.projectContext || {}),
+    });
+    if (r) api.getLogger().info(`[graphcorn] session:start → ${r.id}${r.isNew ? ' (new)' : ''}${r.projectId ? ' part_of ' + r.projectId : ''}`);
+  } catch (e) {
+    api.getLogger().warn(`[graphcorn] session:start failed: ${e.message}`);
+  }
+}
+
+// Phase 7 + 8 of the session lifecycle: chain summarize → distill on
+// session:end. Both fire-and-forget so they don't block the WS close.
+// distillSession is idempotent (extra.distilled_at marker), so if the
+// WS ALSO drops and re-fires distillation from the close handler in
+// core, the second call is a no-op.
+function sessionEndHandler(api, ws, msg) {
+  if (!msg?.sessionId) return;
+  const ctx = api._appContext;
+  const learner = ctx?.tools?.learner || ctx?.learner;
+  const config = ctx?.config || {};
+  const log = api.getLogger();
+  if (!learner) return;
+  try {
+    const sessions = require('./lib/sessions');
+    sessions.finalizeSessionNode(learner, msg.sessionId, { endedAt: msg.endedAt });
+    log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
+    const llmClient = ctx?.tools?.anthropicClient;
+    if (llmClient) {
+      sessions.summarizeSessionNode(learner, llmClient, config, msg.sessionId, log)
+        .then(() => sessions.distillSession(learner, llmClient, config, msg.sessionId, log))
+        .catch(e => log.warn(`[graphcorn] summary/distill error: ${e.message}`));
+    }
+  } catch (e) {
+    api.getLogger().warn(`[graphcorn] session:end failed: ${e.message}`);
   }
 }
 
@@ -818,14 +904,86 @@ module.exports = function register(api) {
 
   // afterTurn lifecycle hook — fires once per agent turn after _firePluginAfterTurn.
   // Implements failure-fix discovery synthesis + per-turn breadcrumb on the
-  // session node's `rounds` aspect. Both gate internally on platform === 'cli'
-  // so they're no-ops for web/discord turns. Replaces the in-tree
-  // _captureFailureFix and _recordRoundCheckpoint methods that lived in
-  // src/agent/loop.js before phase 2.3e.
+  // session node's `rounds` aspect, plus the per-turn project-activity note
+  // (cross-session memory accumulator on the project node). All gate
+  // internally on platform === 'cli' / projectContext presence so they're
+  // no-ops for web/discord turns. Replaces the in-tree _captureFailureFix,
+  // _recordRoundCheckpoint, and _noteProjectActivity methods that lived in
+  // src/agent/loop.js.
   api.registerLifecycleHook('afterTurn', ({ opts, finalText, toolLog }) => {
     captureFailureFix(api, opts, toolLog || []);
     recordRoundCheckpoint(api, opts, toolLog || [], finalText);
+    noteProjectActivity(api, opts, finalText, toolLog || []);
   });
 
-  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + afterTurn + afterLearn + prompt sections registered.');
+  // beforeMessage lifecycle hook — fires once at the top of _runLoop's
+  // dynamicOpts assembly, BEFORE the system prompt is built. Returns an
+  // opts patch (or null) that the agent loop merges into dynamicOpts.
+  // Acorn uses this to upsert the project node from opts.projectContext
+  // and surface { cachedProjectNodeId, cachedProjectStale, cachedProjectIsNew }
+  // so the plugin's own Project Context prompt section can reference the
+  // cached node id and skip re-injecting the full file tree on subsequent
+  // sessions in the same project.
+  api.registerLifecycleHook('beforeMessage', ({ opts }) => {
+    const learner = api._appContext?.learner;
+    if (!opts?.projectContext || !learner) return null;
+    try {
+      const projects = require('./lib/projects');
+      const r = projects.upsertProject(learner, opts.userId || 'anon', opts.projectContext);
+      if (!r) return null;
+      return {
+        cachedProjectNodeId: r.id,
+        cachedProjectStale:  !!r.gitHashChanged,
+        cachedProjectIsNew:  !!r.isNew,
+      };
+    } catch (e) {
+      api.getLogger().warn('[project-node] upsert failed: ' + e.message);
+      return null;
+    }
+  });
+
+  // WS handlers: session:start / session:end. Core's gateways/web.js
+  // dispatches `session:*` frames to `plugin:acorn-cli:session:*` via a
+  // small alias block; if the plugin isn't installed the alias is a
+  // no-op and the frame is silently ignored. session:observe and
+  // session:unobserve still live in core because they touch the
+  // gateway-internal _sessionClients fan-out map; future cleanup can
+  // expose that primitive via the plugin API.
+  api.registerWsHandler('session:start', (ws, msg) => sessionStartHandler(api, ws, msg));
+  api.registerWsHandler('session:end',   (ws, msg) => sessionEndHandler(api, ws, msg));
+
+  // wsClose lifecycle hook — ungraceful-close distillation chain. The
+  // graceful path (session:end frame) sets distilled_at first;
+  // distillSession's idempotency guard makes the close-side call a
+  // no-op when graceful already ran. For network drop / SIGKILL /
+  // alt-tab-and-leave-it, the session:end never arrives and this is
+  // the only chance to distill before the 48h janitor sweep. Gates on
+  // `ws._role === 'acorn'` so non-acorn closes are a no-op.
+  api.registerLifecycleHook('wsClose', ({ ws, sessionIds, log }) => {
+    if (ws?._role !== 'acorn' || !sessionIds?.length) return;
+    const ctx = api._appContext;
+    const learner = ctx?.tools?.learner || ctx?.learner;
+    const config = ctx?.config || {};
+    if (!learner) return;
+    try {
+      const sessions = require('./lib/sessions');
+      const llmClient = ctx?.tools?.anthropicClient;
+      for (const sid of sessionIds) {
+        try {
+          sessions.finalizeSessionNode(learner, sid, { endedAt: new Date().toISOString() });
+          if (llmClient) {
+            sessions.summarizeSessionNode(learner, llmClient, config, sid, log)
+              .then(() => sessions.distillSession(learner, llmClient, config, sid, log))
+              .catch(e => log.warn(`[graphcorn] ws-close distill error: ${e.message}`));
+          }
+        } catch (e) {
+          log.warn(`[graphcorn] ws-close finalize failed: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      api.getLogger().warn(`[graphcorn] wsClose hook failed: ${e.message}`);
+    }
+  });
+
+  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + prompt sections registered.');
 };

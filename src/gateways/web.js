@@ -4535,14 +4535,17 @@ class WebGateway {
           // Fall through to default unknown-type handling if nothing matched.
         }
 
-        // Acorn session:* alias — preserves the legacy WS protocol contract
-        // for Go clients while letting the acorn-cli plugin own the actual
-        // handlers. Rewrites the bare `session:start` / `session:end` /
-        // `session:observe` / `session:unobserve` types to the plugin-
-        // namespaced form and dispatches to the plugin if installed. Falls
-        // through to the in-tree handlers below in transitional builds; in
-        // the fully-decoupled build the in-tree handlers are gone and this
-        // alias is the only path.
+        // Acorn session:* alias — Go-client protocol contract preserved
+        // while the acorn-cli plugin owns the actual handlers. Rewrites
+        // bare `session:start` / `session:end` / `session:observe` /
+        // `session:unobserve` to the plugin-namespaced form and
+        // dispatches to the plugin if installed. If no plugin handler
+        // is registered for a given subtype the frame falls through;
+        // session:observe and session:unobserve still hit the in-tree
+        // handlers below because they touch the gateway-internal
+        // _sessionClients fan-out map. session:start / session:end have
+        // no in-tree handlers — when the plugin isn't installed those
+        // frames are silently ignored.
         if (typeof msg.type === 'string' && msg.type.startsWith('session:')) {
           const mgr = this.tools?._pluginManager;
           const aliasType = `plugin:acorn-cli:${msg.type}`;
@@ -4555,55 +4558,8 @@ class WebGateway {
             }
             return;
           }
-          // Plugin not installed — fall through to in-tree handlers (still
-          // present in this transitional build). When those are removed and
-          // no plugin matches either, the frame is silently ignored.
-        }
-
-        // graphcorn: session:start fires once per acorn launch right
-        // after the WS handshake, before the first chat:submit. We
-        // create a session-<id> graph node + edge to the project node
-        // so everything captured during the conversation has a graph
-        // anchor. Idempotent — flaky reconnects re-firing this just
-        // bump mentions on the existing node.
-        if (msg.type === 'session:start' && msg.sessionId) {
-          try {
-            const sessions = require('../graph/sessions');
-            const r = sessions.upsertSessionNode(this.tools?.learner, {
-              sessionId: msg.sessionId,
-              userId:    ws._user || msg.userName || 'anon',
-              userName:  msg.userName,
-              cwd:       msg.cwd,
-              startedAt: msg.startedAt,
-              model:     this.config.normalModel || this.config.model,
-              ...(msg.projectContext || {}),
-            });
-            if (r) this.log.info(`[graphcorn] session:start → ${r.id}${r.isNew ? ' (new)' : ''}${r.projectId ? ' part_of ' + r.projectId : ''}`);
-          } catch (e) {
-            this.log.warn(`[graphcorn] session:start failed: ${e.message}`);
-          }
-          return;
-        }
-        if (msg.type === 'session:end' && msg.sessionId) {
-          try {
-            const sessions = require('../graph/sessions');
-            sessions.finalizeSessionNode(this.tools?.learner, msg.sessionId, { endedAt: msg.endedAt });
-            this.log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
-            // Phase 7 + 8: chain summarize → distill. Both fire-and-forget
-            // so they don't block the WS close. distillSession is
-            // idempotent (extra.distilled_at marker), so if the WS
-            // ALSO drops and re-fires distillation from the close
-            // handler below, the second call is a no-op.
-            const llmClient = this.tools?.anthropicClient;
-            if (llmClient) {
-              sessions.summarizeSessionNode(this.tools.learner, llmClient, this.config, msg.sessionId, this.log)
-                .then(() => sessions.distillSession(this.tools.learner, llmClient, this.config, msg.sessionId, this.log))
-                .catch(e => this.log.warn(`[graphcorn] summary/distill error: ${e.message}`));
-            }
-          } catch (e) {
-            this.log.warn(`[graphcorn] session:end failed: ${e.message}`);
-          }
-          return;
+          // Fall through — observe/unobserve in-tree handlers below
+          // still need to run when the plugin isn't installed.
         }
 
         if (msg.type === 'ping') {
@@ -5419,37 +5375,21 @@ class WebGateway {
           }
         }
 
-        // graphcorn Phase 8: ungraceful close also triggers distillation.
-        // The graceful path (session:end frame) sets distilled_at first;
-        // distillSession's idempotency guard makes the close-side call a
-        // no-op when graceful already ran. For network drop / SIGKILL /
-        // alt-tab-and-leave-it, the session:end never arrives and this
-        // is the only chance to distill before the 48h janitor sweep.
-        if (ws._role === 'acorn') {
-          const acornSessionIds = new Set();
+        // Plugin wsClose lifecycle hook — fires once per WS-close with
+        // the set of session ids attached to this ws. Acorn-cli's
+        // handler implements the ungraceful-close distillation chain
+        // (finalize → summarize → distill) for `ws._role === 'acorn'`
+        // sessions; idempotent w.r.t. the graceful session:end path.
+        // Other plugins can use this for any per-ws-close cleanup.
+        if (this.tools?._pluginManager) {
+          const sessionIds = new Set();
           for (const [sid, clients] of this._sessionClients) {
             for (const entry of clients) {
-              if (entry.ws === ws) acornSessionIds.add(sid);
+              if (entry.ws === ws) sessionIds.add(sid);
             }
           }
-          if (acornSessionIds.size > 0) {
-            const sessions = require('../graph/sessions');
-            const llmClient = this.tools?.anthropicClient;
-            for (const sid of acornSessionIds) {
-              try {
-                sessions.finalizeSessionNode(this.tools?.learner, sid, { endedAt: new Date().toISOString() });
-                if (llmClient) {
-                  // Same chain as the graceful path — summarize, then
-                  // distill. Both functions short-circuit if the prior
-                  // session:end already ran them.
-                  sessions.summarizeSessionNode(this.tools.learner, llmClient, this.config, sid, this.log)
-                    .then(() => sessions.distillSession(this.tools.learner, llmClient, this.config, sid, this.log))
-                    .catch(e => this.log.warn(`[graphcorn] ws-close distill error: ${e.message}`));
-                }
-              } catch (e) {
-                this.log.warn(`[graphcorn] ws-close finalize failed: ${e.message}`);
-              }
-            }
+          for (const handler of this.tools._pluginManager.getLifecycleHooks?.('wsClose') || []) {
+            try { handler({ ws, sessionIds: [...sessionIds], log: this.log }); } catch (e) { this.log.warn('[plugins] wsClose hook failed: ' + e.message); }
           }
         }
 
