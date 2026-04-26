@@ -1095,104 +1095,8 @@ class AgentLoop {
     // graphcorn — failure capture (extracted to keep _runLoop slim)
     this._captureFailureFix(opts, toolLog);
 
-    // graphcorn — round checkpoint. Each finished round leaves a
-    // breadcrumb on the session node's `rounds` aspect: turn N | tools
-    // used | files touched | first sentence of the assistant reply.
-    // Capped at the last 50 entries so the session node doesn't balloon
-    // (full history still in episodes table). Also bumps the
-    // turn_count attribute on lifecycle. Only for acorn turns where
-    // the session node exists.
-    // Trace condition — user observed sessions (T123901) where the
-    // round checkpoint silently didn't fire despite the conditions
-    // appearing to match. Logging the entry + condition values so we
-    // can catch whatever path is skipping it.
-    try {
-      this.log.info(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
-    } catch {}
-    if (opts.platform === 'cli' && opts.channelId && this.learner?.db) {
-      try {
-        const sessions = require('../graph/sessions');
-        const turn = sessions.bumpTurnCount(this.learner, opts.channelId);
-        this.log.info(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
-        const sessId = 'session-' + opts.channelId;
-        const sessExists = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
-        if (sessExists) {
-          let asp = this.learner.db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'rounds'").get(sessId);
-          if (!asp) {
-            this.learner.db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'rounds', 7, 'graphcorn')").run(sessId);
-            asp = { id: this.learner.db.prepare('SELECT last_insert_rowid() AS id').get().id };
-          }
-          // Build a richer breadcrumb. The old format was just
-          // "tools | files | first sentence" which gave the summarizer
-          // almost nothing to work with. Now we also capture:
-          //   - the user's prompt (truncated) so the summarizer knows
-          //     what was asked, not just what was done
-          //   - exec commands attempted (first ~80 chars each)
-          //   - files touched (already had basenames; now full paths)
-          //   - non-zero exec outcomes (error hint for "what failed")
-          //   - a bigger assistant reply preview (~300 chars)
-          // toolLog entries store input as JSON.stringify(...).slice(0, 300)
-          // — a truncated STRING. Earlier checkpoint code was doing
-          // `t.input?.path` expecting an object, which always returned
-          // undefined → "files: none" even when write_file ran. Parse
-          // the string first; fall through on parse failure.
-          const parseInput = (t) => {
-            if (t == null || t.input == null) return null;
-            if (typeof t.input === 'object') return t.input;
-            try { return JSON.parse(t.input); } catch { return null; }
-          };
-          const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
-          const fileSet = new Set();
-          const execCmds = [];
-          let failedExecs = 0;
-          for (const t of toolLog) {
-            if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
-              const inp = parseInput(t);
-              const p = inp?.path;
-              // Store FULL path (not just basename) so the summarizer
-              // can see .acorn/scratch/ vs project-root pollution.
-              if (typeof p === 'string') fileSet.add(p);
-            }
-            if (t.tool === 'exec') {
-              const inp = parseInput(t);
-              const cmd = inp?.command || '';
-              // Bumped per-command preview from 100 → 200. The prior
-              // cap was chopping multi-part commands mid-flag and
-              // losing the "what was actually run" context.
-              if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
-              if (t.succeeded === false) failedExecs++;
-            }
-          }
-          const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
-          // Show up to 6 exec commands (was 3) so full workflows
-          // survive to the summary.
-          const execPart = execCmds.length
-            ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 6).join(' ; ')}${execCmds.length > 6 ? ' …' : ''}`
-            : '';
-          const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 250);
-          const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
-          // Bumped reply cap 300 → 800. A 300-char window cut off most
-          // multi-part replies right when they got to the substantive
-          // content (post-preamble). 800 captures a solid paragraph.
-          const replyPreview = replySnip.length > 800 ? replySnip.slice(0, 797) + '…' : replySnip;
-          const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
-          this.learner.db.prepare(
-            "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
-          ).run(asp.id, content);
-          // Trim to last 50 attributes on this aspect so the session
-          // node doesn't grow unbounded over long conversations.
-          const overflow = this.learner.db.prepare(
-            'SELECT id FROM attributes WHERE aspect_id = ? ORDER BY id DESC LIMIT -1 OFFSET 50'
-          ).all(asp.id);
-          if (overflow.length) {
-            const ids = overflow.map(r => r.id);
-            this.learner.db.prepare(`DELETE FROM attributes WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
-          }
-        }
-      } catch (e) {
-        this.log.warn(`[graphcorn] round checkpoint failed: ${e.message}`);
-      }
-    }
+    // graphcorn — round checkpoint (extracted to keep _runLoop slim)
+    this._recordRoundCheckpoint(opts, toolLog, finalText);
 
     // Plugin context engines: afterTurn
     if (this._pluginManager) {
@@ -1334,6 +1238,107 @@ class AgentLoop {
       this._sessionFailures.set(sessKey, buf);
     } catch (e) {
       this.log.warn(`[graphcorn] failure capture loop failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Each finished round leaves a breadcrumb on the session node's `rounds`
+   * aspect: turn N | tools used | files touched | first sentence of the
+   * assistant reply. Capped at the last 50 entries so the session node
+   * doesn't balloon (full history still in episodes table). Also bumps the
+   * turn_count attribute on lifecycle. Only for acorn turns where the
+   * session node exists.
+   */
+  _recordRoundCheckpoint(opts, toolLog, finalText) {
+    // Trace condition — user observed sessions (T123901) where the
+    // round checkpoint silently didn't fire despite the conditions
+    // appearing to match. Logging the entry + condition values so we
+    // can catch whatever path is skipping it.
+    try {
+      this.log.info(`[graphcorn] round-checkpoint gate: platform=${opts.platform || 'null'} channelId=${opts.channelId ? 'set' : 'null'} learnerDb=${this.learner?.db ? 'yes' : 'no'} toolLogLen=${toolLog.length} finalTextLen=${finalText?.length || 0}`);
+    } catch {}
+    if (!(opts.platform === 'cli' && opts.channelId && this.learner?.db)) return;
+    try {
+      const sessions = require('../graph/sessions');
+      const turn = sessions.bumpTurnCount(this.learner, opts.channelId);
+      this.log.info(`[graphcorn] round-checkpoint turn=${turn} for session-${opts.channelId.slice(-15)}`);
+      const sessId = 'session-' + opts.channelId;
+      const sessExists = this.learner.db.prepare('SELECT id FROM nodes WHERE id = ?').get(sessId);
+      if (sessExists) {
+        let asp = this.learner.db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'rounds'").get(sessId);
+        if (!asp) {
+          this.learner.db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'rounds', 7, 'graphcorn')").run(sessId);
+          asp = { id: this.learner.db.prepare('SELECT last_insert_rowid() AS id').get().id };
+        }
+        // Build a richer breadcrumb. The old format was just
+        // "tools | files | first sentence" which gave the summarizer
+        // almost nothing to work with. Now we also capture:
+        //   - the user's prompt (truncated) so the summarizer knows
+        //     what was asked, not just what was done
+        //   - exec commands attempted (first ~80 chars each)
+        //   - files touched (already had basenames; now full paths)
+        //   - non-zero exec outcomes (error hint for "what failed")
+        //   - a bigger assistant reply preview (~300 chars)
+        // toolLog entries store input as JSON.stringify(...).slice(0, 300)
+        // — a truncated STRING. Earlier checkpoint code was doing
+        // `t.input?.path` expecting an object, which always returned
+        // undefined → "files: none" even when write_file ran. Parse
+        // the string first; fall through on parse failure.
+        const parseInput = (t) => {
+          if (t == null || t.input == null) return null;
+          if (typeof t.input === 'object') return t.input;
+          try { return JSON.parse(t.input); } catch { return null; }
+        };
+        const toolNames = [...new Set(toolLog.map(t => t.tool))].join(',') || 'none';
+        const fileSet = new Set();
+        const execCmds = [];
+        let failedExecs = 0;
+        for (const t of toolLog) {
+          if (['read_file', 'write_file', 'edit_file'].includes(t.tool)) {
+            const inp = parseInput(t);
+            const p = inp?.path;
+            // Store FULL path (not just basename) so the summarizer
+            // can see .acorn/scratch/ vs project-root pollution.
+            if (typeof p === 'string') fileSet.add(p);
+          }
+          if (t.tool === 'exec') {
+            const inp = parseInput(t);
+            const cmd = inp?.command || '';
+            // Bumped per-command preview from 100 → 200. The prior
+            // cap was chopping multi-part commands mid-flag and
+            // losing the "what was actually run" context.
+            if (cmd) execCmds.push(String(cmd).replace(/\s+/g, ' ').slice(0, 200));
+            if (t.succeeded === false) failedExecs++;
+          }
+        }
+        const files = fileSet.size ? [...fileSet].slice(0, 10).join(' | ') : 'none';
+        // Show up to 6 exec commands (was 3) so full workflows
+        // survive to the summary.
+        const execPart = execCmds.length
+          ? ` | exec[${execCmds.length}${failedExecs ? `, ${failedExecs} failed` : ''}]: ${execCmds.slice(0, 6).join(' ; ')}${execCmds.length > 6 ? ' …' : ''}`
+          : '';
+        const userSnip = String(opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 250);
+        const replySnip = (finalText || '').replace(/\s+/g, ' ').trim();
+        // Bumped reply cap 300 → 800. A 300-char window cut off most
+        // multi-part replies right when they got to the substantive
+        // content (post-preamble). 800 captures a solid paragraph.
+        const replyPreview = replySnip.length > 800 ? replySnip.slice(0, 797) + '…' : replySnip;
+        const content = `turn ${turn} | user: "${userSnip}" | tools: ${toolNames} | files: ${files}${execPart} | reply: "${replyPreview || '(no text)'}"`;
+        this.learner.db.prepare(
+          "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn', 'graphcorn')"
+        ).run(asp.id, content);
+        // Trim to last 50 attributes on this aspect so the session
+        // node doesn't grow unbounded over long conversations.
+        const overflow = this.learner.db.prepare(
+          'SELECT id FROM attributes WHERE aspect_id = ? ORDER BY id DESC LIMIT -1 OFFSET 50'
+        ).all(asp.id);
+        if (overflow.length) {
+          const ids = overflow.map(r => r.id);
+          this.learner.db.prepare(`DELETE FROM attributes WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+        }
+      }
+    } catch (e) {
+      this.log.warn(`[graphcorn] round checkpoint failed: ${e.message}`);
     }
   }
 
