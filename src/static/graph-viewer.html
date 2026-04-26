@@ -4973,6 +4973,18 @@ function populateSettingsPanel(data) {
 
   document.getElementById('settings-browser-backend').value = data.browser?.backend || 'zendriver';
 
+  const inviteInput = document.getElementById('settings-invite-key');
+  if (inviteInput) {
+    inviteInput.value = data.inviteKey || '';
+    inviteInput.type = 'password';
+    const showBtn = document.getElementById('settings-invite-key-show');
+    if (showBtn) showBtn.textContent = 'show';
+    const inviteNote = document.getElementById('settings-invite-key-note');
+    if (inviteNote) inviteNote.textContent = data.inviteKeySet
+      ? 'Self-registration + acorn-cli auth are enabled.'
+      : 'No invite key set — self-registration + acorn-cli auth are disabled.';
+  }
+
   document.getElementById('settings-websearch-searxng-url').value = data.webSearch?.searxngUrl || '';
   document.getElementById('settings-websearch-searxng-key').value = data.webSearch?.searxngApiKey || '';
   document.getElementById('settings-websearch-brave-key').value = data.webSearch?.braveApiKey || '';
@@ -5690,6 +5702,7 @@ async function openSettingsPanel() {
   overlay.classList.add('settings-pane-open');
   _initSettingsFloatingPane();
   _bindResetGraphButton();
+  _bindInviteKeyButtons();
   _hidePluginUiIfMissing();
   if (typeof _focusFloatingWindow === 'function') _focusFloatingWindow('settings-pane');
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
@@ -5808,6 +5821,35 @@ async function renderSettingsGraphsList() {
 // itself also requires {confirm: "RESET"} as a second guard. Idempotent
 // rebind — refreshes button state if the settings pane is opened/closed
 // multiple times in one session.
+// Invite-key card buttons — show/hide toggle, copy-to-clipboard, regen.
+// Regen sets a `_pendingInviteRegenerate` flag so the next saveSettingsPanel
+// call posts `inviteKeyRegenerate: true` instead of the typed value.
+let _inviteKeyBound = false;
+let _pendingInviteRegenerate = false;
+function _bindInviteKeyButtons() {
+  if (_inviteKeyBound) return;
+  _inviteKeyBound = true;
+  const input = document.getElementById('settings-invite-key');
+  document.getElementById('settings-invite-key-show')?.addEventListener('click', () => {
+    if (!input) return;
+    if (input.type === 'password') { input.type = 'text'; document.getElementById('settings-invite-key-show').textContent = 'hide'; }
+    else { input.type = 'password'; document.getElementById('settings-invite-key-show').textContent = 'show'; }
+  });
+  document.getElementById('settings-invite-key-copy')?.addEventListener('click', async () => {
+    if (!input?.value) return;
+    const ok = await _copyToClipboard(input.value);
+    toast(ok ? 'Invite key copied' : 'Copy failed — select manually', !ok);
+  });
+  document.getElementById('settings-invite-key-regen')?.addEventListener('click', async () => {
+    if (!confirm('Regenerate the SPORE invite key? Existing webapp guests + acorn-cli users will lose access until they get the new key.')) return;
+    _pendingInviteRegenerate = true;
+    if (input) input.value = '';
+    const note = document.getElementById('settings-invite-key-note');
+    if (note) note.textContent = 'Will mint a fresh UUID on Save.';
+    toast('Click Save to mint the new key');
+  });
+}
+
 let _resetGraphBound = false;
 function _bindResetGraphButton() {
   if (_resetGraphBound) return;
@@ -6031,7 +6073,15 @@ async function saveSettingsPanel() {
       braveApiKey: document.getElementById('settings-websearch-brave-key').value.trim(),
     },
     plugins: _collectPluginSettingsPayload(),
+    // Invite key: regen flag wins (mint fresh UUID server-side).
+    // Otherwise send the typed value (empty string = disable).
+    ...(_pendingInviteRegenerate
+      ? { inviteKeyRegenerate: true }
+      : { inviteKey: document.getElementById('settings-invite-key')?.value.trim() ?? '' }),
   };
+  // Reset the regen latch after the body is built; the next save would
+  // be a normal value-update unless the operator clicks regen again.
+  _pendingInviteRegenerate = false;
 
   setSettingsBusy(true, 'Saving settings...');
   try {
@@ -18960,6 +19010,19 @@ build/
           </div>
         </div>
         <div class="settings-note" id="settings-provider-note"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="advanced">
+        <h4>Invite Key</h4>
+        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via acorn-cli. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
+        <label for="settings-invite-key">Invite key</label>
+        <div style="display:flex; gap:6px; align-items:stretch; margin-top:4px">
+          <input id="settings-invite-key" type="password" placeholder="empty = self-register + acorn-cli disabled" autocomplete="off" style="flex:1; min-width:0">
+          <button type="button" class="settings-test-btn" id="settings-invite-key-show" title="Show / hide">show</button>
+          <button type="button" class="settings-test-btn" id="settings-invite-key-copy" title="Copy to clipboard">copy</button>
+          <button type="button" class="settings-test-btn" id="settings-invite-key-regen" title="Generate a new key (existing webapp guests + acorn-cli users will need the new one)">regen</button>
+        </div>
+        <div class="settings-note" id="settings-invite-key-note"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="advanced">

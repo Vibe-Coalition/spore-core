@@ -78,6 +78,17 @@ function _buildThemeInlineStyle(dataDir) {
   return Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';');
 }
 
+// Constant-time invite-key compare. Used by both self-register and
+// the acorn-cli /auth handler (the plugin reads config.inviteKey from
+// the host and calls this).
+function _inviteKeyMatches(typed, stored) {
+  if (!typed || !stored) return false;
+  const a = Buffer.from(String(typed));
+  const b = Buffer.from(String(stored));
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+}
+
 function _isOnboardingNeeded(dataDir, config) {
   const prefsPath = path.join(dataDir, 'preferences.json');
   let prefs = {};
@@ -884,6 +895,11 @@ class WebGateway {
         braveApiKey: this.config.braveApiKey ? '***hidden***' : '',
         braveApiKeySet: !!this.config.braveApiKey,
       },
+      // Single host-level invite key — gates webapp self-register +
+      // acorn-cli /auth. Empty means both are disabled. Surfaced as a
+      // password field with a Regenerate button in the Advanced tab.
+      inviteKey: this.config.inviteKey || '',
+      inviteKeySet: !!this.config.inviteKey,
       modelLimits: this.config.modelLimits || {},
       budgets: (() => {
         // System-prompt section budgets (graph/context.js GraphContext).
@@ -1179,6 +1195,20 @@ class WebGateway {
       }
     }
 
+    // Invite key — accept either:
+    //   body.inviteKeyRegenerate: true → mint a fresh UUID
+    //   body.inviteKey: '<value>'      → set explicitly (empty disables)
+    // Persisted to .env (SPORE_INVITE_KEY) so it survives restarts.
+    if (body.inviteKeyRegenerate === true) {
+      const fresh = crypto.randomUUID();
+      envUpdates.SPORE_INVITE_KEY = fresh;
+      runtimePatch.inviteKey = fresh;
+    } else if (Object.prototype.hasOwnProperty.call(body, 'inviteKey')) {
+      const trimmed = String(body.inviteKey || '').trim();
+      envUpdates.SPORE_INVITE_KEY = trimmed || null;
+      runtimePatch.inviteKey = trimmed || null;
+    }
+
     if (body.browser && typeof body.browser === 'object'
       && Object.prototype.hasOwnProperty.call(body.browser, 'backend')) {
       const backend = this._normalizeBrowserBackendSetting(body.browser.backend);
@@ -1357,6 +1387,7 @@ class WebGateway {
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'geminiApiKey')) this.config.geminiApiKey = runtimePatch.geminiApiKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'customProviders')) this.config.customProviders = runtimePatch.customProviders;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'browserBackend')) this.config.browserBackend = runtimePatch.browserBackend;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'inviteKey')) this.config.inviteKey = runtimePatch.inviteKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'publicUrl')) this.config.publicUrl = runtimePatch.publicUrl;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngUrl')) this.config.searxngUrl = runtimePatch.searxngUrl;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngApiKey')) this.config.searxngApiKey = runtimePatch.searxngApiKey;
@@ -2789,12 +2820,10 @@ class WebGateway {
         return;
       }
 
-      // Self-register: anyone with a valid team-key (acorn-cli plugin)
-      // or other plugin-provided gate can create a webapp user without
-      // operator intervention. Always issues a 'webapp' role session
-      // (never creator). The team-key check is delegated to plugin
-      // `webappSelfRegisterCheck` lifecycle hooks; if NO plugin
-      // handles the check, self-registration is disabled (503).
+      // Self-register: anyone with the SPORE invite key can create a
+      // webapp user without operator intervention. Always issues a
+      // 'webapp' role session (never creator). When config.inviteKey
+      // is empty, self-register is disabled (503).
       if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
@@ -2802,22 +2831,16 @@ class WebGateway {
         try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
         const username = String(parsed.username || '').trim();
         const password = String(parsed.password || '');
-        const mgr = this.tools?._pluginManager;
-        const checkHooks = mgr?.getLifecycleHooks?.('webappSelfRegisterCheck') || [];
-        if (!checkHooks.length) {
+        if (!this.config.inviteKey) {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
         }
-        let gate = { allowed: false, code: 503, reason: 'Self-registration not gated by any plugin.' };
-        for (const h of checkHooks) {
-          let out;
-          try { out = h({ parsed, req }); } catch (e) { this.log.warn('[plugins] webappSelfRegisterCheck failed: ' + e.message); continue; }
-          if (out?.allowed === true) { gate = { allowed: true }; break; }
-          if (out && out.allowed === false) gate = { allowed: false, code: out.code || 401, reason: out.reason || 'Invalid credentials' };
-        }
-        if (!gate.allowed) {
-          res.writeHead(gate.code || 401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: gate.reason })); return;
+        // Accept teamKey (current login UI), inviteKey (direct field
+        // name), or acornKey (legacy clients).
+        const typedKey = String(parsed.inviteKey || parsed.teamKey || parsed.acornKey || '').trim();
+        if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid invite key' })); return;
         }
         if (!username || username.length > 64 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });

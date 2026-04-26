@@ -394,12 +394,16 @@ function loadConfigFresh() {
   if (process.env.SPORE_WEB_AUTH_USER) config.webAuthUser = process.env.SPORE_WEB_AUTH_USER;
   if (process.env.SPORE_WEB_AUTH_PASS) config.webAuthPass = process.env.SPORE_WEB_AUTH_PASS;
 
-  // SPORE_ACORN_KEY env var ownership moved to the acorn-cli plugin in
-  // phase 2.3-final. The plugin reads process.env.SPORE_ACORN_KEY
-  // directly during backfillLegacyConfig and copies it into
-  // config.plugins['acorn-cli'].key. Self-register, /auth, and the
-  // settings UI all flow through the plugin's config slot now —
-  // core no longer surfaces an `acornKey` field.
+  // SPORE invite key — single host-level secret used for two things:
+  //   1. Webapp self-register gate (anyone with the key can create a
+  //      webapp user account).
+  //   2. acorn-cli /auth gate (Go binaries pass the key to obtain a
+  //      Bearer token).
+  // Reads SPORE_INVITE_KEY first, falls back to legacy SPORE_ACORN_KEY
+  // for backward compat. Plugins read `config.inviteKey` from the host
+  // config; nobody owns this slot from a plugin.
+  if (process.env.SPORE_INVITE_KEY) config.inviteKey = process.env.SPORE_INVITE_KEY;
+  else if (process.env.SPORE_ACORN_KEY) config.inviteKey = process.env.SPORE_ACORN_KEY;
 
   // Public URL (set by manager during creation, or derived from legacy ingress vars)
   if (process.env.SPORE_PUBLIC_URL) {

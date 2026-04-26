@@ -16,71 +16,38 @@
 //   • WS handlers: session:start / session:end (Go-binary wire frames).
 //   • Project Context + Plan Mode prompt sections (acorn-specific UX:
 //     PHASE 1-6 plan mode, QUESTIONS marker, ACORN.md handling).
-//   • Settings pane (team key — auto-mints when enabled with no key).
 //   • Lifecycle hooks that call into session-graph's lib helpers:
 //       - afterTurn: failure-fix + round checkpoints + project activity
 //       - afterLearn: discovered_in edges + session-temp tagging
 //       - beforeMessage: project-node upsert + cachedProject* opts
 //       - shouldSkipRecall: looksLikeCodingTurn gate for cli sessions
-//       - webappSelfRegisterCheck: team-key gate for self-register
 //       - isNodeManaged: claims session/project node ownership
 //       - wsClose: ungraceful-close distillation chain
 //   • afterToolExec middleware: temp-tagging on graph_update creates.
+//
+// The /auth handler validates against config.inviteKey (a host-level
+// setting in core, NOT a plugin slot). Webapp self-register uses the
+// same key; both flows read it directly from this.config.
 
 const crypto = require('crypto');
 
-// ── Legacy config backfill ──────────────────────────────────────────
-// Same pattern as plugins/email: copies any pre-existing top-level
-// `acornKey` (legacy SPORE_ACORN_KEY env var or saved spore.json field)
-// into `config.plugins.acorn-cli.key` on first install. After this
-// runs once, the plugin owns the slot.
-const LEGACY_KEY_MAP = {
-  acornKey: 'key',
-};
-
-function backfillLegacyConfig(api) {
-  const current = api.getConfig();
-  if (Object.keys(current).length > 0) return;
+// ── Resolve the host invite key ────────────────────────────────────
+// The acorn-cli /auth endpoint validates incoming Go-binary connections
+// against the host-level SPORE invite key (same key webapp self-register
+// uses). Stored in core's config.inviteKey slot; the plugin reads it
+// without owning it.
+function resolveInviteKey(api) {
   const host = api.getHostConfig();
-  const patch = {};
-  let any = false;
-  for (const [legacy, modern] of Object.entries(LEGACY_KEY_MAP)) {
-    const v = host[legacy];
-    if (v !== undefined && v !== null && v !== '') {
-      patch[modern] = v;
-      any = true;
-    }
-  }
-  // Plugin owns SPORE_ACORN_KEY directly — config.js no longer mirrors
-  // the env var into a top-level slot. If the legacy slot didn't carry
-  // a value (fresh install without prior settings UI), fall back to
-  // the env var. After backfill, the plugin owns the slot for good.
-  if (!patch.key && process.env.SPORE_ACORN_KEY) {
-    patch.key = process.env.SPORE_ACORN_KEY;
-    any = true;
-  }
-  if (any) {
-    api.setConfig(patch).catch(e => api.getLogger().warn('legacy backfill failed: ' + e.message));
-    api.getLogger().info(`Migrated ${Object.keys(patch).length} legacy acorn config key(s) into plugins.acorn-cli`);
-  }
+  return host.inviteKey || null;
 }
 
-// ── Acorn key constant-time comparison ──────────────────────────────
-function acornKeyMatches(typed, stored) {
+// Constant-time compare; mirrors src/gateways/web.js _inviteKeyMatches.
+function inviteKeyMatches(typed, stored) {
   if (!typed || !stored) return false;
   const a = Buffer.from(String(typed));
   const b = Buffer.from(String(stored));
   if (a.length !== b.length) return false;
   try { return crypto.timingSafeEqual(a, b); } catch { return false; }
-}
-
-// ── Resolve the operator-configured key ─────────────────────────────
-// Plugin owns the slot exclusively. backfillLegacyConfig handles the
-// one-time migration from any pre-existing top-level acornKey field
-// or the SPORE_ACORN_KEY env var.
-function resolveAcornKey(api) {
-  const cfg = api.getConfig();
-  return cfg.key || null;
 }
 
 // ── HTTP route handlers ─────────────────────────────────────────────
@@ -103,10 +70,10 @@ async function handleAuth(api, req, res) {
   }
   const { username, key } = parsed || {};
 
-  const acornKey = resolveAcornKey(api);
-  if (!acornKey) {
+  const inviteKey = resolveInviteKey(api);
+  if (!inviteKey) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Acorn not configured on this agent', code: 'ACORN_NOT_CONFIGURED' }));
+    res.end(JSON.stringify({ error: 'No SPORE invite key set on this instance', code: 'INVITE_KEY_NOT_CONFIGURED' }));
     return;
   }
   if (!username || typeof username !== 'string' || username.length > 32 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
@@ -114,9 +81,9 @@ async function handleAuth(api, req, res) {
     res.end(JSON.stringify({ error: 'Invalid username (alphanumeric, max 32 chars)' }));
     return;
   }
-  if (!acornKeyMatches(key, acornKey)) {
+  if (!inviteKeyMatches(key, inviteKey)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid team key' }));
+    res.end(JSON.stringify({ error: 'Invalid invite key' }));
     return;
   }
 
@@ -537,10 +504,7 @@ module.exports = function register(api) {
     schemaVersion: 1,
   });
 
-  // One-time copy-forward of legacy top-level acornKey config slot.
-  backfillLegacyConfig(api);
-
-  // HTTP routes — auth issues an acorn-typed Bearer token; sessions
+  // HTTP routes — auth issues a CLI-typed Bearer token; sessions
   // returns the user's prior chat sessions. Surfaced under
   // /api/plugins/acorn-cli/* and aliased from /api/acorn/* via core's
   // pre-route rewrite (src/gateways/web.js).
@@ -723,52 +687,12 @@ module.exports = function register(api) {
     noteProjectActivity(api, opts, finalText, toolLog || []);
   });
 
-  // Settings pane — surfaces `enabled` toggle + `key` (auto-generated
-  // when enabled-but-empty via the onConfigChange hook below). Lives in
-  // the Plugins tab alongside email and any other plugin's pane. Replaces
-  // the legacy Acorn settings card that lived in graph-viewer.html.
-  api.registerSettingsPane({
-    title: 'Acorn',
-    description: 'Acorn CLI auth — pass the team key to acorn-cli to let it sign in to this SPORE. Tick "Enabled" with an empty key field and save to mint a fresh UUID; clear and save again to regenerate.',
-    schema: [
-      { key: 'enabled', label: 'Enable Acorn auth', type: 'toggle' },
-      { key: 'key',     label: 'Team key',          type: 'password', secret: true,
-        help: 'Auto-generated when enabled and empty. Existing CLI users lose access if regenerated.' },
-    ],
-  });
-
-  // onConfigChange — auto-mint a fresh UUID when the operator enables
-  // the plugin without supplying a key (the "ergonomic on-by-default"
-  // flow). Runs after the settings save persists `enabled: true, key: ''`,
-  // mints a UUID, and writes it back via setConfig — re-fires this hook
-  // but with `key` now populated, so the second pass exits early.
-  api.onConfigChange(async (oldConfig, newConfig) => {
-    if (newConfig?.enabled === true && !newConfig.key) {
-      const fresh = crypto.randomUUID();
-      try {
-        await api.setConfig({ key: fresh });
-        api.getLogger().info('Auto-minted fresh team key (enabled with no key supplied).');
-      } catch (e) {
-        api.getLogger().warn('Auto-mint failed: ' + e.message);
-      }
-    }
-  });
-
-  // webappSelfRegisterCheck lifecycle hook — gates the
-  // /api/webapp/users/self-register endpoint with the acorn team key.
-  // Returns { allowed: true } on a valid key, or { allowed: false,
-  // code, reason } otherwise. When the plugin is uninstalled the hook
-  // disappears and core defaults to "self-registration disabled" (503).
-  api.registerLifecycleHook('webappSelfRegisterCheck', ({ parsed }) => {
-    const stored = resolveAcornKey(api);
-    if (!stored) return { allowed: false, code: 503, reason: 'Self-registration is not enabled on this instance.' };
-    // Accept both the new generic `teamKey` field and the legacy
-    // `acornKey` field so older login pages and Go acorn-cli builds
-    // keep working through the rename.
-    const typed = String(parsed?.teamKey || parsed?.acornKey || '').trim();
-    if (!acornKeyMatches(typed, stored)) return { allowed: false, code: 401, reason: 'Invalid team key' };
-    return { allowed: true };
-  });
+  // No plugin settings pane — the SPORE invite key (used by both this
+  // plugin's /auth handler AND the webapp self-register endpoint) is
+  // a host-level setting in core's config.inviteKey. The settings UI
+  // surfaces it under Advanced → Invite Key, not in the Plugins tab.
+  // No webappSelfRegisterCheck hook either — core's self-register
+  // reads config.inviteKey directly.
 
   // shouldSkipRecall lifecycle hook — short-circuits the expensive
   // per-turn recall pipeline for cli-platform coding turns. Returns
@@ -849,5 +773,5 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/acorn alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + webappSelfRegisterCheck + afterToolExec(graph_update) + settings pane + prompt sections registered.');
+  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/acorn alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
 };
