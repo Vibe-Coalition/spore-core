@@ -5035,6 +5035,10 @@ async function _refreshSettingsFromServer() {
     const r = await fetch(API + '/api/settings', { headers: { ...authHeaders() } });
     if (r.ok) populateSettingsPanel(await r.json());
   } catch { /* silent: best-effort refresh */ }
+  // Plugin install/uninstall flips section visibility — invalidate cache
+  // and re-run the gate so newly-installed plugins' UI cards appear.
+  _pluginInstalledIdsCache = null;
+  if (typeof _hidePluginUiIfMissing === 'function') _hidePluginUiIfMissing();
 }
 
 document.addEventListener('click', async (e) => {
@@ -5462,6 +5466,29 @@ function _showAcornFlash(key, label = 'Your Acorn team key:') {
   if (input) { input.value = key; input.type = 'text'; document.getElementById('settings-acorn-key-show').textContent = 'hide'; }
 }
 
+// Hide settings sections whose owning plugin isn't installed. Sections
+// declare ownership via `data-plugin-required="<plugin-id>"`. Cached for
+// the lifetime of the panel; "everything optional" — when the plugin is
+// uninstalled the card disappears, when reinstalled it reappears.
+let _pluginInstalledIdsCache = null;
+async function _ensurePluginInstalledIds() {
+  if (_pluginInstalledIdsCache) return _pluginInstalledIdsCache;
+  try {
+    const r = await fetch(API + '/api/plugins/list', { headers: authHeaders() });
+    if (!r.ok) { _pluginInstalledIdsCache = new Set(); return _pluginInstalledIdsCache; }
+    const data = await r.json();
+    _pluginInstalledIdsCache = new Set((data?.installed || []).map(p => p.id));
+  } catch { _pluginInstalledIdsCache = new Set(); }
+  return _pluginInstalledIdsCache;
+}
+async function _hidePluginUiIfMissing() {
+  const ids = await _ensurePluginInstalledIds();
+  document.querySelectorAll('[data-plugin-required]').forEach(el => {
+    const required = el.getAttribute('data-plugin-required');
+    el.style.display = required && ids.has(required) ? '' : 'none';
+  });
+}
+
 let _acornBtnsBound = false;
 function _bindAcornButtons() {
   if (_acornBtnsBound) return;
@@ -5584,6 +5611,7 @@ async function openSettingsPanel() {
   _initSettingsFloatingPane();
   _bindAcornButtons();
   _bindResetGraphButton();
+  _hidePluginUiIfMissing();
   if (typeof _focusFloatingWindow === 'function') _focusFloatingWindow('settings-pane');
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
 
@@ -5913,10 +5941,15 @@ async function saveSettingsPanel() {
       },
       custom: collectSettingsCustomProviders(),
     },
-    acorn: {
-      enabled: document.getElementById('settings-acorn-enabled').checked,
-      key: document.getElementById('settings-acorn-key').value.trim(),
-    },
+    // Only emit the legacy `acorn` block when the plugin is installed —
+    // otherwise an unrelated settings save would null out the operator's
+    // stored acornKey on uninstall.
+    ...(_pluginInstalledIdsCache?.has('acorn-cli') ? {
+      acorn: {
+        enabled: document.getElementById('settings-acorn-enabled').checked,
+        key: document.getElementById('settings-acorn-key').value.trim(),
+      },
+    } : {}),
     browser: {
       backend: document.getElementById('settings-browser-backend').value,
     },
@@ -18851,7 +18884,7 @@ build/
         <div class="settings-note" id="settings-provider-note"></div>
       </div>
 
-      <div class="settings-section wide" data-target-tab="advanced">
+      <div class="settings-section wide" data-target-tab="advanced" data-plugin-required="acorn-cli">
         <h4>Acorn</h4>
         <div class="settings-check">
           <input id="settings-acorn-enabled" type="checkbox">

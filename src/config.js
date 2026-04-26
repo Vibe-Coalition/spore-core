@@ -395,6 +395,12 @@ function loadConfigFresh() {
   if (process.env.SPORE_WEB_AUTH_PASS) config.webAuthPass = process.env.SPORE_WEB_AUTH_PASS;
 
   // Acorn CLI team key
+  // Kept here as a legacy bridge: the acorn-cli plugin reads it via
+  // getHostConfig() during one-time backfill, AND web.js's
+  // /api/webapp/users/self-register endpoint uses this.config.acornKey
+  // as a self-registration gate (wraps the same value, no plugin coupling).
+  // A future cleanup can move self-register into the plugin and then
+  // drop both the env loader here and the host slot in web.js.
   if (process.env.SPORE_ACORN_KEY) config.acornKey = process.env.SPORE_ACORN_KEY;
 
   // Public URL (set by manager during creation, or derived from legacy ingress vars)
