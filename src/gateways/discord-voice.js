@@ -49,7 +49,7 @@ class DiscordVoice {
 
     const pipeline = this._ensureVoicePipeline();
     if (!pipeline?.enabled) {
-      await message.reply('Voice pipeline not configured. Need DEEPGRAM_API_KEY + XI_API_KEY (or OPENAI_API_KEY) in .env.');
+      await message.reply('Voice pipeline not configured. Install the deepgram or whisper plugin (Settings → Plugins) and ensure a TTS provider key (XI_API_KEY / OPENAI_API_KEY) is set in .env.');
       return;
     }
 

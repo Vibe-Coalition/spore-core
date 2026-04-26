@@ -1065,7 +1065,12 @@ function applyPromptSectionsMixin(GraphContext) {
       else keyStatus.push('XI_API_KEY (ElevenLabs) ✗ not set');
       if (this.config.voice?.enabled) {
         const tts = this.config.xiApiKey ? 'ElevenLabs' : this.config.openaiApiKey ? 'OpenAI' : 'Edge (free)';
-        const stt = this.config.deepgramApiKey ? 'Deepgram' : this.config.openaiApiKey ? 'OpenAI Whisper' : 'none';
+        // STT providers come from plugins; consult the registry if it
+        // exists, else say 'unknown' (the plugin manager isn't always
+        // wired to graph context — this is just diagnostic).
+        const sttProviders = this._pluginManager?.getSTTProviders?.() || [];
+        const sttConfigured = sttProviders.filter(p => p.configured).map(p => p.name);
+        const stt = sttConfigured.length ? sttConfigured.join('+') : 'none (install whisper or deepgram plugin)';
         keyStatus.push(`Voice pipeline: TTS=${tts}, STT=${stt}`);
       }
       parts.push('');

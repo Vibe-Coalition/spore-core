@@ -4096,23 +4096,23 @@
 // ── Browser-side Whisper STT ──
 // Lives in plugins/whisper/static/whisper-stt.js and is loaded at boot
 // by the plugin frontend-asset loader above when the whisper plugin is
-// installed. Attaches to `window.WhisperSTT`. When the plugin is
-// uninstalled, `window.WhisperSTT` is undefined and call sites below
-// fall through to the noop placeholder.
+// installed. Attaches to `window.WhisperSTT`.
 //
-// `WhisperSTT` (the bare identifier) is captured at script-parse time
-// — the dynamic <script> insertion is async, so on first reference it
-// might not yet be ready. Call sites that need late-binding read
-// `window.WhisperSTT` directly. The noop placeholder ensures any
-// remaining bare-identifier callers don't ReferenceError when the
-// plugin isn't installed.
-const _WHISPER_NOOP = {
-  init: async () => {},
-  transcribe: async () => null,
-  isReady: () => false,
-  isLoading: () => false,
-};
-const WhisperSTT = (typeof window !== 'undefined' && window.WhisperSTT) || _WHISPER_NOOP;
+// We seed `window.WhisperSTT` with a noop placeholder on script-parse
+// so existing call sites that reference the bare `WhisperSTT`
+// identifier (which resolves to `window.WhisperSTT` in browser scope)
+// don't throw before the async plugin script finishes loading. The
+// plugin script overwrites `window.WhisperSTT` with the real impl
+// when it loads. If the plugin isn't installed, the noop stays put
+// and `WhisperSTT.isReady()` returns false — no Whisper code runs.
+if (typeof window !== 'undefined' && !window.WhisperSTT) {
+  window.WhisperSTT = {
+    init: async () => {},
+    transcribe: async () => null,
+    isReady: () => false,
+    isLoading: () => false,
+  };
+}
 </script>
 <script>
 const VB = window.BRAND || {};
