@@ -214,9 +214,90 @@ function noteProjectInteraction(learner, userId, cwd, summary) {
   }
 }
 
+// upsertProjectCodeGraph writes a summary of the structural code index
+// (clusters, tech stack, entry points, hot paths, stats) onto the
+// project node's `code_graph` aspect. Authoritative symbol/CALLS data
+// stays in the client-side .acorn/index.db; this is the cheap,
+// agent-facing summary that survives across sessions and shows up in
+// the SPORE graph viewer.
+//
+// summary shape (matches what the codeindex `architecture` tool returns):
+//   {
+//     index_head: string,
+//     stats: { files, symbols, functions, methods, classes, calls },
+//     tech_stack: [{language, files, symbols}, ...],
+//     entry_points: [{qname, name, file, line, kind, language}, ...] (≤10),
+//     clusters: [{name, files, symbols, dominant_lang}, ...] (≤30),
+//     hot_paths: [{qname, name, file, line, callers, language}, ...] (≤20),
+//     notes: [string, ...]
+//   }
+function upsertProjectCodeGraph(learner, userId, cwd, summary) {
+  if (!learner?.db || !cwd || !summary) return null;
+  const db = learner.db;
+  const id = projectNodeId(userId, cwd);
+  const projRow = db.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
+  if (!projRow) return { error: `project node ${id} not found; session:start must run first` };
+
+  // Wipe + rewrite the code_graph aspect from scratch — easier than
+  // diffing per-attribute, and the aspect is small (≤100 attrs).
+  let asp = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'code_graph'").get(id);
+  if (!asp) {
+    db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'code_graph', 7, 'acorn-codeindex')").run(id);
+    asp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+  }
+  db.prepare('DELETE FROM attributes WHERE aspect_id = ?').run(asp.id);
+
+  const ins = db.prepare(
+    "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, ?, 'acorn-codeindex', 'acorn-codeindex')"
+  );
+
+  if (summary.index_head) ins.run(asp.id, `index_head: ${summary.index_head}`, 5);
+
+  if (summary.stats) {
+    const s = summary.stats;
+    ins.run(asp.id, `stats: ${s.files || 0} files, ${s.symbols || 0} symbols, ${s.functions || 0} functions, ${s.methods || 0} methods, ${s.classes || 0} classes, ${s.calls || 0} call edges`, 7);
+  }
+
+  if (Array.isArray(summary.tech_stack)) {
+    const parts = summary.tech_stack.slice(0, 10).map(t => `${t.language}=${t.files}f/${t.symbols}s`);
+    if (parts.length) ins.run(asp.id, `tech_stack: ${parts.join(', ')}`, 6);
+  }
+
+  if (Array.isArray(summary.entry_points)) {
+    for (const ep of summary.entry_points.slice(0, 10)) {
+      ins.run(asp.id, `entry: ${ep.kind || 'main'} ${ep.qname || (ep.file + ':' + ep.line)}`, 5);
+    }
+  }
+
+  if (Array.isArray(summary.clusters)) {
+    for (const c of summary.clusters.slice(0, 30)) {
+      ins.run(asp.id, `cluster: ${c.name || c.path} — ${c.files} files, ${c.symbols} symbols (${c.dominant_lang})`, 6);
+    }
+  }
+
+  if (Array.isArray(summary.hot_paths)) {
+    for (const hp of summary.hot_paths.slice(0, 20)) {
+      ins.run(asp.id, `hot: ${hp.qname || hp.name} ← ${hp.callers} callers (${hp.file}:${hp.line})`, 6);
+    }
+  }
+
+  if (Array.isArray(summary.notes)) {
+    for (const n of summary.notes.slice(0, 10)) {
+      ins.run(asp.id, `note: ${n}`, 4);
+    }
+  }
+
+  // Bump mentions on the project node so it lights up in the graph
+  // viewer's recently-active list.
+  db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+
+  return { ok: true, projectNodeId: id };
+}
+
 module.exports = {
   projectNodeId,
   upsertProject,
   getProject,
   noteProjectInteraction,
+  upsertProjectCodeGraph,
 };

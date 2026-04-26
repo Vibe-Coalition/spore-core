@@ -447,7 +447,7 @@ function buildPlanModeSection(api, opts) {
   if (pc.hasCodeIndex) {
     parts.push('PHASE 2 — CODEBASE SCAN (structural-first):');
     parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}). Prefer structural queries over reading files — a single search_symbols result is roughly 50× cheaper in tokens than the equivalent grep + read_file pair. Order:`);
-    parts.push('  1. `architecture` — once, to learn module clusters, entry points, hot paths, and tech stack. Read the `notes` field for any partial-coverage caveats (regex-extracted JS, missing language extractor, etc.).');
+    parts.push('  1. `architecture` — once, to learn module clusters, entry points, hot paths, and tech stack. Read the `notes` field for any partial-coverage caveats. THEN immediately pass the result through `update_code_graph_summary` so the project node\'s `code_graph` aspect reflects it — that\'s how cross-session and cross-machine memory of this codebase\'s shape gets persisted in the graph viewer.');
     parts.push('  2. For each concept named in the user\'s request, `search_symbols({ name: "<concept>" })` (optionally narrow by `kind`, `file`, or `language`).');
     parts.push('  3. For each plausible target symbol, `trace_calls({ name: "<name>", direction: "callers", depth: 3 })` to learn who depends on it. Use `direction: "callees"` to learn what it depends on.');
     parts.push('  4. Only after the structural pass is exhausted: `get_snippet({ qname: "..." })` for the 3-5 symbols you will actually modify. Do not read whole files unless the symbol is missing from the index.');
@@ -586,6 +586,128 @@ module.exports = function register(api) {
   // ctx.channelId / ctx.projectContext.cwd to detect the session and
   // link the discovery node — so the agent contract is preserved
   // verbatim. Acorn-cli no longer registers it here.
+
+  // ── codeindex tools (client-routed) ─────────────────────────────────
+  //
+  // The acorn Go CLI (v0.4.0+) ships a per-project SQLite code graph at
+  // <cwd>/.acorn/index.db built from tree-sitter-style parsing of Go,
+  // TypeScript, JavaScript, and Python source. These six tools let the
+  // agent query that index instead of falling back to grep+read_file —
+  // a search_symbols result is ~50x cheaper in tokens than the
+  // equivalent grep + read_file pair on a real codebase.
+  //
+  // Routing: when an acorn CLI client is connected, its executor.go
+  // claims these tool names via its localTools map and runs them
+  // against the local DB. The execute() stub below only fires as a
+  // fallback when there's no claiming CLI — which means either an
+  // older CLI is connected, or someone called the tool from a non-CLI
+  // ctx (web/discord/cron). All return a clear error in that case so
+  // the agent doesn't silently produce wrong results.
+  const requireAcornClient = (toolName) => () => ({
+    ok: false,
+    error: `${toolName} runs on the user's machine via the acorn CLI; no acorn CLI v0.4.0+ client is currently connected to this session.`,
+  });
+
+  api.registerTool('index_codebase', {
+    namespaced: false,
+    description:
+      'Build (or refresh) the per-project code graph at <cwd>/.acorn/index.db. ' +
+      'Walks the cwd, parses Go/TS/JS/Python source, extracts symbols + CALLS edges + imports. ' +
+      'Idempotent: per-file mtime-skip on subsequent runs. Returns counts (files, symbols, calls, took_ms) and a by-language breakdown. ' +
+      'Usually triggered manually by the user via /index — only call this from the agent if a search_symbols query came back surprisingly empty and you suspect the index is stale.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        roots:     { type: 'array', items: { type: 'string' }, description: 'Optional sub-dirs to constrain the walk; defaults to cwd.' },
+        languages: { type: 'array', items: { type: 'string' }, description: 'Optional filter (e.g. ["go", "ts"]). Default: all 5 supported (go, ts, js, py, rs).' },
+        max_files: { type: 'number', description: 'Safety cap; 0 = unlimited.' },
+        force:     { type: 'boolean', description: 'Re-parse every file even if mtime unchanged. Default false.' },
+      },
+    },
+    execute: requireAcornClient('index_codebase'),
+  });
+
+  api.registerTool('search_symbols', {
+    namespaced: false,
+    description:
+      'Query the project code index for symbols by name / kind / file / language. Returns name, qualified-name, kind, file, line, signature, container, exported. ' +
+      'Use this INSTEAD of grep when you want to locate a function/class/method/type — ~50x cheaper in tokens than grep + read_file. ' +
+      'Bare-name match is case-insensitive substring; combine with kind="function" / "method" / "class" / "struct" / "interface" / "type" / "const" / "var" / "enum" / "constructor" to narrow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:     { type: 'string', description: 'Substring against symbol.name (case-insensitive).' },
+        qname:    { type: 'string', description: 'Substring against the fully-qualified name <file>::<container>.<name>.' },
+        kind:     { type: 'string', description: 'Exact match (function|method|class|struct|interface|type|const|var|enum|constructor).' },
+        file:     { type: 'string', description: 'LIKE pattern over the file path.' },
+        language: { type: 'string', description: 'go | ts | js | py | rs.' },
+        exported: { type: 'boolean', description: 'Restrict to exported symbols.' },
+        limit:    { type: 'number', description: 'Default 200, hard cap.' },
+      },
+    },
+    execute: requireAcornClient('search_symbols'),
+  });
+
+  api.registerTool('trace_calls', {
+    namespaced: false,
+    description:
+      'BFS over CALLS edges in the code index — answers "who calls X?" or "what does X call?". ' +
+      'Returns a flat list of (caller_qname, callee_qname, line, depth) edges; reconstruct paths client-side if needed. ' +
+      'Use this INSTEAD of grepping for invocations: a trace_calls result is structural and authoritative for the indexed languages, whereas grep matches strings in comments and unrelated files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:      { type: 'string', description: 'Match callee_name (works without resolved qname). Either name or qname is required.' },
+        qname:     { type: 'string', description: 'Exact qualified-name match. Either name or qname is required.' },
+        direction: { type: 'string', enum: ['callers', 'callees', 'both'], description: 'Default: callers.' },
+        depth:     { type: 'number', description: '1..5; default 3.' },
+        limit:     { type: 'number', description: 'Total edge cap; default and max 200.' },
+      },
+    },
+    execute: requireAcornClient('trace_calls'),
+  });
+
+  api.registerTool('get_snippet', {
+    namespaced: false,
+    description:
+      'Fetch source for a symbol by qualified name (preferred) or file+line range. ' +
+      'Use this INSTEAD of read_file when you only need the body of one symbol — get_snippet returns just the relevant lines from the indexed range, not the whole file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        qname:      { type: 'string', description: 'Qualified name (preferred form).' },
+        file:       { type: 'string', description: 'Repo-relative path (alternate form, with start_line+end_line).' },
+        start_line: { type: 'number' },
+        end_line:   { type: 'number' },
+      },
+    },
+    execute: requireAcornClient('get_snippet'),
+  });
+
+  api.registerTool('architecture', {
+    namespaced: false,
+    description:
+      'Produce a structured codebase summary: tech stack (file/symbol counts per language), clusters by top-level directory, entry points (Go main/init, JS main/bootstrap), hot paths (top-N symbols by inbound CALLS count), and coverage notes. ' +
+      'Call this ONCE early in plan mode to orient yourself — far cheaper than grepping for "main" or reading package.json + go.mod.',
+    inputSchema: { type: 'object', properties: {} },
+    execute: requireAcornClient('architecture'),
+  });
+
+  api.registerTool('impact', {
+    namespaced: false,
+    description:
+      'Map a list of file paths (or the current `git diff --name-only HEAD` if omitted) to affected symbols, plus a transitive caller blast-radius count for each. ' +
+      'Use this BEFORE producing a plan that edits files — surfaces "this 5-line change actually touches 23 callers" risk.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: { type: 'array', items: { type: 'string' }, description: 'Repo-relative; defaults to staged + unstaged paths.' },
+        depth: { type: 'number', description: '1..3; default 2.' },
+        limit: { type: 'number', description: 'Total symbol cap; default 100, max 200.' },
+      },
+    },
+    execute: requireAcornClient('impact'),
+  });
 
   // Prompt sections — Project Context (every acorn turn) + Plan Mode (when
   // projectContext.mode === 'plan'). Registered with the `*` wildcard so

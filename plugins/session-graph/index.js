@@ -17,6 +17,7 @@
 
 const { noteDiscovery } = require('./lib/discovery');
 const scripts = require('./lib/scripts');
+const projectsLib = require('./lib/projects');
 
 module.exports = function register(api) {
   // note_discovery tool — bare name (namespaced:false) preserves the
@@ -161,6 +162,35 @@ module.exports = function register(api) {
     },
   });
 
+  api.registerTool('update_code_graph_summary', {
+    namespaced: false,
+    description:
+      'Mirror a structural code-index summary (clusters, tech stack, entry points, hot paths, stats) into the current project node\'s `code_graph` aspect. ' +
+      'Call this AFTER running the local `architecture` tool — pass its result through. The summary survives across sessions and shows up in the SPORE graph viewer alongside other project memory. ' +
+      'Authoritative symbol/CALLS data stays in the client-side .acorn/index.db; this is the cheap, persistable summary.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        index_head:   { type: 'string', description: 'Git short-sha at index time (from architecture.index_head).' },
+        stats:        { type: 'object', description: '{files, symbols, functions, methods, classes, calls} from architecture.stats.' },
+        tech_stack:   { type: 'array', description: 'Language breakdown — array of {language, files, symbols}.' },
+        entry_points: { type: 'array', description: 'Array of {qname, name, file, line, kind, language}; cap at 10.' },
+        clusters:     { type: 'array', description: 'Top-level dir clusters — array of {name, path, files, symbols, dominant_lang}; cap at 30.' },
+        hot_paths:    { type: 'array', description: 'Top callers — array of {qname, name, file, line, callers, language}; cap at 20.' },
+        notes:        { type: 'array', items: { type: 'string' }, description: 'Coverage notes from architecture.notes.' },
+      },
+    },
+    execute: (input, ctx) => {
+      const projectId = ctxProjectId(ctx);
+      if (!projectId) return { ok: false, error: 'no project context — update_code_graph_summary only works inside an acorn session' };
+      const learner = api._appContext?.learner;
+      const userId = ctx?.userId || ctx?.userName || 'anon';
+      const cwd = ctx?.projectContext?.cwd || ctx?.projectContext?.clientCwd;
+      if (!cwd) return { ok: false, error: 'no cwd in projectContext' };
+      return projectsLib.upsertProjectCodeGraph(learner, userId, cwd, input || {});
+    },
+  });
+
   api.registerTool('record_script_outcome', {
     namespaced: false,
     description:
@@ -181,5 +211,5 @@ module.exports = function register(api) {
     },
   });
 
-  api.getLogger().info('Plugin ready — note_discovery + save_project_script + list_project_scripts + get_project_script + record_script_outcome tools registered. Lib modules (sessions, projects, heuristics, checkpoints, discovery, scripts) available via require for dependent plugins.');
+  api.getLogger().info('Plugin ready — note_discovery + save_project_script + list_project_scripts + get_project_script + record_script_outcome + update_code_graph_summary tools registered. Lib modules (sessions, projects, heuristics, checkpoints, discovery, scripts) available via require for dependent plugins.');
 };
