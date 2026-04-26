@@ -194,7 +194,7 @@ const DEFAULTS = {
   discordAdmins: [],           // SPORE_DISCORD_ADMINS — comma-separated user/role IDs for privileged commands
 
   // Plugins
-  pluginsDir: null,            // SPORE_PLUGINS_DIR — defaults to <repo>/shared/plugins
+  pluginsDir: null,            // SPORE_PLUGINS_DIR — defaults to <repo>/plugins
   pluginsEnabled: false,       // SPORE_PLUGINS_ENABLED — opt-in; plugins run as full-privilege Node code
   pluginsHotReload: false,     // SPORE_PLUGINS_HOT_RELOAD — opt-in; allow runtime install/uninstall via /api/plugins
   plugins: {},                 // per-plugin config; populated as plugins.<id> = { ... } at runtime
