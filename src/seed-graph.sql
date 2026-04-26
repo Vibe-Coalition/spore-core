@@ -453,22 +453,12 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'Actions: launch, navigate, click, type, scroll, screenshot, evaluate, close, status.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Set backend="playwright" only when you explicitly need the Playwright path.', 8, 'seed', 'seed');
 
--- NODE: Acorn Client Context
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-acorn-context', 'Acorn Client Context', 'reference',
-  'How Acorn sessions map to a scoped project on the user''s machine and how to work within that client-side environment.', 8, 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'scope', 9, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Acorn sessions are bound to a specific project CWD on the user''s machine. Stay inside that project unless the user explicitly redirects you.', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'File reads, writes, edits, and execs are sandboxed to that client project path. Paths outside the assigned project are rejected.', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Do NOT use /workspace or other container-local paths for Acorn project work. Those are server-side paths, not the user''s repo.', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'When you mention files back to the user, use the client project path from the Acorn context or tool results, not a container path.', 8, 'seed', 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'workflow', 8, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Acorn CLI and Acorn Companion connect to the same server runtime, but each session preserves its own project scope and local-machine context.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Use the normal coding tools inside that provided project scope. Keep replies concise and execution-focused.', 8, 'seed', 'seed');
+-- ref-acorn-context moved to plugins/acorn-cli/sql/install.sql (phase 2.3a).
+-- Operators who want acorn must install the acorn-cli plugin; fresh installs
+-- without the plugin won't have any acorn-context ref content. The plugin's
+-- install SQL is self-sufficient (creates the node + scope/workflow + the
+-- spore→ref-acorn-context documents edge) so it works on both fresh installs
+-- and after a clean uninstall+reinstall cycle.
 
 -- NODE: Cron & Startup Tasks
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
@@ -538,7 +528,6 @@ INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUE
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-web-architecture', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-image-display', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-browser-automation', 'documents', 0.8, 'seed');
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-acorn-context', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-cross-agent-messaging', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-token-efficiency', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-code-viewer', 'documents', 0.8, 'seed');
