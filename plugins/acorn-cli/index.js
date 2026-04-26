@@ -513,6 +513,33 @@ function recordRoundCheckpoint(api, opts, toolLog, finalText) {
   }
 }
 
+// ── Recall-skip heuristic (was in src/graph/context.js) ────────────
+// Acorn coding turns don't need the per-turn graph recall pipeline:
+// they need filesystem tools, not "remember our chat from last week".
+// Recall = ~45-65 DB hits + LLM round-trip on every message — pure
+// overhead for focused refactor work. Conservative: any positive
+// signal trips skip; everything else still gets full recall.
+// Aggregation/recall-shaped queries are filtered upstream by queryType,
+// so this only sees specific/task-shaped ones.
+const _CODING_FILE_RE = /[\/\\]?[A-Za-z0-9_.\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs|go|rs|java|kt|c|cc|cpp|h|hpp|cs|rb|php|lua|sh|bash|zsh|fish|sql|html|css|scss|less|md|json|jsonc|toml|yaml|yml|xml|ini|env|dockerfile|makefile|gradle|cmake|proto|graphql|gql|svelte|vue)\b/i;
+const _CODING_VERB_RE = /\b(?:read|edit|write|create|delete|rename|move|copy|fix|refactor|build|run|exec|test|debug|grep|find|search|implement|add|remove|update|patch|merge|rebase|commit|push|deploy|install|compile|lint|format|stub|mock|wire|hook|port|migrate|generate|scaffold)\b/i;
+const _CODING_TOOL_RE = /\b(?:read_file|write_file|edit_file|exec|glob|grep|web_fetch|web_search|bash|terminal|file)\b/i;
+const _CODE_FENCE_RE = /```/;
+const _COMMAND_RE = /^\s*[\$>]?\s*(?:npm|yarn|pnpm|bun|go|cargo|pip|pip3|python|python3|node|deno|make|just|docker|git|ls|cd|cat|grep|sed|awk|find|curl|wget)\s/i;
+function looksLikeCodingTurn(text) {
+  if (!text || typeof text !== 'string') return false;
+  if (_CODE_FENCE_RE.test(text)) return true;
+  if (_CODING_FILE_RE.test(text)) return true;
+  if (_CODING_TOOL_RE.test(text)) return true;
+  if (_COMMAND_RE.test(text)) return true;
+  // Verb check is the loosest — only count it when paired with some
+  // code-context cue (short and direct, OR includes another code-
+  // shaped fragment). Pure prose like "I should refactor my schedule"
+  // shouldn't trip this.
+  if (_CODING_VERB_RE.test(text) && (text.length < 240 || /\.[a-z]{1,5}\b/i.test(text))) return true;
+  return false;
+}
+
 // ── Project activity note (per-turn breadcrumb on project node) ────
 // Appends a one-line activity note to the project node so cross-session
 // memory accumulates. Captures user prompt + tool-call summary so the
@@ -872,6 +899,49 @@ module.exports = function register(api) {
   api.registerPromptSection('*', 'Project Context', ({ opts }) => buildProjectContextSection(api, opts));
   api.registerPromptSection('*', 'Plan Mode',       ({ opts }) => buildPlanModeSection(api, opts));
 
+  // afterToolExec middleware — owns the graphcorn temp-tagging contract
+  // for graph_update. When a graph_update call inside an acorn ctx
+  // creates a NEW node (result.created === true), tag it with
+  // `{ ttl: 'temp', sessionId, tempCreated }` so session-end distillation
+  // picks winners. Skips if:
+  //   • not platform=cli (web/discord/cron callers don't get the tag)
+  //   • the operator passed temp:false explicitly (input.temp === false)
+  //     — would rather ship the tag, but respect the explicit override
+  //   • the agent already set extra.ttl=temp via input.temp:true
+  //     (the in-tree path handles that and we don't double-write)
+  //   • the session was already distilled (race with session-end)
+  //   • the node id matches a graphcorn-managed pattern (session-, project-)
+  // Never fires outside an acorn ctx — when the plugin is uninstalled,
+  // this entire branch disappears with the rest of the plugin.
+  api.registerMiddleware('afterToolExec', ({ name, input, result, ctx }) => {
+    if (name !== 'graph_update' || !result?.created || !result?.nodeId) return;
+    if (ctx?.platform !== 'cli' || !ctx?.channelId) return;
+    if (input?.temp === false || input?.temp === true) return;
+    const learner = api._appContext?.learner;
+    const db = learner?.db;
+    if (!db) return;
+    const sessionId = ctx.channelId;
+    const sessNodeId = 'session-' + String(sessionId);
+    try {
+      const sessRow = db.prepare(
+        "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
+      ).get(sessNodeId);
+      if (sessRow?.distilled) return;
+      const nodeRow = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(result.nodeId);
+      if (!nodeRow) return;
+      let extra = {};
+      try { extra = nodeRow.extra ? JSON.parse(nodeRow.extra) : {}; } catch { extra = {}; }
+      if (extra.sessionId || String(result.nodeId).startsWith('session-') || String(result.nodeId).startsWith('project-')) return;
+      extra.ttl = 'temp';
+      extra.sessionId = sessionId;
+      if (!extra.tempCreated) extra.tempCreated = new Date().toISOString();
+      db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(JSON.stringify(extra), result.nodeId);
+    } catch (e) {
+      api.getLogger().warn(`[graphcorn] graph_update temp-tag failed: ${e.message}`);
+    }
+  });
+
   // afterLearn worker hook — fires once after the learner finishes a batch.
   // For acorn turns (sessionIdOpt non-null), auto-link every newly-created
   // entity to the session-<id> node via a `discovered_in` edge so a
@@ -914,6 +984,16 @@ module.exports = function register(api) {
     captureFailureFix(api, opts, toolLog || []);
     recordRoundCheckpoint(api, opts, toolLog || [], finalText);
     noteProjectActivity(api, opts, finalText, toolLog || []);
+  });
+
+  // shouldSkipRecall lifecycle hook — short-circuits the expensive
+  // per-turn recall pipeline for cli-platform coding turns. Returns
+  // true to skip; any other return is treated as "don't skip". Core's
+  // graph/context.js consults this before kicking off Enhanced Recall.
+  api.registerLifecycleHook('shouldSkipRecall', ({ opts, queryType }) => {
+    return opts?.platform === 'cli'
+      && queryType !== 'aggregation'
+      && looksLikeCodingTurn(opts?.messageContent);
   });
 
   // beforeMessage lifecycle hook — fires once at the top of _runLoop's
@@ -985,5 +1065,5 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + prompt sections registered.');
+  api.getLogger().info('Plugin ready — ref nodes + /auth + /sessions + note_discovery + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + afterToolExec(graph_update) + prompt sections registered.');
 };

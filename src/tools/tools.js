@@ -2178,38 +2178,15 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           }
         }
       } else {
-        // graphcorn: when graph_update is called inside an acorn session
-        // ctx, default any NEW node to session-temp + tag with sessionId.
-        // Agent can override by passing temp:false explicitly. Existing
-        // explicit temp:true stays temp the same way. Outside an acorn
-        // ctx (web/discord/cron), behavior is unchanged.
-        const ctx = _execContext.getStore() || {};
-        const acornSessionId = (ctx.platform === 'cli' || this._currentPlatform === 'cli')
-          ? (ctx.channelId || this._currentChannelId)
-          : null;
-        // Post-distill race guard — same as _noteDiscoveryTool.
-        let sessionAlreadyDistilled = false;
-        if (acornSessionId) {
-          try {
-            const sessRow = db.prepare(
-              "SELECT json_extract(extra, '$.distilled_at') AS distilled FROM nodes WHERE id = ?"
-            ).get('session-' + String(acornSessionId));
-            sessionAlreadyDistilled = !!sessRow?.distilled;
-          } catch (e) { this.log.warn('[tools] db.prepare failed: ' + e.message); }
-        }
-        const effectiveSessionId = sessionAlreadyDistilled ? null : acornSessionId;
-        let extraObj;
+        // New node — set temp flag if the agent asked for it explicitly.
+        // Acorn-specific defaults (born temp + tied to sessionId for
+        // distillation later) are applied by the acorn-cli plugin's
+        // afterToolExec middleware, which sees `created: true` in the
+        // result and updates the row's `extra` column post-insert. Core
+        // is acorn-blind here.
+        let extraObj = {};
         if (setTemp) {
           extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
-          if (effectiveSessionId) extraObj.sessionId = effectiveSessionId;
-        } else if (clearTemp) {
-          extraObj = {};
-        } else if (effectiveSessionId) {
-          // Default for an acorn session: born temp, tied to sessionId.
-          // Distillation at session-end picks winners.
-          extraObj = { ttl: 'temp', sessionId: effectiveSessionId, tempCreated: new Date().toISOString() };
-        } else {
-          extraObj = {};
         }
         const extraJson = JSON.stringify(extraObj);
         db.prepare(
@@ -2272,7 +2249,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         }
       }
 
-      const result = { success: true, nodeId: id, aspectsAdded: aspCount, edgesAdded: edgeCount };
+      const result = { success: true, nodeId: id, created: !existing, aspectsAdded: aspCount, edgesAdded: edgeCount };
       if (personalitySkipped > 0) {
         result.warning = `${personalitySkipped} personality aspect(s) skipped — personality editing is disabled. Knowledge can be stored on separate nodes.`;
       }
