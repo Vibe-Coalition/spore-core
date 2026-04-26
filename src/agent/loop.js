@@ -1306,37 +1306,36 @@ class AgentLoop {
 
   /**
    * Splice any user interjections that arrived during streaming into the
-   * messages array. Rather than merging them into the still-open
-   * tool_result block (where they'd be ignored), we inject a clean
-   * assistant ack + user message pair so the model sees the interjection
-   * as the most recent thing while still being reminded to finish the
-   * original task. Mutates `messages` in place and returns the adjusted
-   * iteration count (with headroom restored so the agent has room to
-   * respond to both threads).
+   * messages array. Interjections are presented as plain user messages —
+   * sometimes they're added context, sometimes a pivot, sometimes a
+   * cancellation. The model reads the language and decides; we don't
+   * prescribe a behavior.
+   *
+   * Mutates `messages` in place and returns the adjusted iteration count
+   * (with headroom restored so the agent has room to respond).
    */
   _injectPendingInterjections(sessionKey, messages, opts, iterations) {
     const interjections = this._pendingInterjections.get(sessionKey);
     if (!(interjections && interjections.length > 0)) return iterations;
     this._pendingInterjections.delete(sessionKey);
     this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
-    // Ensure messages end with an assistant turn so we can add a fresh
-    // user message. Whether there are tool_results still pending or not,
-    // we prepend an assistant ack that reminds the model to KEEP doing
-    // what it was doing AND fold in the new input.
+    // The Anthropic API requires alternating user/assistant turns. If the
+    // last message is already a user turn (e.g. tool_results still pending),
+    // insert a minimal assistant ack so the new user message is well-formed.
+    // The ack is intentionally bland — no instructions, no framing — so the
+    // model isn't nudged toward any particular interpretation.
     const lastMsg = messages[messages.length - 1];
     if (lastMsg?.role === 'user') {
-      messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Interjection received. I will finish the task I was in the middle of and address the follow-up message(s) together in my next reply. I am NOT abandoning the original request.]' }] });
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Acknowledged.]' }] });
     }
-    // Build the user turn: raw message(s) + an explicit reminder so the
-    // model does not drop the original task context. Without this the
-    // model often answers only the latest user message and forgets the
-    // in-flight work.
+    // Inject the raw user content. Multiple interjections that arrived in
+    // the same window are concatenated as numbered items so the model can
+    // see them as discrete messages.
     const raw = interjections.length === 1
       ? interjections[0]
       : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n\n');
-    const framed = `${raw}\n\n---\n[reminder: keep working on the original request too. Your final reply should cover BOTH the in-flight task's results and a response to this follow-up, in one coherent message.]`;
-    messages.push({ role: 'user', content: framed });
-    // Persist each interjection to session history (raw, no framing)
+    messages.push({ role: 'user', content: raw });
+    // Persist each interjection to session history
     for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
     if (opts.onStatus) {
       try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { /* silent: best-effort UI callback */ }
