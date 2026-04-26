@@ -24,9 +24,22 @@ const path = require('path');
 const fs = require('fs');
 const { feed } = require('../graph');
 const { resolveSourcePolicy } = require('./privacy');
+// Branding strings used in status messages. Falls back to Anima defaults
+// when brand.json isn't present in the image (e.g. agents created without
+// the per-anima brand.json mount). Without this fallback, requiring this
+// module crashes the gateway and silently disables Slack — see the audit
+// finding from the empty-catch sweep.
+const DEFAULT_BRAND = { name: 'Anima', Agent: 'Anima' };
+let brand = DEFAULT_BRAND;
 const brandPath = [path.join(__dirname, '..', 'brand.json'), path.join(__dirname, '..', '..', 'brand.json')]
-  .find(p => fs.existsSync(p)) || path.join(__dirname, '..', 'brand.json');
-const brand = JSON.parse(fs.readFileSync(brandPath, 'utf8'));
+  .find(p => fs.existsSync(p));
+if (brandPath) {
+  try {
+    brand = { ...DEFAULT_BRAND, ...JSON.parse(fs.readFileSync(brandPath, 'utf8')) };
+  } catch (e) {
+    console.warn('[slack] brand.json read failed, using defaults: ' + e.message);
+  }
+}
 
 class SlackGateway {
   constructor(config, logger, agentLoop) {
