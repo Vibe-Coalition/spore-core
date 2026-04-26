@@ -11054,12 +11054,18 @@ function updateMicButton() {
   }
 }
 
-// ── Push-to-talk (hold mic button to record, release to send) ──
-let micPressStart = 0;
-let micPressId = null;
-const MIC_MIN_MS = 300; // ignore accidental brief taps
+// ── Click-to-toggle mic (tap to start, tap again to stop and send) ──
+// Was push-to-talk (hold-to-record); switched because pointer-capture
+// edge cases (mouse leaving button, touch cancel, etc.) could leave
+// the recording stuck on with no obvious way for the user to stop it.
 
 async function startMicRecording() {
+  // Defensive cleanup — if a previous recording is still wired,
+  // detach its onstop callback and stop the tracks before starting
+  // fresh. Prevents stale recorders from firing late callbacks.
+  if (micRecorder && micRecorder.state === 'recording') {
+    try { micRecorder.onstop = null; micRecorder.stop(); } catch (_) {}
+  }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -11106,7 +11112,7 @@ async function startMicRecording() {
           sendChat();
         }
       } else {
-        addChatMessage('system', 'No STT available (no Deepgram key and local model not ready).');
+        addChatMessage('system', 'No STT available — install the whisper or deepgram plugin (Settings → Plugins) to enable voice input.');
       }
     };
     micRecorder.start(250);
@@ -11124,9 +11130,9 @@ function stopMicRecording(discard) {
   }
 }
 
-btnMic.addEventListener('pointerdown', async (e) => {
+btnMic.addEventListener('click', async (e) => {
   e.preventDefault();
-  // During a voice call: single-tap mutes (no hold behavior)
+  // During a voice call: single-tap mutes (call is the only "modal" path)
   if (voiceCallActive) {
     callMuted = !callMuted;
     if (voiceCallStream) {
@@ -11136,27 +11142,18 @@ btnMic.addEventListener('pointerdown', async (e) => {
     voiceStatusText.textContent = callMuted ? 'muted' : 'listening...';
     return;
   }
-  micPressId = e.pointerId;
-  micPressStart = Date.now();
-  try { btnMic.setPointerCapture(micPressId); } catch (_) {}
-  await startMicRecording();
-});
-
-function endMicPress(e) {
-  if (e.pointerId !== micPressId) return;
-  if (voiceCallActive) return;
-  const held = Date.now() - micPressStart;
-  try { btnMic.releasePointerCapture(micPressId); } catch (_) {}
-  micPressId = null;
-  if (held < MIC_MIN_MS) {
-    stopMicRecording(true); // discard short taps
-  } else {
+  // Otherwise: toggle. If currently recording, stop and send. If idle,
+  // start recording. Stop is recognised either by the button class or
+  // by the underlying recorder state (whichever is true catches a stuck
+  // state from a previous failed cycle).
+  const recording = btnMic.classList.contains('recording')
+    || (micRecorder && micRecorder.state === 'recording');
+  if (recording) {
     stopMicRecording(false);
+  } else {
+    await startMicRecording();
   }
-}
-
-btnMic.addEventListener('pointerup', endMicPress);
-btnMic.addEventListener('pointercancel', endMicPress);
+});
 btnMic.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // ── Voice Call ──
