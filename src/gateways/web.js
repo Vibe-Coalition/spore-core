@@ -3156,86 +3156,11 @@ class WebGateway {
         }
       }
 
-      // ── Acorn CLI auth ──
-      if (urlPath === '/api/acorn/auth' && req.method === 'POST') {
-        let body = '';
-        req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
-        req.on('end', () => {
-          try {
-            const { username, key } = JSON.parse(body);
-            const acornKey = this.config.acornKey;
-            if (!acornKey) {
-              res.writeHead(503, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Acorn not configured on this agent' }));
-              return;
-            }
-            if (!username || typeof username !== 'string' || username.length > 32 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Invalid username (alphanumeric, max 32 chars)' }));
-              return;
-            }
-            if (!_acornKeyMatches(key, acornKey)) {
-              res.writeHead(401, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Invalid team key' }));
-              return;
-            }
-            const acornSid = crypto.randomBytes(16).toString('hex');
-            const webSessions = this._webSessions;
-            webSessions.set(acornSid, { user: username.toLowerCase().trim(), type: 'acorn', created: Date.now() });
-            this.log.info(`[acorn] Auth OK for user: ${username}`);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, token: acornSid, user: username }));
-          } catch (e) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Invalid request body' }));
-          }
-        });
-        return;
-      }
-
-      // ── Acorn: list sessions for authenticated user ──
-      if (urlPath === '/api/acorn/sessions' && req.method === 'GET') {
-        // Authenticate via Bearer token
-        const authHeader = req.headers['authorization'] || '';
-        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-        const session = token ? this._webSessions.get(token) : null;
-        if (!session || session.type !== 'acorn') {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid or missing token' }));
-          return;
-        }
-        const user = session.user;
-        const prefix = `channel:cli:${user}@`;
-        try {
-          const allSessions = this.tools._sessions.listSessions();
-          const agent = this.tools._agent;
-          const activeKeys = agent ? new Set(agent.activeRuns) : new Set();
-          const sessions = allSessions
-            .filter(s => s.key.startsWith(prefix) && s.message_count > 0)
-            .map(s => {
-              // Parse project name from key: channel:cli:user@project-hash-ts
-              const afterAt = s.key.slice(prefix.length);
-              const parts = afterAt.split('-');
-              const project = parts.length >= 3 ? parts.slice(0, parts.length - 2).join('-') : afterAt;
-              const hasConnectedClient = this._sessionClients.has(s.key.replace('channel:', ''));
-              return {
-                key: s.key.replace('channel:', ''),
-                project,
-                created: s.created,
-                updated: s.updated,
-                messageCount: s.message_count,
-                active: activeKeys.has(s.key) || hasConnectedClient,
-              };
-            });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ sessions }));
-        } catch (e) {
-          this.log.warn(`[acorn] Sessions list failed: ${e.message}`);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Failed to list sessions' }));
-        }
-        return;
-      }
+      // /api/acorn/auth + /api/acorn/sessions extracted to plugins/acorn-cli/
+      // (phase 2.3c). The pre-route alias above (in the CORS block) rewrites
+      // /api/acorn/<rest> to /api/plugins/acorn-cli/<rest> and dispatches to
+      // the plugin if installed. The 503 fallback below catches the case
+      // where the plugin isn't installed.
 
       // Final fallback for /api/acorn/* — if no in-tree handler matched and
       // no plugin alias dispatched, the acorn-cli plugin isn't installed.
@@ -3610,13 +3535,15 @@ class WebGateway {
 
       // Plugin-registered HTTP routes — namespaced under /api/plugins/<pluginId>/<route>.
       // Resolved AFTER the built-in /api/plugins/* endpoints (list/install/uninstall)
-      // so plugins can't shadow them. Must be authenticated; auth model matches
-      // graph endpoints (any signed-in user, not creator-only).
+      // so plugins can't shadow them. Default auth model is "any signed-in user"
+      // (matches graph endpoints), but plugins can opt out via
+      // registerWebRoute(method, path, { public: true, handler }) for routes
+      // that ARE the auth boundary (e.g. acorn-cli /auth issues Bearer tokens).
       if (urlPath.startsWith('/api/plugins/') && !urlPath.startsWith('/api/plugins/list') && !urlPath.startsWith('/api/plugins/install') && !urlPath.startsWith('/api/plugins/uninstall')) {
         const mgr = this.tools?._pluginManager;
         const resolved = mgr?.resolveWebRoute?.(req.method, urlPath);
         if (resolved) {
-          if (!isAnyAuth(req)) {
+          if (!resolved.public && !isAnyAuth(req)) {
             res.writeHead(401, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Authentication required' }));
             return;

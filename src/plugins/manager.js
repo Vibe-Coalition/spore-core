@@ -529,7 +529,7 @@ class PluginManager {
     const upper = String(method).toUpperCase();
     for (const route of plugin.instance.getWebRoutes()) {
       if (route.method === upper && route.path === routePath) {
-        return { pluginId, handler: route.handler };
+        return { pluginId, handler: route.handler, public: !!route.public };
       }
     }
     return null;

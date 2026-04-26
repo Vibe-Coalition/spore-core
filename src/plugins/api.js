@@ -291,19 +291,33 @@ class PluginAPI {
    * Handler receives (req, res, parsedUrl) — same shape as built-in handlers.
    * The pluginId namespace prevents collisions with core routes.
    *
+   * Routes are auth-gated by default (any signed-in user). Pass
+   * `{ public: true }` for routes that ARE the auth boundary (e.g. an
+   * acorn-cli `/auth` endpoint that issues Bearer tokens). Public routes
+   * MUST do their own validation before handing out credentials.
+   *
    * @param {string} method   — 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
    * @param {string} routePath — must start with '/'; e.g. '/status'
-   * @param {Function} handler — async (req, res, parsedUrl) => void
+   * @param {Function|object} handlerOrOpts — async (req, res, parsedUrl) => void,
+   *                            or `{ handler, public }` for opt-out auth.
+   * @param {Function} [handler] — when handlerOrOpts is an object, the handler.
    */
-  registerWebRoute(method, routePath, handler) {
-    if (typeof handler !== 'function') throw new Error('registerWebRoute requires a handler function');
+  registerWebRoute(method, routePath, handlerOrOpts, handler) {
+    let opts = {};
+    let fn = handlerOrOpts;
+    if (typeof handlerOrOpts === 'object' && handlerOrOpts !== null) {
+      opts = handlerOrOpts;
+      fn = handler || handlerOrOpts.handler;
+    }
+    if (typeof fn !== 'function') throw new Error('registerWebRoute requires a handler function');
     if (!routePath?.startsWith('/')) throw new Error('routePath must start with "/"');
     this._webRoutes.push({
       method: String(method).toUpperCase(),
       path: routePath,
-      handler,
+      handler: fn,
+      public: !!opts.public,
     });
-    this._log.debug(`[plugin:${this.pluginId}] Registered web route: ${method} ${routePath}`);
+    this._log.debug(`[plugin:${this.pluginId}] Registered web route: ${method} ${routePath}${opts.public ? ' [public]' : ''}`);
   }
 
   getWebRoutes() {
