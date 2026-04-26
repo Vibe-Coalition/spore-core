@@ -535,7 +535,7 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('');
     lines.push('### Asking, Waiting, Tracking');
     lines.push('- **ask_user** (web sessions) when you need the operator to pick between 2-5 concrete options and the answer is not inferrable from context. Typical cases: which of two duplicate nodes should survive a merge, which provider to configure first, whether to proceed with a destructive action. The chat shows a picker card. Web sessions only — returns `{error}` on CLI.');
-    lines.push('- **CLI sessions (platform=cli, Acorn)** don\'t support ask_user. Instead, embed a `QUESTIONS:` block at the end of your response. The CLI parses it and renders a picker:');
+    lines.push('- **CLI sessions (platform=cli)** don\'t support ask_user. Instead, embed a `QUESTIONS:` block at the end of your response. The CLI parses it and renders a picker:');
     lines.push('  ```');
     lines.push('  QUESTIONS:');
     lines.push('  1. Which framework? [React / Vue / Svelte]');
@@ -548,7 +548,7 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('- **log_watch** (local paths only) when you need continuous visibility into a log file while something runs (training loss, deploy output, startup). Matches arrive as interjections mid-turn. Use tight regex — every match becomes a message. Prefer over repeated `remote_tail` calls. For remote logs, pair `remote_exec` with `tmux_session` + `remote_tail`.');
     lines.push('- **Plan mode** behaves differently per session:');
     lines.push('  - **Web session plan mode**: if the operator flipped it ON, your mutating tools (`graph_delete`, `exec`, `write_file`, etc.) get queued for approval instead of executing. Propose the full sequence by CALLING those tools normally; each returns `{queued:true, summary}`. Summarize your plan in a natural-language reply. Operator clicks Approve or Reject in the chat.');
-    lines.push('  - **CLI session plan mode** (Acorn): the operator flips CLI-side. When on, respond with your plan as prose, end with a `PLAN_READY` marker on its own line. The CLI shows Execute/Revise/Cancel. On execute, it replays your plan as a new chat turn and you implement it for real.');
+    lines.push('  - **CLI session plan mode**: the operator flips CLI-side. When on, respond with your plan as prose, end with a `PLAN_READY` marker on its own line. The CLI shows Execute/Revise/Cancel. On execute, it replays your plan as a new chat turn and you implement it for real.');
     lines.push('  - Read-only tools (`graph_query`, `read_file`, `web_fetch`) always run immediately, both modes.');
 
     lines.push('');

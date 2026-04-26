@@ -1035,7 +1035,10 @@ module.exports = function register(api) {
   api.registerLifecycleHook('webappSelfRegisterCheck', ({ parsed }) => {
     const stored = resolveAcornKey(api);
     if (!stored) return { allowed: false, code: 503, reason: 'Self-registration is not enabled on this instance.' };
-    const typed = String(parsed?.acornKey || '').trim();
+    // Accept both the new generic `teamKey` field and the legacy
+    // `acornKey` field so older login pages and Go acorn-cli builds
+    // keep working through the rename.
+    const typed = String(parsed?.teamKey || parsed?.acornKey || '').trim();
     if (!acornKeyMatches(typed, stored)) return { allowed: false, code: 401, reason: 'Invalid team key' };
     return { allowed: true };
   });
