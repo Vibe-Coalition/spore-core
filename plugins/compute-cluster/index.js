@@ -37,5 +37,15 @@ module.exports = function register(api) {
   api.registerWebRoute('POST',   '/ssh-key/generate',  (req, res) => routes.postSshKeyGenerate(api, req, res));
   api.registerWebRoute('DELETE', '/ssh-key',           (req, res) => routes.deleteSshKey(api, req, res));
 
-  api.getLogger().info('Plugin ready — /api/cluster/{settings,hosts,test-ssh,ssh-key,ssh-key/generate} + ref-compute-cluster registered.');
+  // Settings pane in the Plugins tab. Markup is a thin mount-point;
+  // static/cluster-settings.js (loaded via registerFrontendAsset)
+  // populates it on the spore-plugin-panes-rendered event.
+  api.registerSettingsPane({
+    title: 'Compute Cluster',
+    description: 'SLURM cluster access over SSH (typically over a tailnet).',
+    html: '<div data-plugin-mount="compute-cluster">Loading…</div>',
+  });
+  api.registerFrontendAsset('cluster-settings.js');
+
+  api.getLogger().info('Plugin ready — /api/cluster/{settings,hosts,test-ssh,ssh-key,ssh-key/generate} + ref-compute-cluster + settings pane + frontend asset registered.');
 };

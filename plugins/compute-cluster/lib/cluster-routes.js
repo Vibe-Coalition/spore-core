@@ -30,11 +30,6 @@ function getSettings(api, req, res) {
     clusterUsername:   cfg.clusterUsername || '',
     clusterLoginHost:  cfg.clusterLoginHost || '',
     clusterTmuxPrefix: cfg.clusterTmuxPrefix || 'spore',
-    // tailscaleHostname is sibling to cluster fields in the form even
-    // though it logically belongs to the tailscale plugin — keeping
-    // it here as a legacy bridge so the existing form submit POST
-    // still works.
-    tailscaleHostname: cfg.tailscaleHostname || `spore-${cfg.agentId || 'agent'}`,
     clusterHosts: Array.isArray(cfg.clusterHosts) ? cfg.clusterHosts : [],
   }));
 }
@@ -53,11 +48,8 @@ async function postSettings(api, req, res) {
       updates.clusterTmuxPrefix = p;
       envUpd.SPORE_CLUSTER_TMUX_PREFIX = p;
     }
-    if ('tailscaleHostname' in body) {
-      const h = clean(body.tailscaleHostname).replace(/[^a-zA-Z0-9.-]/g, '') || `spore-${cfg.agentId || 'agent'}`;
-      updates.tailscaleHostname = h;
-      envUpd.SPORE_TAILSCALE_HOSTNAME = h;
-    }
+    // tailscaleHostname now owned by the tailscale plugin (POST
+    // /api/tailscale/settings). Cleanly separated.
     Object.assign(cfg, updates);
     try {
       const gw = api._appContext?.tools?.gateway;

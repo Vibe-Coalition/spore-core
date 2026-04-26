@@ -162,6 +162,46 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/login',  loginHandler);
   api.registerWebRoute('POST', '/logout', logoutHandler);
 
+  // Hostname settings — read/write the tailnet hostname used by
+  // `tailscale up --hostname <value>`. Persists to env so the host's
+  // config.tailscaleHostname survives restarts; loginHandler reads
+  // the same value via api.getHostConfig().
+  api.registerWebRoute('GET', '/settings', (req, res) => {
+    const cfg = api._appContext?.config || {};
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      hostname: cfg.tailscaleHostname || `spore-${cfg.agentId || 'agent'}`,
+    }));
+  });
+  api.registerWebRoute('POST', '/settings', async (req, res) => {
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 4096) { res.writeHead(413); res.end(); return; } }
+    let parsed;
+    try { parsed = JSON.parse(body || '{}'); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'bad body' })); return; }
+    const cfg = api._appContext?.config || {};
+    const clean = String(parsed.hostname || '').trim().replace(/[^a-zA-Z0-9.-]/g, '') || `spore-${cfg.agentId || 'agent'}`;
+    cfg.tailscaleHostname = clean;
+    try {
+      const gw = api._appContext?.tools?.gateway;
+      if (gw && typeof gw._applyEnvUpdates === 'function') {
+        gw._applyEnvUpdates({ SPORE_TAILSCALE_HOSTNAME: clean });
+      }
+    } catch (e) { api.getLogger().warn('hostname persist failed: ' + e.message); }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, hostname: clean }));
+  });
+
+  // Settings pane — appears in the Plugins tab. Markup is a thin
+  // mount-point; the frontend asset (loaded by graph-viewer.html via
+  // registerFrontendAsset) populates it on the spore-plugin-panes-
+  // rendered event and wires up the live handlers.
+  api.registerSettingsPane({
+    title: 'Tailscale',
+    description: 'Mesh-VPN access. Log in via SSO; state persists at /data/tailscale across container restarts.',
+    html: '<div data-plugin-mount="tailscale">Loading…</div>',
+  });
+  api.registerFrontendAsset('tailscale-settings.js');
+
   // Shutdown: kill any active login process so plugin uninstall doesn't
   // leave a child SUDO process running in the container.
   api.onShutdown(() => {
@@ -172,5 +212,5 @@ module.exports = function register(api) {
     _tsAuthUrl = null;
   });
 
-  api.getLogger().info('Plugin ready — /api/tailscale/{status,login,logout} + ref-tailscale node registered.');
+  api.getLogger().info('Plugin ready — /api/tailscale/{status,login,logout,settings} + ref-tailscale node + settings pane + frontend asset registered.');
 };

@@ -113,7 +113,6 @@
   #logs-content, #logs-content *,
   #sk-viewer-content code,
   #code-viewer-content code, #code-viewer-content code *,
-  #settings-cluster-pubkey, #settings-cluster-paste-text,
   .chat-msg pre, .chat-msg pre code, .chat-msg pre *,
   .chat-msg code, .chat-msg .diff-block, .chat-msg .diff-block * {
     font-family: var(--font-mono) !important;
@@ -4926,6 +4925,13 @@ function _populatePluginsTab(plugins) {
   } else {
     panesEl.innerHTML = panes.map(_renderPluginPane).join('');
   }
+  // Notify plugin frontend-assets that their panes are now in the
+  // DOM so they can wire up handlers, populate dynamic content, etc.
+  // Each plugin asset listens via document.addEventListener; the
+  // detail.panes array carries the rendered pane metadata.
+  try {
+    document.dispatchEvent(new CustomEvent('spore-plugin-panes-rendered', { detail: { panes } }));
+  } catch {}
 }
 
 function _renderPluginRow(hotReload, p) {
@@ -5470,7 +5476,6 @@ const SETTINGS_TABS = [
   { id: 'agent',        label: 'Agent',         forAll: false },
   { id: 'graph-memory', label: 'Graph & Memory', forAll: false },
   { id: 'backups',      label: 'Backups',       forAll: false },
-  { id: 'cluster',      label: 'Cluster',       forAll: false },
   { id: 'tools',        label: 'Tools',         forAll: false },
   { id: 'plugins',      label: 'Plugins',       forAll: false },
   { id: 'users',        label: 'Users',         forAll: false },
@@ -5486,11 +5491,8 @@ const _SETTINGS_TAB_REFRESHERS = {
     try { if (typeof _bkLoadStatus === 'function') _bkLoadStatus(); } catch {}
     try { if (typeof _bkLoadList === 'function') _bkLoadList(); } catch {}
   },
-  'cluster': () => {
-    try { if (typeof _tsRefreshStatus === 'function') _tsRefreshStatus(); } catch {}
-    try { if (typeof _clLoadSettings === 'function') _clLoadSettings(); } catch {}
-    try { if (typeof _clRefreshKeyStatus === 'function') _clRefreshKeyStatus(); } catch {}
-  },
+  // Tailscale + compute-cluster live in their plugins now (Plugins
+  // tab). No 'cluster' refresher needed.
 };
 
 function _reparentSettingsSections() {
@@ -5963,8 +5965,9 @@ async function saveSettingsPanel() {
     // panel open, so re-saving unchanged fields is idempotent.
     const sectionSaves = [
       ['Backups', typeof _bkSaveSettings === 'function' ? _bkSaveSettings : null],
-      ['Cluster', typeof _clSaveSettings === 'function' ? _clSaveSettings : null],
-      ['Cluster hosts', typeof _clHostsSave === 'function' ? _clHostsSave : null],
+      // Tailscale + cluster save flows live in the plugin settings
+      // panes (Plugins tab) — they have their own per-pane Save
+      // buttons, no central-Save propagation.
     ].filter(([, fn]) => fn);
     const sectionFailures = [];
     for (const [name, fn] of sectionSaves) {
@@ -13979,37 +13982,6 @@ document.addEventListener('click', (e) => {
     _graphExportDownload();
   } else if (t.id === 'settings-graph-import') {
     document.getElementById('settings-graph-import-file')?.click();
-  } else if (t.id === 'settings-tailscale-login') {
-    _tsTriggerLogin();
-  } else if (t.id === 'settings-tailscale-logout') {
-    _tsLogout();
-  } else if (t.id === 'settings-cluster-test') {
-    _clTestSsh();
-  } else if (t.id === 'settings-cluster-hosts-add') {
-    _clHostsAddRow();
-  } else if (t.dataset?.clusterHostRm !== undefined) {
-    t.closest('[data-cluster-row]')?.remove();
-  } else if (t.dataset?.clusterHostTest !== undefined) {
-    _clHostsTestRow(t.closest('[data-cluster-row]'));
-  } else if (t.id === 'settings-cluster-gen-key') {
-    _clGenerateKey();
-  } else if (t.id === 'settings-cluster-upload-key') {
-    document.getElementById('settings-cluster-upload-key-file')?.click();
-  } else if (t.id === 'settings-cluster-paste-key') {
-    const m = document.getElementById('settings-cluster-paste-modal');
-    if (m) m.style.display = '';
-    const ta = document.getElementById('settings-cluster-paste-text');
-    if (ta) { ta.value = ''; setTimeout(() => ta.focus(), 50); }
-  } else if (t.id === 'settings-cluster-paste-cancel') {
-    const m = document.getElementById('settings-cluster-paste-modal');
-    if (m) m.style.display = 'none';
-  } else if (t.id === 'settings-cluster-paste-save') {
-    _clSavePastedKey();
-  } else if (t.id === 'settings-cluster-del-key') {
-    _clDeleteKey();
-  } else if (t.id === 'settings-cluster-copypub') {
-    const ta = document.getElementById('settings-cluster-pubkey');
-    if (ta) { ta.select(); try { navigator.clipboard.writeText(ta.value); t.textContent = 'copied ✓'; setTimeout(() => { t.textContent = 'Copy public key'; }, 1500); } catch { document.execCommand('copy'); } }
   } else if (t.dataset?.providerTest) {
     runProviderTest(t.dataset.providerTest);
   } else if (t.dataset?.modelTest) {
@@ -14592,385 +14564,6 @@ async function _bkDelete(filename) {
   } catch (e) { alert('Delete error: ' + e.message); }
 }
 
-// ── Tailscale + cluster ───────────────────────────────────────────
-let _tsPollTimer = null;
-
-async function _tsRefreshStatus() {
-  const line = document.getElementById('settings-tailscale-line');
-  const loginBtn = document.getElementById('settings-tailscale-login');
-  const logoutBtn = document.getElementById('settings-tailscale-logout');
-  const urlBox = document.getElementById('settings-tailscale-authurl');
-  const urlLink = document.getElementById('settings-tailscale-authurl-link');
-  if (!line) return;
-  try {
-    const r = await fetch(API + '/api/tailscale/status', { headers: authHeaders() });
-    const d = await r.json();
-    const state = d.backend || 'Stopped';
-    if (state === 'Running') {
-      const ip = d.tailnetIp || '?';
-      const online = d.onlineCount != null ? d.onlineCount : 0;
-      const total = d.peerCount != null ? d.peerCount : 0;
-      line.textContent = `connected · ${ip} · ${online}/${total} peers online`;
-      line.style.color = 'var(--text)';
-      if (loginBtn) loginBtn.style.display = 'none';
-      if (logoutBtn) logoutBtn.style.display = '';
-      if (urlBox) urlBox.style.display = 'none';
-      if (_tsPollTimer) { clearInterval(_tsPollTimer); _tsPollTimer = null; }
-    } else if (state === 'NeedsLogin' || state === 'Starting') {
-      line.textContent = state === 'Starting' ? 'daemon starting…' : 'not logged in';
-      line.style.color = 'var(--text-dim)';
-      if (loginBtn) loginBtn.style.display = '';
-      if (logoutBtn) logoutBtn.style.display = 'none';
-      if (d.authUrl && urlBox && urlLink) {
-        urlBox.style.display = '';
-        urlLink.href = d.authUrl;
-        urlLink.textContent = d.authUrl;
-      } else if (urlBox) {
-        urlBox.style.display = 'none';
-      }
-    } else {
-      line.textContent = d.error ? `tailscaled not running · ${String(d.error).slice(0, 80)}` : `state: ${state}`;
-      line.style.color = 'var(--danger)';
-      if (loginBtn) loginBtn.style.display = '';
-      if (logoutBtn) logoutBtn.style.display = 'none';
-      if (urlBox) urlBox.style.display = 'none';
-    }
-  } catch (e) {
-    line.textContent = 'status unavailable: ' + e.message;
-    line.style.color = 'var(--danger)';
-  }
-}
-
-async function _tsTriggerLogin() {
-  const btn = document.getElementById('settings-tailscale-login');
-  const urlBox = document.getElementById('settings-tailscale-authurl');
-  const urlLink = document.getElementById('settings-tailscale-authurl-link');
-  const statusLine = document.getElementById('settings-tailscale-line');
-  if (btn) btn.disabled = true;
-  if (statusLine) { statusLine.textContent = 'requesting login URL…'; statusLine.style.color = 'var(--accent2)'; }
-  try {
-    const r = await fetch(API + '/api/tailscale/login', {
-      method: 'POST',
-      headers: authHeaders(),
-      credentials: 'include',
-    });
-    if (!r.ok) {
-      const txt = await r.text().catch(() => '');
-      let msg = `HTTP ${r.status}`;
-      try { const j = JSON.parse(txt); if (j.error) msg = j.error; } catch {}
-      if (statusLine) { statusLine.textContent = 'login failed: ' + msg; statusLine.style.color = 'var(--danger)'; }
-      alert('Tailscale login failed: ' + msg);
-      return;
-    }
-    const d = await r.json();
-    if (d.status === 'already-connected') {
-      _tsRefreshStatus();
-      return;
-    }
-    if (d.authUrl && urlBox && urlLink) {
-      urlBox.style.display = '';
-      urlLink.href = d.authUrl;
-      urlLink.textContent = d.authUrl;
-      if (statusLine) { statusLine.textContent = 'open the link above to complete SSO'; statusLine.style.color = 'var(--accent2)'; }
-      try { window.open(d.authUrl, '_blank', 'noopener'); } catch {}
-    } else if (d.status === 'no-url-yet') {
-      if (statusLine) { statusLine.textContent = 'tailscale up running — polling for login URL…'; statusLine.style.color = 'var(--accent2)'; }
-    } else {
-      if (statusLine) { statusLine.textContent = 'login started — polling…'; statusLine.style.color = 'var(--accent2)'; }
-    }
-    if (_tsPollTimer) clearInterval(_tsPollTimer);
-    _tsPollTimer = setInterval(_tsRefreshStatus, 2000);
-  } catch (e) {
-    if (statusLine) { statusLine.textContent = 'login error: ' + e.message; statusLine.style.color = 'var(--danger)'; }
-    alert('Tailscale login error: ' + e.message);
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function _tsLogout() {
-  if (!confirm('Log out of Tailscale? This disconnects the container from the tailnet.')) return;
-  try {
-    const r = await fetch(API + '/api/tailscale/logout', { method: 'POST', headers: authHeaders() });
-    const d = await r.json();
-    if (!d.ok) alert('Logout failed: ' + (d.stderr || ''));
-    _tsRefreshStatus();
-  } catch (e) { alert('Logout error: ' + e.message); }
-}
-
-async function _clLoadSettings() {
-  try {
-    const r = await fetch(API + '/api/cluster/settings', { headers: authHeaders() });
-    const d = await r.json();
-    const setVal = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v || ''; };
-    setVal('settings-cluster-username', d.clusterUsername);
-    setVal('settings-cluster-login-host', d.clusterLoginHost);
-    setVal('settings-cluster-tmux-prefix', d.clusterTmuxPrefix || 'spore');
-    setVal('settings-tailscale-hostname', d.tailscaleHostname);
-    _clHostsRender(d.clusterHosts || []);
-  } catch {}
-}
-
-async function _clSaveSettings() {
-  const btn = document.getElementById('settings-cluster-save');
-  if (btn) btn.disabled = true;
-  try {
-    const body = {
-      clusterUsername: document.getElementById('settings-cluster-username')?.value || '',
-      clusterLoginHost: document.getElementById('settings-cluster-login-host')?.value || '',
-      clusterTmuxPrefix: document.getElementById('settings-cluster-tmux-prefix')?.value || '',
-      tailscaleHostname: document.getElementById('settings-tailscale-hostname')?.value || '',
-    };
-    const r = await fetch(API + '/api/cluster/settings', {
-      method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (!d.ok) { alert('Save failed: ' + (d.error || 'unknown')); return; }
-    const el = document.getElementById('settings-cluster-test-result');
-    if (el) { el.textContent = 'saved'; el.style.color = 'var(--text-dim)'; }
-  } catch (e) { alert('Save error: ' + e.message); }
-  finally { if (btn) btn.disabled = false; }
-}
-
-async function _clTestSsh() {
-  const btn = document.getElementById('settings-cluster-test');
-  const el = document.getElementById('settings-cluster-test-result');
-  if (btn) btn.disabled = true;
-  if (el) { el.textContent = 'testing…'; el.style.color = 'var(--accent2)'; }
-  try {
-    const r = await fetch(API + '/api/cluster/test-ssh', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' });
-    const d = await r.json();
-    if (el) {
-      if (d.ok) {
-        el.textContent = 'OK' + (d.usedKey ? ` (key: ${d.usedKey})` : ' (no key — using default ssh-agent)') + ':\n' + (d.output || '');
-        el.style.color = 'var(--text)';
-      } else {
-        el.textContent = `FAILED (code=${d.code}):\n${d.stderr || d.error || '(no stderr)'}${d.hint ? '\n\nHint: ' + d.hint : ''}`;
-        el.style.color = 'var(--danger)';
-      }
-    }
-  } catch (e) {
-    if (el) { el.textContent = 'error: ' + e.message; el.style.color = 'var(--danger)'; }
-  } finally { if (btn) btn.disabled = false; }
-}
-
-function _clHostsRender(hosts) {
-  const host = document.getElementById('settings-cluster-hosts-list');
-  if (!host) return;
-  host.innerHTML = '';
-  const arr = Array.isArray(hosts) ? hosts : [];
-  if (!arr.length) {
-    host.innerHTML = '<div style="padding:8px 10px;color:var(--text-dim);font-size:.66rem">None yet. Click + Add cluster.</div>';
-    return;
-  }
-  for (const h of arr) _clHostsAddRow(h);
-}
-
-function _clHostsAddRow(preset) {
-  const host = document.getElementById('settings-cluster-hosts-list');
-  if (!host) return;
-  // Clear the "None yet" placeholder if present
-  if (host.querySelector('[data-empty]') || (host.children.length === 1 && !host.querySelector('[data-cluster-row]'))) {
-    host.innerHTML = '';
-  }
-  const row = document.createElement('div');
-  row.setAttribute('data-cluster-row', '');
-  row.style.cssText = 'display:grid;grid-template-columns:1fr 1.8fr 1.2fr auto auto;gap:6px;align-items:center;padding:6px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px';
-  const inp = (placeholder, value) => {
-    const i = document.createElement('input');
-    i.type = 'text';
-    i.placeholder = placeholder;
-    i.value = value || '';
-    i.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--text);padding:3px 6px;font-size:.66rem;border-radius:3px;min-width:0';
-    return i;
-  };
-  const nameI = inp('label (e.g. gb200)', preset?.name);
-  nameI.dataset.field = 'name';
-  const hostI = inp('magic-dns hostname', preset?.host);
-  hostI.dataset.field = 'host';
-  const userI = inp('username (blank = primary)', preset?.username);
-  userI.dataset.field = 'username';
-  const testBtn = document.createElement('button');
-  testBtn.className = 'settings-btn-secondary';
-  testBtn.type = 'button';
-  testBtn.dataset.clusterHostTest = '';
-  testBtn.style.cssText = 'font-size:.6rem;padding:2px 6px';
-  testBtn.textContent = 'test';
-  const rmBtn = document.createElement('button');
-  rmBtn.className = 'settings-btn-secondary';
-  rmBtn.type = 'button';
-  rmBtn.dataset.clusterHostRm = '';
-  rmBtn.style.cssText = 'font-size:.6rem;padding:2px 6px;color:var(--danger)';
-  rmBtn.textContent = '×';
-  row.appendChild(nameI);
-  row.appendChild(hostI);
-  row.appendChild(userI);
-  row.appendChild(testBtn);
-  row.appendChild(rmBtn);
-  host.appendChild(row);
-}
-
-function _clHostsCollect() {
-  const rows = document.querySelectorAll('#settings-cluster-hosts-list [data-cluster-row]');
-  const hosts = [];
-  rows.forEach(r => {
-    const get = f => r.querySelector(`input[data-field="${f}"]`)?.value?.trim() || '';
-    const entry = { name: get('name'), host: get('host'), username: get('username') };
-    if (entry.host) hosts.push(entry);
-  });
-  return hosts;
-}
-
-async function _clHostsSave() {
-  const el = document.getElementById('settings-cluster-hosts-status');
-  const btn = document.getElementById('settings-cluster-hosts-save');
-  if (btn) btn.disabled = true;
-  if (el) { el.textContent = 'saving…'; el.style.color = 'var(--accent2)'; }
-  try {
-    const hosts = _clHostsCollect();
-    const r = await fetch(API + '/api/cluster/hosts', {
-      method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hosts }),
-    });
-    const d = await r.json();
-    if (!d.ok) { alert('Save failed: ' + (d.error || 'unknown')); return; }
-    if (el) { el.textContent = `saved ${d.hosts.length} cluster(s)`; el.style.color = 'var(--text-dim)'; }
-  } catch (e) { alert('Save error: ' + e.message); }
-  finally { if (btn) btn.disabled = false; }
-}
-
-async function _clHostsTestRow(row) {
-  if (!row) return;
-  const el = document.getElementById('settings-cluster-hosts-status');
-  const user = row.querySelector('input[data-field="username"]')?.value?.trim() || '';
-  const host = row.querySelector('input[data-field="host"]')?.value?.trim() || '';
-  const name = row.querySelector('input[data-field="name"]')?.value?.trim() || host;
-  if (!host) { alert('Enter a hostname first'); return; }
-  if (el) { el.textContent = `testing ${name}…`; el.style.color = 'var(--accent2)'; }
-  try {
-    const r = await fetch(API + '/api/cluster/test-ssh', {
-      method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, host }),
-    });
-    const d = await r.json();
-    if (el) {
-      if (d.ok) { el.textContent = `[${name}] OK:\n${(d.output || '').slice(0, 300)}`; el.style.color = 'var(--text)'; }
-      else { el.textContent = `[${name}] FAILED (code=${d.code}):\n${(d.stderr || d.error || '').slice(0, 300)}${d.hint ? '\n' + d.hint : ''}`; el.style.color = 'var(--danger)'; }
-    }
-  } catch (e) {
-    if (el) { el.textContent = `[${name}] error: ${e.message}`; el.style.color = 'var(--danger)'; }
-  }
-}
-
-// Email settings UI extracted to plugins/email/. Settings flow through the
-// standard /api/settings + per-plugin pane render path now.
-
-async function _clRefreshKeyStatus() {
-  const status = document.getElementById('settings-cluster-key-status');
-  const pubWrap = document.getElementById('settings-cluster-pubkey-wrap');
-  const pubTa = document.getElementById('settings-cluster-pubkey');
-  const delBtn = document.getElementById('settings-cluster-del-key');
-  if (!status) return;
-  try {
-    const r = await fetch(API + '/api/cluster/ssh-key', { headers: authHeaders() });
-    const d = await r.json();
-    if (d.hasPrivate) {
-      status.textContent = 'key installed · ' + (d.fingerprint || '(fingerprint unavailable)');
-      status.style.color = 'var(--text)';
-      if (d.publicKey && pubWrap && pubTa) {
-        pubWrap.style.display = '';
-        pubTa.value = d.publicKey;
-      }
-      if (delBtn) delBtn.style.display = '';
-    } else {
-      status.textContent = 'no SSH key installed';
-      status.style.color = 'var(--text-dim)';
-      if (pubWrap) pubWrap.style.display = 'none';
-      if (delBtn) delBtn.style.display = 'none';
-    }
-  } catch (e) { status.textContent = 'status unavailable: ' + e.message; status.style.color = 'var(--danger)'; }
-}
-
-async function _clGenerateKey() {
-  if (!confirm('Generate a new ed25519 SSH key at /data/.ssh/id_cluster? Any existing key will be replaced — you will need to reinstall the public key on the cluster.')) return;
-  const btn = document.getElementById('settings-cluster-gen-key');
-  if (btn) btn.disabled = true;
-  try {
-    const r = await fetch(API + '/api/cluster/ssh-key/generate', { method: 'POST', headers: authHeaders() });
-    const d = await r.json();
-    if (!d.ok) { alert('Generate failed: ' + (d.error || 'unknown')); return; }
-    _clRefreshKeyStatus();
-  } catch (e) { alert('Generate error: ' + e.message); }
-  finally { if (btn) btn.disabled = false; }
-}
-
-async function _clSavePastedKey() {
-  const ta = document.getElementById('settings-cluster-paste-text');
-  const modal = document.getElementById('settings-cluster-paste-modal');
-  if (!ta) return;
-  const key = ta.value.trim();
-  if (!key) { alert('Paste a private key first.'); return; }
-  try {
-    const r = await fetch(API + '/api/cluster/ssh-key', {
-      method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ privateKey: key }),
-    });
-    const d = await r.json();
-    if (!r.ok || !d.ok) { alert('Save failed: ' + (d.error || 'unknown')); return; }
-    if (modal) modal.style.display = 'none';
-    ta.value = '';
-    _clRefreshKeyStatus();
-  } catch (e) { alert('Save error: ' + e.message); }
-}
-
-async function _clUploadKeyFile(file) {
-  if (!file) return;
-  if (file.size > 32 * 1024) { alert('Key file too large (>32KB). Is this really a private key?'); return; }
-  try {
-    const text = (await file.text()).trim();
-    if (!text.startsWith('-----BEGIN') || !text.includes('PRIVATE KEY-----')) {
-      alert(`"${file.name}" doesn't look like an SSH private key — it should start with -----BEGIN ... PRIVATE KEY-----. If you picked the public key (.pub) by mistake, pick the matching file without the .pub suffix.`);
-      return;
-    }
-    if (/ENCRYPTED/i.test(text) || /Proc-Type:.*ENCRYPTED/i.test(text)) {
-      alert(`"${file.name}" is passphrase-encrypted. Decrypt it first (ssh-keygen -p -f <keyfile>) and try again — the server can't unlock it.`);
-      return;
-    }
-    if (!confirm(`Install "${file.name}" as the cluster SSH private key? Any existing key will be replaced.`)) return;
-    const r = await fetch(API + '/api/cluster/ssh-key', {
-      method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ privateKey: text }),
-    });
-    const d = await r.json();
-    if (!r.ok || !d.ok) { alert('Upload failed: ' + (d.error || 'HTTP ' + r.status)); return; }
-    _clRefreshKeyStatus();
-  } catch (e) { alert('Upload error: ' + e.message); }
-}
-
-document.addEventListener('change', (e) => {
-  const t = e.target;
-  if (t && t.id === 'settings-cluster-upload-key-file' && t.files?.[0]) {
-    const f = t.files[0];
-    t.value = '';
-    _clUploadKeyFile(f);
-  }
-});
-
-async function _clDeleteKey() {
-  if (!confirm('Remove the cluster SSH private key from this deployment?')) return;
-  try {
-    const r = await fetch(API + '/api/cluster/ssh-key', { method: 'DELETE', headers: authHeaders() });
-    const d = await r.json();
-    if (!d.ok) { alert('Delete failed: ' + (d.error || 'unknown')); return; }
-    _clRefreshKeyStatus();
-  } catch (e) { alert('Delete error: ' + e.message); }
-}
 
 // Refresh status whenever the settings pane is opened
 const _origOpenSettings = typeof openSettingsPanel === 'function' ? openSettingsPanel : null;
@@ -14983,9 +14576,6 @@ if (_origOpenSettings && !window.__maintStatusHooked) {
     _janLoadBin();
     _bkLoadStatus();
     _bkLoadList();
-    _tsRefreshStatus();
-    _clLoadSettings();
-    _clRefreshKeyStatus();
     return r;
   };
   window.openSettingsPanel = _wrap;
@@ -18433,94 +18023,6 @@ build/
 
       </div>
 
-      <!-- Tailscale card. Owned by the tailscale plugin: when uninstalled
-           the entire section disappears via data-plugin-required.
-           Holds the SSO login flow + the per-container hostname. -->
-      <div class="settings-section wide" data-target-tab="cluster" data-plugin-required="tailscale">
-        <h4>Tailscale</h4>
-        <div class="settings-note" style="margin-top:4px">Mesh-VPN access via tailscaled. Log in once via SSO; state persists at <code>/data/tailscale</code> across container restarts.</div>
-        <div id="settings-tailscale-status" style="margin-top:8px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;font-size:.72rem;display:flex;align-items:center;justify-content:space-between;gap:8px">
-          <span id="settings-tailscale-line">loading…</span>
-          <span style="display:flex;gap:4px">
-            <button class="settings-btn-secondary" id="settings-tailscale-login" type="button" style="font-size:.66rem;padding:3px 8px">Log in to Tailscale</button>
-            <button class="settings-btn-secondary" id="settings-tailscale-logout" type="button" style="font-size:.66rem;padding:3px 8px;display:none">Logout</button>
-          </span>
-        </div>
-        <div id="settings-tailscale-authurl" style="display:none;margin-top:8px;padding:10px;background:var(--bg-2);border:1px dashed var(--accent2);border-radius:4px;font-size:.7rem">
-          <div style="margin-bottom:6px;font-weight:600;color:var(--accent2)">Open this URL in your browser and complete SSO:</div>
-          <a id="settings-tailscale-authurl-link" href="#" target="_blank" rel="noopener noreferrer" style="word-break:break-all;color:var(--accent);text-decoration:underline"></a>
-          <div style="margin-top:6px;color:var(--text-dim)">Polling status until connected…</div>
-        </div>
-        <label style="display:block;font-size:.7rem;margin-top:14px">Hostname for this container on the tailnet
-          <input id="settings-tailscale-hostname" type="text" autocomplete="off" placeholder="spore-<agent>" style="display:block;margin-top:3px;width:100%;max-width:520px;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-          <div class="settings-note" style="margin-top:3px">Sent as <code>tailscale up --hostname &lt;value&gt;</code>. Defaults to <code>spore-&lt;agentId&gt;</code>.</div>
-        </label>
-      </div>
-
-      <!-- Compute cluster card. Owned by the compute-cluster plugin:
-           when uninstalled the section disappears via
-           data-plugin-required (mirrors the Tailscale card pattern).
-           Reachability further depends on the Tailscale plugin being
-           installed + connected, but config storage is plugin-only. -->
-      <div class="settings-section wide" data-target-tab="cluster" data-plugin-required="compute-cluster">
-        <h4>Compute cluster</h4>
-        <div class="settings-note" style="margin-top:4px">SLURM cluster access over SSH (typically over a tailnet). Reachability further depends on the Tailscale plugin being installed and connected.</div>
-          <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px">
-            <label style="font-size:.7rem">Cluster SSH username
-              <input id="settings-cluster-username" type="text" autocomplete="off" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-            </label>
-            <label style="font-size:.7rem">Login host (MagicDNS)
-              <input id="settings-cluster-login-host" type="text" autocomplete="off" placeholder="login.tailnet.ts.net" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-            </label>
-            <label style="font-size:.7rem;grid-column:1/-1">tmux session prefix
-              <input id="settings-cluster-tmux-prefix" type="text" autocomplete="off" placeholder="spore" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-            </label>
-          </div>
-          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="settings-btn-secondary" id="settings-cluster-test" style="font-size:.68rem;padding:3px 8px">Test SSH (primary)</button>
-          </div>
-          <div id="settings-cluster-test-result" style="margin-top:6px;font-family:var(--font-body);font-size:.64rem;color:var(--text-dim);white-space:pre-wrap"></div>
-
-          <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border)">
-            <div style="font-size:.72rem;font-weight:600;display:flex;justify-content:space-between;align-items:center">
-              <span>Additional clusters</span>
-              <button class="settings-btn-secondary" id="settings-cluster-hosts-add" type="button" style="font-size:.62rem;padding:2px 6px">+ Add cluster</button>
-            </div>
-            <div class="settings-note" style="margin-top:2px">Extra SLURM clusters reachable over the same tailnet. The agent sees them all in its live state and can pick the right one when you tell it which cluster to use. Username falls back to the primary cluster's if left blank.</div>
-            <div id="settings-cluster-hosts-list" style="margin-top:8px;display:flex;flex-direction:column;gap:6px"></div>
-            <div id="settings-cluster-hosts-status" style="margin-top:4px;font-family:var(--font-body);font-size:.62rem;color:var(--text-dim)"></div>
-          </div>
-
-          <div style="margin-top:16px;padding-top:10px;border-top:1px dashed var(--border)">
-            <div style="font-size:.72rem;font-weight:600">Cluster SSH key</div>
-            <div class="settings-note" style="margin-top:2px">Stored at <code>/data/.ssh/id_cluster</code> (0600, owned by spore). Used by Test SSH and by the agent's cluster tools. Either generate a fresh keypair here and install the public key on the cluster, or paste an existing private key you use.</div>
-            <div id="settings-cluster-key-status" style="margin-top:6px;font-family:var(--font-body);font-size:.64rem;color:var(--text-dim)">loading…</div>
-            <div id="settings-cluster-pubkey-wrap" style="display:none;margin-top:6px">
-              <div style="font-size:.66rem;color:var(--text-dim)">Public key (install on the cluster: <code>~/.ssh/authorized_keys</code>):</div>
-              <textarea id="settings-cluster-pubkey" readonly rows="2" style="display:block;width:100%;margin-top:3px;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-family:var(--font-mono);font-size:.62rem;border-radius:4px;resize:vertical;word-break:break-all"></textarea>
-              <button class="settings-btn-secondary" id="settings-cluster-copypub" type="button" style="margin-top:4px;font-size:.62rem;padding:2px 6px">Copy public key</button>
-            </div>
-            <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
-              <button class="settings-btn-secondary" id="settings-cluster-gen-key" type="button" style="font-size:.66rem;padding:3px 8px">Generate new ed25519 key</button>
-              <button class="settings-btn-secondary" id="settings-cluster-upload-key" type="button" style="font-size:.66rem;padding:3px 8px">Upload key file…</button>
-              <button class="settings-btn-secondary" id="settings-cluster-paste-key" type="button" style="font-size:.66rem;padding:3px 8px">Paste private key…</button>
-              <button class="settings-btn-secondary" id="settings-cluster-del-key" type="button" style="font-size:.66rem;padding:3px 8px;color:var(--danger);display:none">Remove key</button>
-              <input type="file" id="settings-cluster-upload-key-file" accept=".pem,.key,id_rsa,id_ed25519,id_ecdsa,*" style="display:none">
-            </div>
-          </div>
-      </div>
-
-        <!-- Hidden modal-ish textarea for pasting private key -->
-        <div id="settings-cluster-paste-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9999;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px;width:min(640px,90vw);box-shadow:0 4px 24px rgba(0,0,0,0.5)">
-          <div style="font-size:.78rem;font-weight:600;margin-bottom:6px">Paste private SSH key</div>
-          <div class="settings-note" style="margin-bottom:6px">Unencrypted OpenSSH or PEM private key. Must include the BEGIN/END lines. Stored at /data/.ssh/id_cluster with 0600.</div>
-          <textarea id="settings-cluster-paste-text" rows="12" style="width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:6px;font-family:var(--font-mono);font-size:.66rem;border-radius:4px;resize:vertical"
-            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
-          <div style="margin-top:8px;display:flex;gap:6px;justify-content:flex-end">
-            <button class="settings-btn-secondary" id="settings-cluster-paste-cancel" type="button" style="font-size:.68rem;padding:3px 8px">Cancel</button>
-            <button class="settings-btn-secondary" id="settings-cluster-paste-save" type="button" style="font-size:.68rem;padding:3px 8px">Save</button>
-          </div>
-        </div>
 
       <div class="settings-section wide" data-target-tab="graph-memory">
         <h4>Export / import</h4>
