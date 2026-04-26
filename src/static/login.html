@@ -8,10 +8,13 @@
   @font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 400 600; font-display: swap; src: url('/fonts/fraunces.woff2?v=20260425b') format('woff2'); }
   @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/jetbrainsmono.woff2?v=20260425b') format('woff2'); }
   @font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/spacegrotesk.woff2?v=20260425b') format('woff2'); }
+  /* Dark Petri baseline — values from dir-petri.jsx PETRI_THEMES.dark.
+     Accent is leaf green (not amber); ink-chip pattern handles buttons
+     so we don't rely on accent-as-button-bg contrast. */
   :root {
-    --bg:#16140f; --surface:#1f1c16; --panel:#1a1812;
-    --border:#2c2820; --text:#bdb6a3; --text-dim:#8a8676; --text-bright:#ece4cf;
-    --accent:#e08a4e; --accent2:#7aa583; --danger:#d94e3a;
+    --bg:#131511; --surface:#1a1d17; --panel:#21241d;
+    --border:#2c2f26; --text:#b5b0a0; --text-dim:#706c62; --text-bright:#ece7d5;
+    --accent:#8eb77c; --accent2:#7aa583; --danger:#d94e3a;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',system-ui,-apple-system,'Segoe UI','Helvetica Neue',sans-serif}
@@ -29,8 +32,11 @@
   label{display:block;text-align:left;font-size:.7rem;color:var(--text-dim);letter-spacing:.06em;text-transform:uppercase;margin-bottom:5px;margin-top:14px;font-weight:500}
   input{width:100%;padding:11px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text-bright);font-size:.92rem;outline:none;transition:border-color .2s,box-shadow .2s;font-family:'Space Grotesk',system-ui,sans-serif}
   input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent)}
-  .btn{width:100%;margin-top:24px;padding:12px;border:none;border-radius:8px;cursor:pointer;font-size:.92rem;font-weight:500;color:#fff;background:var(--accent);transition:background-color .15s,transform .1s}
-  .btn:hover{background:color-mix(in srgb,var(--accent) 88%,#fff)}.btn:active{transform:scale(.98)}.btn:disabled{opacity:.5;cursor:not-allowed}
+  /* Ink-chip primary CTA — mirrors PetriChat send button (`background:
+     t.ink, color: t.bg`). Avoids the white-on-leaf-green contrast issue
+     in dark mode and stays consistent with the chat send chip. */
+  .btn{width:100%;margin-top:24px;padding:12px;border:none;border-radius:10px;cursor:pointer;font-size:.92rem;font-weight:500;color:var(--bg);background:var(--text-bright);transition:opacity .15s,transform .1s;font-family:inherit;letter-spacing:.01em}
+  .btn:hover{opacity:.85}.btn:active{transform:scale(.98)}.btn:disabled{opacity:.4;cursor:not-allowed}
   .hidden{display:none !important}
   .mode-toggle{margin-top:16px;text-align:center;font-size:.82rem}
   .mode-toggle a{color:var(--text-dim);text-decoration:none;transition:color .15s ease;cursor:pointer}
@@ -75,13 +81,17 @@
   // for the warm stone palette. Legacy stored names (midnight, paper,
   // terminal, ember, arctic, neon, forest) are normalized: paper/arctic
   // → light, everything else → dark.
+  // Light Petri palette — values from dir-petri.jsx PETRI_THEMES.light,
+  // surface/panel deepened ~4% to compensate for the same too-white
+  // effect we tuned around in graph-viewer.html (prototype's literal
+  // #f7f2e6/#fbf7ec read as bright cream in our denser layout).
   const THEMES = {
     dark: {},
     light: {
-      '--bg':'#f3efe6','--surface':'#fbf8f0','--panel':'#ede7d8',
-      '--border':'#e6e0d2',
-      '--text':'#3c3a35','--text-dim':'#9a948a','--text-bright':'#1f1d1a',
-      '--accent':'#c2542d','--accent2':'#3e6b47','--danger':'#b8341c',
+      '--bg':'#ece7dc','--surface':'#f3eddc','--panel':'#f7f1e0',
+      '--border':'rgba(29,33,27,0.12)',
+      '--text':'#4a4e46','--text-dim':'#8a8c82','--text-bright':'#1d211b',
+      '--accent':'#5a7a4a','--accent2':'#3e6b47','--danger':'#b8341c',
     },
   };
   function normalizeThemeName(name) {
@@ -227,7 +237,7 @@
   window.addEventListener('resize', resize);
   function tick() {
     ctx.clearRect(0, 0, w, h);
-    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#e08a4e';
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#8eb77c';
     ctx.fillStyle = accent;
     ctx.globalAlpha = 0.25;
     for (const p of parts) {

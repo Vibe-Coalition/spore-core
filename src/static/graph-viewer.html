@@ -19,14 +19,14 @@
     --bg: #131511; --surface: #1a1d17; --panel: #21241d; --element: #2a2d24;
     --border: #2c2f26; --border-active: #4a4d42; --border-subtle: #1f221b;
     --graph-hair: #2c2f26;
-    /* Graph canvas sits on `panel` — slightly elevated above the artboard so
-       the graph reads as a distinct surface (matches prototype skin.bg). */
-    --graph-bg: #21241d; --graph-cream: var(--graph-bg);
-    /* Atmospheric glows layered over the graph canvas — three soft radial
-       gradients in warm / accent / slate. Alphas from prototype (0x22, 0x28, 0x22). */
+    /* Graph canvas — very dark solid base. Glows below land on this
+       and read as actual color hints rather than washes on near-paper. */
+    --graph-bg: #0d100b; --graph-cream: var(--graph-bg);
+    /* Atmospheric glows on the very-dark canvas — pulled back near the
+       prototype's original 0.13/0.16/0.13 alphas. */
     --graph-glow-1: rgba(227, 139, 95, 0.13);
-    --graph-glow-2: rgba(142, 183, 124, 0.16);
-    --graph-glow-3: rgba(58, 106, 163, 0.13);
+    --graph-glow-2: rgba(142, 183, 124, 0.15);
+    --graph-glow-3: rgba(58, 106, 163, 0.12);
     /* Polarity-aware highlight base: white in dark mode, ink in light.
        Used by subtle hover/divider overlays so they flip cleanly across
        themes — see the `rgba(var(--hl-rgb), X)` rules below. */
@@ -559,7 +559,8 @@
     padding: 6px 14px; border-radius: 4px; border: 1px solid var(--border);
     background: var(--element); color: var(--text); cursor: pointer; font-size: .7rem;
   }
-  .lm-settings-btns button.primary { background: var(--accent); color: #000; border-color: var(--accent); }
+  .lm-settings-btns button.primary { background: var(--text-bright); color: var(--bg); border-color: var(--text-bright); }
+  .lm-settings-btns button.primary:hover { opacity: 0.85; }
   .lm-check-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
   .lm-check-row input[type=checkbox] { accent-color: var(--accent); }
   /* Settings floating pane — behaves like chat/node/files/logs panes */
@@ -852,7 +853,8 @@
     padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--element); color: var(--text); cursor: pointer; font-size: .74rem;
   }
-  .settings-btns button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+  .settings-btns button.primary { background: var(--text-bright); color: var(--bg); border-color: var(--text-bright); font-weight: 600; }
+  .settings-btns button.primary:hover { opacity: 0.85; }
   @media (max-width: 860px) {
     .settings-body { grid-template-columns: 1fr; }
     .settings-inline { grid-template-columns: 1fr; }
@@ -1114,8 +1116,10 @@
   .chat-ask-user .au-desc { font-size: .72rem; color: var(--text-dim); margin-top: 2px; margin-left: 20px; }
   .chat-ask-user .au-submit {
     margin-top: 10px; padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
-    background: var(--accent); color: #fff; font-size: .78rem; font-weight: 600;
+    background: var(--text-bright); color: var(--bg); font-size: .78rem; font-weight: 600;
+    transition: opacity .15s;
   }
+  .chat-ask-user .au-submit:hover { opacity: 0.85; }
   .chat-ask-user .au-submit:disabled { opacity: .5; cursor: not-allowed; }
   .chat-ask-user .au-status { font-size: .7rem; color: var(--text-dim); margin-top: 6px; }
 
@@ -1129,7 +1133,7 @@
   }
   #plan-mode-toggle.chat-plan-toggle:hover { color: var(--text); border-color: var(--text-dim); }
   #plan-mode-toggle.chat-plan-toggle.on {
-    background: var(--accent); color: #fff; border-color: var(--accent);
+    background: var(--text-bright); color: var(--bg); border-color: var(--text-bright);
   }
   .plan-card {
     align-self: stretch; background: var(--panel); border: 1px solid var(--accent2);
@@ -1145,7 +1149,8 @@
   .plan-card .plan-reject {
     padding: 5px 12px; border: none; border-radius: 5px; cursor: pointer; font-size: .76rem; font-weight: 600;
   }
-  .plan-card .plan-approve { background: var(--accent); color: #fff; }
+  .plan-card .plan-approve { background: var(--text-bright); color: var(--bg); transition: opacity .15s; }
+  .plan-card .plan-approve:hover { opacity: 0.85; }
   .plan-card .plan-reject { background: transparent; color: var(--text); border: 1px solid var(--border); }
   .plan-card button:disabled { opacity: .5; cursor: not-allowed; }
 
@@ -1349,7 +1354,8 @@
     border-radius: 4px; padding: 6px 14px; cursor: pointer; font-size: 0.7rem;
     font-family: var(--font-body);
   }
-  #ssh-modal .modal-actions button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  #ssh-modal .modal-actions button.primary { background: var(--text-bright); color: var(--bg); border-color: transparent; transition: opacity .15s; }
+  #ssh-modal .modal-actions button.primary:hover { opacity: 0.85; }
   #ssh-modal .modal-actions button:hover { opacity: 0.85; }
   .ssh-host-list { margin: 10px 0; }
   .ssh-host-item {
@@ -1605,9 +1611,11 @@
     font-family: var(--font-body); font-size: .82rem; font-weight: 500;
     box-shadow: 0 4px 12px rgba(0,0,0,.18);
   }
+  /* Active-pill matches the chat send chip — ink bg with paper text.
+     No border (the chip itself is the contrast). */
   #view-mode-bar .vm-pill {
     position: absolute; top: 3px; bottom: 3px; left: 0; width: 0;
-    background: color-mix(in srgb, var(--accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    background: var(--text-bright);
     border-radius: 6px; pointer-events: none; z-index: 0;
     opacity: 0;
     transition: left .28s cubic-bezier(.4,.05,.2,1), width .28s cubic-bezier(.4,.05,.2,1), opacity .2s ease;
@@ -1620,15 +1628,19 @@
     transition: color .22s ease, transform .22s ease;
   }
   #view-mode-bar button:hover { color: var(--text); }
-  #view-mode-bar button.active { color: var(--accent); background: transparent; transform: translateY(-.5px); }
+  /* Active button gets paper text on the ink pill behind it. */
+  #view-mode-bar button.active { color: var(--bg); background: transparent; transform: translateY(-.5px); }
   #view-mode-bar .vm-divider {
     width: 1px; height: 18px; background: var(--border); margin: 0 4px;
     flex-shrink: 0;
   }
   #view-mode-bar #theme-toggle {
     /* Override the inline style this button ships with so it integrates
-       into the mode bar instead of looking like a 30px boxed button. */
-    all: unset; cursor: pointer; padding: 5px 9px; border-radius: 6px;
+       into the mode bar instead of looking like a 30px boxed button.
+       Fixed width keeps the bar from resizing when the icon swaps
+       between ☀ (narrow) and 🌙 (wide emoji) on theme toggle. */
+    all: unset; cursor: pointer; padding: 5px 0; border-radius: 6px;
+    width: 28px; flex-shrink: 0;
     color: var(--text-dim); font-family: var(--font-mono); font-size: .82rem;
     line-height: 1; transition: color .15s, background .15s;
     display: inline-flex; align-items: center; justify-content: center;
@@ -1685,7 +1697,7 @@
     display: flex; flex-direction: column; overflow: hidden;
   }
   #view-list-search {
-    padding: 60px 14px 12px 14px; border-bottom: 1px solid var(--border);
+    padding: 14px 14px 12px 14px; border-bottom: 1px solid var(--border);
   }
   #view-list-search input {
     width: 100%; box-sizing: border-box; padding: 9px 14px;
@@ -1733,18 +1745,20 @@
     flex: 1; overflow-y: auto; padding: 60px 22px 18px 22px;
     scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
+  /* Detail keeps its 60px top padding because the mode bar floats over
+     the right side of the canvas — that's where the detail pane sits. */
   #view-list-detail::-webkit-scrollbar { width: 4px; }
   #view-list-detail::-webkit-scrollbar-track { background: transparent; }
   #view-list-detail::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
   #view-list-detail::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
 
-  /* People & projects view — toolbar is a transparent strip; only the
-     search pill carries chrome. The hairline divider separates header
-     from body without painting a solid bar over the canvas glow. */
+  /* People & projects view — toolbar floats top-left at the same row as
+     the mode selector (mirrors #controls in graph mode). No bar bg,
+     just the search pill and count text inline. */
   #view-work-toolbar {
-    padding: 60px 22px 14px 22px; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 14px; flex-shrink: 0;
-    background: transparent;
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0; background: transparent; border: none;
   }
   #vw-search {
     flex: 1; max-width: 340px; box-sizing: border-box;
@@ -1760,7 +1774,7 @@
     color: var(--text-dim); opacity: .75; letter-spacing: .04em;
   }
   #view-work-body {
-    flex: 1; overflow-y: auto; padding: 18px 24px;
+    flex: 1; overflow-y: auto; padding: 60px 24px 18px 24px;
     scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
   #view-work-body::-webkit-scrollbar { width: 4px; }
@@ -2042,7 +2056,10 @@
     font-family: var(--font-body); font-size: 11px;
     text-anchor: middle; dominant-baseline: hanging; pointer-events: none; user-select: none;
     fill: var(--text, #c8c8d8);
-    paint-order: stroke fill; stroke: rgba(7,7,12,.85); stroke-width: 3px; stroke-linejoin: round;
+    /* Halo stroke matches the canvas surface so labels stay readable in
+       both themes (was hardcoded near-black — invisible-on-light-paper). */
+    paint-order: stroke fill; stroke: var(--graph-bg); stroke-opacity: 0.85;
+    stroke-width: 3px; stroke-linejoin: round;
   }
   .tmw-edge { stroke-width: 1; pointer-events: none; }
   .tmw-edge-hi { stroke: var(--accent) !important; stroke-opacity: .9 !important; stroke-width: 1.6 !important; }
@@ -2077,7 +2094,8 @@
   .lme-row { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
   .lme-row label { font-size:.62rem; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); font-weight:600; min-width:52px; flex-shrink:0; }
   .lme-btn { padding:5px 14px; border:none; border-radius:5px; font-family:inherit; font-size:.7rem; cursor:pointer; font-weight:600; transition:all .15s; }
-  .lme-btn-go { background:var(--accent); color:#fff; }
+  .lme-btn-go { background:var(--text-bright); color:var(--bg); transition: opacity .15s; }
+  .lme-btn-go:hover { opacity: 0.85; }
   .lme-btn-go:hover { filter:brightness(1.15); }
   .lme-btn-stop { background:var(--danger,#ef4444); color:#fff; }
   .lme-btn-stop:hover { filter:brightness(1.15); }
@@ -2437,9 +2455,11 @@
   /* Icon/tooltip must never block clicks on their parent button. */
   .desktop-dock-btn .dock-icon,
   .desktop-dock-btn .dock-tooltip { pointer-events: none; }
+  /* Active dock button — ink chip with paper text. Same pattern as the
+     mode bar's vm-pill and the chat send chip. */
   .desktop-dock-btn.dock-active {
-    color: var(--accent2);
-    background: color-mix(in srgb, var(--accent2) 10%, transparent);
+    color: var(--bg);
+    background: var(--text-bright);
   }
   .desktop-dock-btn::after { display: none; }
   .dock-icon {
@@ -2596,8 +2616,9 @@
     background: transparent; color: var(--text); transition: all .15s;
   }
   .btn:hover { border-color: var(--border-active); color: var(--text-bright); background: var(--element); }
-  .btn-save { background: var(--accent); color: #fff; border-color: transparent; }
-  .btn-save:hover { background: color-mix(in srgb, var(--accent) 85%, transparent); }
+  /* Primary save action — ink chip pattern (matches chat send + dock active). */
+  .btn-save { background: var(--text-bright); color: var(--bg); border-color: transparent; }
+  .btn-save:hover { opacity: 0.85; }
   .btn-danger { border-color: var(--danger); color: var(--danger); }
   .btn-danger:hover { background: rgba(239,68,68,0.08); }
   .btn-new { border-color: var(--border); color: var(--text); }
@@ -2770,7 +2791,8 @@
   }
   .node-label {
     opacity: 0;
-    transition: opacity 140ms ease;
+    fill: var(--text-dim);
+    transition: opacity 140ms ease, fill 200ms ease;
   }
   .node-sub-label { opacity: 0; }
   .node-deleting .node-shape { stroke: var(--danger) !important; fill: var(--danger) !important; fill-opacity: 0.3 !important; }
@@ -2782,14 +2804,16 @@
     stroke: var(--danger) !important;
   }
 
-  /* Graph edges (main graph mode) — themed via --border so edge colour
-     follows the active theme. */
+  /* Graph edges — use --text (ink2) per dir-petri.jsx skin.edge.
+     --border is too close to the canvas bg in dark mode (both warm earth
+     tones at similar luminance), and the inline attr('stroke', ...) on
+     the JS side doesn't resolve CSS vars, so this rule is the source of
+     truth. EDGE_KIND opacity (0.45/0.6/0.85) lives on the line element. */
   #graph-svg g.links line {
-    stroke: var(--border);
-    stroke-opacity: 0.55;
+    stroke: var(--text);
     stroke-width: 0.6;
   }
-  #graph-svg defs #arrowhead path { fill: var(--text-dim); fill-opacity: 0.45; }
+  #graph-svg defs #arrowhead path { fill: var(--text); fill-opacity: 0.55; }
 
   /* Selected node edge highlighting */
   .edge-highlighted { stroke: var(--accent) !important; stroke-width: 1.4 !important; stroke-opacity: 0.85 !important; }
@@ -2800,7 +2824,10 @@
   .focus-edge-label {
     font-family: var(--font-body); font-size: 9.5px; letter-spacing: 0.04em;
     fill: var(--text-dim, #8a8aa0); pointer-events: none; user-select: none;
-    paint-order: stroke fill; stroke: rgba(7,7,12,.85); stroke-width: 3px; stroke-linejoin: round;
+    /* Halo stroke matches the active canvas surface so labels remain
+       readable in both themes (was hardcoded near-black for dark only). */
+    paint-order: stroke fill; stroke: var(--graph-bg); stroke-opacity: 0.85;
+    stroke-width: 3px; stroke-linejoin: round;
   }
   .node-selected-multi .node-circle {
     stroke: var(--accent2) !important;
@@ -3023,9 +3050,9 @@
   }
   .picker-dropdown .gp-footer button:hover { border-color: var(--accent); color: var(--accent); }
   .picker-dropdown .gp-footer button.gp-new {
-    background: var(--accent); color: #fff; border: none; font-weight: 600;
+    background: var(--text-bright); color: var(--bg); border: none; font-weight: 600;
   }
-  .picker-dropdown .gp-footer button.gp-new:hover { background: color-mix(in srgb, var(--accent) 85%, transparent); }
+  .picker-dropdown .gp-footer button.gp-new:hover { opacity: 0.85; }
 
   /* ── New Graph Modal ── */
   #graph-modal-overlay {
@@ -3056,9 +3083,9 @@
   }
   #graph-modal .gm-buttons button:hover { border-color: var(--accent); }
   #graph-modal .gm-buttons .gm-create {
-    background: var(--accent); color: #fff; border: none; font-weight: 600;
+    background: var(--text-bright); color: var(--bg); border: none; font-weight: 600;
   }
-  #graph-modal .gm-buttons .gm-create:hover { background: color-mix(in srgb, var(--accent) 85%, transparent); }
+  #graph-modal .gm-buttons .gm-create:hover { opacity: 0.85; }
 
   /* ── Browser Live Preview Panel ── */
   #browser-preview {
@@ -4424,6 +4451,26 @@ function applyGraphTheme(name) {
   // Sync the toggle button's icon
   const toggle = document.getElementById('theme-toggle');
   if (toggle) toggle.textContent = THEMES[normalized === 'light' ? 'dark' : 'light'].icon;
+  // Rebuild the family palette and retint existing graph nodes. Touch only
+  // fill/stroke on the existing visual elements — don't go through
+  // _upsertNodeVisuals (which also updates geometry, labels, halos, etc.)
+  // because that races with the live d3 simulation tick and can blank
+  // nodes if the data binding is mid-update. Self-node geometry rebuilds
+  // every frame via _selfAnim regardless.
+  try {
+    FAM = _buildFAM();
+    if (typeof gNodes !== 'undefined' && gNodes) {
+      gNodes.selectAll('.glow-ring')
+        .attr('fill', d => d ? getColor(d.type) : null);
+      gNodes.selectAll('.node-circle')
+        .attr('fill', d => d ? getFillColor(d.type) : null)
+        .attr('stroke', d => d ? getColor(d.type) : null);
+      gNodes.selectAll('.node-glyph')
+        .attr('fill', d => d ? getColor(d.type) : null);
+      gNodes.selectAll('.node-focus-halo')
+        .attr('stroke', d => d ? getColor(d.type) : null);
+    }
+  } catch (e) { console.warn('theme retint failed', e); }
 }
 
 async function toggleTheme() {
@@ -6993,18 +7040,37 @@ const TYPE_COLORS = {
 };
 const DEFAULT_COLOR = '#8a8676';
 
-// Family palette from the design handoff (design_handoff_node_graph).
-// Six families with stroke + soft fill + glyph color (glyph always equals
-// stroke so labels stay legible against the soft fill). Self-node sits
-// outside this system — it keeps its dedicated F01 amber/ink palette.
-const FAM = {
-  meta:   { name: 'Meta',   stroke: '#1a1a1a', fill: '#e2dccb', glyph: '#1a1a1a' },
-  people: { name: 'People', stroke: '#3e6b47', fill: '#b6cdb6', glyph: '#3e6b47' },
-  mind:   { name: 'Mind',   stroke: '#c8762c', fill: '#f0d4a8', glyph: '#c8762c' },
-  event:  { name: 'Events', stroke: '#a04822', fill: '#e9b8a0', glyph: '#a04822' },
-  thing:  { name: 'Things', stroke: '#6b8a5a', fill: '#cfdcc0', glyph: '#6b8a5a' },
-  affect: { name: 'Affect', stroke: '#7a3f5a', fill: '#e3c3d0', glyph: '#7a3f5a' },
-};
+// Family palette from the design handoff (design_handoff_node_graph),
+// retuned for the Petri direction. Six families: stroke + soft fill +
+// glyph color (glyph always equals stroke so labels stay legible against
+// the fill). Self-node sits outside this system — it keeps its dedicated
+// F01 amber/ink palette.
+//
+// Theme-aware: rebuilt by _buildFAM() on theme change so node colours
+// stay legible in both light and dark. Light uses saturated mid-tones
+// over warm paper; dark uses lighter Petri tones with soft alpha fills.
+function _buildFAM() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    return {
+      meta:   { name: 'Meta',   stroke: '#4a4e46', fill: 'rgba(74,78,70,0.10)',   glyph: '#4a4e46' },
+      people: { name: 'People', stroke: '#3a6aa3', fill: 'rgba(58,106,163,0.10)', glyph: '#3a6aa3' },
+      mind:   { name: 'Mind',   stroke: '#8a4a9c', fill: 'rgba(138,74,156,0.10)', glyph: '#8a4a9c' },
+      event:  { name: 'Events', stroke: '#b8542a', fill: 'rgba(184,84,42,0.10)',  glyph: '#b8542a' },
+      thing:  { name: 'Things', stroke: '#c08a2e', fill: 'rgba(192,138,46,0.10)', glyph: '#c08a2e' },
+      affect: { name: 'Affect', stroke: '#9c4a4a', fill: 'rgba(156,74,74,0.10)',  glyph: '#9c4a4a' },
+    };
+  }
+  return {
+    meta:   { name: 'Meta',   stroke: '#b5b0a0', fill: 'rgba(181,176,160,0.14)', glyph: '#b5b0a0' },
+    people: { name: 'People', stroke: '#7aa7d6', fill: 'rgba(122,167,214,0.14)', glyph: '#7aa7d6' },
+    mind:   { name: 'Mind',   stroke: '#c29ad0', fill: 'rgba(194,154,208,0.14)', glyph: '#c29ad0' },
+    event:  { name: 'Events', stroke: '#e38b5f', fill: 'rgba(227,139,95,0.14)',  glyph: '#e38b5f' },
+    thing:  { name: 'Things', stroke: '#e3b567', fill: 'rgba(227,181,103,0.14)', glyph: '#e3b567' },
+    affect: { name: 'Affect', stroke: '#d67a7a', fill: 'rgba(214,122,122,0.14)', glyph: '#d67a7a' },
+  };
+}
+let FAM = _buildFAM();
 // Map every node type SPORE knows to one of the six design families.
 const TYPE_FAMILY = {
   self:         'meta',  // overridden visually by F01 mark anyway
@@ -7569,9 +7635,9 @@ function getEdgeKind(d) {
   return 'normal';
 }
 const EDGE_KIND = {
-  strong: { width: 2.0, opacity: 0.85, dash: null },
-  normal: { width: 1.4, opacity: 0.6,  dash: null },
-  soft:   { width: 1.0, opacity: 0.45, dash: '4 4' },
+  strong: { width: 2.0, opacity: 0.55, dash: null },
+  normal: { width: 1.4, opacity: 0.38, dash: null },
+  soft:   { width: 1.0, opacity: 0.25, dash: '4 4' },
 };
 function getFillColor(type) {
   // The soft, harmonised fill paired with the family stroke. Used as the
@@ -8390,10 +8456,10 @@ function _upsertNodeVisuals(nodeSelection) {
         .attr('y', 1);
     }
     if (sel.select('.node-label').empty()) {
+      // Fill is set in CSS (.node-label) so labels retint on theme change.
       sel.append('text')
         .attr('class', 'node-label')
         .attr('text-anchor', 'middle')
-        .attr('fill', '#5a5a70')
         .attr('font-size', '10px');
     }
     // Sub-label below the node name (mono, uppercase, family-stroke
@@ -12753,10 +12819,13 @@ function initGraph(data) {
     simulation.alpha(0.0009); // < default alphaMin (0.001) — parks the timer
   }
 
+  // Stroke color comes from the CSS rule (#graph-svg g.links line) so it
+  // resolves --text correctly per active theme. SVG presentation
+  // attributes don't expand var(), so setting it inline here would
+  // produce a literal "var(--text)" string and fall back to black.
   const link = gLinks.selectAll('line').data(simLinks).join('line')
     .attr('marker-end', 'url(#arrowhead)')
     .attr('data-edge-kind', d => getEdgeKind(d))
-    .attr('stroke', 'var(--text-dim)')
     .attr('stroke-linecap', 'round')
     .attr('stroke-width', d => EDGE_KIND[getEdgeKind(d)].width)
     .attr('stroke-opacity', d => EDGE_KIND[getEdgeKind(d)].opacity)
@@ -13817,6 +13886,34 @@ window.addEventListener('resize', () => {
   const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--chat-width'));
   if (Number.isFinite(cur)) _applyChatWidth(cur);
 });
+
+// Pan the graph to follow canvas width changes (chat open/close,
+// right-panel toggles, viewport resize). Without this the graph stays
+// in absolute pixel coords while the canvas shrinks/grows around it,
+// so it visibly drifts off-center. Translating the zoom transform by
+// half the width delta keeps the visible portion centered.
+(function _initGraphFollowsCanvasWidth() {
+  const canvasEl = document.getElementById('canvas');
+  if (!canvasEl || typeof ResizeObserver === 'undefined') return;
+  let prevWidth = canvasEl.clientWidth;
+  let pending = false;
+  const ro = new ResizeObserver(() => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      const newWidth = canvasEl.clientWidth;
+      const delta = newWidth - prevWidth;
+      prevWidth = newWidth;
+      if (Math.abs(delta) < 1) return;
+      if (typeof svg === 'undefined' || !svg || !zoom) return;
+      const t = d3.zoomTransform(svg.node());
+      const next = d3.zoomIdentity.translate(t.x + delta / 2, t.y).scale(t.k);
+      svg.transition().duration(220).ease(d3.easeCubicOut).call(zoom.transform, next);
+    });
+  });
+  ro.observe(canvasEl);
+})();
 
 (function _initChatResizeHandle() {
   const handle = document.getElementById('chat-resize-handle');
@@ -17481,7 +17578,9 @@ async function createNewGraph() {
     }
     c.classList.remove('view-graph', 'view-list', 'view-typemap', 'view-work');
     c.classList.add('view-' + mode);
-    document.querySelectorAll('#view-mode-bar button').forEach(btn => {
+    // Filter on [data-vm] so the theme toggle (also in this bar) isn't
+    // treated as a view button.
+    document.querySelectorAll('#view-mode-bar button[data-vm]').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.vm === mode);
     });
     _updateViewModePill();
@@ -17495,7 +17594,10 @@ async function createNewGraph() {
     requestAnimationFrame(() => requestAnimationFrame(render));
   }
 
-  document.querySelectorAll('#view-mode-bar button').forEach(btn => {
+  // [data-vm] excludes #theme-toggle, which lives in this same bar but has
+  // its own click handler elsewhere — without this filter, clicking the
+  // theme button would call setView(undefined) and blank the canvas.
+  document.querySelectorAll('#view-mode-bar button[data-vm]').forEach(btn => {
     btn.addEventListener('click', () => setView(btn.dataset.vm));
   });
 
