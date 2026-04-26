@@ -1347,7 +1347,14 @@ Set wait:false when you've submitted a long background job and just want to retu
             // Plugin tools and middleware get the full per-session tool context
             // so they can read platform / sessionToken / projectContext / userId
             // without falling back to the host's _current* legacy fields.
-            const sessionCtx = this._sessionContexts?.get(sessionKey) || {};
+            //
+            // sessionKey lives in the AsyncLocalStorage set by the outer
+            // executeTool() — the bare local variable is only in scope
+            // there. Pull it via _ctx() so this fallback works regardless
+            // of the call path.
+            const ctx0 = this._ctx();
+            const sessionKey = ctx0?.sessionKey || null;
+            const sessionCtx = (sessionKey && this._sessionContexts?.get(sessionKey)) || {};
             const pluginResult = await this._pluginManager.executePluginTool(normalizedName, input, {
               sessionKey,
               trigger:        sessionCtx.trigger        ?? this._currentTrigger ?? null,
