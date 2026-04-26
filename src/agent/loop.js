@@ -585,31 +585,10 @@ class AgentLoop {
 
         // If no tool calls, we're done — this text IS the final response
         if (toolBlocks.length === 0 || response.stop_reason === 'end_turn') {
-          if (responseText) {
-            finalText = responseText;
-          }
-          // Store in session regardless (for context continuity)
-          if (finalText) {
-            this.sessions.addMessage(sessionKey, 'assistant', finalText);
-          }
-          // If the final text was already sent as intermediate, don't re-send it
-          if (finalText && finalText === lastSentIntermediate) {
-            finalText = null;
-          }
-          // Before breaking: if a user interjection arrived while we were streaming,
-          // don't exit — send the current text as intermediate and continue the loop
-          // so the interjection gets processed on the next iteration.
-          const pendingIj = this._pendingInterjections.get(sessionKey);
-          if (pendingIj && pendingIj.length > 0) {
-            this.log.info(`[interject] Interjection pending at end_turn — continuing loop`);
-            if (finalText && opts.onTextDelta) {
-              // The text was already streamed via deltas, just record it
-              lastSentIntermediate = finalText;
-            }
-            messages.push({ role: 'assistant', content: response.content });
-            finalText = null;
-            continue;
-          }
+          const r = this._handleEndTurn({ response, responseText, finalText, lastSentIntermediate, sessionKey, opts, messages });
+          finalText = r.finalText;
+          lastSentIntermediate = r.lastSentIntermediate;
+          if (r.action === 'continue') continue;
           break;
         }
 
@@ -1243,6 +1222,42 @@ class AgentLoop {
 
     if (opts.onError) opts.onError(e);
     return { action: 'rethrow' };
+  }
+
+  /**
+   * Finalize the iteration when the model produced no tool_use blocks
+   * (or signalled end_turn). Persists the assistant text to session
+   * history, suppresses re-emission if the text was already streamed as
+   * intermediate, and detects mid-stream interjections that should keep
+   * the loop running for one more iteration.
+   *
+   * Returns { action: 'continue' | 'break', finalText, lastSentIntermediate }
+   * — the caller mutates messages in place when a continuation is needed
+   * (the response.content is pushed onto messages here).
+   */
+  _handleEndTurn(ctx) {
+    const { response, responseText, sessionKey, opts, messages } = ctx;
+    let { finalText, lastSentIntermediate } = ctx;
+    if (responseText) finalText = responseText;
+    // Store in session regardless (for context continuity)
+    if (finalText) this.sessions.addMessage(sessionKey, 'assistant', finalText);
+    // If the final text was already sent as intermediate, don't re-send it
+    if (finalText && finalText === lastSentIntermediate) finalText = null;
+    // Before breaking: if a user interjection arrived while we were streaming,
+    // don't exit — send the current text as intermediate and continue the loop
+    // so the interjection gets processed on the next iteration.
+    const pendingIj = this._pendingInterjections.get(sessionKey);
+    if (pendingIj && pendingIj.length > 0) {
+      this.log.info(`[interject] Interjection pending at end_turn — continuing loop`);
+      if (finalText && opts.onTextDelta) {
+        // The text was already streamed via deltas, just record it
+        lastSentIntermediate = finalText;
+      }
+      messages.push({ role: 'assistant', content: response.content });
+      finalText = null;
+      return { action: 'continue', finalText, lastSentIntermediate };
+    }
+    return { action: 'break', finalText, lastSentIntermediate };
   }
 
   /**
