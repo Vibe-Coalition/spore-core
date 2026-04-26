@@ -678,25 +678,8 @@ class AgentLoop {
           continue;
         }
 
-        // 2-tier escalation: casual → normal on any tool use.
-        // Planner (Opus) is reserved for explicit delegation only — triggered
-        // when the agent calls delegate_task, not on routine tool use.
-        if (toolBlocks.length > 0 && activeModel) {
-          const casualM = this.config.casualModel || this.config.normalModel;
-          const normalM = this.config.normalModel || this.config.plannerModel;
-          if (activeModel === casualM && casualM !== normalM) {
-            activeModel = normalM;
-            this.log.info(`[escalation] casual → normal (${activeModel})`);
-          }
-          const plannerM = this.config.plannerModel;
-          if (activeModel === normalM && normalM !== plannerM) {
-            const hasDelegation = toolBlocks.some(b => b.name === 'delegate_task');
-            if (hasDelegation) {
-              activeModel = plannerM;
-              this.log.info(`[escalation] normal → planner (${activeModel}) — delegation requested`);
-            }
-          }
-        }
+        // 2-tier escalation (extracted)
+        activeModel = this._maybeEscalateModel(toolBlocks, activeModel);
         if (toolBlocks.length > 0 && response.stop_reason === 'tool_use') {
           // Store compact version in session — trim large tool inputs for history
           const compactContent = response.content.map(block => {
@@ -1340,6 +1323,31 @@ class AgentLoop {
     } catch (e) {
       this.log.warn(`[graphcorn] round checkpoint failed: ${e.message}`);
     }
+  }
+
+  /**
+   * 2-tier escalation: casual → normal on any tool use. Planner (Opus) is
+   * reserved for explicit delegation only — triggered when the agent calls
+   * delegate_task, not on routine tool use. Returns the (possibly updated)
+   * activeModel; caller assigns the result back.
+   */
+  _maybeEscalateModel(toolBlocks, activeModel) {
+    if (!(toolBlocks.length > 0 && activeModel)) return activeModel;
+    const casualM = this.config.casualModel || this.config.normalModel;
+    const normalM = this.config.normalModel || this.config.plannerModel;
+    if (activeModel === casualM && casualM !== normalM) {
+      activeModel = normalM;
+      this.log.info(`[escalation] casual → normal (${activeModel})`);
+    }
+    const plannerM = this.config.plannerModel;
+    if (activeModel === normalM && normalM !== plannerM) {
+      const hasDelegation = toolBlocks.some(b => b.name === 'delegate_task');
+      if (hasDelegation) {
+        activeModel = plannerM;
+        this.log.info(`[escalation] normal → planner (${activeModel}) — delegation requested`);
+      }
+    }
+    return activeModel;
   }
 
   // ── Multimodal attachment handling ──────────────────────────────────
