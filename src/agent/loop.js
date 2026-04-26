@@ -956,56 +956,12 @@ class AgentLoop {
     // Signal LLM is idle so learner can process its queue
     if (this.learner) this.learner.setLLMBusy(false);
 
-    // Async learning — fire and forget, never delays response
-    const learningMode = this.config.learningMode || 'always';
-    if (finalText && this.learner && learningMode === 'always') {
-      this.learner.extractAndLearn(opts.content, finalText, {
-        userName: opts.userName,
-        channelName: opts.channelName,
-        toolCalls: toolLog.length > 0 ? toolLog : undefined,
-        // graphcorn: pass the sessionId (= opts.channelId for acorn —
-        // see web.js:4719 where agentOpts.channelId is set to the WS
-        // sessionId). The learner uses this to link every newly-
-        // created entity to the session-<id> node via a
-        // `discovered_in` edge. Only fires for cli-platform turns
-        // where the session node was actually created at session:start.
-        sessionId: opts.platform === 'cli' ? opts.channelId : null,
-      }).catch(e => this.log.error('[learner] Background extraction error:', e.message));
-    }
-
-    // Project node — append a one-line activity note so cross-session
-    // memory accumulates. Captures user prompt + tool-call summary so
-    // the agent can later graph_query and see "what we worked on
-    // last time in this project". Cheap (one INSERT, capped at 50).
-    if (opts.projectContext && this.learner && (finalText || toolLog.length)) {
-      try {
-        const projects = require('../graph/projects');
-        const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
-        const tools = toolLog.length ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]` : '';
-        const summary = `${userSnip}${tools}`;
-        projects.noteProjectInteraction(this.learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
-      } catch (e) {
-        this.log.warn(`[project-node] note failed: ${e.message}`);
-      }
-    }
-
-    // graphcorn — failure capture (extracted to keep _runLoop slim)
+    // Post-loop fire-and-forget hooks (extracted to keep _runLoop slim)
+    this._kickOffLearnerExtraction(opts, finalText, toolLog);
+    this._noteProjectActivity(opts, finalText, toolLog);
     this._captureFailureFix(opts, toolLog);
-
-    // graphcorn — round checkpoint (extracted to keep _runLoop slim)
     this._recordRoundCheckpoint(opts, toolLog, finalText);
-
-    // Plugin context engines: afterTurn
-    if (this._pluginManager) {
-      const turnData = { userMessage: opts.content, assistantResponse: finalText, toolCalls: toolLog };
-      for (const engine of this._pluginManager.getContextEngines()) {
-        if (engine.engine?.afterTurn) {
-          engine.engine.afterTurn(turnData).catch(() => { });
-        } else if (engine.afterTurn) {
-          engine.afterTurn(turnData).catch(() => { });
-        }
-      }
-    }
+    this._firePluginAfterTurn(opts, finalText, toolLog);
 
     if (opts.onComplete) opts.onComplete(finalText, totalUsage);
 
@@ -1235,6 +1191,65 @@ class AgentLoop {
       }
     } catch (e) {
       this.log.warn(`[graphcorn] round checkpoint failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Fire-and-forget: kick off the learner's async extractAndLearn for the
+   * just-completed turn. No-op if no finalText, no learner, or learning is
+   * disabled by config.
+   */
+  _kickOffLearnerExtraction(opts, finalText, toolLog) {
+    const learningMode = this.config.learningMode || 'always';
+    if (!(finalText && this.learner && learningMode === 'always')) return;
+    this.learner.extractAndLearn(opts.content, finalText, {
+      userName: opts.userName,
+      channelName: opts.channelName,
+      toolCalls: toolLog.length > 0 ? toolLog : undefined,
+      // graphcorn: pass the sessionId (= opts.channelId for acorn —
+      // see web.js:4719 where agentOpts.channelId is set to the WS
+      // sessionId). The learner uses this to link every newly-
+      // created entity to the session-<id> node via a
+      // `discovered_in` edge. Only fires for cli-platform turns
+      // where the session node was actually created at session:start.
+      sessionId: opts.platform === 'cli' ? opts.channelId : null,
+    }).catch(e => this.log.error('[learner] Background extraction error:', e.message));
+  }
+
+  /**
+   * Append a one-line activity note to the project node so cross-session
+   * memory accumulates. Captures user prompt + tool-call summary so the
+   * agent can later graph_query and see "what we worked on last time in
+   * this project". Cheap (one INSERT, capped at 50).
+   */
+  _noteProjectActivity(opts, finalText, toolLog) {
+    if (!(opts.projectContext && this.learner && (finalText || toolLog.length))) return;
+    try {
+      const projects = require('../graph/projects');
+      const userSnip = (opts.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+      const tools = toolLog.length ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]` : '';
+      const summary = `${userSnip}${tools}`;
+      projects.noteProjectInteraction(this.learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
+    } catch (e) {
+      this.log.warn(`[project-node] note failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Fire each plugin context engine's afterTurn hook with the just-
+   * completed turn's data. All calls are fire-and-forget; plugin errors
+   * are caught at the engine boundary so one bad plugin can't break the
+   * loop.
+   */
+  _firePluginAfterTurn(opts, finalText, toolLog) {
+    if (!this._pluginManager) return;
+    const turnData = { userMessage: opts.content, assistantResponse: finalText, toolCalls: toolLog };
+    for (const engine of this._pluginManager.getContextEngines()) {
+      if (engine.engine?.afterTurn) {
+        engine.engine.afterTurn(turnData).catch(() => { /* silent: plugin best-effort */ });
+      } else if (engine.afterTurn) {
+        engine.afterTurn(turnData).catch(() => { /* silent: plugin best-effort */ });
+      }
     }
   }
 
