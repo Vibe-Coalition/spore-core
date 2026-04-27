@@ -313,6 +313,43 @@ function sessionEndHandler(api, ws, msg) {
   }
 }
 
+// codeGraphSummaryHandler — receives a structural-index summary
+// payload from the acorn CLI and writes it to the project node's
+// `code_graph` aspect via projectsLib.upsertProjectCodeGraph.
+//
+// Why this exists: until v0.7 we relied on the agent to call
+// architecture + update_code_graph_summary. In practice the agent
+// rarely did — when the user asked for execute-mode work the agent
+// went straight to the task and skipped housekeeping. Result:
+// project nodes never accumulated codebase-shape memory.
+//
+// Now the CLI computes architecture locally right after auto-index
+// completes, ships it as a `code_graph:summary` WS frame, and this
+// handler upserts the aspect. No agent turn wasted, populates
+// silently every session.
+function codeGraphSummaryHandler(api, ws, msg) {
+  if (!msg?.sessionId) return;
+  const ctx = api._appContext;
+  const learner = ctx?.tools?.learner || ctx?.learner;
+  if (!learner) return;
+  const userId = ws?._user || msg.userName || 'anon';
+  const cwd = msg.cwd;
+  if (!cwd) return;
+  try {
+    const r = projectsLib.upsertProjectCodeGraph(learner, userId, cwd, msg.summary || {});
+    if (r?.ok) {
+      api.getLogger().info(
+        `[code_graph] mirrored summary onto ${r.projectNodeId} ` +
+        `(${msg.summary?.stats?.files || 0} files, ${msg.summary?.stats?.symbols || 0} symbols)`
+      );
+    } else {
+      api.getLogger().warn(`[code_graph] mirror failed: ${r?.error || 'unknown'}`);
+    }
+  } catch (e) {
+    api.getLogger().warn(`[code_graph] handler error: ${e.message}`);
+  }
+}
+
 // ── Prompt sections ─────────────────────────────────────────────────
 // Acorn-specific prompt content. Originally lived inline in
 // src/graph/prompt-sections.js _buildRuntimeSection (~225 lines),
@@ -435,7 +472,7 @@ function buildProjectContextSection(api, opts) {
     }
     if (pc.hasCodeIndex) {
       const head = pc.indexHead ? `head ${pc.indexHead}` : 'present';
-      summary.push(`code_graph: indexed (${head}) — prefer search_symbols / trace_calls / get_snippet over grep+read_file in plan mode`);
+      summary.push(`code_graph: indexed (${head})`);
     }
     if (summary.length) {
       parts.push('');
@@ -443,22 +480,32 @@ function buildProjectContextSection(api, opts) {
       for (const s of summary) parts.push(`- ${s}`);
     }
 
-    // Auto-mirror nudge — fires once per project, until the
-    // code_graph aspect is populated. When the client has an
-    // .acorn/index.db (HasCodeIndex=true) but the project node
-    // doesn't yet carry a code_graph aspect, instruct the agent
-    // to run the architecture + update_code_graph_summary pair as
-    // its first action this turn. Drops out automatically as
-    // soon as the aspect exists, so it never spams the prompt.
-    if (pc.hasCodeIndex && projectId && learner?.db) {
-      const hasCodeGraphAspect = !!learner.db.prepare(
-        "SELECT 1 FROM aspects WHERE node_id = ? AND name = 'code_graph' LIMIT 1"
-      ).get(projectId);
-      if (!hasCodeGraphAspect) {
-        parts.push('');
-        parts.push('**First-action mirror (run this once on first turn of this session):** the local code index exists (`.acorn/index.db`) but the project node has no `code_graph` aspect yet — meaning future sessions on different machines or after the local DB is wiped won\'t see the codebase shape. Call `architecture` (returns clusters, hot paths, entry points, tech stack) and immediately pass the result through `update_code_graph_summary` so the project node carries the summary. ~3-5 seconds total. After that, the aspect persists in the graph and this instruction stops appearing.');
-      }
+    // Always-on codeindex usage prompt — applies in BOTH plan and
+    // execute modes. Without this, execute-mode sessions revert to
+    // grep + read_file by default because the agent's training
+    // doesn't strongly weight the new tools. The "use INSTEAD of
+    // grep" guidance was previously locked to plan-mode Phase 2;
+    // moving it here makes the structural tools the default
+    // search path whenever the index exists.
+    if (pc.hasCodeIndex) {
+      parts.push('');
+      parts.push('### Codebase structural search (PREFER over grep + read_file)');
+      parts.push("This project has a per-file SQLite code index at `.acorn/index.db`. The following tools are **strictly cheaper** than grep + read_file for code questions:");
+      parts.push("- **`search_symbols({name: \"<thing>\"})`** — find a function/class/method/type by name. ~50× cheaper in tokens than `grep -r 'function thing' && read_file`. First reach for this when the user names a symbol.");
+      parts.push("- **`trace_calls({name: \"<symbol>\", direction: \"callers\"})`** — answers \"who calls X\" / \"who depends on X\". Use this for impact reasoning before edits.");
+      parts.push("- **`get_snippet({qname: \"<file>::<container>.<name>\"})`** — fetch the body of one symbol without reading the whole file.");
+      parts.push("- **`architecture()`** — clusters, hot paths, entry points, tech stack. Call once early in any session that involves understanding the codebase shape.");
+      parts.push("- **`impact({paths: [...]})`** — given a list of files about to be edited, returns affected symbols + transitive callers.");
+      parts.push("**Rule of thumb**: if you would otherwise grep for a function/class/type name, try `search_symbols` first. Fall back to grep only when search_symbols returns nothing AND the file extension isn't supported by the indexer (the architecture `notes` field will say so).");
     }
+
+    // Helper-script save nudge — applies whenever the agent has
+    // generated a helper file in `.acorn/scratch/` or in the
+    // project root with no obvious caller. This appears every turn
+    // in execute mode, since that's where helper scripts get
+    // written. Cheap pattern-match nudge; the agent decides
+    // whether to act.
+    parts.push('**If you write a one-off helper (QR generator, log parser, IP probe, build wrapper, anything in `.acorn/scratch/` or a `gen_*` / `*_helper.*` file in the repo root):** call `save_project_script({name, description, language, body})` so future sessions on this project can re-use it via `list_project_scripts` / `get_project_script`. The body lives on a dedicated graph node; future sessions on a different machine still find it. Skipping this means the next session re-writes the same helper from scratch.');
   } catch (e) {
     // Non-fatal — the rest of the prompt still renders.
     api.getLogger().warn('project_memory_summary build failed: ' + e.message);
@@ -960,8 +1007,9 @@ module.exports = function register(api) {
   // session:unobserve still live in core because they touch the
   // gateway-internal _sessionClients fan-out map; future cleanup can
   // expose that primitive via the plugin API.
-  api.registerWsHandler('session:start', (ws, msg) => sessionStartHandler(api, ws, msg));
-  api.registerWsHandler('session:end',   (ws, msg) => sessionEndHandler(api, ws, msg));
+  api.registerWsHandler('session:start',      (ws, msg) => sessionStartHandler(api, ws, msg));
+  api.registerWsHandler('session:end',        (ws, msg) => sessionEndHandler(api, ws, msg));
+  api.registerWsHandler('code_graph:summary', (ws, msg) => codeGraphSummaryHandler(api, ws, msg));
 
   // wsClose lifecycle hook — ungraceful-close distillation chain. The
   // graceful path (session:end frame) sets distilled_at first;
