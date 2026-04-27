@@ -313,6 +313,44 @@ function sessionEndHandler(api, ws, msg) {
   }
 }
 
+// saveProjectScriptFromFileHandler — receives an auto-saved helper
+// script the CLI flagged via path-pattern match (.acorn/scratch/*,
+// gen_*.py, *_helper.*, etc.) and persists it to the graph via
+// scripts.upsertScriptNode. Lets the agent stop remembering
+// save_project_script — the CLI fires this deterministically every
+// time write_file/edit_file lands on a helper path. Same secret-
+// pattern guard as the agent-callable tool, so credentials don't
+// auto-leak.
+function saveProjectScriptFromFileHandler(api, ws, msg) {
+  if (!msg?.sessionId || !msg?.cwd || !msg?.name || !msg?.body) return;
+  const ctx = api._appContext;
+  const learner = ctx?.tools?.learner || ctx?.learner;
+  if (!learner) return;
+  const userId = ws?._user || msg.userName || 'anon';
+  const projectId = scriptsLib.projectNodeId(userId, msg.cwd);
+  try {
+    const r = scriptsLib.upsertScriptNode(learner, {
+      projectId,
+      sessionId: msg.sessionId,
+      name: msg.name,
+      description: msg.description,
+      language: msg.language,
+      body: msg.body,
+      tags: Array.isArray(msg.tags) ? msg.tags : ['auto-saved'],
+      force: msg.force === true,
+    });
+    if (r?.ok) {
+      api.getLogger().info(`[scripts] auto-saved ${r.scriptNodeId} from ${msg.path || '(unknown)'} (${msg.language || '?'}, ${(msg.body || '').length} bytes)`);
+    } else if (r?.reason === 'suspected_secret') {
+      api.getLogger().warn(`[scripts] auto-save skipped for ${msg.path}: secret pattern detected (${r.pattern}) on line ${r.line}`);
+    } else if (!r?.ok) {
+      api.getLogger().warn(`[scripts] auto-save failed for ${msg.path}: ${r?.error || 'unknown'}`);
+    }
+  } catch (e) {
+    api.getLogger().warn(`[scripts] from-file handler error: ${e.message}`);
+  }
+}
+
 // codeGraphSummaryHandler — receives a structural-index summary
 // payload from the acorn CLI and writes it to the project node's
 // `code_graph` aspect via projectsLib.upsertProjectCodeGraph.
@@ -466,9 +504,10 @@ function buildProjectContextSection(api, opts) {
     const userId = opts.userId || opts.userName || 'anon';
     const projectId = pc.cwd ? scriptsLib.projectNodeId(userId, pc.cwd) : null;
     const summary = [];
+    let savedScripts = [];
     if (projectId && learner?.db) {
-      const scriptsCount = scriptsLib.listScriptsIndex(learner, projectId).length;
-      if (scriptsCount > 0) summary.push(`scripts: ${scriptsCount} saved (use list_project_scripts to enumerate)`);
+      savedScripts = scriptsLib.listScriptsIndex(learner, projectId);
+      if (savedScripts.length > 0) summary.push(`scripts: ${savedScripts.length} saved (listed below — re-use via get_project_script)`);
     }
     if (pc.hasCodeIndex) {
       const head = pc.indexHead ? `head ${pc.indexHead}` : 'present';
@@ -478,6 +517,27 @@ function buildProjectContextSection(api, opts) {
       parts.push('');
       parts.push('### Project memory');
       for (const s of summary) parts.push(`- ${s}`);
+    }
+
+    // Inline saved-script list so the agent sees them as passive
+    // context — no tool call needed to discover what's there. Cap at
+    // 30 entries so a project with hundreds of scripts doesn't
+    // dominate the prompt; if there are more, the count line above
+    // still tells the agent to call list_project_scripts.
+    if (savedScripts.length > 0) {
+      parts.push('');
+      parts.push('### Saved helper scripts (re-use before re-deriving)');
+      parts.push('Each line: `name (lang) — description`. Fetch the body via `get_project_script({name})`. The CLI will rehydrate the file under `.acorn/scratch/<name>.<ext>` so you can `exec` it directly.');
+      const shown = savedScripts.slice(0, 30);
+      for (const s of shown) {
+        const tagBits = (s.tags && s.tags.length) ? ` [${s.tags.join(',')}]` : '';
+        const stats = (s.success_count || s.fail_count) ? ` (✓${s.success_count || 0}/✗${s.fail_count || 0})` : '';
+        parts.push(`- **${s.name}** (${s.language || '?'})${tagBits}${stats} — ${s.description || '(no description)'}`);
+      }
+      if (savedScripts.length > shown.length) {
+        parts.push(`- … and ${savedScripts.length - shown.length} more (call \`list_project_scripts\` to enumerate)`);
+      }
+      parts.push('**Before writing a new helper, scan this list — if one matches the task, fetch and run it instead.** This is how the next session inherits the work.');
     }
 
     // Always-on codeindex usage prompt — applies in BOTH plan and
@@ -1020,9 +1080,10 @@ module.exports = function register(api) {
   // session:unobserve still live in core because they touch the
   // gateway-internal _sessionClients fan-out map; future cleanup can
   // expose that primitive via the plugin API.
-  api.registerWsHandler('session:start',      (ws, msg) => sessionStartHandler(api, ws, msg));
-  api.registerWsHandler('session:end',        (ws, msg) => sessionEndHandler(api, ws, msg));
-  api.registerWsHandler('code_graph:summary', (ws, msg) => codeGraphSummaryHandler(api, ws, msg));
+  api.registerWsHandler('session:start',                 (ws, msg) => sessionStartHandler(api, ws, msg));
+  api.registerWsHandler('session:end',                   (ws, msg) => sessionEndHandler(api, ws, msg));
+  api.registerWsHandler('code_graph:summary',            (ws, msg) => codeGraphSummaryHandler(api, ws, msg));
+  api.registerWsHandler('save_project_script:from_file', (ws, msg) => saveProjectScriptFromFileHandler(api, ws, msg));
 
   // wsClose lifecycle hook — ungraceful-close distillation chain. The
   // graceful path (session:end frame) sets distilled_at first;
