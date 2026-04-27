@@ -507,16 +507,18 @@ function buildProjectContextSection(api, opts) {
     // whether to act.
     parts.push('**If you write a one-off helper (QR generator, log parser, IP probe, build wrapper, anything in `.acorn/scratch/` or a `gen_*` / `*_helper.*` file in the repo root):** call `save_project_script({name, description, language, body})` so future sessions on this project can re-use it via `list_project_scripts` / `get_project_script`. The body lives on a dedicated graph node; future sessions on a different machine still find it. Skipping this means the next session re-writes the same helper from scratch.');
 
-    // web_serve override notice for acorn sessions. The default
-    // server-side description points at SPORE's Traefik-proxied
-    // /workspace hosting flavor — useless when the user's intent
-    // is "let me reach a file from my phone over the LAN". The
-    // Go CLI claims web_serve locally for action=start/stop/status,
-    // serving from the user's actual filesystem on a real LAN
-    // port. action=backend (vault keys + Traefik) still routes
-    // server-side. Spell that out so the agent doesn't get
-    // confused by the dual implementation.
-    parts.push('**`web_serve` for acorn sessions runs LOCALLY on your machine** (NOT inside the SPORE container). action=start/stop/status host the directory on your real LAN — the response includes a `lan_urls` array your phone can reach over Wi-Fi. Use this for "show me the QR code on my phone", "preview a static site I just built", "expose a directory to a sibling laptop". The server-side Traefik/vault-key/backend flavor only kicks in for action=backend (which falls through to SPORE). For local backend processes, just use `exec` — it inherits your env including any keys you have set.');
+    // web_serve is forbidden for acorn sessions. The server-side
+    // version hosts /workspace inside Docker (useless to the user
+    // on their LAN); the Go CLI now refuses any web_serve call to
+    // prevent the agent reaching for it out of habit. Every
+    // legitimate use case — static file hosting, dev servers,
+    // backend processes — is better served by `exec` running on
+    // the user's machine.
+    parts.push('**Do NOT call `web_serve`.** It is disabled for acorn sessions and will return an error. For ANY HTTP serving on the user\'s machine, use `exec` instead:');
+    parts.push("  - Static directory: `exec(\"python3 -m http.server 8000\", workdir=\"<dir>\")` (or `npx serve <dir>`).");
+    parts.push("  - Dev server: `exec(\"npm run dev\")` / `exec(\"npx expo start\")` / whatever the project's package.json defines — it'll bind to the user's real LAN interface and inherits their full environment.");
+    parts.push("  - Get the LAN URL to share: `exec(\"ipconfig\")` on Windows or `exec(\"ip -o addr show | grep inet\")` on Linux/macOS to find the user's IP, then construct `http://<ip>:<port>/`.");
+    parts.push("  - For long-running servers, the executor auto-backgrounds dev-server commands (npm/yarn/pnpm/expo/etc.) so the chat stays responsive — same as `/bg`.");
   } catch (e) {
     // Non-fatal — the rest of the prompt still renders.
     api.getLogger().warn('project_memory_summary build failed: ' + e.message);
