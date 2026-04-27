@@ -729,6 +729,12 @@ function buildPlanModeSection(api, opts) {
   parts.push('  - `ls .acorn/scratch/` — `gen-qr.js` should be present');
   parts.push('Pick checks that use existing project tooling (tests, curl, read_file) and have an unambiguous pass signal. Avoid "it should feel better" or "make sure it looks right" — those are not verifications. If the project has no test runner and no live endpoint, fall back to targeted `read_file` / `exec --version` checks that prove the expected state.');
   parts.push('');
+  if (pc.hasCodeIndex) {
+    parts.push('**For ANY symbol you create or modify in the plan, ALSO include a `verify_implementation` check** as part of PHASE 6. This is the goal-backward 4-level audit: exists → substantive → wired → export-level. It catches stub functions, unwired components, comment-only bodies, and `panic("not implemented")`-style placeholders that your other verification checks would miss. Example:');
+    parts.push('  - `verify_implementation({ qnames: ["src/foo.ts::Bar.baz", "src/foo.ts::helper"] })` — both must report exists/substantive/wired/export_level all true. Failures pinpoint the gap (e.g. "wired but every caller is in the same file → not actually used externally yet").');
+    parts.push('Use it BEFORE declaring the implementation tasks done in execute mode. If it reports `failed > 0`, the work isn\'t complete — re-open the failing tasks via `task_progress({id, status:"error"})` and fix.');
+    parts.push('');
+  }
   parts.push('Format the VERIFICATION section as a bulleted list under a `## Verification` heading inside the plan. The user will review it alongside the steps before accepting.');
   parts.push('');
   parts.push('RULES (these are HARD constraints, not suggestions):');
@@ -904,6 +910,23 @@ module.exports = function register(api) {
       },
     },
     execute: requireAcornClient('impact'),
+  });
+
+  api.registerTool('verify_implementation', {
+    namespaced: false,
+    description:
+      'Goal-backward 4-level audit: for a list of qualified symbol names (or every symbol in a list of files), confirm exists → substantive → wired → export_level. ' +
+      'Catches stub functions (panic("not implemented"), Python `pass`-only, comment-only bodies), unwired components (no callers anywhere), and "wired but only used in the same file" (not actually exported in practice). ' +
+      'CALL THIS for every symbol your plan claims to create or modify, BEFORE marking the implementation step done in execute mode. A `failed > 0` result means the work is incomplete — open a task_progress error on the failing step and fix. ' +
+      'Use either `qnames` (explicit list of fully-qualified names) or `paths` (verify every indexed symbol declared in those files), or both — results merge.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        qnames: { type: 'array', items: { type: 'string' }, description: 'Qualified names like `internal/foo/bar.go::Baz` or `src/foo.ts::Cls.method`.' },
+        paths:  { type: 'array', items: { type: 'string' }, description: 'Repo-relative file paths; verifies every indexed symbol declared there.' },
+      },
+    },
+    execute: requireAcornClient('verify_implementation'),
   });
 
   // Prompt sections — Project Context (every acorn turn) + Plan Mode (when
