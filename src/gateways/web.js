@@ -103,7 +103,7 @@ function _isOnboardingNeeded(dataDir, config) {
     try { hasUsers = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8')).length > 0; } catch { /* silent: malformed JSON → fallback */ }
     const hasProvider = !!(
       config.anthropicApiKey || config.openaiApiKey || config.openrouterApiKey ||
-      config.geminiApiKey || config.localModelBaseUrl ||
+      config.localModelBaseUrl ||
       (config.customProviders && Object.keys(config.customProviders).length > 0)
     );
     const hasModel = !!(config.plannerModel || config.normalModel || config.casualModel);
@@ -156,6 +156,11 @@ function _ephemeralConfig(formProviders = {}) {
     openrouterReferer: formProviders.openrouter?.referer || '',
     localModelBaseUrl: formProviders.local?.baseUrl || '',
     localModelApiKey: formProviders.local?.apiKey || '',
+    // geminiApiKey persists to GEMINI_API_KEY env. Used by GeminiClient
+    // (chat completions) and read as a legacy fallback by the
+    // gemini-embedder plugin. The plugin's own settings pane is the
+    // recommended way to configure the embedder; this field stays for
+    // chat-completion users until that path also moves to a plugin.
     geminiApiKey: formProviders.gemini?.apiKey || '',
     customProviders: cp,
     apiTimeoutMs: 240000,
@@ -165,15 +170,10 @@ function _ephemeralConfig(formProviders = {}) {
 async function _probeProvider(name, body) {
   const { createClientForModel } = require('../providers');
   const cfg = _ephemeralConfig({ [name]: body, ...body.providers || {} });
-  if (name === 'gemini') {
-    const apiKey = body.apiKey;
-    if (!apiKey) return { ok: false, error: 'missing apiKey' };
-    const { embedText } = require('../graph/embedder');
-    const t0 = Date.now();
-    const vec = await embedText('hello', apiKey).catch(e => { throw new Error('Gemini: ' + (e?.message || e)); });
-    if (!Array.isArray(vec) || !vec.length) return { ok: false, error: 'empty embedding response' };
-    return { ok: true, latency_ms: Date.now() - t0, model: 'gemini-embedding-2-preview', excerpt: `${vec.length}-dim vector` };
-  }
+  // Embedder providers (gemini-embedder, embedder-gemma) own their own
+  // /test endpoints — see plugins/<name>/index.js. The probe path here
+  // only handles chat-completion providers.
+
   // Pick a probe model per provider
   let probeModel;
   if (name === 'anthropic') { if (!cfg.anthropicApiKey) return { ok: false, error: 'missing apiKey' }; probeModel = 'claude-haiku-4-5-20251001'; }
@@ -318,8 +318,6 @@ async function _listModelsForProvider({ kind, baseUrl, apiKey, authHeader }) {
   } else if (kind === 'openrouter') {
     url = (baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '') + '/models';
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-  } else if (kind === 'gemini') {
-    return { ok: false, error: 'Gemini is embeddings-only' };
   } else if (kind === 'custom' || kind === 'local') {
     if (!baseUrl) return { ok: false, error: 'missing baseUrl' };
     url = baseUrl.replace(/\/$/, '') + '/models';
@@ -1510,7 +1508,6 @@ class WebGateway {
       if (providers.openai?.apiKey) configuredProviders.push('OpenAI (OPENAI_API_KEY)');
       if (providers.openrouter?.apiKey) configuredProviders.push('OpenRouter (OPENROUTER_API_KEY)');
       if (providers.local?.apiKey || providers.local?.baseUrl) configuredProviders.push('Local OAI-compatible (LOCAL_MODEL_*)');
-      if (providers.gemini?.apiKey) configuredProviders.push('Gemini Embedder (GEMINI_API_KEY)');
       if (Array.isArray(providers.custom)) {
         for (const p of providers.custom) {
           if (p?.name && (p.key || p.url)) configuredProviders.push(`Custom provider: ${p.name}`);
@@ -4613,15 +4610,16 @@ class WebGateway {
           // Fall through to default unknown-type handling if nothing matched.
         }
 
-        // session:* protocol contract — bare `session:start` /
-        // `session:end` / `session:observe` / `session:unobserve` frames
-        // route to the FIRST plugin that registered a handler for them.
-        // Generic — core doesn't know which plugin (acorn-cli, future
-        // CLIs, etc.) owns the contract. session:observe and
-        // session:unobserve still fall through to the in-tree handlers
-        // below when no plugin claims them, because those handlers need
-        // the gateway-internal _sessionClients fan-out map.
-        if (typeof msg.type === 'string' && msg.type.startsWith('session:')) {
+        // Plugin WS-frame dispatch — any namespaced frame (containing
+        // a `:`) gets a chance to route to a plugin handler. The
+        // `session:*` family was the original use case; new contracts
+        // (`code_graph:summary`, `save_project_script:from_file`,
+        // future plugin protocols) ride the same routing.
+        // session:observe and session:unobserve still fall through to
+        // the in-tree handlers when no plugin claims them, because
+        // those handlers need the gateway-internal _sessionClients
+        // fan-out map.
+        if (typeof msg.type === 'string' && msg.type.includes(':') && msg.type !== 'tool:result' && msg.type !== 'tool:approval-resolved') {
           const mgr = this.tools?._pluginManager;
           const resolved = mgr?.resolveBareWsHandler?.(msg.type);
           if (resolved) {
@@ -4632,8 +4630,8 @@ class WebGateway {
             }
             return;
           }
-          // Fall through — observe/unobserve in-tree handlers below
-          // still need to run when no plugin claims them.
+          // Fall through — session:observe/unobserve and other in-tree
+          // handlers below still need to run when no plugin claims them.
         }
 
         if (msg.type === 'ping') {
