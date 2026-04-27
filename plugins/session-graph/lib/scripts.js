@@ -490,6 +490,47 @@ function extensionForLanguage(lang) {
   }
 }
 
+// pruneStaleScripts removes `script:` nodes (and their scripts_index
+// summary entries) for the given project that match a stale-ness
+// rule. Default rule: last_used older than `daysIdle` AND
+// success_count < `maxSuccess` — i.e. either "never run successfully"
+// or "ran successfully but was abandoned long ago".
+//
+// Returns { ok, pruned: [name, ...], scanned: N }.
+//
+// Called opportunistically from the acorn-cli plugin's afterLearn
+// hook (gated to once per 24h per project so it doesn't re-scan on
+// every turn). Also exposed as a future agent-callable / operator
+// tool if we want to surface it.
+function pruneStaleScripts(learner, projectId, opts = {}) {
+  if (!learner?.db || !projectId) return { ok: false, error: 'invalid input' };
+  const daysIdle = Number(opts.daysIdle ?? 90);
+  const maxSuccess = Number(opts.maxSuccess ?? 2);
+  const cutoffMs = Date.now() - daysIdle * 86400 * 1000;
+
+  const db = learner.db;
+  const entries = loadIndexEntries(db, projectId);
+  let scanned = 0;
+  const pruned = [];
+  for (const entry of entries) {
+    scanned++;
+    const lastMs = Date.parse(entry.last_used || '') || 0;
+    const succ = Number(entry.success_count || 0);
+    if (lastMs && lastMs > cutoffMs) continue;       // recently used
+    if (succ >= maxSuccess) continue;                // proven reliable
+    // Drop the dedicated node (cascades to body/meta/stats aspects
+    // via FK ON DELETE CASCADE) and its index entry.
+    const scriptId = scriptNodeId(projectId, entry.name);
+    if (scriptId) {
+      db.prepare("DELETE FROM edges WHERE source = ? AND target = ? AND type = 'has_script'").run(projectId, scriptId);
+      db.prepare('DELETE FROM nodes WHERE id = ?').run(scriptId);
+    }
+    deleteIndexEntry(db, projectId, entry.name);
+    pruned.push(entry.name);
+  }
+  return { ok: true, scanned, pruned };
+}
+
 module.exports = {
   projectNodeId,
   scriptNodeId,
@@ -499,6 +540,7 @@ module.exports = {
   getScriptNode,
   recordScriptOutcome,
   migrateScratchHelpers,
+  pruneStaleScripts,
   extensionForLanguage,
   // Exported for tests.
   _internal: {

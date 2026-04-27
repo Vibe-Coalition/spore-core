@@ -18,6 +18,7 @@
 const { noteDiscovery } = require('./lib/discovery');
 const scripts = require('./lib/scripts');
 const projectsLib = require('./lib/projects');
+const decisions = require('./lib/decisions');
 
 module.exports = function register(api) {
   // note_discovery tool — bare name (namespaced:false) preserves the
@@ -211,5 +212,116 @@ module.exports = function register(api) {
     },
   });
 
-  api.getLogger().info('Plugin ready — note_discovery + save_project_script + list_project_scripts + get_project_script + record_script_outcome + update_code_graph_summary tools registered. Lib modules (sessions, projects, heuristics, checkpoints, discovery, scripts) available via require for dependent plugins.');
+  // ── Decisions (ADR-style) ─────────────────────────────────────────
+  // Records non-trivial architectural choices the agent and operator
+  // make over the lifetime of a project. Same dedicated-node pattern
+  // as scripts: `decision:<projectId>:<id>` carries body + meta;
+  // `decisions_index` aspect on the project node carries one one-line
+  // summary entry per ADR. status enum: proposed | accepted |
+  // rejected | superseded | deprecated.
+
+  api.registerTool('decisions_new', {
+    namespaced: false,
+    description:
+      'Record a new architectural decision (ADR) on the current project. Saves the full body to a dedicated `decision:<projectId>:<id>` node and a summary entry on the project\'s `decisions_index` aspect. ' +
+      'WHEN to call: when a non-obvious tradeoff is made — language choice, framework, data model shape, deployment target, library replacement, etc. ' +
+      'Default status is "proposed"; the operator marks it "accepted" or "rejected" later. ' +
+      'Decisions are intentionally NOT born temp — they survive session-end distillation, since they record explicit choices that should outlive the session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id:     { type: 'string', description: 'Optional short id (e.g. "0042" or "auth-rewrite"); defaults to a slug of the title.' },
+        title:  { type: 'string', description: 'One-line summary of the decision.' },
+        body:   { type: 'string', description: 'Full ADR text — context, options considered, consequences. Markdown supported.' },
+        status: { type: 'string', enum: ['proposed', 'accepted', 'rejected', 'superseded', 'deprecated'], description: 'Default: proposed.' },
+        author: { type: 'string', description: 'Optional — defaults to the session userId.' },
+      },
+      required: ['title', 'body'],
+    },
+    execute: (input, ctx) => {
+      const projectId = ctxProjectId(ctx);
+      if (!projectId) return { ok: false, error: 'no project context — decisions_new only works inside an acorn session' };
+      const learner = api._appContext?.learner;
+      const author = input?.author || ctx?.userName || ctx?.userId || null;
+      return decisions.newDecision(learner, {
+        projectId,
+        sessionId: ctx?.channelId || null,
+        id:    input.id,
+        title: input.title,
+        body:  input.body,
+        status: input.status,
+        author,
+      });
+    },
+  });
+
+  api.registerTool('decisions_list', {
+    namespaced: false,
+    description:
+      'List the architectural decisions recorded on the current project. Returns id + title + status + created_at for each — body NOT included. ' +
+      'Cheap: reads only the `decisions_index` aspect, never the dedicated decision: nodes. Call this in plan mode to surface ADR constraints — accepted decisions are non-negotiable; the plan must respect them.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['proposed', 'accepted', 'rejected', 'superseded', 'deprecated'], description: 'Optional filter.' },
+      },
+    },
+    execute: (input, ctx) => {
+      const projectId = ctxProjectId(ctx);
+      if (!projectId) return { ok: false, error: 'no project context' };
+      const learner = api._appContext?.learner;
+      const list = decisions.listDecisions(learner, projectId, { status: input?.status });
+      return { ok: true, count: list.length, decisions: list };
+    },
+  });
+
+  api.registerTool('decisions_get', {
+    namespaced: false,
+    description:
+      'Fetch the full body + meta of one decision recorded on the current project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Decision id (matches what decisions_list returned).' },
+      },
+      required: ['id'],
+    },
+    execute: (input, ctx) => {
+      const projectId = ctxProjectId(ctx);
+      if (!projectId) return { ok: false, error: 'no project context' };
+      const learner = api._appContext?.learner;
+      return decisions.getDecision(learner, projectId, input.id);
+    },
+  });
+
+  api.registerTool('decisions_update', {
+    namespaced: false,
+    description:
+      'Update an existing decision — change its status (e.g. "proposed" → "accepted"), rewrite the body, or fix the title. ' +
+      'Use this when the operator marks an ADR accepted, supersedes one, or revises the rationale. The created_at is preserved; updated_at refreshes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id:     { type: 'string', description: 'Decision id.' },
+        status: { type: 'string', enum: ['proposed', 'accepted', 'rejected', 'superseded', 'deprecated'] },
+        body:   { type: 'string' },
+        title:  { type: 'string' },
+      },
+      required: ['id'],
+    },
+    execute: (input, ctx) => {
+      const projectId = ctxProjectId(ctx);
+      if (!projectId) return { ok: false, error: 'no project context' };
+      const learner = api._appContext?.learner;
+      return decisions.updateDecision(learner, {
+        projectId,
+        id:     input.id,
+        status: input.status,
+        body:   input.body,
+        title:  input.title,
+      });
+    },
+  });
+
+  api.getLogger().info('Plugin ready — note_discovery + save/list/get_project_script + record_script_outcome + update_code_graph_summary + decisions_new/list/get/update tools registered. Lib modules (sessions, projects, heuristics, checkpoints, discovery, scripts, decisions) available via require for dependent plugins.');
 };

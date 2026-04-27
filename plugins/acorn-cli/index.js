@@ -209,6 +209,37 @@ const scriptsLib     = require('../session-graph/lib/scripts');
 // _noteProjectActivity method that lived in src/agent/loop.js before
 // this phase. Gates on projectContext presence so it's a no-op for
 // web/discord turns where opts.projectContext is undefined.
+// maybePruneStaleScripts opportunistically removes script: nodes that
+// haven't been used in 90 days AND haven't proven reliable
+// (success_count < 2). Gated to once per 24h per project via a marker
+// on the project node's `extra` JSON, so the afterTurn hook doesn't
+// re-scan on every chat turn. Safe to run inside afterTurn — operates
+// on a small index-aspect list, completes in microseconds.
+function maybePruneStaleScripts(api, opts) {
+  if (opts?.platform !== 'cli' || !opts?.projectContext?.cwd) return;
+  const learner = api._appContext?.learner;
+  if (!learner?.db) return;
+  try {
+    const userId = opts.userId || opts.userName || 'anon';
+    const projectId = scriptsLib.projectNodeId(userId, opts.projectContext.cwd);
+    const projRow = learner.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(projectId);
+    if (!projRow) return;
+    let extra = {};
+    try { extra = projRow.extra ? JSON.parse(projRow.extra) : {}; } catch { /* ignore */ }
+    const lastPrune = Date.parse(extra.scripts_last_pruned || '') || 0;
+    if (lastPrune && Date.now() - lastPrune < 24 * 60 * 60 * 1000) return; // 24h cooldown
+    const r = scriptsLib.pruneStaleScripts(learner, projectId);
+    if (!r?.ok) return;
+    extra.scripts_last_pruned = new Date().toISOString();
+    learner.db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extra), projectId);
+    if (r.pruned && r.pruned.length > 0) {
+      api.getLogger().info(`[scripts] pruned ${r.pruned.length} stale scripts on ${projectId}: ${r.pruned.join(', ')}`);
+    }
+  } catch (e) {
+    api.getLogger().warn(`[scripts] prune failed: ${e.message}`);
+  }
+}
+
 function noteProjectActivity(api, opts, finalText, toolLog) {
   const learner = api._appContext?.learner;
   if (!opts?.projectContext || !learner) return;
@@ -410,6 +441,23 @@ function buildProjectContextSection(api, opts) {
       parts.push('');
       parts.push('### Project memory');
       for (const s of summary) parts.push(`- ${s}`);
+    }
+
+    // Auto-mirror nudge — fires once per project, until the
+    // code_graph aspect is populated. When the client has an
+    // .acorn/index.db (HasCodeIndex=true) but the project node
+    // doesn't yet carry a code_graph aspect, instruct the agent
+    // to run the architecture + update_code_graph_summary pair as
+    // its first action this turn. Drops out automatically as
+    // soon as the aspect exists, so it never spams the prompt.
+    if (pc.hasCodeIndex && projectId && learner?.db) {
+      const hasCodeGraphAspect = !!learner.db.prepare(
+        "SELECT 1 FROM aspects WHERE node_id = ? AND name = 'code_graph' LIMIT 1"
+      ).get(projectId);
+      if (!hasCodeGraphAspect) {
+        parts.push('');
+        parts.push('**First-action mirror (run this once on first turn of this session):** the local code index exists (`.acorn/index.db`) but the project node has no `code_graph` aspect yet — meaning future sessions on different machines or after the local DB is wiped won\'t see the codebase shape. Call `architecture` (returns clusters, hot paths, entry points, tech stack) and immediately pass the result through `update_code_graph_summary` so the project node carries the summary. ~3-5 seconds total. After that, the aspect persists in the graph and this instruction stops appearing.');
+      }
     }
   } catch (e) {
     // Non-fatal — the rest of the prompt still renders.
@@ -859,6 +907,7 @@ module.exports = function register(api) {
     checkpointsLib.captureFailureFix(api, opts, toolLog || []);
     checkpointsLib.recordRoundCheckpoint(api, opts, toolLog || [], finalText);
     noteProjectActivity(api, opts, finalText, toolLog || []);
+    maybePruneStaleScripts(api, opts);
   });
 
   // No plugin settings pane — the SPORE invite key (used by both this

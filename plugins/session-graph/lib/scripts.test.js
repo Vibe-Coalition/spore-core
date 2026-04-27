@@ -198,5 +198,44 @@ console.log('\nplugins/session-graph/lib/scripts.test.js\n');
   ok('migration marker stamped on project.extra', extra.scripts_migrated_v1 === true);
 }
 
+// ── pruneStaleScripts ────────────────────────────────────────────
+{
+  const db = newDb();
+  const learner = { db };
+  const projectId = scripts.projectNodeId('prune', '/proj/x');
+  makeProject(db, projectId);
+
+  // Three scripts with controlled last_used / success_count combos.
+  scripts.upsertScriptNode(learner, { projectId, name: 'recent-unproven', language: 'sh', body: 'true' });
+  scripts.upsertScriptNode(learner, { projectId, name: 'old-unproven',    language: 'sh', body: 'true' });
+  scripts.upsertScriptNode(learner, { projectId, name: 'old-proven',      language: 'sh', body: 'true' });
+
+  // Bump 'old-proven' success_count to 5 — exempt from prune.
+  for (let i = 0; i < 5; i++) scripts.recordScriptOutcome(learner, projectId, 'old-proven', true);
+
+  // Backdate 'old-unproven' and 'old-proven' last_used to 200 days ago.
+  // We cheat the index entry directly since the public API always
+  // touches last_used to now.
+  const old = new Date(Date.now() - 200 * 86400 * 1000).toISOString();
+  for (const name of ['old-unproven', 'old-proven']) {
+    const e = scripts._internal.loadIndexEntries(db, projectId).find(x => x.name === name);
+    if (e) {
+      e.last_used = old;
+      const aspId = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'scripts_index'").get(projectId).id;
+      db.prepare('UPDATE attributes SET content = ? WHERE id = ?').run(JSON.stringify({ ...e, __attrId: undefined }), e.__attrId);
+    }
+  }
+
+  const r = scripts.pruneStaleScripts(learner, projectId);
+  ok('prune returns ok',                        r.ok === true && r.scanned === 3);
+  ok('prune drops old-unproven',                r.pruned.includes('old-unproven'));
+  ok('prune keeps recent-unproven',             !r.pruned.includes('recent-unproven'));
+  ok('prune keeps old-proven',                  !r.pruned.includes('old-proven'));
+  ok('pruned script node deleted from db',      !db.prepare("SELECT 1 FROM nodes WHERE id = ?").get(scripts.scriptNodeId(projectId, 'old-unproven')));
+  ok('pruned has_script edge cleaned up',       !db.prepare("SELECT 1 FROM edges WHERE target = ?").get(scripts.scriptNodeId(projectId, 'old-unproven')));
+  ok('pruned entry removed from index',         !scripts.listScriptsIndex(learner, projectId).find(e => e.name === 'old-unproven'));
+  ok('surviving entries still listed',          scripts.listScriptsIndex(learner, projectId).length === 2);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
