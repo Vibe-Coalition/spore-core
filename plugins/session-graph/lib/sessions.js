@@ -811,8 +811,77 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       notesAppended,
       source: 'graphcorn',
     });
+
+    // Archive the session node itself. Distillation has already
+    // mined the useful signal (promotions to permanent nodes,
+    // notes appended onto existing nodes, dropped temps recycled).
+    // The session node's only remaining content — `summary`,
+    // `rounds`, lifecycle metadata — is bookkeeping. Leaving it in
+    // the live graph just clutters the viewer; the prior strategy
+    // of "let the 48h janitor reap it via tempCreated" left a 48h
+    // window of stale session nodes accumulating between runs.
+    //
+    // Now: move the full session payload to recycle_bin (7-day
+    // restore window, same as unpromoted temp nodes), delete the
+    // session's edges (no FK CASCADE on edges.source/target),
+    // delete the node. The graph viewer immediately stops showing
+    // it; future distillations don't see it; cross-session
+    // discovery / context retrieval continues to work because the
+    // discoveries / promoted nodes from this session were already
+    // re-anchored to project nodes during distill (or carry their
+    // own descriptive content).
+    //
+    // Opt out via `config.keepSessionNodes = true` for operators
+    // who want sessions to persist (e.g. for forensics or for
+    // experiments that walk session nodes directly).
+    let archiveResult = { archived: false };
+    if (!config?.keepSessionNodes) {
+      try {
+        const sessNode = db.prepare('SELECT id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, created, updated, extra FROM nodes WHERE id = ?').get(id);
+        if (sessNode) {
+          const sessAspects = db.prepare(`
+            SELECT a.id AS aspect_id, a.name AS aspect_name, a.weight, a.extracted_with AS aspect_extracted_with,
+                   att.id AS attr_id, att.content, att.importance, att.source, att.event_date, att.document_date, att.source_excerpt
+            FROM aspects a
+            LEFT JOIN attributes att ON att.aspect_id = a.id
+            WHERE a.node_id = ?
+          `).all(id);
+          const sessEdges = db.prepare(
+            'SELECT id, source, target, type, weight, extracted_with FROM edges WHERE source = ? OR target = ?'
+          ).all(id, id);
+
+          const archiveExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+          const payload = JSON.stringify({
+            node: sessNode,
+            aspects: sessAspects,
+            edges: sessEdges,
+            archived_reason: 'session distillation complete',
+            archived_at: new Date().toISOString(),
+          });
+          db.prepare(
+            "INSERT INTO recycle_bin (item_type, item_id, label, payload, deleted_by, reason, confidence, expires_at) VALUES ('node', ?, ?, ?, 'graphcorn-distill', ?, 1.0, ?)"
+          ).run(id, sessNode.label, payload, `session ${sessionId} archived after distill`, archiveExpiresAt);
+
+          // Delete edges first (no FK CASCADE on source/target).
+          db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(id, id);
+          // Aspects + attributes cascade via the schema's ON DELETE CASCADE.
+          db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
+
+          graphEvents.emit('change', { op: 'node:delete', nodeId: id, source: 'graphcorn-archive' });
+          archiveResult = { archived: true, edgesRemoved: sessEdges.length, aspectsRemoved: new Set(sessAspects.map(r => r.aspect_id)).size };
+          if (log) log.info(`[distill] ${id} archived to recycle_bin (${archiveResult.edgesRemoved} edges, ${archiveResult.aspectsRemoved} aspects, restorable until ${archiveExpiresAt})`);
+        }
+      } catch (e) {
+        // Archive failure is non-fatal — distillation already
+        // succeeded. The session node will be cleaned by the 48h
+        // janitor as before.
+        if (log) log.warn(`[distill] ${id} archive failed (distill itself ok): ${e.message}`);
+        archiveResult = { archived: false, error: e.message };
+      }
+    }
+
     if (log) log.info(`[distill] ${id} done: promoted=${promotedIds.size} created=${createdCount.value} dropped=${dropped} notes=${notesAppended} model=${model}`);
-    return { promoted: promotedIds.size, created: createdCount.value, dropped, notesAppended };
+    return { promoted: promotedIds.size, created: createdCount.value, dropped, notesAppended, archived: archiveResult.archived };
   } catch (e) {
     extraObj.distilling = false;
     extraObj.distill_error = e.message;
