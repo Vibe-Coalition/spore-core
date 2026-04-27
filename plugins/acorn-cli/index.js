@@ -506,6 +506,17 @@ function buildProjectContextSection(api, opts) {
     // written. Cheap pattern-match nudge; the agent decides
     // whether to act.
     parts.push('**If you write a one-off helper (QR generator, log parser, IP probe, build wrapper, anything in `.acorn/scratch/` or a `gen_*` / `*_helper.*` file in the repo root):** call `save_project_script({name, description, language, body})` so future sessions on this project can re-use it via `list_project_scripts` / `get_project_script`. The body lives on a dedicated graph node; future sessions on a different machine still find it. Skipping this means the next session re-writes the same helper from scratch.');
+
+    // web_serve override notice for acorn sessions. The default
+    // server-side description points at SPORE's Traefik-proxied
+    // /workspace hosting flavor — useless when the user's intent
+    // is "let me reach a file from my phone over the LAN". The
+    // Go CLI claims web_serve locally for action=start/stop/status,
+    // serving from the user's actual filesystem on a real LAN
+    // port. action=backend (vault keys + Traefik) still routes
+    // server-side. Spell that out so the agent doesn't get
+    // confused by the dual implementation.
+    parts.push('**`web_serve` for acorn sessions runs LOCALLY on your machine** (NOT inside the SPORE container). action=start/stop/status host the directory on your real LAN — the response includes a `lan_urls` array your phone can reach over Wi-Fi. Use this for "show me the QR code on my phone", "preview a static site I just built", "expose a directory to a sibling laptop". The server-side Traefik/vault-key/backend flavor only kicks in for action=backend (which falls through to SPORE). For local backend processes, just use `exec` — it inherits your env including any keys you have set.');
   } catch (e) {
     // Non-fatal — the rest of the prompt still renders.
     api.getLogger().warn('project_memory_summary build failed: ' + e.message);
