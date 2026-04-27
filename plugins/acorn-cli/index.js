@@ -351,6 +351,35 @@ function saveProjectScriptFromFileHandler(api, ws, msg) {
   }
 }
 
+// recordScriptOutcomeFromExecHandler — receives an "exec just ran a
+// saved helper script" event from the CLI and bumps the matching
+// script's success_count or fail_count via
+// scripts.recordScriptOutcome. Lets the agent stop calling
+// record_script_outcome by hand: every exec that touches a
+// saved-helper path automatically updates its reliability counters.
+function recordScriptOutcomeFromExecHandler(api, ws, msg) {
+  if (!msg?.sessionId || !msg?.cwd || !msg?.name) return;
+  const ctx = api._appContext;
+  const learner = ctx?.tools?.learner || ctx?.learner;
+  if (!learner) return;
+  const userId = ws?._user || msg.userName || 'anon';
+  const projectId = scriptsLib.projectNodeId(userId, msg.cwd);
+  try {
+    const r = scriptsLib.recordScriptOutcome(learner, projectId, msg.name, msg.ok === true);
+    if (r?.ok) {
+      const which = msg.ok ? 'success' : 'failure';
+      api.getLogger().debug(`[scripts] auto-recorded ${which} for ${msg.name} (${msg.ok ? 'success_count' : 'fail_count'}=${r[msg.ok ? 'success_count' : 'fail_count']})`);
+    } else if (!r?.ok && r?.error && !r.error.includes('no script named')) {
+      // "no script named X" is the common case when an exec touches a
+      // helper-shaped path that wasn't auto-saved (e.g. agent ran a
+      // helper without ever creating it via write_file). Quiet skip.
+      api.getLogger().warn(`[scripts] auto-record failed for ${msg.name}: ${r.error}`);
+    }
+  } catch (e) {
+    api.getLogger().warn(`[scripts] outcome handler error: ${e.message}`);
+  }
+}
+
 // codeGraphSummaryHandler — receives a structural-index summary
 // payload from the acorn CLI and writes it to the project node's
 // `code_graph` aspect via projectsLib.upsertProjectCodeGraph.
@@ -1080,10 +1109,11 @@ module.exports = function register(api) {
   // session:unobserve still live in core because they touch the
   // gateway-internal _sessionClients fan-out map; future cleanup can
   // expose that primitive via the plugin API.
-  api.registerWsHandler('session:start',                 (ws, msg) => sessionStartHandler(api, ws, msg));
-  api.registerWsHandler('session:end',                   (ws, msg) => sessionEndHandler(api, ws, msg));
-  api.registerWsHandler('code_graph:summary',            (ws, msg) => codeGraphSummaryHandler(api, ws, msg));
-  api.registerWsHandler('save_project_script:from_file', (ws, msg) => saveProjectScriptFromFileHandler(api, ws, msg));
+  api.registerWsHandler('session:start',                  (ws, msg) => sessionStartHandler(api, ws, msg));
+  api.registerWsHandler('session:end',                    (ws, msg) => sessionEndHandler(api, ws, msg));
+  api.registerWsHandler('code_graph:summary',             (ws, msg) => codeGraphSummaryHandler(api, ws, msg));
+  api.registerWsHandler('save_project_script:from_file',  (ws, msg) => saveProjectScriptFromFileHandler(api, ws, msg));
+  api.registerWsHandler('record_script_outcome:from_exec',(ws, msg) => recordScriptOutcomeFromExecHandler(api, ws, msg));
 
   // wsClose lifecycle hook — ungraceful-close distillation chain. The
   // graceful path (session:end frame) sets distilled_at first;
