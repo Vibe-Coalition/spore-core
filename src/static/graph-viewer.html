@@ -121,9 +121,17 @@
   /* Login lives at its own /login page now (static/login.html). */
 
   /* ── Onboarding Wizard Overlay ── */
+  /* Same Petri atmospheric backdrop as #canvas — three radial-gradient
+     glows (warm / accent / slate) over --graph-bg. Tokens flip with the
+     theme so the wizard inherits the operator's chosen palette. */
   #onboarding-overlay {
     position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center;
-    background: var(--bg); color: var(--text);
+    color: var(--text);
+    background-color: var(--graph-bg);
+    background-image:
+      radial-gradient(circle at 22% 32%, var(--graph-glow-1) 0%, transparent 42%),
+      radial-gradient(circle at 78% 68%, var(--graph-glow-2) 0%, transparent 48%),
+      radial-gradient(circle at 55% 85%, var(--graph-glow-3) 0%, transparent 40%);
   }
   #onboarding-overlay.hidden { display: none; }
   #onboarding-box {
