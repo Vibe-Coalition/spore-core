@@ -30,10 +30,12 @@ module.exports = function register(api) {
 
   api.registerProvider('openai', (config) => {
     const slot = config?.plugins?.['openai-provider'] || {};
-    const apiKey = slot.apiKey || config.openaiApiKey || process.env.OPENAI_API_KEY || '';
+    // Env wins over slot — Settings-pane Save with stale defaults must
+    // not poison what the wizard / .env wrote.
+    const apiKey = process.env.OPENAI_API_KEY || config.openaiApiKey || slot.apiKey || '';
     if (!apiKey) throw new Error('OpenAI provider: no API key (set plugins.openai-provider.apiKey or OPENAI_API_KEY)');
     return new OAICompatClient({
-      baseURL: slot.baseUrl || config.openaiBaseUrl || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+      baseURL: process.env.OPENAI_BASE_URL || config.openaiBaseUrl || slot.baseUrl || 'https://api.openai.com/v1',
       apiKey,
       timeoutMs: config.apiTimeoutMs || 120000,
     });
@@ -42,7 +44,7 @@ module.exports = function register(api) {
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['openai-provider'] || {};
-      return !!(slot.apiKey || config?.openaiApiKey || process.env.OPENAI_API_KEY);
+      return !!(process.env.OPENAI_API_KEY || config?.openaiApiKey || slot.apiKey);
     },
     defaultBaseUrl: 'https://api.openai.com/v1',
   });
@@ -76,7 +78,7 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/test', async (req, res) => {
     const slot = api.getConfig();
     const host = api.getHostConfig();
-    const apiKey = slot.apiKey || host.openaiApiKey || process.env.OPENAI_API_KEY || '';
+    const apiKey = process.env.OPENAI_API_KEY || host.openaiApiKey || slot.apiKey || '';
     if (!apiKey) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'No API key configured' }));
@@ -84,7 +86,7 @@ module.exports = function register(api) {
     }
     try {
       const t0 = Date.now();
-      const r = await fetch((slot.baseUrl || host.openaiBaseUrl || 'https://api.openai.com/v1').replace(/\/$/, '') + '/models', {
+      const r = await fetch((process.env.OPENAI_BASE_URL || host.openaiBaseUrl || slot.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '') + '/models', {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(10000),
       });

@@ -43,7 +43,9 @@ module.exports = function register(api) {
 
   api.registerProvider('gemini', (config) => {
     const slot = config?.plugins?.['gemini-provider'] || {};
-    const apiKey = slot.apiKey || config.geminiApiKey || process.env.GEMINI_API_KEY || '';
+    // Env wins over slot — Settings-pane Save with stale defaults must
+    // not poison what the wizard / .env wrote.
+    const apiKey = process.env.GEMINI_API_KEY || config.geminiApiKey || slot.apiKey || '';
     if (!apiKey) throw new Error('Gemini provider: no API key (set plugins.gemini-provider.apiKey or GEMINI_API_KEY)');
     return new GeminiClient({ apiKey, timeoutMs: config.apiTimeoutMs || 120000 });
   }, {
@@ -51,7 +53,7 @@ module.exports = function register(api) {
     capabilities: { tools: true, vision: true, audio: true, video: true },
     isConfigured: (config) => {
       const slot = config?.plugins?.['gemini-provider'] || {};
-      return !!(slot.apiKey || config?.geminiApiKey || process.env.GEMINI_API_KEY);
+      return !!(process.env.GEMINI_API_KEY || config?.geminiApiKey || slot.apiKey);
     },
   });
 
@@ -82,7 +84,7 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/test', async (req, res) => {
     const slot = api.getConfig();
     const host = api.getHostConfig();
-    const apiKey = slot.apiKey || host.geminiApiKey || process.env.GEMINI_API_KEY || '';
+    const apiKey = process.env.GEMINI_API_KEY || host.geminiApiKey || slot.apiKey || '';
     if (!apiKey) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'No API key configured' }));

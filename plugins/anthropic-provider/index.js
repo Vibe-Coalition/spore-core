@@ -34,7 +34,10 @@ module.exports = function register(api) {
 
   api.registerProvider('anthropic', (config) => {
     const slot = config?.plugins?.['anthropic-provider'] || {};
-    const apiKey = slot.apiKey || config.anthropicApiKey || process.env.ANTHROPIC_API_KEY || '';
+    // Env wins over slot — Settings-pane Save with stale defaults must
+    // not poison what the wizard / .env wrote. Slot is the fallback for
+    // ops who edit via the UI before any env value exists.
+    const apiKey = process.env.ANTHROPIC_API_KEY || config.anthropicApiKey || slot.apiKey || '';
     return createAnthropicClient({
       apiKey,
       displayName: config.displayName || 'SPORE',
@@ -45,7 +48,7 @@ module.exports = function register(api) {
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['anthropic-provider'] || {};
-      return !!(slot.apiKey || config?.anthropicApiKey || process.env.ANTHROPIC_API_KEY);
+      return !!(process.env.ANTHROPIC_API_KEY || config?.anthropicApiKey || slot.apiKey);
     },
   });
 
@@ -74,7 +77,7 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/test', async (req, res) => {
     const slot = api.getConfig();
     const host = api.getHostConfig();
-    const apiKey = slot.apiKey || host.anthropicApiKey || process.env.ANTHROPIC_API_KEY || '';
+    const apiKey = process.env.ANTHROPIC_API_KEY || host.anthropicApiKey || slot.apiKey || '';
     if (!apiKey) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'No API key configured' }));

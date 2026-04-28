@@ -13,12 +13,13 @@
 
 const { GeminiEmbedder } = require('./lib/gemini-embedder');
 
-// Read the apiKey from gemini-provider's slot. Falls through to the
-// legacy host-level field as a transitional safety net (cleared once
-// gemini-provider's backfill runs and the host field becomes redundant).
+// Read the apiKey from gemini-provider. Env wins over slot so a
+// Settings-pane Save with stale defaults can't override what the
+// wizard / .env wrote (same precedence rule the LLM provider plugins
+// use — single source of truth in env).
 function _resolveApiKey(config) {
   const providerSlot = config?.plugins?.['gemini-provider'] || {};
-  return providerSlot.apiKey || config?.geminiApiKey || process.env.GEMINI_API_KEY || '';
+  return process.env.GEMINI_API_KEY || config?.geminiApiKey || providerSlot.apiKey || '';
 }
 
 module.exports = function register(api) {

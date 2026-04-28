@@ -31,14 +31,16 @@ module.exports = function register(api) {
 
   api.registerProvider('openrouter', (config) => {
     const slot = config?.plugins?.['openrouter-provider'] || {};
-    const apiKey = slot.apiKey || config.openrouterApiKey || process.env.OPENROUTER_API_KEY || '';
+    // Env wins over slot — Settings-pane Save with stale defaults must
+    // not poison what the wizard / .env wrote.
+    const apiKey = process.env.OPENROUTER_API_KEY || config.openrouterApiKey || slot.apiKey || '';
     if (!apiKey) throw new Error('OpenRouter provider: no API key (set plugins.openrouter-provider.apiKey or OPENROUTER_API_KEY)');
     return new OAICompatClient({
-      baseURL: slot.baseUrl || config.openrouterBaseUrl || 'https://openrouter.ai/api/v1',
+      baseURL: process.env.OPENROUTER_BASE_URL || config.openrouterBaseUrl || slot.baseUrl || 'https://openrouter.ai/api/v1',
       apiKey,
       headers: {
-        'HTTP-Referer': slot.referer || config.openrouterReferer || 'https://spore.local',
-        'X-Title': slot.title || config.openrouterTitle || (config.displayName || 'SPORE'),
+        'HTTP-Referer': process.env.OPENROUTER_REFERER || config.openrouterReferer || slot.referer || 'https://spore.local',
+        'X-Title': config.openrouterTitle || slot.title || (config.displayName || 'SPORE'),
       },
       timeoutMs: config.apiTimeoutMs || 120000,
     });
@@ -47,7 +49,7 @@ module.exports = function register(api) {
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['openrouter-provider'] || {};
-      return !!(slot.apiKey || config?.openrouterApiKey || process.env.OPENROUTER_API_KEY);
+      return !!(process.env.OPENROUTER_API_KEY || config?.openrouterApiKey || slot.apiKey);
     },
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
   });
@@ -83,7 +85,7 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/test', async (req, res) => {
     const slot = api.getConfig();
     const host = api.getHostConfig();
-    const apiKey = slot.apiKey || host.openrouterApiKey || process.env.OPENROUTER_API_KEY || '';
+    const apiKey = process.env.OPENROUTER_API_KEY || host.openrouterApiKey || slot.apiKey || '';
     if (!apiKey) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'No API key configured' }));
@@ -91,7 +93,7 @@ module.exports = function register(api) {
     }
     try {
       const t0 = Date.now();
-      const r = await fetch((slot.baseUrl || host.openrouterBaseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '') + '/models', {
+      const r = await fetch((process.env.OPENROUTER_BASE_URL || host.openrouterBaseUrl || slot.baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '') + '/models', {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(10000),
       });
