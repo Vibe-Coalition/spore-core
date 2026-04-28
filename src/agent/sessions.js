@@ -382,7 +382,7 @@ class SessionManager {
     
     const messages = rows.map(row => {
       const msg = { role: row.role };
-      
+
       // Try to parse structured content
       try {
         const parsed = JSON.parse(row.content);
@@ -396,12 +396,44 @@ class SessionManager {
       } catch {
         msg.content = row.content;
       }
-      
+
       return msg;
     });
 
+    // Strip thinking / redacted_thinking blocks from historical assistant
+    // turns. They're provider-specific scratch state, not conversational
+    // substance. Two reasons to drop them on replay:
+    //
+    // 1. Cross-vendor safety: thinking blocks captured from an OAI-compat
+    //    backend (vLLM, GLM, BFL) carry no Anthropic `signature`. If the
+    //    operator switches the model to claude-opus-4-7 mid-session, the
+    //    Anthropic API replays history and returns
+    //    `messages.N.content.M.thinking.signature: Field required` on the
+    //    pre-existing unsigned block.
+    //
+    // 2. Token waste: thinking content can be tens of thousands of tokens
+    //    per turn. The model doesn't need its OWN past reasoning replayed
+    //    back at it as user-visible context — only the live turn's
+    //    thinking blocks need to round-trip (and only when followed by a
+    //    tool_use, which agent/loop pushes directly from response.content
+    //    with signatures intact, never from this getHistory path).
+    //
+    // If a turn ends up with zero content blocks after stripping (e.g. an
+    // assistant message that was thinking-only), drop the whole message
+    // so the API doesn't see an empty content array.
+    const stripped = [];
+    for (const msg of messages) {
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        const filtered = msg.content.filter(b => b?.type !== 'thinking' && b?.type !== 'redacted_thinking');
+        if (filtered.length === 0) continue;
+        stripped.push({ ...msg, content: filtered });
+      } else {
+        stripped.push(msg);
+      }
+    }
+
     // Validate tool_use/tool_result pairing — orphaned results crash the API
-    return this._validateToolPairing(messages);
+    return this._validateToolPairing(stripped);
   }
 
   /**
