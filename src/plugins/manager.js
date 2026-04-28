@@ -816,6 +816,7 @@ class PluginManager {
           applyReasoningEffort: p.applyReasoningEffort || null,
           getDefaultReasoningEffort: p.getDefaultReasoningEffort || null,
           probe: p.probe || null,
+          wrapSystemPrompt: p.wrapSystemPrompt || null,
           defaultBaseUrl: p.defaultBaseUrl,
           configured,
         });

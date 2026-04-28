@@ -736,7 +736,15 @@ class WebGateway {
   }
 
   _normalizeSettingsCustomProviders(rawProviders) {
-    const builtins = new Set(['anthropic', 'openai', 'openrouter', 'local', 'gemini']);
+    // Reserved provider names — collect from registered plugins so a
+    // future provider plugin's name automatically becomes off-limits
+    // for custom-OAI prefixes without a code change here.
+    const mgr = this.tools?._pluginManager;
+    const builtins = new Set(
+      (mgr?.getProviders?.() || [])
+        .map(p => String(p.name || '').toLowerCase())
+        .filter(Boolean)
+    );
     const providers = [];
     const seen = new Set();
     for (const entry of Array.isArray(rawProviders) ? rawProviders : []) {

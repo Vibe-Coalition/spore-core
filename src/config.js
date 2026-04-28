@@ -39,7 +39,7 @@ const DEFAULTS = {
 
   // Learner
   learningMode: 'always', // 'always' | 'flush_only' | 'disabled'
-  subagentMaxTokens: null, // null = auto based on model (opus 64K, sonnet 32K, haiku 16K)
+  subagentMaxTokens: null, // null = auto, derived from the active model's modelLimits[].maxTokens
   maintainerIdleOnly: false,
 
   // Optional capabilities

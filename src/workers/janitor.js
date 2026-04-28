@@ -724,12 +724,12 @@ ${edgeLines || '    (no edges)'}`;
   // ── LLM + JSON helpers (same shape as maintainer) ───────────────────────
 
   async _callLLM(systemPrompt, prompt) {
-    const system = this.config._isOAuth
-      ? [
-          { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-        ]
-      : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+    const { wrapSystemPromptForModel } = require('../providers');
+    const system = wrapSystemPromptForModel(
+      [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      this.model,
+      this.config,
+    );
     const params = {
       model: this.model,
       max_tokens: 8192,

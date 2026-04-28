@@ -89,6 +89,22 @@ function getDefaultReasoningEffort(model, hostConfig) {
   }
 }
 
+// Wrap the system prompt for a model via the owning plugin's hook.
+// Used by every system-prompt builder (agent loop, tools, workers) so
+// vendor-specific prefix requirements (e.g. Anthropic's Claude Code
+// identity line for OAuth tokens) live next to the plugin instead of
+// scattered as inline `if (config._isOAuth) [{...}, ...]` patterns.
+function wrapSystemPromptForModel(system, model, hostConfig) {
+  const entry = _resolvePluginByBackend(model);
+  if (!entry?.wrapSystemPrompt) return system;
+  try {
+    return entry.wrapSystemPrompt(system, model, hostConfig);
+  } catch (e) {
+    console.error(`[providers] wrapSystemPrompt(${entry.name}) threw:`, e.message);
+    return system;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Model-string utilities
 // ---------------------------------------------------------------------------
@@ -498,6 +514,7 @@ module.exports = {
   setProviderManager,
   applyReasoningEffortViaPlugin,
   getDefaultReasoningEffort,
+  wrapSystemPromptForModel,
   _hasImages,
   _inferCapabilities,
 };

@@ -436,15 +436,16 @@ class Learner {
 
       const prompt = basePrompt;
 
-      const system = this.config._isOAuth
-        ? [
-            { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-            { type: 'text', text: prompt, cache_control: { type: 'ephemeral' } },
-          ]
-        : [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }];
+      const _model = this.config.learnerModel || this.config.casualModel || this.config.model;
+      const { wrapSystemPromptForModel } = require('../providers');
+      const system = wrapSystemPromptForModel(
+        [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }],
+        _model,
+        this.config,
+      );
 
       const response = await this._callWithRetry(() => this.client.messages.create({
-        model: this.config.learnerModel || this.config.casualModel || this.config.model,
+        model: _model,
         // Bumped 4096 → 8192 (2026-04-23). Extraction can return many
         // entities + aspects + attributes from a single rich turn; 4k
         // truncated mid-JSON often enough to be a real loss.
@@ -621,15 +622,16 @@ Return ONLY valid JSON (same schema as extraction):
   "gaps": []
 }`;
 
-    const system = this.config._isOAuth
-      ? [
-          { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-          { type: 'text', text: verifyPrompt, cache_control: { type: 'ephemeral' } },
-        ]
-      : [{ type: 'text', text: verifyPrompt, cache_control: { type: 'ephemeral' } }];
+    const _model = this.config.learnerModel || this.config.casualModel || this.config.model;
+    const { wrapSystemPromptForModel } = require('../providers');
+    const system = wrapSystemPromptForModel(
+      [{ type: 'text', text: verifyPrompt, cache_control: { type: 'ephemeral' } }],
+      _model,
+      this.config,
+    );
 
     const response = await this._callWithRetry(() => this.client.messages.create({
-      model: this.config.learnerModel || this.config.casualModel || this.config.model,
+      model: _model,
       // Bumped 2048 → 4096 (2026-04-23). Verification pass shouldn't be
       // tighter than half of extraction; was producing truncated retries.
       max_tokens: 4096,
@@ -1694,12 +1696,13 @@ Output ONLY the summary using this template:
 ${structuredTemplate}`;
       }
 
-      const system = this.config._isOAuth
-        ? [
-            { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-            { type: 'text', text: compactSystem, cache_control: { type: 'ephemeral' } },
-          ]
-        : [{ type: 'text', text: compactSystem, cache_control: { type: 'ephemeral' } }];
+      const _model = this.config.learnerModel || this.config.casualModel || this.config.model;
+      const { wrapSystemPromptForModel } = require('../providers');
+      const system = wrapSystemPromptForModel(
+        [{ type: 'text', text: compactSystem, cache_control: { type: 'ephemeral' } }],
+        _model,
+        this.config,
+      );
 
       // Compaction is called from within the agent loop (between iterations),
       // so _llmBusy is true but the model server is actually idle. Temporarily
@@ -1707,7 +1710,7 @@ ${structuredTemplate}`;
       const wasBusy = this._llmBusy;
       this._llmBusy = false;
       const response = await this._callWithRetry(() => this.client.messages.create({
-        model: this.config.learnerModel || this.config.casualModel || this.config.model,
+        model: _model,
         max_tokens: summaryBudget,
         system,
         messages: [{ role: 'user', content: transcript }],
@@ -1915,17 +1918,18 @@ ${structuredTemplate}`;
       return `${t.tool}(${(t.input || '').substring(0, 80)}) → ${result}`;
     }).join('\n');
 
-    const system = this.config._isOAuth
-      ? [
-          { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-          { type: 'text', text: SKILL_EXTRACTION_PROMPT, cache_control: { type: 'ephemeral' } },
-        ]
-      : [{ type: 'text', text: SKILL_EXTRACTION_PROMPT, cache_control: { type: 'ephemeral' } }];
+    const _model = this.config.learnerModel || this.config.casualModel || this.config.model;
+    const { wrapSystemPromptForModel } = require('../providers');
+    const system = wrapSystemPromptForModel(
+      [{ type: 'text', text: SKILL_EXTRACTION_PROMPT, cache_control: { type: 'ephemeral' } }],
+      _model,
+      this.config,
+    );
 
     const userContent = `## Conversation exchange\n${combinedExchange.substring(0, 4000)}\n\n## Tool calls (${allToolCalls.length} total)\n${toolSummary}\n\n## Existing skills\n${existingSummary}`;
 
     const response = await this._callWithRetry(() => this.client.messages.create({
-      model: this.config.learnerModel || this.config.casualModel || this.config.model,
+      model: _model,
       // Bumped 2048 → 4096 (2026-04-23) — skill JSON now also includes
       // longer step summaries and 4k headroom matches extraction tier.
       max_tokens: 4096,

@@ -37,7 +37,6 @@ class Maintainer {
     this.client = anthropicClient;
     this.db = db;
     this.model = config.learnerModel || config.casualModel || config.model;
-    this._isOAuth = config._isOAuth || false;
     this._running = false;
     this._lastGraphChangeAt = 0;
     this._lastCreativeRunAt = 0;
@@ -1412,12 +1411,12 @@ ${reflectionBlock || 'none yet'}`
   }
 
   async _callLLM(systemPrompt, prompt) {
-    const system = this.config._isOAuth
-      ? [
-          { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-        ]
-      : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+    const { wrapSystemPromptForModel } = require('../providers');
+    const system = wrapSystemPromptForModel(
+      [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      this.model,
+      this.config,
+    );
 
     // Use streaming: non-streaming requests keep the HTTP connection idle
     // while the model thinks, which trips nginx's default 60s idle timeout

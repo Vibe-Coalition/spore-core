@@ -2059,16 +2059,15 @@ Set wait:false when you've submitted a long background job and just want to retu
 
       const fullContext = contextBlocks.join('\n---\n') + episodeContext;
 
-      const system = this.config._isOAuth
-        ? [
-            { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-            { type: 'text', text: `You are reasoning about entities in a knowledge graph. Given comprehensive context about one or more entities (facts, relationships, derived conclusions, reflections, conversation history), synthesize a thorough answer to the question.
+      const { wrapSystemPromptForModel } = require('../providers');
+      const _model = this.config.learnerModel || this.config.casualModel || this.config.model;
+      const system = wrapSystemPromptForModel(
+        [{ type: 'text', text: `You are reasoning about entities in a knowledge graph. Given comprehensive context about one or more entities (facts, relationships, derived conclusions, reflections, conversation history), synthesize a thorough answer to the question.
 
-Be specific — cite facts, dates, and patterns. If the answer involves reasoning beyond what's explicitly stated, say so. If information is missing or uncertain, acknowledge it. Be direct and insightful, not generic.`, cache_control: { type: 'ephemeral' } },
-          ]
-        : [{ type: 'text', text: `You are reasoning about entities in a knowledge graph. Given comprehensive context about one or more entities (facts, relationships, derived conclusions, reflections, conversation history), synthesize a thorough answer to the question.
-
-Be specific — cite facts, dates, and patterns. If the answer involves reasoning beyond what's explicitly stated, say so. If information is missing or uncertain, acknowledge it. Be direct and insightful, not generic.`, cache_control: { type: 'ephemeral' } }];
+Be specific — cite facts, dates, and patterns. If the answer involves reasoning beyond what's explicitly stated, say so. If information is missing or uncertain, acknowledge it. Be direct and insightful, not generic.`, cache_control: { type: 'ephemeral' } }],
+        _model,
+        this.config,
+      );
 
       const response = await this.anthropicClient.messages.create({
         model: this.config.learnerModel || this.config.casualModel || this.config.model,
@@ -2732,13 +2731,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const toolNames = subTools.map(t => t.name).join(', ');
         basePrompt = basePrompt.replace('%%TOOLS%%', `Your tools: ${toolNames}.`);
 
-        const isOAuth = this.config._isOAuth || false;
-        const systemPrompt = isOAuth
-          ? [
-            { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-            { type: 'text', text: basePrompt, cache_control: { type: 'ephemeral' } },
-          ]
-          : [{ type: 'text', text: basePrompt, cache_control: { type: 'ephemeral' } }];
+        const { wrapSystemPromptForModel } = require('../providers');
+        const systemPrompt = wrapSystemPromptForModel(
+          [{ type: 'text', text: basePrompt, cache_control: { type: 'ephemeral' } }],
+          subModel,
+          this.config,
+        );
 
         // Tag last tool with cache_control so the full tool array is cached across iterations
         if (subTools.length > 0) {

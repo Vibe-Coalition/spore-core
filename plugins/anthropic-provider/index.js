@@ -220,6 +220,26 @@ module.exports = function register(api) {
     // Wizard test-button probe — tiny chat call so an operator gets a
     // real round-trip + latency, not just key validation. Uses haiku
     // for speed.
+    // OAuth-token-aware system prompt wrapper. When the active key is
+    // an sk-ant-oat token (Claude.ai Pro / Max), Anthropic's API
+    // expects the assistant to identify as Claude Code at the very
+    // start of the system prompt — same convention claude-cli uses.
+    // Standard sk-ant-api03 keys don't need this prefix, neither do
+    // any other vendor. The flag is set by _detectOAuth on register +
+    // every onConfigChange.
+    wrapSystemPrompt: (system, model, hostConfig) => {
+      if (!hostConfig?._isOAuth) return system;
+      const claudeCodeId = "You are Claude Code, Anthropic's official CLI for Claude.";
+      if (Array.isArray(system)) {
+        // Already wrapped? leave alone.
+        if (system[0]?.text === claudeCodeId) return system;
+        return [{ type: 'text', text: claudeCodeId }, ...system];
+      }
+      if (typeof system === 'string' && system.startsWith(claudeCodeId)) return system;
+      // Build the structured form so cache_control etc. on subsequent
+      // blocks can be added by callers without losing the prefix.
+      return [{ type: 'text', text: claudeCodeId }, { type: 'text', text: system || '' }];
+    },
     probe: async (body) => {
       const apiKey = (body?.apiKey || '').trim()
         || process.env.ANTHROPIC_API_KEY

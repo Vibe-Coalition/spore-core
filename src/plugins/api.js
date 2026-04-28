@@ -557,6 +557,13 @@ class PluginAPI {
     // round-trip. The `body` is whatever the wizard posts —
     // typically { apiKey, baseUrl, authHeader }.
     const probe = typeof opts.probe === 'function' ? opts.probe : null;
+    // (system, model, hostConfig) → system. Lets a plugin wrap the
+    // system prompt for its model — Anthropic prepends the Claude Code
+    // identity line when an OAuth token is active, others pass through.
+    // Called once per request build by the agent loop / tool runners /
+    // workers (replaces the inline `if (config._isOAuth) [{...}, ...]`
+    // pattern that used to live in those callsites).
+    const wrapSystemPrompt = typeof opts.wrapSystemPrompt === 'function' ? opts.wrapSystemPrompt : null;
     this._llmProviders.push({
       name,
       factory,
@@ -567,6 +574,7 @@ class PluginAPI {
       applyReasoningEffort,
       getDefaultReasoningEffort,
       probe,
+      wrapSystemPrompt,
       defaultBaseUrl: opts.defaultBaseUrl || null,
     });
     this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);

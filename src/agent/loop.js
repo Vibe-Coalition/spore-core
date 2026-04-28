@@ -1876,23 +1876,8 @@ class AgentLoop {
   async _callClaude(systemPrompt, messages, opts = {}) {
     const staticPart = opts.staticPrompt || null;
     const dynamicPart = opts.dynamicContext || null;
-    const claudeCodeId = "You are Claude Code, Anthropic's official CLI for Claude.";
-
     let system;
-    if (this.config._isOAuth) {
-      if (staticPart && dynamicPart) {
-        system = [
-          { type: 'text', text: claudeCodeId },
-          { type: 'text', text: staticPart, cache_control: { type: 'ephemeral' } },
-          { type: 'text', text: dynamicPart },
-        ];
-      } else {
-        system = [
-          { type: 'text', text: claudeCodeId },
-          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-        ];
-      }
-    } else if (staticPart && dynamicPart) {
+    if (staticPart && dynamicPart) {
       system = [
         { type: 'text', text: staticPart, cache_control: { type: 'ephemeral' } },
         { type: 'text', text: dynamicPart },
@@ -1906,6 +1891,11 @@ class AgentLoop {
         { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
       ];
     }
+    // Plugin hook — anthropic-provider prepends its Claude Code
+    // identity prefix when an OAuth token is active. Other providers
+    // pass through unchanged.
+    const { wrapSystemPromptForModel } = require('../providers');
+    system = wrapSystemPromptForModel(system, this.config.model, this.config);
 
     // Tag last tool with cache_control so the full tool array is cached on repeat calls.
     // Pass the per-call platform explicitly so the cli-tool-catalog filter doesn't
