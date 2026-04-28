@@ -166,14 +166,20 @@ class AgentLoop {
    * The message will be picked up before the next _callClaude() iteration.
    * Returns false if the session isn't running or is already aborting.
    */
-  interject(sessionKey, content) {
+  interject(sessionKey, content, newOpts) {
     if (!this.activeRuns.has(sessionKey)) return false;
     const ac = this._activeAbortControllers?.get(sessionKey);
     if (!ac || ac.signal.aborted) return false; // Can't inject into a dying loop
     const arr = this._pendingInterjections.get(sessionKey) || [];
-    arr.push(content);
+    // Items used to be raw strings. Now stored as {content, opts} so a
+    // mode toggle (plan↔execute) carried by the new message can drive a
+    // system-prompt rebuild on the next iteration. Old call sites that
+    // pass just a string still work via the typeof-string fallback in
+    // _injectPendingInterjections.
+    arr.push({ content, opts: newOpts || null });
     this._pendingInterjections.set(sessionKey, arr);
-    this.log.info(`[interject] Queued interjection for session ${sessionKey} (${content.length} chars, ${arr.length} pending)`);
+    const modeNote = newOpts?.projectContext?.mode ? `, mode=${newOpts.projectContext.mode}` : '';
+    this.log.info(`[interject] Queued interjection for session ${sessionKey} (${content.length} chars, ${arr.length} pending${modeNote})`);
     return true;
   }
 
@@ -285,9 +291,11 @@ class AgentLoop {
       cachedProjectIsNew  = !!beforePatch.cachedProjectIsNew;
     }
 
-    // Build system prompt using async path (hybrid search + Enhanced Recall)
+    // Build system prompt using async path (hybrid search + Enhanced Recall).
+    // `let` (not `const`) so a mid-loop mode toggle via interjection can
+    // rebuild it — see _injectPendingInterjections.
     const llmClient = this.tools?.anthropicClient || null;
-    const systemPrompt = await this.graph.buildSystemPromptAsync({
+    let systemPrompt = await this.graph.buildSystemPromptAsync({
       ...dynamicOpts,
       promptMode,
       _llmClient: llmClient,
@@ -441,12 +449,12 @@ class AgentLoop {
 
     if (msgTokens > softBudget) {
       const targetMsgTokens = Math.min(softBudget, hardCeiling - systemTokens - 2000);
-      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens);
+      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus);
       messages = this._sanitizeMessages(messages);
       this.log.info(`[compaction] ${isCasualChat ? 'casual' : 'complex'} ${msgTokens} → ~${targetMsgTokens} msg tokens`);
     } else if (systemTokens + msgTokens > hardCeiling) {
       const targetMsgTokens = hardCeiling - systemTokens - 2000;
-      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens);
+      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus);
       messages = this._sanitizeMessages(messages);
       this.log.info(`[compaction] hard-ceiling ${msgTokens} → ~${targetMsgTokens} msg tokens`);
     }
@@ -482,10 +490,30 @@ class AgentLoop {
     // 3-tier model escalation: casual → normal → planner
     // Full toolset is always provided (stripping tools causes denial of capabilities).
     // Escalation happens on tool_use: casual→normal on first tools, normal→planner on next.
+    //
+    // Special case: the BUILDING turn of the acorn multi-turn plan flow
+    // synthesizes a structured plan from a prior RESEARCH_DONE block.
+    // It typically does no tool calls (which means the delegate_task
+    // escalation never fires) but it's THE highest-leverage turn —
+    // its output gets reviewed and approved by the user, then drives
+    // every execute-mode turn that follows. Bias it toward plannerModel
+    // up-front rather than relying on the tool-call escalation path.
+    // No-op when all tiers point to the same model (single-provider
+    // deployments); kicks in automatically the moment plannerModel
+    // diverges from normalModel.
+    const isBuildingTurn = opts.projectContext?.mode === 'plan'
+      && /^\s*\[BUILD_PLAN\]/.test(typeof opts.content === 'string' ? opts.content : '');
+
     let chatTools = null;
-    let activeModel = isCasualChat
-      ? (this.config.casualModel || this.config.normalModel)
-      : (this.config.normalModel || this.config.plannerModel);
+    let activeModel;
+    if (isBuildingTurn) {
+      activeModel = this.config.plannerModel || this.config.normalModel;
+      this.log.info(`[routing] BUILDING turn → planner (${activeModel})`);
+    } else if (isCasualChat) {
+      activeModel = this.config.casualModel || this.config.normalModel;
+    } else {
+      activeModel = this.config.normalModel || this.config.plannerModel;
+    }
 
     const abortSignal = opts._abortSignal;
 
@@ -542,8 +570,23 @@ class AgentLoop {
           }
         }
 
-        // Pending interjections (extracted to keep _runLoop slim)
-        iterations = this._injectPendingInterjections(sessionKey, messages, opts, iterations);
+        // Pending interjections (extracted to keep _runLoop slim).
+        // Returns updated iterations + a possibly-rebuilt systemPrompt
+        // when the interjection arrived with a different mode (e.g.
+        // user toggled /plan during a streaming execute turn).
+        const ijResult = await this._injectPendingInterjections(sessionKey, messages, opts, iterations, {
+          systemPrompt,
+          dynamicOpts,
+          promptMode,
+          llmClient,
+          cachedProjectNodeId,
+          cachedProjectStale,
+          cachedProjectIsNew,
+        });
+        iterations = ijResult.iterations;
+        if (ijResult.systemPrompt && ijResult.systemPrompt !== systemPrompt) {
+          systemPrompt = ijResult.systemPrompt;
+        }
 
         const iterStart = Date.now();
         this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
@@ -1157,34 +1200,113 @@ class AgentLoop {
    * Mutates `messages` in place and returns the adjusted iteration count
    * (with headroom restored so the agent has room to respond).
    */
-  _injectPendingInterjections(sessionKey, messages, opts, iterations) {
-    const interjections = this._pendingInterjections.get(sessionKey);
-    if (!(interjections && interjections.length > 0)) return iterations;
+  async _injectPendingInterjections(sessionKey, messages, opts, iterations, ctx) {
+    const queued = this._pendingInterjections.get(sessionKey);
+    if (!(queued && queued.length > 0)) return { iterations, systemPrompt: ctx?.systemPrompt };
     this._pendingInterjections.delete(sessionKey);
-    this.log.info(`[interject] Injecting ${interjections.length} user message(s) into session ${sessionKey}`);
+
+    // Normalize legacy (string) and new ({content, opts}) shapes.
+    const items = queued.map(ij => typeof ij === 'string' ? { content: ij, opts: null } : ij);
+    const contents = items.map(ij => ij.content);
+
+    this.log.info(`[interject] Injecting ${items.length} user message(s) into session ${sessionKey}`);
+
     // The Anthropic API requires alternating user/assistant turns. If the
     // last message is already a user turn (e.g. tool_results still pending),
     // insert a minimal assistant ack so the new user message is well-formed.
-    // The ack is intentionally bland — no instructions, no framing — so the
-    // model isn't nudged toward any particular interpretation.
     const lastMsg = messages[messages.length - 1];
     if (lastMsg?.role === 'user') {
       messages.push({ role: 'assistant', content: [{ type: 'text', text: '[Acknowledged.]' }] });
     }
-    // Inject the raw user content. Multiple interjections that arrived in
-    // the same window are concatenated as numbered items so the model can
-    // see them as discrete messages.
-    const raw = interjections.length === 1
-      ? interjections[0]
-      : interjections.map((ij, i) => `(${i + 1}) ${ij}`).join('\n\n');
+    const raw = contents.length === 1
+      ? contents[0]
+      : contents.map((c, i) => `(${i + 1}) ${c}`).join('\n\n');
     messages.push({ role: 'user', content: raw });
-    // Persist each interjection to session history
-    for (const ij of interjections) this.sessions.addMessage(sessionKey, 'user', ij);
+    for (const c of contents) this.sessions.addMessage(sessionKey, 'user', c);
     if (opts.onStatus) {
-      try { opts.onStatus({ type: 'interjection', count: interjections.length }); } catch { /* silent: best-effort UI callback */ }
+      try { opts.onStatus({ type: 'interjection', count: items.length }); } catch { /* silent */ }
     }
-    // Give the agent headroom to respond
-    return Math.max(0, iterations - 4);
+
+    // Mode toggle detection — if any queued interjection brings a
+    // different projectContext.mode (plan↔execute), the loop's original
+    // system prompt is wrong for the rest of this run. Rebuild before
+    // the next iteration so the agent sees Plan Mode / Execute Mode
+    // sections matching the user's actual current intent. Without this,
+    // a user typing during a streaming response and toggling /plan
+    // would have their plan request processed under the execute-mode
+    // prompt — agent never sees the PLAN_READY rule and the modal
+    // never triggers.
+    let systemPrompt = ctx?.systemPrompt;
+    if (ctx && ctx.dynamicOpts) {
+      const currentMode = opts.projectContext?.mode;
+      const newMode = items.map(ij => ij.opts?.projectContext?.mode).filter(Boolean).pop();
+      if (newMode && newMode !== currentMode) {
+        // Adopt the new projectContext for the rest of the loop.
+        opts.projectContext = items.map(ij => ij.opts?.projectContext).filter(Boolean).pop() || opts.projectContext;
+        try {
+          systemPrompt = await this.graph.buildSystemPromptAsync({
+            ...ctx.dynamicOpts,
+            promptMode: ctx.promptMode,
+            projectContext: opts.projectContext,
+            _llmClient: ctx.llmClient,
+            cachedProjectNodeId: ctx.cachedProjectNodeId,
+            cachedProjectStale: ctx.cachedProjectStale,
+            cachedProjectIsNew: ctx.cachedProjectIsNew,
+          });
+          this.log.info(`[interject] Mode change ${currentMode || '(unset)'} → ${newMode} — system prompt rebuilt (${systemPrompt.length} bytes)`);
+          // Run the same marker validator the initial build does, so we
+          // can confirm that the rebuilt plan-mode prompt actually carries
+          // the planHeader / rulesHeader / QUESTIONS: / PLAN_READY anchors
+          // (without this we'd be flying blind on the rebuild path).
+          if (newMode === 'plan') {
+            const has = {
+              planHeader: systemPrompt.includes('## Plan Mode'),
+              questionsMarker: systemPrompt.includes('QUESTIONS:'),
+              planReadyMarker: systemPrompt.includes('PLAN_READY'),
+              rulesHeader: systemPrompt.includes('RULES'),
+            };
+            const missing = Object.entries(has).filter(([_, v]) => !v).map(([k]) => k);
+            if (missing.length > 0) {
+              this.log.warn(`[plan-mode] (rebuild) system prompt MISSING markers: ${missing.join(', ')}`);
+            } else {
+              this.log.info(`[plan-mode] (rebuild) system prompt OK — all 4 markers present`);
+            }
+          }
+          // Dump the rebuilt prompt to disk under a distinct filename so
+          // we can inspect what actually went to the model on the
+          // post-mode-toggle iteration (the regular SPORE_DEBUG_DUMP_PROMPT
+          // dump fires only on the initial build at _runLoop start, which
+          // captures the OLD mode's prompt — useless for diagnosing
+          // "the rebuild fired but the modal didn't trigger" cases).
+          if (process.env.SPORE_DEBUG_DUMP_PROMPT === '1') {
+            try {
+              const fs = require('fs');
+              const path = require('path');
+              const dir = process.env.SPORE_DEBUG_DUMP_DIR || '/data';
+              const outFile = path.join(dir, `last-prompt-rebuild-${newMode}.txt`);
+              const dump = [
+                `# REBUILT — mode change ${currentMode || '(unset)'} → ${newMode}`,
+                `# session=${sessionKey}`,
+                `# systemPrompt length: ${systemPrompt.length} chars`,
+                `# planHeader=${systemPrompt.includes('## Plan Mode')} rulesHeader=${systemPrompt.includes('RULES')} planReady=${systemPrompt.includes('PLAN_READY')} questions=${systemPrompt.includes('QUESTIONS:')}`,
+                '',
+                '── SYSTEM PROMPT ──',
+                systemPrompt,
+              ].join('\n');
+              fs.writeFileSync(outFile, dump);
+              this.log.info(`[debug] wrote rebuilt system prompt to ${outFile}`);
+            } catch (e) {
+              this.log.warn(`[debug] rebuild dump failed: ${e.message}`);
+            }
+          }
+        } catch (e) {
+          this.log.warn(`[interject] system prompt rebuild failed: ${e.message} — continuing with old prompt`);
+          systemPrompt = ctx.systemPrompt;
+        }
+      }
+    }
+
+    return { iterations: Math.max(0, iterations - 4), systemPrompt };
   }
 
   /**
@@ -1809,8 +1931,10 @@ class AgentLoop {
       ];
     }
 
-    // Tag last tool with cache_control so the full tool array is cached on repeat calls
-    const tools = opts.tools || this.tools.getToolDefinitions();
+    // Tag last tool with cache_control so the full tool array is cached on repeat calls.
+    // Pass the per-call platform explicitly so the cli-tool-catalog filter doesn't
+    // race with the legacy `_currentPlatform` global in concurrent multi-session runs.
+    const tools = opts.tools || this.tools.getToolDefinitions({ platform: opts.platform });
     if (tools.length > 0) {
       const last = tools[tools.length - 1];
       if (!last.cache_control) {
@@ -2256,7 +2380,75 @@ class AgentLoop {
    * 3. Inject the summary as a compact context message
    * Falls back to plain trimming if summarization fails.
    */
-  async _compactHistory(sessionKey, messages, targetTokens) {
+  // Detect messages that contribute nothing to a session summary. Used
+  // to filter the compaction drop-set so the summarizer doesn't burn
+  // tokens narrating "the assistant said [Acknowledged.]" or "user
+  // returned [Old tool output cleared to save context space]". The
+  // fundamental check: would removing this message lose any meaningful
+  // signal about what happened in the session? If no, drop it silently.
+  //
+  // What counts as useless:
+  //   - empty content (string or array)
+  //   - bland alternation acks ("[Acknowledged.]")
+  //   - assistant text turns that are too short to carry intent (<5 chars)
+  //   - user tool_result arrays where every block has been pre-pruned to
+  //     "[Old tool output cleared ...]" — the actual content already
+  //     vanished in Phase 1, only the placeholder remains
+  //   - text-only messages whose payload is just a system-style stub
+  //     ("[Old tool output cleared to save context space]" can also
+  //     appear as a top-level string when serialized weirdly)
+  //
+  // What is NEVER useless:
+  //   - any message with a tool_use block (the call itself is signal —
+  //     "the agent called search_symbols for X" matters even if its
+  //     result was later cleared)
+  //   - any text containing a workflow marker (RESEARCH_DONE:, PLAN_READY,
+  //     NO_INTERVIEW_NEEDED:, NO_FOLLOWUP_QUESTIONS:, QUESTIONS:) — those
+  //     anchor the multi-turn flow
+  _isMessageUseless(msg) {
+    if (!msg) return true;
+    const c = msg.content;
+    if (c == null) return true;
+    if (typeof c === 'string') {
+      const t = c.trim();
+      if (t === '') return true;
+      // Workflow markers are never useless even when the message is short
+      if (this._hasWorkflowMarker(t)) return false;
+      if (t === '[Acknowledged.]') return true;
+      if (t.length < 5) return true;
+      if (t.startsWith('[Old tool output cleared')) return true;
+      return false;
+    }
+    if (!Array.isArray(c) || c.length === 0) return true;
+    // Tool_use blocks always carry signal — keep the message.
+    if (c.some(b => b.type === 'tool_use')) return false;
+    // All blocks must be useless for the message to be useless.
+    return c.every(b => {
+      if (b.type === 'tool_result') {
+        const tc = typeof b.content === 'string' ? b.content : '';
+        if (!tc || tc.startsWith('[Old tool output cleared') || tc.length < 5) return true;
+        if (this._hasWorkflowMarker(tc)) return false;
+        return false;
+      }
+      if (b.type === 'text') {
+        const tx = (b.text || '').trim();
+        if (!tx) return true;
+        if (this._hasWorkflowMarker(tx)) return false;
+        if (tx === '[Acknowledged.]') return true;
+        if (tx.length < 5) return true;
+        return false;
+      }
+      // Unknown block type — preserve to be safe.
+      return false;
+    });
+  }
+
+  _hasWorkflowMarker(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /\b(RESEARCH_DONE:|PLAN_READY|NO_INTERVIEW_NEEDED:|NO_FOLLOWUP_QUESTIONS:|QUESTIONS:|\[BUILD_PLAN\]|\[REVIEW\]|\[RESEARCH\])/.test(text);
+  }
+
+  async _compactHistory(sessionKey, messages, targetTokens, onStatus) {
     if (messages.length <= 6) return this._trimMessagesToTokenBudget(messages, targetTokens);
 
     const _msgHasToolUse = (m) => m.role === 'assistant' && Array.isArray(m.content) && m.content.some(b => b.type === 'tool_use');
@@ -2335,10 +2527,54 @@ class AgentLoop {
       }
     }
 
-    const toDrop = middle.slice(0, keepFromIdx);
+    let toDrop = middle.slice(0, keepFromIdx);
     const toKeep = [...middle.slice(keepFromIdx), ...tail];
 
-    if (toDrop.length === 0) return messages;
+    // Filter out USELESS messages from the drop set. These contribute
+    // nothing to a summary and would just waste summarizer tokens:
+    //   - already-cleared tool result placeholders (Phase 1 above
+    //     replaced their bodies with a stub)
+    //   - bland alternation acks ("[Acknowledged.]")
+    //   - empty / single-character content
+    //   - assistant messages whose entire payload was a tool_use that's
+    //     paired with an already-cleared result (no narrative left)
+    // They're dropped silently — no summary line, no entry in the
+    // pre-compaction knowledge flush. The result: a tighter summary
+    // focused on actual content.
+    const droppedUseless = [];
+    toDrop = toDrop.filter(m => {
+      if (this._isMessageUseless(m)) {
+        droppedUseless.push(m);
+        return false;
+      }
+      return true;
+    });
+    if (droppedUseless.length > 0) {
+      this.log.info(`[compaction] Phase 2.5: skipped ${droppedUseless.length} useless messages from summarization (acks, cleared tool stubs, blanks)`);
+    }
+
+    if (toDrop.length === 0) {
+      // All to-be-dropped messages were useless — nothing to summarize.
+      // Still need to remove them from the messages array so context
+      // shrinks. Splice them out, return without inserting a summary.
+      if (droppedUseless.length > 0) {
+        return [...head, ...toKeep];
+      }
+      return messages;
+    }
+
+    // Surface compaction in the CLI status bar so the user sees that
+    // the visible "stuck for ~5s" is actual work, not a hang. The CLI
+    // displays this on the input bar and in the transcript.
+    if (typeof onStatus === 'function') {
+      try {
+        onStatus({
+          type: 'compaction-start',
+          count: toDrop.length,
+          dropped_useless: droppedUseless.length,
+        });
+      } catch { /* silent: best-effort UI signal */ }
+    }
 
     // Pre-compaction knowledge flush (fire-and-forget)
     const compactLearningMode = this.config.learningMode || 'always';
@@ -2381,11 +2617,51 @@ class AgentLoop {
     }
 
     // ── Phase 4: Assemble compressed messages ──
-    const summaryText = summary
-      ? `[CONTEXT COMPACTION — ${toDrop.length} earlier turns compacted. This is historical context only; base responses on the LIVE messages below.]\n${summary}\n[END CONTEXT COMPACTION]`
-      : `[${toDrop.length} earlier messages were compacted. The conversation continues below with the live messages.]`;
+    // Fallback summary when the LLM call failed: extract role+snippet
+    // pairs from the dropped messages so the agent at least knows what
+    // topics were touched. Better than a bare "N earlier messages were
+    // compacted" line — that one made the agent treat the compaction
+    // as a hard reset and "continue like it was the first message in
+    // the chat" (real bug observed in long execute-mode sessions).
+    let resolvedSummary = summary;
+    if (!resolvedSummary && toDrop.length > 0) {
+      const topics = new Set();
+      for (const m of toDrop) {
+        let c = '';
+        if (typeof m.content === 'string') c = m.content;
+        else if (Array.isArray(m.content)) {
+          c = m.content.map(b => b.type === 'text' ? b.text : (b.type === 'tool_use' ? `[tool: ${b.name}]` : '')).filter(Boolean).join(' ');
+        }
+        const snip = c.trim().slice(0, 140);
+        if (snip) topics.add(snip);
+      }
+      const lines = [...topics].slice(0, 12).map(t => `- ${t}`);
+      resolvedSummary = `## Critical Context\nLLM summarizer unavailable — best-effort topic extraction:\n${lines.join('\n')}`;
+    }
 
-    this.log.info(`[compaction] Compacted ${toDrop.length} messages → ${summaryText.length} char summary (${previousSummary ? 'iterative update' : 'fresh'}), keeping ${toKeep.length} recent`);
+    // Wrap with framing that primes the agent to TREAT THE SUMMARY AS
+    // WORKING MEMORY, not as background. The previous wording said
+    // "historical context only; base responses on the LIVE messages
+    // below" — Claude reads that as "deprioritize" and grounds in
+    // whatever short tail follows. Long execute-mode sessions then
+    // looked like fresh starts because the actual state lived in the
+    // compacted summary that the agent was told to ignore.
+    const summaryText = resolvedSummary
+      ? `[ACTIVE SESSION STATE — ${toDrop.length} earlier turns compressed below. THIS IS YOUR WORKING MEMORY for the rest of this session: the user's goal, decisions already made, files touched, what's done, what's in progress, and what's next. The messages after this block are the most recent exchanges — combine them with the state here to know where you are. DO NOT restart the conversation or treat this as background; continue the work in progress.]\n${resolvedSummary}\n[END SESSION STATE]`
+      : `[${toDrop.length} earlier turns dropped. No summary available — ask the user to clarify where you left off before continuing.]`;
+
+    this.log.info(`[compaction] Compacted ${toDrop.length} messages → ${summaryText.length} char summary (${previousSummary ? 'iterative update' : 'fresh'}${summary ? '' : ', LLM-FAILED-fallback'}), keeping ${toKeep.length} recent`);
+
+    if (typeof onStatus === 'function') {
+      try {
+        onStatus({
+          type: 'compaction-done',
+          count: toDrop.length,
+          summary_chars: summaryText.length,
+          fallback: summary ? false : true,
+        });
+      } catch { /* silent */ }
+    }
 
     return [...head, { role: 'user', content: summaryText }, ...toKeep];
   }
