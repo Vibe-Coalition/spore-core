@@ -147,6 +147,22 @@ function backfillLegacyConfig(api) {
   }
 }
 
+// OAuth token detection — Anthropic's Claude.ai Pro/Max OAuth tokens
+// (sk-ant-oat-…) require a different request shape (Claude Code system
+// prompt prefix, OAuth headers). Several callsites in core check this
+// flag (system-prompt builders in agent/loop, tools, workers/janitor,
+// workers/learner). The flag SHAPE stays in host config; the
+// DETECTION logic lives here so core has no Anthropic-specific
+// string-matching.
+function _detectOAuth(api) {
+  const host = api.getHostConfig() || {};
+  const slot = api.getConfig() || {};
+  const key = process.env.ANTHROPIC_API_KEY || host.anthropicApiKey || slot.apiKey || '';
+  const isOAuth = !!(key && key.includes('sk-ant-oat'));
+  host._isOAuth = isOAuth;
+  if (isOAuth) api.getLogger().info('Detected OAuth token — using Claude Code auth headers');
+}
+
 module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
@@ -155,6 +171,7 @@ module.exports = function register(api) {
   });
 
   backfillLegacyConfig(api);
+  _detectOAuth(api);
 
   api.registerProvider('anthropic', (config) => {
     const slot = config?.plugins?.['anthropic-provider'] || {};
@@ -200,6 +217,30 @@ module.exports = function register(api) {
       if (!/sonnet|opus|haiku-4/i.test(m) || /3-5|3\.5/i.test(m)) return null;
       return (hostConfig?.thinkingBudget > 0) ? 'medium' : null;
     },
+    // Wizard test-button probe — tiny chat call so an operator gets a
+    // real round-trip + latency, not just key validation. Uses haiku
+    // for speed.
+    probe: async (body) => {
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.ANTHROPIC_API_KEY
+        || api.getHostConfig()?.anthropicApiKey
+        || api.getConfig()?.apiKey
+        || '';
+      if (!apiKey) return { ok: false, error: 'missing apiKey' };
+      try {
+        const t0 = Date.now();
+        const client = createAnthropicClient({ apiKey, apiTimeoutMs: 10000 });
+        const resp = await client.messages.create({
+          model: 'claude-haiku-4-5',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'Respond with a single word: ok' }],
+        });
+        const text = (resp.content || []).find(b => b.type === 'text')?.text || '';
+        return { ok: true, latency_ms: Date.now() - t0, model: 'claude-haiku-4-5', excerpt: text.slice(0, 80) };
+      } catch (e) {
+        return { ok: false, error: String(e.message || e).slice(0, 200) };
+      }
+    },
   });
 
   api.registerSettingsPane({
@@ -222,6 +263,9 @@ module.exports = function register(api) {
         gw._applyEnvUpdates({ ANTHROPIC_API_KEY: newCfg.apiKey });
       }
     } catch (e) { api.getLogger().warn('ANTHROPIC env mirror failed: ' + e.message); }
+    // Re-detect OAuth flag — operator may have switched between a
+    // standard sk-ant-api03 key and an sk-ant-oat OAuth token.
+    _detectOAuth(api);
   });
 
   api.registerWebRoute('POST', '/test', async (req, res) => {

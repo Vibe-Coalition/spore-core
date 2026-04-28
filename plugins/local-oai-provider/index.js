@@ -141,6 +141,45 @@ module.exports = function register(api) {
       return listOaiCompatModels({ baseUrl, apiKey, authHeader });
     },
     applyReasoningEffort: applyOaiCompatReasoningEffort,
+    // /models GET probe — same payload as listModels but returns just
+    // the latency + count for the wizard's test button.
+    probe: async (body) => {
+      const baseUrl = (body?.baseUrl || '').trim()
+        || process.env.LOCAL_MODEL_BASE_URL
+        || api.getHostConfig()?.localModelBaseUrl
+        || api.getConfig()?.baseUrl
+        || '';
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.LOCAL_MODEL_API_KEY
+        || api.getHostConfig()?.localModelApiKey
+        || api.getConfig()?.apiKey
+        || '';
+      const authHeader = (body?.authHeader || '').trim()
+        || process.env.LOCAL_MODEL_AUTH_HEADER
+        || api.getHostConfig()?.localModelAuthHeader
+        || api.getConfig()?.authHeader
+        || 'bearer';
+      if (!baseUrl) return { ok: false, error: 'missing baseUrl' };
+      try {
+        const t0 = Date.now();
+        const headers = {};
+        if (apiKey) {
+          if (authHeader === 'x-api-key')      headers['x-api-key']  = apiKey;
+          else if (authHeader === 'x-key')     headers['x-key']      = apiKey;
+          else                                 headers['Authorization'] = `Bearer ${apiKey}`;
+        }
+        const r = await fetch(baseUrl.replace(/\/$/, '') + '/models', {
+          headers,
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json().catch(() => ({}));
+        const count = Array.isArray(d?.data) ? d.data.length : 0;
+        return { ok: true, latency_ms: Date.now() - t0, model: `${count} models listed` };
+      } catch (e) {
+        return { ok: false, error: String(e.message || e).slice(0, 200) };
+      }
+    },
   });
 
   // Custom-prefixed providers (legacy SPORE_PROVIDER_<NAME>_*). Register

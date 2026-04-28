@@ -176,6 +176,35 @@ module.exports = function register(api) {
       if (!(/^openai\//.test(m) || /^(o1|o3|o4|gpt-5)/.test(m))) return null;
       return hostConfig?.openaiReasoningEffort || null;
     },
+    // /models GET probe — lighter than a chat call and sufficient to
+    // validate the key. Returns the model count so the wizard's UI can
+    // show "ok · N models listed".
+    probe: async (body) => {
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.OPENAI_API_KEY
+        || api.getHostConfig()?.openaiApiKey
+        || api.getConfig()?.apiKey
+        || '';
+      const baseUrl = (body?.baseUrl || '').trim()
+        || process.env.OPENAI_BASE_URL
+        || api.getHostConfig()?.openaiBaseUrl
+        || api.getConfig()?.baseUrl
+        || 'https://api.openai.com/v1';
+      if (!apiKey) return { ok: false, error: 'missing apiKey' };
+      try {
+        const t0 = Date.now();
+        const r = await fetch(baseUrl.replace(/\/$/, '') + '/models', {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json().catch(() => ({}));
+        const count = Array.isArray(d?.data) ? d.data.length : 0;
+        return { ok: true, latency_ms: Date.now() - t0, model: `${count} models listed` };
+      } catch (e) {
+        return { ok: false, error: String(e.message || e).slice(0, 200) };
+      }
+    },
   });
 
   api.registerSettingsPane({

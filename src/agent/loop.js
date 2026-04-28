@@ -35,9 +35,18 @@ class AgentLoop {
       return false;
     }
     const backend = detectBackend(this.config.model);
-    if (backend === 'anthropic' && !this.config.anthropicApiKey) {
-      this.log.warn('No Anthropic API key configured — agent AI is disabled. Set up a provider in the Manager and restart.');
-      return false;
+    // Plugin-driven configuration check. Each provider plugin exposes
+    // isConfigured(config) → bool through its registerProvider opts;
+    // manager.getProviders surfaces the result. If the model's owning
+    // plugin reports not-configured, log the actionable warning and
+    // bail. No vendor strings here.
+    const mgr = this.tools?._pluginManager;
+    if (mgr?.getProviders) {
+      const entry = mgr.getProviders().find(p => p.name === backend);
+      if (entry && entry.configured === false) {
+        this.log.warn(`No API key configured for provider '${entry.name}' — agent AI is disabled. Configure the ${entry.pluginId} plugin (Settings → Plugins) and restart.`);
+        return false;
+      }
     }
     if (!this.client) this.client = new MultiProvider(this.config);
     const multimodal = [
@@ -1568,11 +1577,16 @@ class AgentLoop {
 
   _modelMaxOutputTokens(model) {
     if (!model) return 8192;
-    const m = model.toLowerCase();
-    if (m.includes('opus')) return 64000;
-    if (m.includes('sonnet')) return 32000;
-    if (m.includes('haiku')) return 16000;
-    return 8192;
+    // Plugin-populated source of truth: each provider plugin's listModels
+    // returns maxOutput per-model and the wizard / settings save persists
+    // it into config.modelLimits[model].maxTokens (see _enrichModelLimits
+    // in the web gateway). Look up the resolved entry directly so the
+    // agent gets the actual vendor-published cap (claude-opus-4-7 → 32K,
+    // sonnet-4-x → 64K, haiku-4-5 → 8K, gpt-4.1 → 32K, etc.) without
+    // hardcoded vendor patterns here.
+    const lim = this._lookupModelLimit(model);
+    if (lim?.maxTokens > 0) return Math.min(lim.maxTokens, 128000);
+    return 8192; // generic fallback for models not yet probed
   }
 
   // Resolve a model ref against config.modelLimits with a few key forms so

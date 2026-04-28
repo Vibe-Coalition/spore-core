@@ -815,6 +815,7 @@ class PluginManager {
           listModels: p.listModels || null,
           applyReasoningEffort: p.applyReasoningEffort || null,
           getDefaultReasoningEffort: p.getDefaultReasoningEffort || null,
+          probe: p.probe || null,
           defaultBaseUrl: p.defaultBaseUrl,
           configured,
         });

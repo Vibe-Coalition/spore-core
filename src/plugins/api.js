@@ -551,6 +551,12 @@ class PluginAPI {
     // vendor-specific config-field name (anthropic uses thinkingBudget,
     // openai uses openaiReasoningEffort, etc.).
     const getDefaultReasoningEffort = typeof opts.getDefaultReasoningEffort === 'function' ? opts.getDefaultReasoningEffort : null;
+    // (body) → { ok, latency_ms?, model?, excerpt?, error? }.
+    // Smoke-test the provider — run a tiny chat call (or /models GET for
+    // local backends) so the wizard's "test" button gets a real
+    // round-trip. The `body` is whatever the wizard posts —
+    // typically { apiKey, baseUrl, authHeader }.
+    const probe = typeof opts.probe === 'function' ? opts.probe : null;
     this._llmProviders.push({
       name,
       factory,
@@ -560,6 +566,7 @@ class PluginAPI {
       listModels,
       applyReasoningEffort,
       getDefaultReasoningEffort,
+      probe,
       defaultBaseUrl: opts.defaultBaseUrl || null,
     });
     this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);

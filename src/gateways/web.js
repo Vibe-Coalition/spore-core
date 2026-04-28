@@ -175,101 +175,42 @@ function _ephemeralConfig(formProviders = {}) {
   };
 }
 
-async function _probeProvider(name, body) {
-  const { createClientForModel } = require('../providers');
-  const cfg = _ephemeralConfig({ [name]: body, ...body.providers || {} });
-  // Embedder providers (gemini-embedder, embedder-gemma) own their own
-  // /test endpoints — see plugins/<name>/index.js. The probe path here
-  // only handles chat-completion providers.
-
-  // Pick a probe model per provider
-  let probeModel;
-  if (name === 'anthropic') { if (!cfg.anthropicApiKey) return { ok: false, error: 'missing apiKey' }; probeModel = 'claude-haiku-4-5-20251001'; }
-  else if (name === 'openai') { if (!cfg.openaiApiKey) return { ok: false, error: 'missing apiKey' }; probeModel = 'openai/gpt-4o-mini'; }
-  else if (name === 'openrouter') { if (!cfg.openrouterApiKey) return { ok: false, error: 'missing apiKey' }; probeModel = 'openrouter/anthropic/claude-haiku-4-5'; }
-  else if (name === 'local') {
-    if (!cfg.localModelBaseUrl) return { ok: false, error: 'missing baseUrl' };
-    // Probe /models endpoint — lighter than a chat call and doesn't need a model name
-    const url = (cfg.localModelBaseUrl.replace(/\/$/, '')) + '/models';
-    const t0 = Date.now();
-    // Honor the configured auth header — some self-hosted endpoints
-    // (BFL, certain vLLM tunnels) reject Authorization Bearer and want
-    // x-key / x-api-key instead. localModelAuthHeader comes from the
-    // wizard's OAI-compatible auth-header dropdown via _ephemeralConfig.
-    const auth = (cfg.localModelAuthHeader || 'bearer').toLowerCase();
-    const headers = {};
-    if (cfg.localModelApiKey) {
-      if (auth === 'x-api-key')      headers['x-api-key'] = cfg.localModelApiKey;
-      else if (auth === 'x-key')     headers['x-key']     = cfg.localModelApiKey;
-      else                           headers['Authorization'] = `Bearer ${cfg.localModelApiKey}`;
-    }
-    try {
-      const r = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
-      if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
-      const d = await r.json().catch(() => ({}));
-      const count = Array.isArray(d?.data) ? d.data.length : 0;
-      return { ok: true, latency_ms: Date.now() - t0, model: `${count} models listed`, excerpt: (d.data?.[0]?.id || '').slice(0, 60) };
-    } catch (e) { return { ok: false, error: e.message || String(e) }; }
-  } else {
-    // Custom provider: probe by name
-    const custom = cfg.customProviders?.[name];
-    if (!custom) return { ok: false, error: 'unknown provider' };
-    probeModel = `${name}/`; // bare prefix — expects user to provide a real model via route-level tests
-    return { ok: false, error: 'custom providers: use a Model Tier test instead' };
+// Plugin-aware provider probe. The wizard's "test" button hits
+// /api/providers/<name>/test → here. We delegate to the owning
+// plugin's `probe` hook so each vendor decides whether to run a
+// chat call (anthropic-provider) or a /models GET (openai-provider,
+// gemini-provider, local-oai-provider, openrouter-provider). No
+// vendor branches in core; if no plugin claims the name we return
+// an actionable error.
+async function _probeProvider(name, body, pluginManager) {
+  const entry = pluginManager?.getProviders?.().find(p => p.name === name);
+  if (!entry?.probe) {
+    return { ok: false, error: `No probe registered for provider '${name}'. Install the matching provider plugin and restart.` };
   }
-  // Chat probe
-  const t0 = Date.now();
   try {
-    const client = createClientForModel(probeModel, cfg);
-    const response = await client.messages.create({
-      model: probeModel,
-      max_tokens: 64,
-      messages: [{ role: 'user', content: "Respond with a single word: ok" }],
-    });
-    const text = (response.content || []).find(b => b.type === 'text')?.text || '';
-    return { ok: true, latency_ms: Date.now() - t0, model: probeModel, excerpt: text.slice(0, 80) };
+    return await entry.probe(body || {});
   } catch (e) {
     return { ok: false, error: (e?.message || String(e)).slice(0, 300) };
   }
 }
 
-// Anthropic doesn't surface context length on /v1/models, so we keep a small
-// table of public model families. Matched by prefix.
-const _ANTHROPIC_CTX = [
-  ['claude-opus-4-7-1m', 1000000],
-  ['claude-opus-4-7', 1000000],
-  ['claude-opus-4-1', 200000],
-  ['claude-sonnet-4-6', 200000],
-  ['claude-sonnet-4', 200000],
-  ['claude-haiku-4-5', 200000],
-  ['claude-3-5-sonnet', 200000],
-  ['claude-3-5-haiku', 200000],
-  ['claude-3-opus', 200000],
-  ['claude-3-sonnet', 200000],
-  ['claude-3-haiku', 200000],
-];
-function _resolveContextLength(rawModel, kind) {
+// Generic OAI-compatible context-length resolver — reads vendor-shaped
+// fields from a /models response entry. Used only by the no-plugin
+// fallback path of _listModelsForProvider for unclaimed `kind` values.
+// Vendor-specific tables (Anthropic prefix lookups, OpenAI per-family
+// caps) live in each provider plugin's listModels.
+function _resolveContextLength(rawModel) {
   if (!rawModel) return null;
-  // Common OAI-compatible fields, in order of preference.
-  // `max_model_len` is what vLLM returns. The rest cover OpenAI / OpenRouter /
-  // llama.cpp / various adapters.
   const fields = ['context_length', 'context_window', 'max_context_length', 'max_model_len', 'max_position_embeddings', 'max_input_tokens'];
   for (const f of fields) {
     const v = Number(rawModel[f]);
     if (Number.isFinite(v) && v > 0) return Math.floor(v);
   }
-  // Some providers nest under `top_provider` (OpenRouter does this for some models).
   const tp = rawModel.top_provider;
   if (tp) {
     for (const f of fields) {
       const v = Number(tp[f]);
       if (Number.isFinite(v) && v > 0) return Math.floor(v);
-    }
-  }
-  // Anthropic fallback table by id prefix.
-  if (kind === 'anthropic' && rawModel.id) {
-    for (const [prefix, ctx] of _ANTHROPIC_CTX) {
-      if (rawModel.id.startsWith(prefix)) return ctx;
     }
   }
   return null;
@@ -290,24 +231,22 @@ async function _enrichModelLimits(modelLimits, models, providers, pluginManager)
   const probedProviders = new Map(); // providerName → cached models response
   const probeProvider = async (providerName) => {
     if (probedProviders.has(providerName)) return probedProviders.get(providerName);
+    const entry = pluginManager?.getProviders?.().find(p => p.name === providerName);
+    if (!entry?.listModels) { probedProviders.set(providerName, null); return null; }
+    // Build the probe body from the wizard's posted form values so the
+    // plugin can probe with the operator's pending key/baseUrl before
+    // it's been persisted. Each plugin understands the shape it cares
+    // about — extra fields are ignored.
     const p = providers || {};
-    let probeArgs = null;
-    if (providerName === 'anthropic' && p.anthropic?.apiKey) probeArgs = { kind: 'anthropic', apiKey: p.anthropic.apiKey };
-    else if (providerName === 'openai' && p.openai?.apiKey) probeArgs = { kind: 'openai', apiKey: p.openai.apiKey, baseUrl: p.openai.baseUrl };
-    else if (providerName === 'openrouter' && p.openrouter?.apiKey) probeArgs = { kind: 'openrouter', apiKey: p.openrouter.apiKey, baseUrl: p.openrouter.baseUrl };
-    else {
-      const c = (p.custom || []).find(x => x?.name === providerName);
-      if (c?.url) probeArgs = { kind: 'custom', baseUrl: c.url, apiKey: c.key, authHeader: c.authHeader };
-    }
-    if (!probeArgs) { probedProviders.set(providerName, null); return null; }
-    // Plugin-aware: if a provider plugin registered listModels, prefer it.
-    let res = null;
-    const entry = pluginManager?.getProviders?.().find(pp => pp.name === probeArgs.kind);
-    if (entry?.listModels) {
-      res = await entry.listModels(probeArgs).catch(() => null);
-    } else {
-      res = await _listModelsForProvider(probeArgs).catch(() => null);
-    }
+    const slot = p[providerName] || {};
+    const customRow = (p.custom || []).find(x => x?.name === providerName);
+    const probeArgs = {
+      kind: providerName,
+      apiKey: slot.apiKey || customRow?.key,
+      baseUrl: slot.baseUrl || customRow?.url,
+      authHeader: slot.authHeader || customRow?.authHeader,
+    };
+    const res = await entry.listModels(probeArgs).catch(() => null);
     probedProviders.set(providerName, res);
     return res;
   };
@@ -338,33 +277,20 @@ async function _enrichModelLimits(modelLimits, models, providers, pluginManager)
   return out;
 }
 
-// List models for a given provider (used by the onboarding wizard's Populate button).
-// Hits the provider's /models endpoint server-side so we sidestep CORS.
-async function _listModelsForProvider({ kind, baseUrl, apiKey, authHeader }) {
-  if (!kind) return { ok: false, error: 'missing kind' };
-  let url, headers = {};
-  if (kind === 'anthropic') {
-    if (!apiKey) return { ok: false, error: 'missing apiKey' };
-    url = 'https://api.anthropic.com/v1/models';
-    headers['x-api-key'] = apiKey;
-    headers['anthropic-version'] = '2023-06-01';
-  } else if (kind === 'openai') {
-    if (!apiKey) return { ok: false, error: 'missing apiKey' };
-    url = (baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '') + '/models';
-    headers['Authorization'] = `Bearer ${apiKey}`;
-  } else if (kind === 'openrouter') {
-    url = (baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '') + '/models';
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-  } else if (kind === 'custom' || kind === 'local') {
-    if (!baseUrl) return { ok: false, error: 'missing baseUrl' };
-    url = baseUrl.replace(/\/$/, '') + '/models';
-    if (apiKey) {
-      if (authHeader === 'x-api-key') headers['x-api-key'] = apiKey;
-      else if (authHeader === 'x-key') headers['x-key'] = apiKey;
-      else headers['Authorization'] = `Bearer ${apiKey}`;
-    }
-  } else {
-    return { ok: false, error: `unsupported kind: ${kind}` };
+// Generic OAI-compatible /models probe. Used as the no-plugin fallback
+// for the /api/providers/list-models endpoint when `kind` doesn't match
+// a registered plugin (e.g. legacy custom-OAI tunnels via SPORE_PROVIDER_*
+// during the pre-plugins boot window). All vendor-aware probing
+// (Anthropic prefix tables, OpenAI / Gemini / OpenRouter rich
+// metadata) lives in each plugin's listModels.
+async function _listModelsForProvider({ baseUrl, apiKey, authHeader }) {
+  if (!baseUrl) return { ok: false, error: 'missing baseUrl' };
+  const url = baseUrl.replace(/\/$/, '') + '/models';
+  const headers = {};
+  if (apiKey) {
+    if (authHeader === 'x-api-key') headers['x-api-key'] = apiKey;
+    else if (authHeader === 'x-key') headers['x-key'] = apiKey;
+    else headers['Authorization'] = `Bearer ${apiKey}`;
   }
   try {
     const r = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
@@ -380,7 +306,7 @@ async function _listModelsForProvider({ kind, baseUrl, apiKey, authHeader }) {
       if (typeof m === 'string') return { id: m, contextLength: null };
       const id = m.id || m.name || '';
       if (!id) return null;
-      return { id, contextLength: _resolveContextLength(m, kind) };
+      return { id, contextLength: _resolveContextLength(m) };
     }).filter(Boolean);
     return { ok: true, models };
   } catch (e) {
@@ -1513,7 +1439,9 @@ class WebGateway {
       }
     }
     this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
-    this.config._isOAuth = !!(this.config.anthropicApiKey && String(this.config.anthropicApiKey).includes('sk-ant-oat'));
+    // _isOAuth is set by anthropic-provider's _detectOAuth (runs on
+    // register + every onConfigChange). Core no longer checks token
+    // shape directly.
     if (voiceTouched) this._voicePipeline = null;
     if (providerTouched || modelTouched) {
       this.tools?.anthropicClient?.clearCache?.();
@@ -6497,7 +6425,7 @@ class WebGateway {
 
         // Resolve the top-level `model` pointer (used by detectBackend etc.)
         this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
-        this.config._isOAuth = !!(this.config.anthropicApiKey && String(this.config.anthropicApiKey).includes('sk-ant-oat'));
+        // _isOAuth is set by anthropic-provider's _detectOAuth.
 
         // If providers or model tiers changed, rebuild the agent's LLM client
         // so the next chat uses the new provider/model instead of the old one.
@@ -6555,8 +6483,8 @@ class WebGateway {
       const name = urlPath.slice('/api/providers/'.length, -'/test'.length);
       const body = await _readJsonBody(req);
       try {
-        const result = await _probeProvider(name, body);
-        res.writeHead(result.ok ? 200 : 200, { 'Content-Type': 'application/json' });
+        const result = await _probeProvider(name, body, this.tools?._pluginManager);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });

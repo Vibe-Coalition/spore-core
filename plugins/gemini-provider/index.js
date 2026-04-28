@@ -142,6 +142,28 @@ module.exports = function register(api) {
       return _listGeminiModels({ apiKey });
     },
     applyReasoningEffort: applyGeminiReasoningEffort,
+    // /v1beta/models GET probe.
+    probe: async (body) => {
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.GEMINI_API_KEY
+        || api.getHostConfig()?.geminiApiKey
+        || api.getConfig()?.apiKey
+        || '';
+      if (!apiKey) return { ok: false, error: 'missing apiKey' };
+      try {
+        const t0 = Date.now();
+        const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+          headers: { 'x-goog-api-key': apiKey },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json().catch(() => ({}));
+        const count = Array.isArray(d?.models) ? d.models.length : 0;
+        return { ok: true, latency_ms: Date.now() - t0, model: `${count} models listed` };
+      } catch (e) {
+        return { ok: false, error: String(e.message || e).slice(0, 200) };
+      }
+    },
   });
 
   api.registerSettingsPane({

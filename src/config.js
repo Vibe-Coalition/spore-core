@@ -532,31 +532,11 @@ function loadConfigFresh() {
   if (!config.discordToken && !config.telegramBotToken && !config.slackBotToken && !config.webPort) {
     console.warn('[config] No platform tokens or web port set — agent will only be reachable via the invoke API');
   }
-  // Validate provider-specific keys for the selected main model backend.
-  const selectedModel = config.plannerModel || config.normalModel || config.casualModel || config.model;
-  const mainPrefix = selectedModel?.split('/')[0];
-  const mainBackend = selectedModel?.startsWith('openai/') ? 'openai'
-    : selectedModel?.startsWith('openrouter/') ? 'openrouter'
-    : selectedModel?.startsWith('local/') ? 'local'
-      : selectedModel?.startsWith('gemini/') ? 'gemini'
-        : (config.customProviders?.[mainPrefix]) ? 'custom'
-          : 'anthropic';
-  if (mainBackend === 'anthropic' && !config.anthropicApiKey) {
-    console.error('[config] Missing Anthropic API key. Set ANTHROPIC_API_KEY env var or configure spore.json');
-  }
-  if (mainBackend === 'openai' && !config.openaiApiKey && !process.env.OPENAI_API_KEY) {
-    console.error('[config] Missing OpenAI API key. Set OPENAI_API_KEY env var or configure spore.json');
-  }
-  if (mainBackend === 'openrouter' && !config.openrouterApiKey) {
-    console.error('[config] Missing OpenRouter API key. Set OPENROUTER_API_KEY env var or configure spore.json');
-  }
-  if (mainBackend === 'gemini' && !config.geminiApiKey && !process.env.GEMINI_API_KEY) {
-    console.error('[config] Missing Gemini API key. Set GEMINI_API_KEY env var or configure spore.json');
-  }
-  if (mainBackend === 'custom') {
-    const prov = config.customProviders[mainPrefix];
-    if (!prov?.url) console.error(`[config] Custom provider '${mainPrefix}' missing URL. Set SPORE_PROVIDER_${mainPrefix.toUpperCase()}_URL`);
-  }
+  // Per-provider key validation moved to each provider plugin's
+  // isConfigured/init time. Config-validation runs before plugins
+  // load, so it can't see plugin state — the agent loop's init()
+  // logs the actionable warning when a backend is selected but
+  // unconfigured (see src/agent/loop.js).
 
   // Channel config shims
   if (!config.channels) config.channels = {};

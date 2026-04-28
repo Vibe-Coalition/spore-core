@@ -304,9 +304,9 @@ async function boot() {
     log.warn(`[providers] Failed to load providers from manager: ${e.message}`);
   }
 
-  const isOAuth = config.anthropicApiKey?.includes('sk-ant-oat');
-  config._isOAuth = isOAuth;
-  if (isOAuth) log.info('Detected OAuth token — using Claude Code auth headers');
+  // OAuth token detection now lives in plugins/anthropic-provider —
+  // it sets config._isOAuth at register time and on every config
+  // change. Core no longer string-matches against vendor token shapes.
   const anthropicClient = new MultiProvider(config);
   log.info(`Provider ready — main model backend: ${require('./providers').detectBackend(config.model)}`);
 

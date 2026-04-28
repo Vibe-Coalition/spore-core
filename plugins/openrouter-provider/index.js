@@ -111,6 +111,33 @@ module.exports = function register(api) {
       return r;
     },
     applyReasoningEffort: applyOpenRouterReasoningEffort,
+    // /models GET probe.
+    probe: async (body) => {
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.OPENROUTER_API_KEY
+        || api.getHostConfig()?.openrouterApiKey
+        || api.getConfig()?.apiKey
+        || '';
+      const baseUrl = (body?.baseUrl || '').trim()
+        || process.env.OPENROUTER_BASE_URL
+        || api.getHostConfig()?.openrouterBaseUrl
+        || api.getConfig()?.baseUrl
+        || 'https://openrouter.ai/api/v1';
+      if (!apiKey) return { ok: false, error: 'missing apiKey' };
+      try {
+        const t0 = Date.now();
+        const r = await fetch(baseUrl.replace(/\/$/, '') + '/models', {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json().catch(() => ({}));
+        const count = Array.isArray(d?.data) ? d.data.length : 0;
+        return { ok: true, latency_ms: Date.now() - t0, model: `${count} models listed` };
+      } catch (e) {
+        return { ok: false, error: String(e.message || e).slice(0, 200) };
+      }
+    },
   });
 
   api.registerSettingsPane({
