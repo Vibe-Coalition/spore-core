@@ -115,6 +115,11 @@ module.exports = function register(api) {
       baseURL: process.env.OPENAI_BASE_URL || config.openaiBaseUrl || slot.baseUrl || 'https://api.openai.com/v1',
       apiKey,
       timeoutMs: config.apiTimeoutMs || 120000,
+      // OpenAI's reasoning models (o1/o3/o4/gpt-5) reject `max_tokens`
+      // and require `max_completion_tokens` instead. Other OAI-compat
+      // backends (vLLM, Ollama, OpenRouter) still accept the legacy
+      // field, so flip this on only for the openai-provider plugin.
+      useMaxCompletionTokens: true,
     });
   }, {
     prefixes: ['openai'],
