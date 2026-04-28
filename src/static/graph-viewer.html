@@ -182,11 +182,15 @@
     text-transform: uppercase; margin: 14px 0 4px;
   }
   .ob-step input[type="text"], .ob-step input[type="password"], .ob-step input[type="url"], .ob-step select {
-    width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--panel); color: var(--text-bright); font-size: .86rem; outline: none;
-    transition: border-color .2s ease;
+    width: 100%; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--text-bright); font-size: .92rem; outline: none;
+    font-family: inherit;
+    transition: border-color .2s ease, box-shadow .2s ease;
   }
-  .ob-step input:focus, .ob-step select:focus { border-color: var(--accent); }
+  .ob-step input:focus, .ob-step select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
   .ob-step .ob-error { color: var(--danger); font-size: .78rem; margin-top: 6px; min-height: 1em; }
   .ob-step .ob-note { font-size: .72rem; color: var(--text-dim); margin-top: 4px; }
 
@@ -295,17 +299,22 @@
   #onboarding-foot .left { display: flex; gap: 8px; }
   #onboarding-foot .right { display: flex; gap: 8px; }
   .ob-btn {
-    padding: 9px 18px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
-    font-size: .82rem; font-weight: 500; color: var(--text-bright); background: var(--panel);
-    transition: all .15s ease;
+    padding: 10px 18px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+    font-size: .86rem; font-weight: 500; color: var(--text-bright); background: var(--panel);
+    font-family: inherit; letter-spacing: .01em;
+    transition: opacity .15s ease, border-color .15s ease, transform .1s ease;
   }
   .ob-btn:hover { border-color: var(--accent); }
-  .ob-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .ob-btn:active { transform: scale(.98); }
+  .ob-btn:disabled { opacity: .4; cursor: not-allowed; }
+  /* Primary CTA — ink-chip pattern (same as login.html .btn and the
+     PetriChat send chip): ink-bright background on dark theme reverses
+     to dark-bright on light theme via the theme vars. Avoids the
+     low-contrast white-on-leaf-green gradient. */
   .ob-btn.primary {
-    border: none; color: #fff;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border: none; color: var(--bg); background: var(--text-bright);
   }
-  .ob-btn.primary:hover { opacity: .92; }
+  .ob-btn.primary:hover { opacity: .85; }
   .ob-sub-error { color: var(--danger); font-size: .78rem; }
 
   #app { display: flex; height: 100vh; height: 100dvh; position: relative; z-index: 1; }
@@ -6256,6 +6265,14 @@ function _obUpdateDots() {
 }
 
 function _obShowStep(n) {
+  // Leaving step '5' with the provider editor open (e.g. operator typed
+  // values then clicked Back) — capture the form into _obProviderEntries
+  // first so the input survives the round-trip. Without this, going Back
+  // from '5' returns to a re-rendered editor with empty fields.
+  const prevKey = _obStep ? OB_STEP_MAP[_obMode][_obStep - 1] : null;
+  if (prevKey === '5' && _obProviderEditing != null && typeof _obCaptureEditorForm === 'function' && _obCaptureEditorForm) {
+    try { _obCaptureEditorForm(); } catch { /* silent: missing DOM nodes — ignore */ }
+  }
   _obStep = n;
   const sectionKey = OB_STEP_MAP[_obMode][n - 1];
   document.querySelectorAll('.ob-step').forEach(s => s.classList.toggle('active', s.dataset.step === sectionKey));
@@ -6387,6 +6404,7 @@ const OB_PROVIDERS = [
 // builder) keeps working unchanged.
 let _obProviderEntries = [];
 let _obProviderEditing = null; // index into entries, or null when listing
+let _obCaptureEditorForm = null; // closure exposed by _obRenderProviderEditor; nulled on close
 
 // Step 'pp' — provider TYPE picker. This is the canonical place to
 // enable provider plugins (anthropic-provider, openai-provider, etc.) —
@@ -6449,6 +6467,14 @@ function _obCommitProviderTypeChoices() {
 function _obRenderProvidersList() {
   const root = document.getElementById('ob-providers-state');
   if (!root) return;
+  // Stale-index guard: if _obProviderEditing points past the array
+  // (e.g. operator removed the entry from the list, or _obCommitProviderTypeChoices
+  // dropped it because the tile got unchecked in step 'pp'), reset to
+  // null so we render the list view instead of crashing on
+  // _obProviderEntries[i].kind for an undefined entry.
+  if (_obProviderEditing != null && !_obProviderEntries[_obProviderEditing]) {
+    _obProviderEditing = null;
+  }
   if (_obProviderEditing != null) {
     _obRenderProviderEditor(root, _obProviderEditing);
     return;
@@ -6635,9 +6661,15 @@ function _obRenderProviderEditor(root, i) {
       _obUpdateFinishGate();
     }
   };
+  // Expose captureForm so _obNext can call it before validating step '5'
+  // (so an operator who hits Next mid-edit doesn't lose typed input or
+  // fail the "configure at least one provider" gate spuriously). Cleared
+  // when the editor closes (Save / Cancel) so we never read stale DOM.
+  _obCaptureEditorForm = captureForm;
   document.getElementById('ob-edit-save').addEventListener('click', () => {
     captureForm();
     _obProviderEditing = null;
+    _obCaptureEditorForm = null;
     _obRenderProvidersList();
   });
   document.getElementById('ob-edit-cancel').addEventListener('click', () => {
@@ -6645,6 +6677,7 @@ function _obRenderProviderEditor(root, i) {
     const isEmpty = e.kind === 'builtin' ? !e.apiKey && !e.baseUrl && !e.models : !e.apiKey && !e.url && !e.name;
     if (isEmpty) _obProviderEntries.splice(i, 1);
     _obProviderEditing = null;
+    _obCaptureEditorForm = null;
     _obRenderProvidersList();
   });
   document.getElementById('ob-edit-test').addEventListener('click', async () => {
@@ -7080,10 +7113,20 @@ function _obRenderPluginCard(p) {
 
 // Snapshot the current selections into _obData.plugins so navigation /
 // finish both have a consistent view.
+//
+// IMPORTANT: skip provider plugins. They're filtered out of the
+// rendered picker (see _obRenderPluginPicker) and toggled instead
+// by step 'pp' (the provider tile picker). Without this skip,
+// `cb` is null for provider plugins → `enabled = !!p.recommended`
+// overrides the operator's tile selection from step 'pp', and the
+// next render of 'pp' shows the tile unchecked → _obCommitProviderTypeChoices
+// drops the entry → _obProviderEditing now points at a missing index →
+// editor on step '5' renders against undefined and breaks the wizard.
 function _obSnapshotPluginPicker() {
   if (!_obPluginsCache) return;
   if (!_obData.plugins) _obData.plugins = {};
   for (const p of _obPluginsCache) {
+    if (OB_PROVIDER_PLUGIN_MAP[p.id]) continue;
     const cb = document.getElementById(`ob-plugin-on-${p.id}`);
     const enabled = cb ? cb.checked : !!p.recommended;
     const config = {};
@@ -7286,6 +7329,14 @@ async function _obNext() {
     err('ob-pp-error', '');
   }
   if (_obMode === 'operator' && key === '5') {
+    // If the editor is open, capture its form values into _obProviderEntries
+    // before validating. Without this, an operator who fills the form and
+    // hits Next without first clicking Save would lose their typed input
+    // AND fail the "Configure at least one provider" check (the entry's
+    // own apiKey/baseUrl stay empty since captureForm wasn't called).
+    if (_obProviderEditing != null && typeof _obCaptureEditorForm === 'function' && _obCaptureEditorForm) {
+      _obCaptureEditorForm();
+    }
     if (_obConfiguredProviderIds().length === 0) {
       err('ob-provider-error', 'Configure at least one provider.'); return;
     }
