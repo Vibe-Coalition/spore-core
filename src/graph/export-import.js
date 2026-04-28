@@ -110,10 +110,6 @@ const PROVIDER_DEFS = {
     },
     secretFields: ['openrouterApiKey'],
   },
-  gemini: {
-    envMap: { geminiApiKey: 'GEMINI_API_KEY' },
-    secretFields: ['geminiApiKey'],
-  },
   local: {
     envMap: { localModelBaseUrl: 'LOCAL_MODEL_BASE_URL', localModelApiKey: 'LOCAL_MODEL_API_KEY' },
     secretFields: ['localModelApiKey'],

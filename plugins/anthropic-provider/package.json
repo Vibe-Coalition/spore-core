@@ -1,0 +1,10 @@
+{
+  "name": "anthropic-provider",
+  "version": "1.0.0",
+  "description": "Anthropic Claude chat-completion provider plugin for SPORE.",
+  "main": "index.js",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
+}

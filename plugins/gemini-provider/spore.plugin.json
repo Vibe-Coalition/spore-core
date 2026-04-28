@@ -1,0 +1,9 @@
+{
+  "id": "gemini-provider",
+  "name": "Google Gemini",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Google Gemini chat-completion provider (and shared API key for the gemini-embedder plugin). Claims the 'gemini' model prefix (e.g. 'gemini/gemini-2.5-flash'). Owns the GEMINI_API_KEY config slot — gemini-embedder reads from this plugin via its `depends` declaration. Backfills from the legacy host-level `geminiApiKey` / GEMINI_API_KEY env on first install. Multimodal (vision/audio/video) capable."
+}

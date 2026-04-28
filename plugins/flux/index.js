@@ -15,12 +15,16 @@ module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
     uninstall: './sql/uninstall.sql',
-    // v2 adds the ref-api-keys catalog patch (BFL_API_KEY entry).
-    // Bumping forces plugin manager to run uninstall.sql then
-    // install.sql on next load, sweeping the legacy 'seed'-tagged
-    // catalog row and re-inserting it tagged 'flux' so uninstall
-    // works cleanly going forward.
-    schemaVersion: 2,
+    // v3 adds the "Can generate images using Flux." entry on the spore
+    // node's capabilities aspect. The seed graph used to ship that
+    // line hard-coded; bumping triggers uninstall+install on existing
+    // installs so the seed-tagged row gets swept and re-inserted
+    // tagged 'flux' (clean uninstall going forward). v2 did the same
+    // dance for the ref-api-keys catalog (BFL_API_KEY entry).
+    // v4 adds the spore→ref-bfl-api `documents` edge that used to live
+    // in seed-graph.sql. Bump triggers uninstall+reinstall on existing
+    // installs so the edge gets re-tagged 'flux' for clean uninstall.
+    schemaVersion: 4,
   });
 
   api.registerTool('generate_image', {

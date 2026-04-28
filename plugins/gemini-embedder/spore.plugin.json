@@ -1,0 +1,9 @@
+{
+  "id": "gemini-embedder",
+  "name": "Gemini Embedder",
+  "version": "1.1.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": ["gemini-provider"],
+  "description": "Text embeddings via Google's Gemini embedding API (gemini-embedding-2-preview, 768-dim). Used by graph indexing (tools.graph_update, learner extraction, maintainer sweeper) and retrieval.vectorSearch / hybridSearch. Reads the API key from gemini-provider's plugin slot — install gemini-provider once, the key feeds both chat and embeddings. With embedder-gemma also installed, the operator picks the active embedder via Settings → Plugins."
+}

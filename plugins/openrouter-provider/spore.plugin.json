@@ -1,0 +1,9 @@
+{
+  "id": "openrouter-provider",
+  "name": "OpenRouter",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": ["local-oai-provider"],
+  "description": "OpenRouter chat-completion provider — single API key, hundreds of models. Claims the 'openrouter' model prefix (e.g. 'openrouter/anthropic/claude-haiku-4-5'). Wraps the canonical OAICompatClient from local-oai-provider with OpenRouter's defaults (openrouter.ai/api/v1, HTTP-Referer + X-Title headers). Reads the API key from plugins.openrouter-provider.apiKey or the legacy OPENROUTER_API_KEY env var."
+}

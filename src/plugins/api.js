@@ -29,6 +29,8 @@ class PluginAPI {
     this._pathAliases = [];
     this._sttProviders = [];
     this._ttsProviders = [];
+    this._embedders = [];
+    this._llmProviders = [];
     this._frontendAssets = [];
     this._configChangeFn = null;
     this._shutdownFn = null;
@@ -437,6 +439,103 @@ class PluginAPI {
 
   getTTSProviders() {
     return this._ttsProviders;
+  }
+
+  /**
+   * Register a text-embedding provider. Used by core's graph indexing
+   * (tools.graph_update, learner extraction, maintainer sweeper) and
+   * by retrieval.vectorSearch / hybridSearch at query time. With no
+   * embedder plugin installed, vector search returns [] and hybrid
+   * degrades to keyword search — same behavior as the legacy
+   * `GEMINI_API_KEY not set` fallback.
+   *
+   *   factory(config) → { embed(text): Promise<float[]> }
+   *
+   * `opts.dim` is the embedding dimension (must match what factory
+   * produces); core stores it alongside each vector so switching
+   * providers with different dims is safe — vectorSearch filters by
+   * the active provider's name+dim, and the maintainer sweeper
+   * re-embeds rows whose stored provider/dim no longer matches.
+   * `opts.isConfigured(config) → bool` lets the plugin signal
+   * credential presence; default = always-true.
+   *
+   * @param {string} name
+   * @param {Function} factory
+   * @param {object} opts
+   * @param {number} opts.dim       — REQUIRED: embedding dimension
+   * @param {Function} [opts.isConfigured]
+   */
+  registerEmbedder(name, factory, opts = {}) {
+    if (!name || typeof name !== 'string') throw new Error('registerEmbedder requires a string name');
+    if (typeof factory !== 'function') throw new Error('registerEmbedder requires a factory function');
+    if (typeof opts.dim !== 'number' || opts.dim <= 0) throw new Error('registerEmbedder requires opts.dim (positive integer)');
+    const isConfigured = typeof opts.isConfigured === 'function' ? opts.isConfigured : () => true;
+    this._embedders.push({ name, factory, isConfigured, dim: opts.dim });
+    this._log.debug(`[plugin:${this.pluginId}] Registered embedder: ${name} (dim=${opts.dim})`);
+  }
+
+  getEmbedders() {
+    return this._embedders;
+  }
+
+  /**
+   * Register an LLM chat-completion provider. Used by core's
+   * `createClientForModel` walker — when the operator sends a model
+   * string like `'openai/gpt-4o-mini'`, the manager finds the provider
+   * plugin whose `prefixes` claim that prefix and instantiates its
+   * client. With no provider plugins installed, the legacy in-tree
+   * branches in `src/providers/index.js` keep working (transitional
+   * fallback that goes away in Phase E of the extraction).
+   *
+   *   factory(config) → { messages: { create({model, max_tokens, system?, messages, tools?}) → AnthropicShape, stream?(...): AsyncIterator } }
+   *
+   * `prefixes` is the list of model-string prefixes this plugin claims
+   * (e.g. `['openai']` for any model starting `'openai/...'`). Plugins
+   * MUST NOT claim a prefix that core already routes to a different
+   * backend; the manager rejects collisions at registration time.
+   *
+   * `capabilities` is declared statically here so the agent loop's
+   * sync `getCapabilities(backend)` lookup keeps working without an
+   * extra round-trip into the plugin.
+   *
+   * `isConfigured(config)` lets the plugin signal whether its
+   * credentials are populated (default = true). The wizard's
+   * Provider step reads this to decide whether to mark the plugin's
+   * card as ready.
+   *
+   * @param {string} name
+   * @param {Function} factory
+   * @param {object} opts
+   * @param {string[]} opts.prefixes  — REQUIRED: model-string prefixes
+   * @param {object} [opts.capabilities] — { tools, vision, audio, video }; defaults all false except tools
+   * @param {Function} [opts.isConfigured]
+   * @param {string} [opts.defaultBaseUrl]
+   */
+  registerProvider(name, factory, opts = {}) {
+    if (!name || typeof name !== 'string') throw new Error('registerProvider requires a string name');
+    if (typeof factory !== 'function') throw new Error('registerProvider requires a factory function');
+    if (!Array.isArray(opts.prefixes) || opts.prefixes.length === 0) {
+      throw new Error('registerProvider requires opts.prefixes (non-empty string array)');
+    }
+    const prefixes = opts.prefixes.map(p => String(p));
+    const capabilities = Object.assign(
+      { tools: true, vision: false, audio: false, video: false },
+      opts.capabilities || {}
+    );
+    const isConfigured = typeof opts.isConfigured === 'function' ? opts.isConfigured : () => true;
+    this._llmProviders.push({
+      name,
+      factory,
+      prefixes,
+      capabilities,
+      isConfigured,
+      defaultBaseUrl: opts.defaultBaseUrl || null,
+    });
+    this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);
+  }
+
+  getProviders() {
+    return this._llmProviders;
   }
 
   /**

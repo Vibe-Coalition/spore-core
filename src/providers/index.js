@@ -24,7 +24,41 @@
 
 'use strict';
 
-const Anthropic = require('@anthropic-ai/sdk');
+// @anthropic-ai/sdk used to be imported here for the in-tree Anthropic
+// chat-completion branch in createClientForModel. After Phase E of the
+// provider extraction, every vendor (Anthropic, OpenAI, OpenRouter,
+// Gemini, Local-OAI) lives in a plugin and the SDK lives in
+// plugins/anthropic-provider/package.json. Core has zero vendor SDK
+// deps. The "Anthropic-shape" message envelope mentioned throughout
+// this file is a wire-protocol convention, not the SDK type.
+
+// ---------------------------------------------------------------------------
+// Plugin walker — set by app.js after pluginManager.initAll(). Provider
+// plugins (local-oai-provider, anthropic-provider, etc.) register via
+// `api.registerProvider(...)`; createClientForModel + detectBackend
+// consult the manager first and fall through to the in-tree branches
+// only when no plugin claims the model's prefix. Stays null in early
+// boot — every consumer treats null as "no plugins yet, use built-ins".
+// ---------------------------------------------------------------------------
+
+let _providerManager = null;
+
+function setProviderManager(manager) {
+  _providerManager = manager;
+}
+
+// Resolve a model string to a plugin-registered provider entry, or null.
+function _resolvePluginProvider(model) {
+  if (!_providerManager?.resolveProviderForModel) return null;
+  try {
+    return _providerManager.resolveProviderForModel(model);
+  } catch (e) {
+    // Manager itself crashed — log via console (no logger threaded through here)
+    // and fall back to in-tree dispatch. Keeps the agent loop alive.
+    console.error('[providers] resolveProviderForModel threw:', e.message);
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -162,9 +196,14 @@ function stripPrefix(model) {
 
 let _customProviderNames = new Set();
 
-/** Detect which backend a model string targets */
+/** Detect which backend a model string targets. Plugin-registered
+ *  providers win first (so a plugin claiming `'openai'` shadows the
+ *  in-tree branch); falls through to legacy hard-coded prefixes when
+ *  no plugin manager wired or no plugin claims the prefix. */
 function detectBackend(model) {
   if (!model) return 'none';
+  const pluginEntry = _resolvePluginProvider(model);
+  if (pluginEntry) return pluginEntry.name; // e.g. 'openai', 'anthropic', 'local'
   if (model.startsWith('openai/')) return 'openai';
   if (model.startsWith('openrouter/')) return 'openrouter';
   if (model.startsWith('local/')) return 'local';
@@ -1116,78 +1155,35 @@ class GeminiClient {
  * @returns {{ messages: { create: Function }, _backend: string }}
  */
 function createClientForModel(model, config) {
-  // Register custom provider names so detectBackend/stripPrefix recognize them
+  // Custom provider name registration is still needed for detectBackend's
+  // legacy fallback (when no plugin claims the prefix). The local-oai-provider
+  // plugin reads config.customProviders at register time and claims those
+  // prefixes itself; this just keeps detectBackend's `'custom'` answer
+  // working for any other code that asks.
   if (config?.customProviders) {
     _customProviderNames = new Set(Object.keys(config.customProviders));
   }
 
-  const backend = detectBackend(model);
-
-  if (backend === 'custom') {
-    const prefix = model.substring(0, model.indexOf('/'));
-    const prov = config.customProviders?.[prefix];
-    if (!prov?.url) throw new Error(`Custom provider '${prefix}' has no URL. Set SPORE_PROVIDER_${prefix.toUpperCase()}_URL`);
-    return new OAICompatClient({
-      baseURL: prov.url,
-      apiKey: prov.key || '',
-      authHeader: prov.authHeader || 'bearer',
-      timeoutMs: config.apiTimeoutMs || 120000,
-    });
+  // Every backend lives in a plugin now. The walker resolves the model's
+  // prefix to a registered provider entry and we're done. With no
+  // matching plugin installed, we throw a clear error rather than
+  // silently falling through to a removed in-tree branch.
+  const pluginEntry = _resolvePluginProvider(model);
+  if (pluginEntry) {
+    return pluginEntry.factory(config);
   }
-
-  if (backend === 'openai') {
-    const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY || '';
-    if (!apiKey) throw new Error('OpenAI model requested but OPENAI_API_KEY not set');
-    return new OAICompatClient({
-      baseURL: config.openaiBaseUrl || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-      apiKey,
-      timeoutMs: config.apiTimeoutMs || 120000,
-    });
+  // Anthropic plugin registers `prefixes: ['claude']`; bare model names
+  // (e.g. 'claude-haiku-4-5') with no slash never hit the walker's
+  // resolveProviderForModel path (which requires a slash). Look up
+  // 'anthropic' by name as a special case so the legacy "no prefix
+  // means Claude" UX keeps working without re-introducing the branch.
+  if (_providerManager?.getProviders) {
+    const all = _providerManager.getProviders();
+    const anthropic = all.find(p => p.name === 'anthropic');
+    if (anthropic) return anthropic.factory(config);
   }
-
-  if (backend === 'openrouter') {
-    const apiKey = config.openrouterApiKey || process.env.OPENROUTER_API_KEY || '';
-    if (!apiKey) throw new Error('OpenRouter model requested but OPENROUTER_API_KEY not set');
-    return new OAICompatClient({
-      baseURL: config.openrouterBaseUrl || 'https://openrouter.ai/api/v1',
-      apiKey,
-      headers: {
-        'HTTP-Referer': config.openrouterReferer || 'https://spore.local',
-        'X-Title': config.openrouterTitle || (config.displayName || 'SPORE'),
-      },
-      timeoutMs: config.apiTimeoutMs || 120000,
-    });
-  }
-
-  if (backend === 'local') {
-    const baseURL = config.localModelBaseUrl || process.env.LOCAL_MODEL_BASE_URL || 'http://localhost:11434/v1';
-    return new OAICompatClient({
-      baseURL,
-      apiKey: config.localModelApiKey || process.env.LOCAL_MODEL_API_KEY || 'local',
-      timeoutMs: config.apiTimeoutMs || 120000,
-    });
-  }
-
-  if (backend === 'gemini') {
-    const apiKey = config.geminiApiKey || process.env.GEMINI_API_KEY || '';
-    if (!apiKey) throw new Error('Gemini model requested but GEMINI_API_KEY not set');
-    return new GeminiClient({ apiKey, timeoutMs: config.apiTimeoutMs || 120000 });
-  }
-
-  // Anthropic (default)
-  const isOAuth = config._isOAuth || config.anthropicApiKey?.includes('sk-ant-oat');
-  return new Anthropic(
-    isOAuth
-      ? {
-          authToken: config.anthropicApiKey,
-          apiKey: null,
-          defaultHeaders: {
-            'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
-            'user-agent': 'claude-cli/2.1.75',
-            'x-app': 'cli',
-          },
-        }
-      : { apiKey: config.anthropicApiKey }
+  throw new Error(
+    `No provider plugin handles model '${model}'. Install a provider plugin (anthropic-provider, openai-provider, openrouter-provider, local-oai-provider, gemini-provider) and restart, or change the model string to one a registered plugin claims.`
   );
 }
 
@@ -1409,4 +1405,10 @@ class MultiProvider {
   }
 }
 
-module.exports = { MultiProvider, createClientForModel, detectBackend, stripPrefix, _hasImages, _inferCapabilities };
+// OAICompatClient + GeminiClient are exported as transitional public
+// symbols so the local-oai-provider / openai-provider / openrouter-provider /
+// gemini-provider plugins can wrap them. Phase E of the provider extraction
+// moves the full implementations into the plugins; for now the plugins
+// require these from core to avoid duplicating ~500 lines of stream-parsing
+// code while the contract is still settling.
+module.exports = { MultiProvider, createClientForModel, detectBackend, stripPrefix, setProviderManager, OAICompatClient, GeminiClient, _hasImages, _inferCapabilities };

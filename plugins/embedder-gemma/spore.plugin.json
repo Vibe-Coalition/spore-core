@@ -1,0 +1,9 @@
+{
+  "id": "embedder-gemma",
+  "name": "Local Embedder (Gemma)",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Local text embeddings via Google's EmbeddingGemma-300M (Apache 2.0). Runs in-process via Transformers.js + ONNX Runtime — no API key, no external service, models cache to /data/transformers-cache. 768-dim native, with Matryoshka truncation to 512/256/128 for faster cosine search. With both this and the gemini-embedder plugin installed, the operator picks the active provider via Settings → Plugins → Embedder Selection."
+}

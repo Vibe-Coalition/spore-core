@@ -1,0 +1,9 @@
+{
+  "id": "local-oai-provider",
+  "name": "Local OAI-compatible LLM",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Canonical reference provider plugin: OpenAI-compatible chat completions over any HTTP endpoint (vLLM, LM Studio, Ollama, llama.cpp, self-hosted). No API key required by default. Claims the 'local' model prefix and dynamically registers each entry from spore.json's customProviders block (legacy SPORE_PROVIDER_<NAME>_* env vars). Other provider plugins (openai-provider, openrouter-provider) wrap the same OAICompatClient via this plugin's lib."
+}

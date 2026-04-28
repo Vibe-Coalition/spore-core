@@ -3175,20 +3175,24 @@ class WebGateway {
               return;
             }
           }
-          // 1a. Plugin selections — wizard sent `plugins: { disabled: [...], configs: { id: {...} } }`.
+          // 1a. Plugin selections — wizard sends `pluginActions: { disabled: [...], configs: { id: {...} } }`.
           // For each disabled id: hot-uninstall (which also adds to plugins-disabled.json so
           // subsequent boots skip it). For each config: persist into config.plugins[id].
-          if (parsed.plugins && typeof parsed.plugins === 'object') {
+          // The key is intentionally `pluginActions`, NOT `plugins` — the latter would land
+          // in _persistSettingsPatch's body.plugins branch, which treats every top-level key
+          // as a plugin id and writes `disabled` and `configs` as synthetic plugin slots.
+          const pluginActions = parsed.pluginActions;
+          if (pluginActions && typeof pluginActions === 'object') {
             const mgr = this.tools?._pluginManager;
             if (mgr) {
-              const configs = parsed.plugins.configs || {};
+              const configs = pluginActions.configs || {};
               for (const [pluginId, partial] of Object.entries(configs)) {
                 if (!partial || typeof partial !== 'object') continue;
                 try { await mgr.persistPluginConfig(pluginId, partial); } catch (e) {
                   this.log.warn(`[onboarding] plugin config (${pluginId}) failed: ${e.message}`);
                 }
               }
-              const disabledIds = Array.isArray(parsed.plugins.disabled) ? parsed.plugins.disabled : [];
+              const disabledIds = Array.isArray(pluginActions.disabled) ? pluginActions.disabled : [];
               for (const pluginId of disabledIds) {
                 try { await mgr.uninstallPlugin(pluginId); } catch (e) {
                   this.log.warn(`[onboarding] plugin uninstall (${pluginId}) failed: ${e.message}`);

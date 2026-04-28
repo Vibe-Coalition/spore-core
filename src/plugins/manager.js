@@ -239,9 +239,10 @@ class PluginManager {
 
     // First: honor explicit uninstalls. A plugin folder shipped in
     // plugins/ is auto-loaded by loadAll, but the operator may have
-    // deliberately uninstalled it via the Plugins UI. The
-    // plugin_disabled table sticks across boots; entries in it are
-    // dropped here before init runs.
+    // deliberately uninstalled it via the Plugins UI. The disabled-
+    // plugins ledger (<dataDir>/plugins-disabled.json) sticks across
+    // boots, graph resets, and DB backup-restores; entries in it are
+    // dropped from this.plugins here before init runs.
     const disabledIds = this._getDisabledPluginIds();
     const disabledDropped = [];
     for (const id of disabledIds) {
@@ -298,33 +299,86 @@ class PluginManager {
   }
 
   /**
-   * Ensure the bookkeeping table that records EXPLICIT uninstalls so a
-   * bundled plugin doesn't auto-resurrect on next boot just because its
-   * folder is on disk. An entry here means "the operator deliberately
-   * uninstalled this plugin"; the loader skips it. Re-install via the
-   * Plugins UI removes the row.
+   * Resolve the on-disk path for the disabled-plugins ledger.
+   *
+   * Lives at <dataDir>/plugins-disabled.json — a flat JSON array of plugin
+   * ids the operator has explicitly uninstalled. Plain file (not a graph
+   * DB table) on purpose: graph reset, DB backup-restore, and plugin
+   * schemaVersion migrations all touch the graph DB, and any of those
+   * could otherwise wipe the ledger and cause "uninstalled" plugins to
+   * silently come back on next boot. The file sits next to the graph DB
+   * and only `rm -rf /data` removes it.
    */
-  _ensurePluginDisabledTable(db) {
-    db.exec(`CREATE TABLE IF NOT EXISTS plugin_disabled (
-      plugin_id TEXT PRIMARY KEY,
-      disabled_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+  _disabledFilePath() {
+    const dataDir = this._appContext?.config?.dataDir
+      || (this._appContext?.config?.graphDbPath ? path.dirname(this._appContext.config.graphDbPath) : null);
+    if (!dataDir) return null;
+    return path.join(dataDir, 'plugins-disabled.json');
   }
 
   /**
-   * Read the set of explicitly-disabled plugin ids. The graph DB holds
-   * this; if it isn't ready yet (very early boot), returns an empty set.
+   * Read the set of explicitly-disabled plugin ids from the JSON ledger.
+   * Empty set on first boot or if the file is missing/malformed. One-time
+   * migration: if a legacy `plugin_disabled` row exists in the graph DB
+   * (left over from the pre-file storage), copy it into the file before
+   * returning, so existing operator intent survives the storage change.
    */
   _getDisabledPluginIds() {
+    const file = this._disabledFilePath();
+    let ids = new Set();
+    if (file && fs.existsSync(file)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (Array.isArray(raw)) ids = new Set(raw.filter(x => typeof x === 'string'));
+      } catch (e) {
+        this.log.warn('[plugins] plugins-disabled.json unreadable, ignoring: ' + e.message);
+      }
+    }
+    // One-time migration from the legacy DB-resident table.
     const db = this._appContext?.graph?.db;
-    if (!db) return new Set();
+    if (db) {
+      try {
+        const tableExists = db.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='plugin_disabled'"
+        ).get();
+        if (tableExists) {
+          const rows = db.prepare('SELECT plugin_id FROM plugin_disabled').all();
+          let migrated = 0;
+          for (const r of rows) {
+            if (r?.plugin_id && !ids.has(r.plugin_id)) {
+              ids.add(r.plugin_id);
+              migrated++;
+            }
+          }
+          if (migrated > 0) {
+            this._writeDisabledFile(ids);
+            this.log.info(`[plugins] Migrated ${migrated} entr${migrated === 1 ? 'y' : 'ies'} from legacy plugin_disabled table to plugins-disabled.json`);
+          }
+        }
+      } catch (e) {
+        this.log.debug('[plugins] legacy disabled-table check failed: ' + e.message);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Atomically write the disabled-plugins ledger. Caller passes a Set of
+   * plugin ids; we serialize to a sorted array (stable diffs if the
+   * operator commits this file) and rename-into-place so a crash mid-
+   * write can never leave a half-written file.
+   */
+  _writeDisabledFile(ids) {
+    const file = this._disabledFilePath();
+    if (!file) return;
     try {
-      this._ensurePluginDisabledTable(db);
-      const rows = db.prepare('SELECT plugin_id FROM plugin_disabled').all();
-      return new Set(rows.map(r => r.plugin_id));
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const sorted = Array.from(ids).sort();
+      const tmp = file + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(sorted, null, 2));
+      fs.renameSync(tmp, file);
     } catch (e) {
-      this.log.warn('[plugins] Failed to read plugin_disabled: ' + e.message);
-      return new Set();
+      this.log.warn('[plugins] Failed to write plugins-disabled.json: ' + e.message);
     }
   }
 
@@ -713,6 +767,88 @@ class PluginManager {
   }
 
   /**
+   * Walk every plugin's embedder registrations. Output rows carry the
+   * declared `dim` so callers (graph/embedder.js, retrieval.js) can
+   * filter stored embeddings by both provider name and dimension —
+   * switching providers across dim boundaries stays safe because the
+   * stored vectors are tagged.
+   */
+  getEmbedders() {
+    const cfg = this._appContext?.config || {};
+    const out = [];
+    for (const [pluginId, plugin] of this.plugins) {
+      const providers = plugin.instance?.getEmbedders?.() || [];
+      for (const p of providers) {
+        let configured = false;
+        try { configured = !!p.isConfigured(cfg); } catch (e) {
+          this.log.warn(`[plugins] embedder isConfigured(${pluginId}/${p.name}) threw: ${e.message}`);
+        }
+        out.push({ pluginId, name: p.name, factory: p.factory, configured, dim: p.dim });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Walk every plugin's LLM provider registrations. Each output entry
+   * carries the declared model-string `prefixes` and `capabilities`,
+   * so core's `createClientForModel` walker can resolve a request
+   * (e.g. `'openai/gpt-4o-mini'`) to the right plugin without
+   * round-tripping through the plugin's instance.
+   */
+  getProviders() {
+    const cfg = this._appContext?.config || {};
+    const out = [];
+    for (const [pluginId, plugin] of this.plugins) {
+      const providers = plugin.instance?.getProviders?.() || [];
+      for (const p of providers) {
+        let configured = false;
+        try { configured = !!p.isConfigured(cfg); } catch (e) {
+          this.log.warn(`[plugins] provider isConfigured(${pluginId}/${p.name}) threw: ${e.message}`);
+        }
+        out.push({
+          pluginId,
+          name: p.name,
+          factory: p.factory,
+          prefixes: p.prefixes,
+          capabilities: p.capabilities,
+          defaultBaseUrl: p.defaultBaseUrl,
+          configured,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Resolve a model string (e.g. `'openai/gpt-4o-mini'` or
+   * `'claude-haiku-4-5'`) to the plugin entry whose `prefixes`
+   * claim it. Returns null if no plugin matches — caller then falls
+   * back to the in-tree branches in `src/providers/index.js`. Order
+   * of priority: longest prefix wins (so a `'openai-azure'` plugin
+   * doesn't get hijacked by a generic `'openai'` plugin).
+   */
+  resolveProviderForModel(model) {
+    if (!model || typeof model !== 'string') return null;
+    const slash = model.indexOf('/');
+    if (slash <= 0) return null; // no prefix → fall through to anthropic-default
+    const prefix = model.substring(0, slash);
+    const candidates = [];
+    for (const entry of this.getProviders()) {
+      if (entry.prefixes.includes(prefix)) candidates.push(entry);
+    }
+    if (candidates.length === 0) return null;
+    // Prefer configured providers; tie-break by longest prefix match.
+    candidates.sort((a, b) => {
+      if (a.configured !== b.configured) return b.configured - a.configured;
+      const aMax = Math.max(...a.prefixes.filter(p => p === prefix).map(p => p.length));
+      const bMax = Math.max(...b.prefixes.filter(p => p === prefix).map(p => p.length));
+      return bMax - aMax;
+    });
+    return candidates[0];
+  }
+
+  /**
    * Walk every plugin's `registerFrontendAsset` declarations and
    * return `[{ pluginId, filename, url }]`. Served by web.js's
    * `GET /api/plugins/frontend-assets`. graph-viewer.html fetches the
@@ -922,14 +1058,9 @@ class PluginManager {
 
     // Clear any prior explicit-uninstall marker so this plugin will
     // boot normally on next restart.
-    const dbPre = this._appContext?.graph?.db;
-    if (dbPre) {
-      try {
-        this._ensurePluginDisabledTable(dbPre);
-        dbPre.prepare('DELETE FROM plugin_disabled WHERE plugin_id = ?').run(manifest.id);
-      } catch (e) {
-        this.log.warn(`[plugins] Failed to clear plugin_disabled for ${manifest.id}: ${e.message}`);
-      }
+    {
+      const ids = this._getDisabledPluginIds();
+      if (ids.delete(manifest.id)) this._writeDisabledFile(ids);
     }
 
     try {
@@ -1005,16 +1136,15 @@ class PluginManager {
       this._runAutoUninstall(db, pluginId);
     }
 
-    // Persist the uninstall — without this row, the plugin's folder
+    // Persist the uninstall — without this entry, the plugin's folder
     // (which still exists on disk) would auto-reload on next boot,
     // contradicting the operator's intent. Re-install via the Plugins
-    // UI deletes this row.
-    if (db) {
-      try {
-        this._ensurePluginDisabledTable(db);
-        db.prepare('INSERT OR REPLACE INTO plugin_disabled (plugin_id) VALUES (?)').run(pluginId);
-      } catch (e) {
-        this.log.warn(`[plugins] Failed to record plugin_disabled for ${pluginId}: ${e.message}`);
+    // UI clears it.
+    {
+      const ids = this._getDisabledPluginIds();
+      if (!ids.has(pluginId)) {
+        ids.add(pluginId);
+        this._writeDisabledFile(ids);
       }
     }
 
@@ -1071,6 +1201,7 @@ class PluginManager {
   listAvailable() {
     const out = new Map();
     const installedIds = new Set(this.plugins.keys());
+    const disabledIds = this._getDisabledPluginIds();
 
     for (const [src, dir] of [['user', this._discoveryDirs.user], ['bundled', this._discoveryDirs.bundled]]) {
       if (!dir || !fs.existsSync(dir)) continue;
@@ -1100,6 +1231,7 @@ class PluginManager {
           depends: manifest.depends || [],
           openclawCompat: !!manifest.openclawCompat,
           isInstalled: installedIds.has(manifest.id),
+          isDisabled: disabledIds.has(manifest.id),
           hasReferenceNodes: !!installed?.instance?.getReferenceNodes?.(),
           toolCount: installed?.instance?.getRegisteredTools?.().length || 0,
           gatewayCount: installed?.instance?.getRegisteredGateways?.().length || 0,

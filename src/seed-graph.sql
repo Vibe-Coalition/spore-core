@@ -272,11 +272,14 @@ VALUES (
 );
 
 INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('spore', 'capabilities', 9, 'seed');
+-- Plugin-owned capabilities (e.g. "Can generate images using Flux.") are
+-- appended by each plugin's install.sql and removed by its uninstall.sql,
+-- so this list reflects what's actually installed at any moment. Core-
+-- only entries live here.
 INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
   ((SELECT MAX(id) FROM aspects), 'Can write code, run shell commands, create scripts, and automate tasks.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Can search the web for current information and fetch/read web pages.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Can read, write, and edit files on the workspace filesystem.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Can generate images using Flux.', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Can launch a headless browser to test pages, scrape content, or interact with web apps.', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Can spin up web servers to host dashboards, tools, and pages.', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Can delegate background tasks to subagents that run asynchronously.', 7, 'seed', 'seed'),
@@ -344,9 +347,12 @@ INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('r
 -- plugins toggle on and off. OPENAI_API_KEY stays here even though
 -- the whisper plugin reads it as a fallback — it's also used by
 -- core's LLM provider routing so it's a host concern either way.
+-- Plugin-owned catalog entries (e.g. GEMINI_API_KEY for gemini-embedder)
+-- are appended by each plugin's install.sql and removed by its
+-- uninstall.sql, so the catalog reflects what's actually installed at
+-- any moment. Core-only entries live here.
 INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
   ((SELECT MAX(id) FROM aspects), 'OPENAI_API_KEY — OpenAI', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'GEMINI_API_KEY — Google Gemini (embeddings)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'SEARXNG_URL — Primary web search (self-hosted metasearch). Set to base URL, e.g. http://searxng:8080', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'BRAVE_API_KEY — Fallback web search. Used when SearXNG is unset or returns nothing.', 6, 'seed', 'seed');
 
@@ -489,10 +495,12 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'Use delegate_task for heavy work — runs in separate context', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Cache operational knowledge in your graph — don''t rely on re-fetching the same info every session', 9, 'seed', 'seed');
 
--- Reference node edges
+-- Reference node edges. Plugin-owned ref nodes (ref-bfl-api, ref-elevenlabs-api,
+-- ref-tailscale, ref-compute-cluster, ref-email) get their `spore documents <ref>`
+-- edges added by their own install.sql. Including them here would FK-fail at
+-- seed time on a fresh DB because the target nodes don't exist until the
+-- corresponding plugin runs its install.
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-api-keys', 'documents', 0.8, 'seed');
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-bfl-api', 'documents', 0.8, 'seed');
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-elevenlabs-api', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-web-architecture', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-image-display', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-browser-automation', 'documents', 0.8, 'seed');

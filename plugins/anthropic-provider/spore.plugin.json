@@ -1,0 +1,9 @@
+{
+  "id": "anthropic-provider",
+  "name": "Anthropic (Claude)",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Anthropic Claude chat-completion provider — Opus, Sonnet, Haiku across the 4.x family. Claims the 'claude' model prefix (e.g. 'claude-haiku-4-5'). Owns the @anthropic-ai/sdk dependency: it lives in this plugin's package.json, NOT core's, so SPORE has zero vendor SDK deps when no provider plugins are installed. Supports both standard API keys and OAuth (sk-ant-oat-…) tokens for Claude.ai-issued Pro / Max creator credentials."
+}

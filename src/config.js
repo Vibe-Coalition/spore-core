@@ -335,8 +335,14 @@ function loadConfigFresh() {
   // Local / OAI-compat (Ollama, LM Studio, vLLM, etc.)
   if (process.env.LOCAL_MODEL_BASE_URL) config.localModelBaseUrl = process.env.LOCAL_MODEL_BASE_URL;
   if (process.env.LOCAL_MODEL_API_KEY) config.localModelApiKey = process.env.LOCAL_MODEL_API_KEY;
+  // Auth header for local OAI-compat endpoints. 'bearer' (default) /
+  // 'x-api-key' / 'x-key'. Some self-hosted servers reject Authorization.
+  if (process.env.LOCAL_MODEL_AUTH_HEADER) config.localModelAuthHeader = process.env.LOCAL_MODEL_AUTH_HEADER;
 
-  // Gemini
+  // Gemini API key — kept readable here as a legacy bridge so the
+  // gemini-embedder plugin's backfill picks up GEMINI_API_KEY env vars
+  // from existing operators on first install. The plugin owns its
+  // own slot at config.plugins['gemini-embedder'].apiKey going forward.
   if (process.env.GEMINI_API_KEY) config.geminiApiKey = process.env.GEMINI_API_KEY;
 
   // Legacy multimodal fallbacks — used only when dedicated VLM tool tiers are not configured.

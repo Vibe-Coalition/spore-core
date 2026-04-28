@@ -26,7 +26,6 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'XI_API_KEY — ElevenLabs TTS and sound effects', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'DEEPGRAM_API_KEY — Deepgram speech-to-text', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'OPENAI_API_KEY — OpenAI', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'GEMINI_API_KEY — Google Gemini (embeddings)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'SEARXNG_URL — Primary web search (self-hosted metasearch). Set to base URL, e.g. http://searxng:8080', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'BRAVE_API_KEY — Fallback web search. Used when SearXNG is unset or returns nothing.', 6, 'seed', 'seed');
 

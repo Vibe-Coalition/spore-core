@@ -16,7 +16,7 @@ const path = require('path');
 const { loadConfig, createLogger } = require('./config');
 loadConfig();
 
-const { GraphContext } = require('./graph');
+const { GraphContext, setEmbedderManager } = require('./graph');
 const { SessionManager } = require('./agent');
 const { ToolSystem } = require('./tools');
 const { AgentLoop } = require('./agent');
@@ -357,7 +357,15 @@ async function boot() {
   //     <workspace>/plugins. Operator drops or git-clones plugins here.
   const plugins = new PluginManager(config, log);
   if (config.pluginsEnabled) {
-    const bundledDir = config.pluginsDir || path.join(__dirname, '..', 'plugins');
+    // Bundled plugins live next to app.js in the docker image (`/app/plugins`).
+    // In the host source tree they're a sibling of src/ (`<repo>/plugins`).
+    // Try both; prefer config override → in-tree sibling → repo sibling.
+    const bundledCandidates = [
+      config.pluginsDir,
+      path.join(__dirname, 'plugins'),
+      path.join(__dirname, '..', 'plugins'),
+    ].filter(Boolean);
+    const bundledDir = bundledCandidates.find(p => { try { return require('fs').existsSync(p); } catch { return false; } }) || bundledCandidates[1];
     const userDir = config.pluginsUserDir
       || (config.workspacePath ? path.join(config.workspacePath, 'plugins') : null);
     plugins.setDiscoveryDirs({ bundled: bundledDir, user: userDir });
@@ -376,6 +384,25 @@ async function boot() {
   // on this — without it, every plugin-contributed prompt section silently
   // disappears regardless of mode/registration. Was missed in phase 1 wiring.
   graph._pluginManager = plugins;
+
+  // Wire the embedder walker so graph indexing + retrieval pick up
+  // whichever embedder plugin is currently registered + configured.
+  // Before this call, embedNode/embedText silently no-op — same shape
+  // as the legacy GEMINI_API_KEY-not-set fallback.
+  setEmbedderManager(plugins);
+
+  // Wire the LLM-provider walker so createClientForModel routes
+  // through registered provider plugins first. Until this lands, all
+  // model strings dispatch through the legacy in-tree branches in
+  // src/providers/index.js. Once provider plugins are extracted
+  // (Phases B-E of the provider-extraction plan), those branches
+  // disappear and core consults the manager exclusively.
+  try {
+    const { setProviderManager } = require('./providers');
+    setProviderManager(plugins);
+  } catch (e) {
+    log.warn(`[boot] setProviderManager failed: ${e.message}`);
+  }
 
   const healthServer = startHealthServer(config, log, graph, sessions, gateways, learner, maintainer, tools, agent);
 

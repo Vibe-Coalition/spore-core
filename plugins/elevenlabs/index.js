@@ -9,8 +9,9 @@ module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
     uninstall: './sql/uninstall.sql',
-    // v2 adds the ref-api-keys catalog patch (XI_API_KEY entry).
-    schemaVersion: 2,
+    // v3 adds the spore→ref-elevenlabs-api `documents` edge that used
+    // to live in seed-graph.sql.
+    schemaVersion: 3,
   });
 
   api.registerTTSProvider('elevenlabs', (config) => new ElevenLabsTTS(config), {

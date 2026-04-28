@@ -59,8 +59,8 @@
     <div id="create-fields" class="hidden">
       <label for="p2">Confirm password</label>
       <input type="password" id="p2" name="password2" autocomplete="new-password">
-      <label for="akey">Team key</label>
-      <input type="password" id="akey" name="teamKey" autocomplete="off">
+      <label for="akey">Invite key</label>
+      <input type="password" id="akey" name="inviteKey" autocomplete="off">
     </div>
     <button type="submit" class="btn" id="submit-btn">Sign in</button>
     <div class="mode-toggle">
@@ -167,7 +167,7 @@
       createToggle.classList.add('hidden');
       backToggle.classList.remove('hidden');
       passInput.setAttribute('autocomplete', 'new-password');
-      document.getElementById('hint').textContent = 'Register with your team key';
+      document.getElementById('hint').textContent = 'Register with the invite key from your operator';
     } else {
       fields.classList.add('hidden');
       submitBtn.textContent = 'Sign in';
@@ -191,13 +191,13 @@
     try {
       if (mode === 'create') {
         const password2 = document.getElementById('p2').value;
-        const teamKey = document.getElementById('akey').value.trim();
+        const inviteKey = document.getElementById('akey').value.trim();
         if (password.length < 8) throw new Error('Password must be at least 8 characters');
         if (password !== password2) throw new Error('Passwords do not match');
-        if (!teamKey) throw new Error('Team key is required');
+        if (!inviteKey) throw new Error('Invite key is required');
         const r = await fetch(API + '/api/webapp/users/self-register', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password, teamKey }),
+          body: JSON.stringify({ username, password, inviteKey }),
         });
         const d = await r.json();
         if (!r.ok || !d.ok) throw new Error(d.error || 'Registration failed');

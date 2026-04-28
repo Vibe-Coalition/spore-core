@@ -22,7 +22,7 @@
 
 const https = require('https');
 const graphEvents = require('../graph/events');
-const { embedNode } = require('../graph/embedder');
+const { embedNode, getActive: getActiveEmbedder } = require('../graph/embedder');
 const { ProactiveEngine } = require('./proactive');
 
 const DECAY_DAYS = {
@@ -1334,17 +1334,28 @@ ${reflectionBlock || 'none yet'}`
 
   async embedUnembeddedNodes(limit = 5) {
     if (!this.db) return;
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return;
+    // Picks up: rows that are unembedded, AND rows whose stored
+    // embedding was produced by a provider/dim that no longer matches
+    // the active embedder. The latter handles operator-driven provider
+    // switches (e.g. uninstall gemini-embedder, install embedder-gemma)
+    // — vectorSearch ignores stale-tagged rows, this loop rebuilds them
+    // at idle time, eventually restoring full coverage.
+    const active = getActiveEmbedder();
+    if (!active) return; // no embedder plugin installed/configured — skip
 
     try {
-      const rows = this.db.prepare(
-        'SELECT id FROM nodes WHERE embedding IS NULL LIMIT ?'
-      ).all(limit);
+      const rows = this.db.prepare(`
+        SELECT id FROM nodes
+        WHERE embedding IS NULL
+           OR embedding_provider IS NULL
+           OR embedding_provider != ?
+           OR embedding_dim != ?
+        LIMIT ?
+      `).all(active.name, active.dim, limit);
 
       if (rows.length === 0) return;
 
-      this.log.info(`[maintainer] Embedding ${rows.length} unembedded node(s)...`);
+      this.log.info(`[maintainer] Embedding ${rows.length} node(s) via ${active.name}...`);
       for (const row of rows) {
         try {
           await embedNode(row.id, this.db);

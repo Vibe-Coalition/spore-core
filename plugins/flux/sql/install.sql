@@ -56,3 +56,26 @@ WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-api-keys' AND name='avail
     WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys')
       AND content LIKE 'BFL_API_KEY%'
   );
+
+-- Append "Can generate images using Flux." to the spore node's
+-- capabilities aspect so it shows up in the agent's self-description
+-- only when this plugin is installed. First sweep any pre-existing
+-- row with this exact content (legacy 'seed'-tagged copies from old
+-- builds where this line shipped in seed-graph.sql) so the row we
+-- insert is the single canonical 'flux'-tagged copy and uninstall
+-- works cleanly.
+DELETE FROM attributes
+WHERE aspect_id = (SELECT id FROM aspects WHERE node_id='spore' AND name='capabilities')
+  AND content = 'Can generate images using Flux.';
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT
+  (SELECT id FROM aspects WHERE node_id='spore' AND name='capabilities'),
+  'Can generate images using Flux.', 7, 'seed', 'flux'
+WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='spore' AND name='capabilities');
+
+-- `spore documents ref-bfl-api` edge (used to live in seed-graph.sql;
+-- moved here so a fresh DB doesn't FK-fail when this plugin isn't
+-- installed). uninstall.sql sweeps by extracted_with so this drops out
+-- when the plugin uninstalls.
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  VALUES ('spore', 'ref-bfl-api', 'documents', 0.8, 'flux');

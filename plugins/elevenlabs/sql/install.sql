@@ -30,3 +30,9 @@ WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-api-keys' AND name='avail
     WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-api-keys' AND name='available_keys')
       AND content LIKE 'XI_API_KEY%'
   );
+
+-- `spore documents ref-elevenlabs-api` edge — moved out of seed-graph.sql
+-- so a fresh DB doesn't FK-fail when this plugin isn't installed.
+-- Uninstall sweep on edges.extracted_with handles cleanup.
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  VALUES ('spore', 'ref-elevenlabs-api', 'documents', 0.8, 'elevenlabs');
