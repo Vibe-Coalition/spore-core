@@ -6,7 +6,7 @@
  *
  */
 
-const { embedText } = require('./embedder');
+const { embedText, getActive } = require('./embedder');
 
 const SEARCH_STOPWORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
@@ -95,6 +95,92 @@ function _withTimeout(promise, ms, label) {
 
 function applyRetrievalMixin(GraphContext) {
   const proto = GraphContext.prototype;
+
+  // Compute the "project scope" for recall filtering. When the caller's
+  // opts include projectContext.cwd + userId (cli sessions), returns:
+  //   {
+  //     currentProjectId,         // 'project-<user>-<cwdHash>'
+  //     allowedSessionIds: Set,   // sessions that ran in this project
+  //   }
+  // Returns null when the call isn't a cli session with a known project.
+  proto._computeProjectScope = function _computeProjectScope(opts) {
+    if (!opts) return null;
+    const cwd = opts.projectContext?.cwd;
+    const userId = opts.userId;
+    if (!cwd || !userId || !this.db) return null;
+    // Inline the projectNodeId hash (mirrors session-graph plugin's
+    // lib/projects.js exactly). Done inline rather than via require()
+    // because the file lives at different relative paths on the host
+    // (src/graph/ → ../../plugins/session-graph/lib/projects) vs in
+    // the container (graph/ → ../plugins/session-graph/lib/projects),
+    // and a missing require silently bypassed the entire scope filter.
+    const u = (userId || 'anon').toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 32);
+    const h = require('crypto').createHash('sha256').update(cwd || '').digest('hex').slice(0, 8);
+    const currentProjectId = `project-${u}-${h}`;
+
+    const allowedSessionIds = new Set();
+    try {
+      const rows = this.db.prepare(
+        "SELECT target FROM edges WHERE source = ? AND type = 'has_session'"
+      ).all(currentProjectId);
+      for (const r of rows) allowedSessionIds.add(r.target);
+    } catch (e) { /* best-effort — no edges, no scope tightening */ }
+    return { currentProjectId, allowedSessionIds };
+  };
+
+  // Filter rule: is this node permitted under the project scope? Drops:
+  //   - Project nodes that aren't the current project (e.g. cat-breeds
+  //     project node leaking into an acorn-companion session)
+  //   - Session nodes whose has_session edge doesn't link to the
+  //     current project (cross-project past sessions)
+  //   - Concept/library/system nodes whose `discovered_in` edges ONLY
+  //     point at sessions in OTHER projects (e.g. TheCatAPI was
+  //     discovered in a kimi_test session, never in any other project
+  //     → in an acorn-companion session, drop it)
+  // Lets through nodes with NO discovered_in edges (seed/reference/
+  // manual nodes) and nodes discovered in at least one current-project
+  // session (legitimately learned here too).
+  proto._nodeAllowedInProjectScope = function _nodeAllowedInProjectScope(n, scope) {
+    if (!n || !scope) return true;
+    const t = (n.type || '').toLowerCase();
+    if (t === 'project') return n.id === scope.currentProjectId;
+    if (t === 'session' || t === 'session-temp') {
+      if (scope.allowedSessionIds.size === 0) return true;
+      return scope.allowedSessionIds.has(n.id);
+    }
+    // Provenance check via discovered_in edges. Cheap O(degree) lookup
+    // — typical concept nodes have 1–5 discovered_in edges.
+    return this._allowedByProvenance(n.id, scope);
+  };
+
+  // Returns true if the node has no `discovered_in` edges (general /
+  // seed / reference / manual content), or if at least one of those
+  // edges points at a session in the current project's allowed set.
+  // Returns false ONLY when every discovered_in edge points at a
+  // cross-project session (and there's at least one such edge).
+  // Cached per scope+nodeId so a single recall call doesn't re-query
+  // the same nodes repeatedly.
+  proto._allowedByProvenance = function _allowedByProvenance(nodeId, scope) {
+    if (!scope) return true;
+    if (!scope._provenanceCache) scope._provenanceCache = new Map();
+    if (scope._provenanceCache.has(nodeId)) return scope._provenanceCache.get(nodeId);
+    let allowed = true;
+    try {
+      const rows = this.db.prepare(
+        "SELECT target FROM edges WHERE source = ? AND type = 'discovered_in'"
+      ).all(nodeId);
+      if (!rows || rows.length === 0) {
+        allowed = true; // no provenance — treat as general
+      } else if (scope.allowedSessionIds.size === 0) {
+        // Current project has no sessions yet — can't tell. Permissive.
+        allowed = true;
+      } else {
+        allowed = rows.some(r => scope.allowedSessionIds.has(r.target));
+      }
+    } catch { allowed = true; }
+    scope._provenanceCache.set(nodeId, allowed);
+    return allowed;
+  };
 
   proto.getNode = function getNode(id) {
     const row = this.stmt('getNode', 'SELECT * FROM nodes WHERE id = ?').get(id);
@@ -210,17 +296,34 @@ function applyRetrievalMixin(GraphContext) {
     return this.searchNodes(query, 'self');
   };
 
+  // Helper: fetch candidate rows that match the active embedder's tag.
+  // Falls back to legacy un-tagged rows (provider IS NULL) ONLY when their
+  // stored vector dim matches — pre-Phase-A embeddings exist in old DBs
+  // without provider info but were all produced by the same Gemini path,
+  // so cosine math is valid as long as the dim matches.
+  function _candidateRows(db, active, extraWhere = '') {
+    const where = `embedding IS NOT NULL
+      AND (
+        (embedding_provider = ? AND embedding_dim = ?)
+        OR (embedding_provider IS NULL AND embedding_dim IS NULL)
+      )` + (extraWhere ? ' AND ' + extraWhere : '');
+    return db.prepare(`SELECT id, embedding, embedding_dim FROM nodes WHERE ${where}`)
+      .all(active.name, active.dim);
+  }
+
   proto.vectorSearch = async function vectorSearch(query, topK = 15) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return [];
+    const active = getActive();
+    if (!active) return [];
 
-    const queryVec = await embedText(query, apiKey);
-    const rows = this.db.prepare('SELECT id, embedding FROM nodes WHERE embedding IS NOT NULL').all();
+    const queryVec = await embedText(query);
+    if (!queryVec) return [];
 
+    const rows = _candidateRows(this.db, active);
     const scored = [];
     for (const row of rows) {
       try {
         const vec = JSON.parse(row.embedding);
+        if (vec.length !== queryVec.length) continue; // legacy mismatched dim — skip
         scored.push({ id: row.id, score: _cosine(queryVec, vec) });
       } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
     }
@@ -233,19 +336,18 @@ function applyRetrievalMixin(GraphContext) {
   };
 
   proto.vectorSearchSelf = async function vectorSearchSelf(query, topK = 15) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return [];
+    const active = getActive();
+    if (!active) return [];
 
-    const queryVec = await embedText(query, apiKey);
-    const rows = this.db.prepare(`
-      SELECT id, embedding FROM nodes
-      WHERE embedding IS NOT NULL AND (provenance = 'self' OR provenance IS NULL)
-    `).all();
+    const queryVec = await embedText(query);
+    if (!queryVec) return [];
 
+    const rows = _candidateRows(this.db, active, "(provenance = 'self' OR provenance IS NULL)");
     const scored = [];
     for (const row of rows) {
       try {
         const vec = JSON.parse(row.embedding);
+        if (vec.length !== queryVec.length) continue;
         scored.push({ id: row.id, score: _cosine(queryVec, vec) });
       } catch (e) { this.log.warn('[retrieval] JSON.parse failed: ' + e.message); }
     }
@@ -771,7 +873,7 @@ Rules:
     return node;
   };
 
-  proto._searchEpisodes = function _searchEpisodes(query, limit = 5) {
+  proto._searchEpisodes = function _searchEpisodes(query, limit = 5, opts = {}) {
     if (!this.db) return [];
     try {
       const tbl = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='episodes_fts'").get();
@@ -782,6 +884,13 @@ Rules:
       const words = _expandQueryTerms(baseWords);
       const ftsQuery = words.join(' OR ');
 
+      // Over-fetch when project-scoping is active so the post-filter
+      // step doesn't drop us below `limit` after cross-project episodes
+      // are removed. 4× is enough headroom in practice (most projects
+      // have <25% of FTS hits from outside the current project).
+      const scope = this._computeProjectScope(opts);
+      const fetchLimit = scope && scope.allowedSessionIds.size > 0 ? limit * 4 : limit;
+
       const rows = this.db.prepare(`
         SELECT e.id, e.content, e.observed_at, e.session_id, rank
         FROM episodes_fts
@@ -789,14 +898,24 @@ Rules:
         WHERE episodes_fts MATCH ?
         ORDER BY rank
         LIMIT ?
-      `).all(ftsQuery, limit);
+      `).all(ftsQuery, fetchLimit);
 
-      return rows.map(r => ({
+      let out = rows.map(r => ({
         id: r.id,
         content: r.content,
         observedAt: r.observed_at,
         sessionId: r.session_id,
       }));
+
+      // Project-scope filter: drop episodes whose session_id isn't on
+      // the has_session edge list of the current project. Same bleed
+      // surface as _buildRelevantContext — past cat-breeds sessions
+      // shouldn't surface in an acorn-companion session.
+      if (scope && scope.allowedSessionIds.size > 0) {
+        out = out.filter(ep => !ep.sessionId || scope.allowedSessionIds.has(ep.sessionId));
+      }
+
+      return out.slice(0, limit);
     } catch {
       return [];
     }
@@ -1020,16 +1139,46 @@ Rules:
     const pinned = this._extractQueryEntities(messageContent);
     const pinnedIds = new Set(pinned.map(n => n.id));
 
-    const searchResults = (opts._precomputedResults || this.searchNodesSelf(messageContent))
+    let searchResults = (opts._precomputedResults || this.searchNodesSelf(messageContent))
       .filter(n => n.id !== agentId && !pinnedIds.has(n.id));
 
-    const results = [...pinned, ...searchResults].slice(0, maxContextNodes);
+    // Project-scope filter for cli sessions. When the caller provided
+    // projectContext + userId, FTS-matched nodes from OTHER projects
+    // (and sessions that ran in other projects) are silently dropped.
+    // Without this, opening a session in project B and asking "make a
+    // plan to make this app better" returns the cat-breeds project
+    // node, its has_session edges, and full transcripts of past
+    // cat-breeds plan turns — leaking the wrong codebase into the
+    // current session's prompt. The current project's content is
+    // already in the prompt via the acorn-cli plugin's Project Context
+    // section; we don't need to compete with it via cross-project FTS.
+    const projScope = this._computeProjectScope(opts);
+    if (projScope) {
+      const before = searchResults.length;
+      searchResults = searchResults.filter(n => this._nodeAllowedInProjectScope(n, projScope));
+      const dropped = before - searchResults.length;
+      if (dropped > 0 && this.log?.info) {
+        this.log.info(`[graph] project-scope filter: dropped ${dropped} cross-project nodes from relevant context (current: ${projScope.currentProjectId}, allowed sessions: ${projScope.allowedSessionIds.size})`);
+      }
+    }
+
+    // Apply project-scope to pinned too. Pinned entities come from
+    // _extractQueryEntities — the user's query may textually match an
+    // OTHER project's name, pinning the wrong node directly bypassing
+    // the FTS filter above.
+    const filteredPinned = projScope
+      ? pinned.filter(n => this._nodeAllowedInProjectScope(n, projScope))
+      : pinned;
+    const results = [...filteredPinned, ...searchResults].slice(0, maxContextNodes);
 
     if (this._sharedGraphs && this._sharedGraphs.length > 0) {
       try {
         const sharedResults = this._searchSharedGraphs(messageContent, 15);
         const seenIds = new Set(results.map(n => n.id));
         for (const sn of sharedResults) {
+          // Cross-graph (shared graph) results: skip when project scope
+          // is active. Shared graphs are inherently other-project content.
+          if (projScope) continue;
           const localKey = `shared:${sn._project}:${sn.id}`;
           if (!seenIds.has(localKey) && results.length < maxContextNodes + 10) {
             sn._origId = sn.id;
@@ -1166,6 +1315,28 @@ Rules:
         }
       } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
     }
+
+    // Final defensive scope filter — sweeps the whole `results` array
+    // after every additive path (FTS, pinned, shared-graphs, aggregation
+    // edge traversal, temporal subqueries) has run. Any cross-project
+    // node that snuck in via a path we didn't filter individually gets
+    // dropped here. Idempotent with the per-path filters above; cheap
+    // because the array is bounded by maxContextNodes.
+    let resultsFinal = results;
+    if (projScope) {
+      const before = resultsFinal.length;
+      resultsFinal = resultsFinal.filter(n => this._nodeAllowedInProjectScope(n, projScope));
+      const dropped = before - resultsFinal.length;
+      if (dropped > 0 && this.log?.info) {
+        this.log.info(`[graph] project-scope final sweep: dropped ${dropped} more cross-project nodes (post-aggregation/sharedGraphs/subqueries)`);
+      }
+    }
+    if (resultsFinal.length === 0) return null;
+    // Re-bind the local name so the existing rendering loop below uses
+    // the filtered array. Defensive — assignment to `results` here in
+    // case anything below re-iterates.
+    results.length = 0;
+    for (const n of resultsFinal) results.push(n);
 
     if (results.length === 0) return null;
 

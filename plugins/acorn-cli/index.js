@@ -200,6 +200,63 @@ const checkpointsLib = require('../session-graph/lib/checkpoints');
 const heuristicsLib  = require('../session-graph/lib/heuristics');
 const scriptsLib     = require('../session-graph/lib/scripts');
 
+// renderCodeGraphMap — pulls the cached `code_graph` aspect off the
+// project node (populated by update_code_graph_summary after each
+// architecture/index pass) and renders it as a structured prelude
+// block for plan-mode PHASE 2. Lets the agent enter codebase scanning
+// already oriented (clusters, hot paths, entry points, tech stack)
+// instead of starting cold and burning a tool call on architecture().
+// Returns null when no code_graph aspect exists yet — the prompt then
+// falls back to "call architecture() once first".
+function renderCodeGraphMap(learner, userId, cwd) {
+  if (!learner?.db || !cwd) return null;
+  const proj = projectsLib.getProject(learner, userId, cwd);
+  if (!proj) return null;
+  const attrs = proj.aspects?.code_graph;
+  if (!Array.isArray(attrs) || attrs.length === 0) return null;
+  // The aspect stores typed lines like:
+  //   index_head: <sha>
+  //   stats: <numbers>
+  //   tech_stack: ts=12f/45s, ...
+  //   entry: main app/page.tsx:1
+  //   cluster: <name> — <files> files, <symbols> symbols (<lang>)
+  //   hot: <qname> ← <n> callers (<file>:<line>)
+  //   note: <free text>
+  // Group by prefix so the rendered block reads naturally.
+  const buckets = { head: [], stats: [], tech_stack: [], entry: [], cluster: [], hot: [], note: [] };
+  for (const a of attrs) {
+    if (a.startsWith('index_head:')) buckets.head.push(a.slice('index_head:'.length).trim());
+    else if (a.startsWith('stats:')) buckets.stats.push(a.slice('stats:'.length).trim());
+    else if (a.startsWith('tech_stack:')) buckets.tech_stack.push(a.slice('tech_stack:'.length).trim());
+    else if (a.startsWith('entry:')) buckets.entry.push(a.slice('entry:'.length).trim());
+    else if (a.startsWith('cluster:')) buckets.cluster.push(a.slice('cluster:'.length).trim());
+    else if (a.startsWith('hot:')) buckets.hot.push(a.slice('hot:'.length).trim());
+    else if (a.startsWith('note:')) buckets.note.push(a.slice('note:'.length).trim());
+  }
+  const out = [];
+  out.push('### Codebase Map (cached from last index — use this to skip rediscovery)');
+  if (buckets.head.length) out.push(`index_head: ${buckets.head[0]}  *(if your search comes back stale, re-run \`index_codebase({force:true})\`)*`);
+  if (buckets.stats.length) out.push(`stats: ${buckets.stats[0]}`);
+  if (buckets.tech_stack.length) out.push(`tech_stack: ${buckets.tech_stack[0]}`);
+  if (buckets.entry.length) {
+    out.push('entry_points:');
+    for (const e of buckets.entry.slice(0, 10)) out.push(`  - ${e}`);
+  }
+  if (buckets.cluster.length) {
+    out.push('clusters (use these names instead of grepping for module shape):');
+    for (const c of buckets.cluster.slice(0, 30)) out.push(`  - ${c}`);
+  }
+  if (buckets.hot.length) {
+    out.push('hot_paths (high blast-radius — touching these warrants explicit verification in PHASE 6):');
+    for (const h of buckets.hot.slice(0, 20)) out.push(`  - ${h}`);
+  }
+  if (buckets.note.length) {
+    out.push('notes:');
+    for (const n of buckets.note.slice(0, 10)) out.push(`  - ${n}`);
+  }
+  return out.join('\n');
+}
+
 
 // ── Project activity note (per-turn breadcrumb on project node) ────
 // Appends a one-line activity note to the project node so cross-session
@@ -576,17 +633,10 @@ function buildProjectContextSection(api, opts) {
     // grep" guidance was previously locked to plan-mode Phase 2;
     // moving it here makes the structural tools the default
     // search path whenever the index exists.
-    if (pc.hasCodeIndex) {
-      parts.push('');
-      parts.push('### Codebase structural search (PREFER over grep + read_file)');
-      parts.push("This project has a per-file SQLite code index at `.acorn/index.db`. The following tools are **strictly cheaper** than grep + read_file for code questions:");
-      parts.push("- **`search_symbols({name: \"<thing>\"})`** — find a function/class/method/type by name. ~50× cheaper in tokens than `grep -r 'function thing' && read_file`. First reach for this when the user names a symbol.");
-      parts.push("- **`trace_calls({name: \"<symbol>\", direction: \"callers\"})`** — answers \"who calls X\" / \"who depends on X\". Use this for impact reasoning before edits.");
-      parts.push("- **`get_snippet({qname: \"<file>::<container>.<name>\"})`** — fetch the body of one symbol without reading the whole file.");
-      parts.push("- **`architecture()`** — clusters, hot paths, entry points, tech stack. Call once early in any session that involves understanding the codebase shape.");
-      parts.push("- **`impact({paths: [...]})`** — given a list of files about to be edited, returns affected symbols + transitive callers.");
-      parts.push("**Rule of thumb**: if you would otherwise grep for a function/class/type name, try `search_symbols` first. Fall back to grep only when search_symbols returns nothing AND the file extension isn't supported by the indexer (the architecture `notes` field will say so).");
-    }
+    // Codebase structural-search bullets are now plan-mode only —
+    // PHASE 2 already enumerates the same tools, and execute mode just
+    // follows the plan, so the duplicated 5-tool intro was wasted on
+    // ~70% of cli turns. See buildPlanModeSection.
 
     // Helper-script save nudge — applies whenever the agent has
     // generated a helper file in `.acorn/scratch/` or in the
@@ -594,20 +644,11 @@ function buildProjectContextSection(api, opts) {
     // in execute mode, since that's where helper scripts get
     // written. Cheap pattern-match nudge; the agent decides
     // whether to act.
-    parts.push('**If you write a one-off helper (QR generator, log parser, IP probe, build wrapper, anything in `.acorn/scratch/` or a `gen_*` / `*_helper.*` file in the repo root):** call `save_project_script({name, description, language, body})` so future sessions on this project can re-use it via `list_project_scripts` / `get_project_script`. The body lives on a dedicated graph node; future sessions on a different machine still find it. Skipping this means the next session re-writes the same helper from scratch.');
-
-    // web_serve is forbidden for acorn sessions. The server-side
-    // version hosts /workspace inside Docker (useless to the user
-    // on their LAN); the Go CLI now refuses any web_serve call to
-    // prevent the agent reaching for it out of habit. Every
-    // legitimate use case — static file hosting, dev servers,
-    // backend processes — is better served by `exec` running on
-    // the user's machine.
-    parts.push('**Do NOT call `web_serve`.** It is disabled for acorn sessions and will return an error. For ANY HTTP serving on the user\'s machine, use `exec` instead:');
-    parts.push("  - Static directory: `exec(\"python3 -m http.server 8000\", workdir=\"<dir>\")` (or `npx serve <dir>`).");
-    parts.push("  - Dev server: `exec(\"npm run dev\")` / `exec(\"npx expo start\")` / whatever the project's package.json defines — it'll bind to the user's real LAN interface and inherits their full environment.");
-    parts.push("  - Get the LAN URL to share: `exec(\"ipconfig\")` on Windows or `exec(\"ip -o addr show | grep inet\")` on Linux/macOS to find the user's IP, then construct `http://<ip>:<port>/`.");
-    parts.push("  - For long-running servers, the executor auto-backgrounds dev-server commands (npm/yarn/pnpm/expo/etc.) so the chat stays responsive — same as `/bg`.");
+    // (Helper-scripts guidance lives in the dedicated Helper scripts
+    // paragraph further down — the previous stub here was a duplicate.
+    // web_serve refusal also removed: the cli tool-catalog filter in
+    // tools.js TOOLS_EXCLUDED_FROM_CLI now strips web_serve entirely
+    // for cli sessions, so the agent never sees it as an option.)
   } catch (e) {
     // Non-fatal — the rest of the prompt still renders.
     api.getLogger().warn('project_memory_summary build failed: ' + e.message);
@@ -623,15 +664,329 @@ function buildProjectContextSection(api, opts) {
   parts.push('**Helper scripts (LAN IP detection, QR generation, log parsers, build wrappers, etc.):** the GRAPH is the source of truth. Save with `save_project_script({name, description, language, body, tags?})` — the body is stored on a dedicated `script:<projectId>:<name>` node and a one-line summary lands on the project\'s `scripts_index` aspect, so future sessions on this project (or a fresh laptop) can recover the script. Discover existing helpers with `list_project_scripts({tag?, language?})` (cheap; index-only, no bodies). Fetch a body with `get_project_script({name})` — the CLI rehydrates `.acorn/scratch/<name>.<ext>` if missing so you can `exec` it directly. After running, call `record_script_outcome({name, ok})` so reliable helpers float to the top and dead ones get pruned. Save body refusals: the regex guard rejects bodies matching common credential shapes (`sk-…`, `ghp_…`, AWS keys, password=…); pass `force:true` to override after verifying it\'s a false positive.');
   parts.push('**Project listing — use the right tool, NEVER `exec find` / `exec ls -laR`**: The Project Tree above (and the cached node, when present) already shows the project structure with build/dependency/cache dirs filtered. If you need MORE detail, use `glob` (auto-skips noise dirs, capped at 500 paths, fast) or `read_file` on a specific path — NOT `exec find` / `exec ls -R` / `exec tree`. Walking a node_modules-heavy project with exec regularly hits the 3-minute tool timeout AND dumps thousands of irrelevant lines. Specifically `exec ls -laR` on a Node project = guaranteed timeout.');
   parts.push('**Output filtering**: When listing files / describing a project / showing exec output, NEVER include build/dependency/cache directory contents in your reply — even if the tool returned them. Suppress: .git, node_modules, .venv / venv, __pycache__, dist, build, target, .next, .cache, .acorn, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode/, *.egg-info, coverage, .nyc_output, .DS_Store. If a tool returned a wall of these, FILTER before pasting. The user does not want to see node_modules in chat.');
-  parts.push('**Web lookups**: For things you CAN\'T learn from the user\'s machine — current library versions, framework docs, API changes, error messages you\'ve never seen, "is X deprecated", recent breaking changes — use `web_search` to find candidate URLs, then `web_fetch` the 1-3 most authoritative (official docs > GitHub > Stack Overflow > random blog). Always include the current year for recent topics ("expo router 2026", "Next.js 15 breaking changes") — without it search engines return stale results. Quote exact error strings to pin to actual occurrences. Cite the source URL in your reply so the user can verify. See `ref-web-search` for the full pattern.');
-  parts.push('**Research-and-record loop**: Before working with anything you don\'t already know cold — a CLI flag, library API, error code, framework convention, third-party tool, config schema — `graph_query({ query: "<thing>" })` FIRST to see if a prior session already learned it. If nothing useful comes back, do NOT improvise from training data (it\'s usually months stale and partly wrong): `web_search` (with the year), `web_fetch` the 1-2 best sources (prefer official docs), then SAVE what you learned via `graph_update({ nodeId: "<slug>", label: "...", type: "tool" | "library" | "framework" | "concept", aspects: [{ name: "overview", attributes: ["<key facts>"] }, { name: "gotchas", attributes: ["<non-obvious bits>"] }] })` so the next session in this project finds it via graph_query and skips the lookup. Briefly tell the user "no node for <thing> in the graph — looking it up" so they know you\'re researching, not guessing. Quietly looking it up beats confidently guessing wrong every time.');
-  parts.push('**3-strikes web_search rule (IMPORTANT)**: If you try the same class of exec command twice and it fails/doesn\'t produce the desired outcome, on the THIRD attempt you MUST `web_search` the exact error or the topic BEFORE running another shell command. Example: `expo start` hangs → try once more with different flags (strike 2) → third step is NOT another exec, it\'s `web_search("expo start hangs no output 2026")` + `web_fetch` the top result. Most "hitting a wall" moments are a google-able stale-training-data issue (framework version, changed CLI, deprecated flag) — banging on exec just burns turns. web_search is cheap (2-3 seconds) and almost always informative. Prefer it OVER: guessing, trying "one more variant", asking the user "what do you think is wrong".');
-  parts.push('**Load relevant gotchas at session start**: When the Project Context shows a project using a known framework/tool (expo, react-native, next, tailwind, docker, etc.), BEFORE your first tool call on that topic `graph_query({ query: "<tool name>" })` to load the existing gotchas aspect. This is where prior sessions persist "the QR code needs plain ASCII not ANSI" or "expo dev server defaults to 8081". Skipping this means you\'ll re-hit the same walls earlier sessions already documented for you. For multiple tools, run queries in parallel in the same turn.');
+  // Plan-mode-only research / lookup / gotcha-loading rules now live
+  // in buildPlanModeSection (PHASE 3 area). They were wasted in
+  // execute mode — the agent isn't researching during execution, it's
+  // following the plan. The "Load gotchas BEFORE first tool call"
+  // rule also conflicted with Execute Mode's "FIRST set of tool calls
+  // MUST be task_create"; resolved by scoping it to plan mode where
+  // it actually applies.
 
   return parts.join('\n');
 }
 
+// Phase router for plan mode. The single-turn "PHASE 1-6 in one go"
+// pattern was replaced by an explicit two-turn pipeline:
+//   turn 1 (RESEARCH): pronged external + codebase pre-identification,
+//                      ends with structured RESEARCH_DONE: block
+//   turn 2 (BUILDING): consumes the prior turn's RESEARCH_DONE block,
+//                      emits the final plan + Verification + PLAN_READY
+//
+// Phase is detected from the user's current message content. The CLI
+// auto-sends a "[BUILD_PLAN]" sentinel after detecting RESEARCH_DONE in
+// the streamed response, which is what flips the prompt to BUILDING.
+// No proto changes — pure content-sniff.
+function detectPlanPhase(opts) {
+  // task_complete wakeups fire when delegate_task sub-agents return
+  // mid-research. The system prompt rebuilds and detectPlanPhase runs
+  // again — but the "user message" is now the sub-agent's results, not
+  // a [RESEARCH]/[BUILD_PLAN] sentinel. Falling back to ROUTER would
+  // hijack the research mid-flight (agent sees router prompt while it
+  // was meant to keep researching). Default to RESEARCH on these
+  // continuations — the agent is mid-research, keep it that way.
+  if (opts.trigger === 'task_complete') return 'research';
+
+  const msg = (opts.messageContent || opts.content || '').trim();
+  if (msg.startsWith('[BUILD_PLAN]') || msg.startsWith('[BUILD_PLAN ')) return 'building';
+  if (msg.startsWith('[REVIEW]') || msg.startsWith('[REVIEW ')) return 'router2';
+  if (msg.startsWith('[RESEARCH]') || msg.startsWith('[RESEARCH ')) return 'research';
+  return 'router';
+}
+
 function buildPlanModeSection(api, opts) {
+  if (opts.platform !== 'cli' || !opts.projectContext || opts.projectContext.mode !== 'plan') return null;
+  const phase = detectPlanPhase(opts);
+  if (phase === 'building') return buildPlanBuildingSection(api, opts);
+  if (phase === 'router2') return buildPlanRouter2Section(api, opts);
+  if (phase === 'research') return buildPlanResearchSection(api, opts);
+  return buildPlanRouterSection(api, opts);
+}
+
+// ROUTER phase prompt — the FIRST plan-mode turn. Tiny prompt; the
+// agent reads the user's request and decides one of two things:
+//   - Material ambiguity exists → emit QUESTIONS: block (existing
+//     modal flow handles it). After user answers, CLI auto-prepends
+//     "[RESEARCH]" to the answers so the next turn enters RESEARCH.
+//   - Request is concrete enough to research directly → emit
+//     NO_INTERVIEW_NEEDED: <one-line reason>. CLI detects this and
+//     auto-fires "[RESEARCH] continue" as the next turn.
+//
+// Keeping this turn explicit (instead of folding it into RESEARCH)
+// lets the user see the agent's interview-or-skip judgment up-front
+// and gives a clean checkpoint where they can intervene before any
+// real work starts.
+function buildPlanRouterSection(api, opts) {
+  const parts = [];
+  parts.push('## Plan Mode — ROUTER (acorn CLI)');
+  parts.push('[MODE: Plan only — ROUTER turn. This is the FIRST turn of a 3-stage plan workflow:');
+  parts.push('  1. ROUTER (this turn) — decide whether to interview the user or skip straight to research.');
+  parts.push('  2. RESEARCH+CODE (next turn) — pronged: external research + codebase pre-identification.');
+  parts.push('  3. BUILDING (final turn) — produce the plan from stages 1+2 outputs, end with PLAN_READY.');
+  parts.push('');
+  parts.push('Your only job THIS turn is the interview-or-skip decision. Do NOT write the plan. Do NOT run research tools (no architecture/search_symbols/web_search/delegate_task). Just decide.');
+  parts.push('');
+  parts.push('--- DECIDE ---');
+  parts.push('Ask yourself: would I take a materially different path through the plan based on the user\'s answer to a question? Specifically:');
+  parts.push('  - Tooling categories the user likely has a preference about: language/runtime, framework, package manager, build tool, test runner, linter/formatter, type system, styling, database/ORM, auth, deployment target, state management.');
+  parts.push('  - Scope ambiguity (e.g. "build a website" — what kind, audience, features).');
+  parts.push('  - Approach ambiguity (e.g. "make it faster" — measure first vs assume bottleneck; rewrite vs incremental).');
+  parts.push('Skip a category when:');
+  parts.push('  - The existing codebase already commits to a choice (check Project Context — package.json, go.mod, pyproject.toml).');
+  parts.push('  - The choice is trivial (e.g. don\'t ask about test runner if vitest is already in package.json).');
+  parts.push('  - The user clearly expects you to choose (e.g. "implement this small bug fix").');
+  parts.push('');
+  parts.push('--- TWO POSSIBLE OUTPUTS ---');
+  parts.push('');
+  parts.push('Option A — Interview needed. Emit ONLY a QUESTIONS: block (no preamble, no postamble):');
+  parts.push('QUESTIONS:');
+  parts.push('```json');
+  parts.push('[');
+  parts.push('  {"text": "Question?", "type": "single|multi|open", "options": ["A","B","C"]}');
+  parts.push(']');
+  parts.push('```');
+  parts.push('Valid `type`: `single` (one-of), `multi` (any-of), `open` (free text).');
+  parts.push('Aim for 1–4 questions. Don\'t ask trivia you can derive from the codebase.');
+  parts.push('');
+  parts.push('Option B — Skip interview. Emit:');
+  parts.push('NO_INTERVIEW_NEEDED: <one-line reason, ≤120 chars — e.g. "scope is concrete and stack is committed in package.json">');
+  parts.push('');
+  parts.push('That\'s it. Do NOT emit both. Do NOT add a plan. Do NOT call mutating tools. Read-only inspection of the Project Context above is fine if you need to confirm something (e.g. checking package.json for the test runner).');
+  parts.push(']');
+  return parts.join('\n');
+}
+
+// ROUTER2 phase prompt — fires AFTER the RESEARCH+CODE turn. Same
+// interview-or-skip decision shape as ROUTER1, but the agent now
+// reviews its own RESEARCH_DONE block from the previous turn and
+// decides whether the findings surfaced any new questions worth
+// asking the user before the plan is built. Common reasons:
+//   - Two competing approaches showed up in research, both viable
+//   - A library has a breaking change between versions and the user
+//     should choose upgrade vs stay
+//   - The codebase scan found two patterns for the same concern
+//     (e.g. two state-management approaches) — pick which to follow
+//   - A blast-radius check (impact > 20 callers) makes the user-facing
+//     trade-off worth confirming
+//
+// If nothing material surfaced → emit NO_FOLLOWUP_QUESTIONS: and the
+// CLI auto-fires [BUILD_PLAN].
+function buildPlanRouter2Section(api, opts) {
+  const parts = [];
+  parts.push('## Plan Mode — ROUTER 2 / post-research review (acorn CLI)');
+  parts.push('[MODE: Plan only — POST-RESEARCH ROUTER turn. The previous assistant turn in this conversation contains a RESEARCH_DONE: yaml block. Read it carefully — your only job this turn is to decide whether the research SURFACED any new questions worth asking the user before the plan is built.');
+  parts.push('');
+  parts.push('Stage status: ROUTER1 ✓ → RESEARCH+CODE ✓ → ROUTER2 (this turn) → BUILDING (next).');
+  parts.push('');
+  parts.push('--- DECIDE ---');
+  parts.push('Look for genuine forks in the road that the research output revealed:');
+  parts.push('  - **Approach forks**: research found two valid approaches with different trade-offs the user would care about (e.g. "server-render vs ISR", "rewrite the scroll system vs incrementally fix it").');
+  parts.push('  - **Version/upgrade forks**: research surfaced a breaking change and the user should choose upgrade-now vs stay-on-current-version.');
+  parts.push('  - **Codebase pattern forks**: code_targets surfaced multiple existing patterns for the same concern (e.g. project uses both Context AND Zustand — which to extend?).');
+  parts.push('  - **High-blast-radius edits**: a `files_to_modify` entry has callers_after_change > 20, and the user should explicitly approve touching that hot edge.');
+  parts.push('  - **Genuine gaps**: code_targets is missing a piece that research couldn\'t determine alone (e.g. "couldn\'t find an auth middleware — does the project have one outside the indexed files?").');
+  parts.push('');
+  parts.push('Skip a question when:');
+  parts.push('  - Research clearly pointed at one direction with no real alternative.');
+  parts.push('  - The trade-off is internal/technical, not a user-facing preference.');
+  parts.push('  - You\'re tempted to ask "does this look right?" — that\'s what PLAN_READY + the modal is for, not router2.');
+  parts.push('');
+  parts.push('--- TWO POSSIBLE OUTPUTS ---');
+  parts.push('');
+  parts.push('Option A — Follow-up questions exist. Emit ONLY a QUESTIONS: block (no preamble, no postamble):');
+  parts.push('QUESTIONS:');
+  parts.push('```json');
+  parts.push('[');
+  parts.push('  {"text": "Question?", "type": "single|multi|open", "options": ["A","B","C"]}');
+  parts.push(']');
+  parts.push('```');
+  parts.push('Aim for 1–3 questions. Reference what the research found in the question text so the user understands why you\'re asking (e.g. "Research found you\'re using both Context and Zustand. Which should the new state live in?").');
+  parts.push('');
+  parts.push('Option B — No follow-ups, ready to build. Emit:');
+  parts.push('NO_FOLLOWUP_QUESTIONS: <one-line reason, ≤120 chars — e.g. "research pointed at server-render approach with no real alternative; ready to build">');
+  parts.push('');
+  parts.push('That\'s it. Do NOT write the plan. Do NOT call mutating tools. Do NOT redo any research — your job is to evaluate the existing RESEARCH_DONE block, not extend it.');
+  parts.push(']');
+  return parts.join('\n');
+}
+
+// RESEARCH phase prompt — pronged external + codebase pre-identification.
+// Goal of this turn: collect everything needed to build the plan WITHOUT
+// writing the plan itself. Ends with a structured RESEARCH_DONE: yaml block
+// that the BUILDING turn (and a potential graph-cached re-plan) reads as
+// input. Heavy on instructions because the model needs the exact output
+// shape; the BUILDING prompt is correspondingly lighter.
+function buildPlanResearchSection(api, opts) {
+  const pc = opts.projectContext;
+  const parts = [];
+  parts.push('## Plan Mode — RESEARCH phase (acorn CLI)');
+  parts.push('[MODE: Plan only — RESEARCH turn. You are gathering the inputs for a plan, NOT writing the plan yet. The user will see your output and a follow-up BUILDING turn will produce the actual plan from your findings. Run the two prongs below IN PARALLEL within this single turn, then emit RESEARCH_DONE: as the LAST thing.');
+  parts.push('');
+  parts.push('PHASE 0 — ENVIRONMENT AUDIT (free, takes no tool calls):');
+  parts.push('The Project Context above lists OS, installed tools, project type, and file tree. Note tools/runtimes the request will need that aren\'t installed.');
+  parts.push('');
+  parts.push('--- PRONG A — EXTERNAL RESEARCH ---');
+  parts.push('For each external concept the request touches (frameworks, libraries, APIs, version compatibility, recent breaking changes, best-practice debates), delegate ONE researcher per concept. They run in parallel and return structured Findings/Caveats/Recommendation:');
+  parts.push('');
+  parts.push('  delegate_task({');
+  parts.push('    persona: "researcher",');
+  parts.push('    task: "Find current best practices for <X>. Cover <specific subquestions>. Include version-specific gotchas (current year is 2026).",');
+  parts.push('    context: "We are planning <project change>. Constraints: <constraints>."');
+  parts.push('  })');
+  parts.push('');
+  parts.push('Aim for 1–3 parallel researchers. Skip Prong A entirely if the request is purely codebase-internal (refactor, rename, bug fix) — say so in the RESEARCH_DONE output.');
+  parts.push('Quick one-off lookups (a single CLI flag, a known error string) can use `web_search` + `web_fetch` directly in your turn instead of delegating. Always include the year for recent topics.');
+  parts.push('');
+  parts.push('--- PRONG B — CODEBASE PRE-IDENTIFICATION ---');
+  parts.push('Map the existing codebase against the request. The output is a structured `code_targets` block naming exactly which files get created or modified, with current code excerpts (modifies) and pseudocode shapes (creates).');
+  parts.push('');
+  if (pc.hasCodeIndex) {
+    const learner = api._appContext?.learner;
+    const userId = opts.userId || opts.userName || 'anon';
+    const map = renderCodeGraphMap(learner, userId, pc.cwd);
+    if (map) {
+      parts.push(map);
+      parts.push('');
+      parts.push('You already have the Codebase Map above. Use cluster names + hot_paths to choose targets without grepping. Order:');
+      parts.push('  1. **Skip `architecture()`** — Codebase Map already gives you clusters, hot paths, entry points, and tech stack. Only call it if `index_head` looks stale.');
+    } else {
+      parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}) but no code_graph aspect is cached yet. Order:`);
+      parts.push('  1. `architecture` once → IMMEDIATELY pass the result through `update_code_graph_summary` so future plan-mode sessions can skip this call.');
+    }
+    parts.push('  2. `search_symbols({ name: "<concept>" })` for each concept named in the request. Narrow by `kind`/`file`/`language` if useful.');
+    parts.push('  3. `trace_calls({ name: "<symbol>", direction: "callers", depth: 3 })` for each plausible target. The caller count goes into code_targets.callers_after_change. Cross-check against hot_paths — hits there mean explicit per-step verification in the plan.');
+    parts.push('  4. `get_snippet({ qname: "<file>::<container>.<name>" })` for each symbol you intend to modify — the body becomes `current_excerpt` (5–15 lines, the actual current code, not a paraphrase).');
+    parts.push('  5. `impact({ paths: [<files you intend to edit>] })` once your target list is firm — populates blast-radius numbers.');
+    parts.push('  Do NOT use grep/glob/read_file for symbol discovery here. Allowed only when a search_symbols query came back empty for a name you SEE in the file tree, or for files in unsupported languages.');
+  } else {
+    parts.push(`No code index exists for ${pc.cwd}. Use \`read_file\`, \`glob\`, and \`grep\` to identify targets. If the project has more than a handful of source files, consider asking the user to run \`/index\` first — it builds a per-project SQLite index that makes future plan-mode scans 50× cheaper.`);
+  }
+  parts.push('');
+  parts.push('PHASE Q — CLARIFY (only if material ambiguity remains AFTER both prongs):');
+  parts.push("If something can't be answered by Prong A (no clear best practice) or Prong B (the codebase doesn't commit to one approach) AND the user almost certainly has a preference, emit a QUESTIONS: block INSTEAD of RESEARCH_DONE: this turn. The CLI will surface the picker and resume RESEARCH after answers. Format: see below.");
+  parts.push('');
+  parts.push('Don\'t ask trivial questions you can answer from the codebase or that the user clearly expects you to choose. Ask only when you would genuinely take different paths based on the answer.');
+  parts.push('');
+  parts.push('QUESTIONS format (only if needed — emit ONLY this block, then STOP, do NOT emit RESEARCH_DONE the same turn):');
+  parts.push('QUESTIONS:');
+  parts.push('```json');
+  parts.push('[{"text": "Question?", "type": "single|multi|open", "options": ["A","B"]}]');
+  parts.push('```');
+  parts.push('');
+  parts.push('--- OUTPUT — RESEARCH_DONE block ---');
+  parts.push('After both prongs are complete, emit this as the LAST thing in your turn (not before — wait for delegations to return). YAML, exact shape:');
+  parts.push('');
+  parts.push('RESEARCH_DONE:');
+  parts.push('```yaml');
+  parts.push('external:');
+  parts.push('  findings:');
+  parts.push('    - "<concrete fact about a library/version/API/best practice>"');
+  parts.push('  caveats:');
+  parts.push('    - "<gotcha that affects the plan>"');
+  parts.push('  recommended_approach: "<one or two sentences on the chosen direction>"');
+  parts.push('  # If the request is purely codebase-internal:');
+  parts.push('  # external: { skipped: true, reason: "internal refactor, no external dependencies touched" }');
+  parts.push('');
+  parts.push('code_targets:');
+  parts.push('  files_to_create:');
+  parts.push('    - path: "<repo-relative path>"');
+  parts.push('      purpose: "<what role this file plays>"');
+  parts.push('      pseudocode: |');
+  parts.push('        // function shape — types, return shape, what calls what.');
+  parts.push('        // NOT "// implement X here" — the actual structure.');
+  parts.push('      depends_on: ["<other repo paths>"]');
+  parts.push('  files_to_modify:');
+  parts.push('    - path: "<repo-relative path>"');
+  parts.push('      current_excerpt: |');
+  parts.push('        <5–15 lines of the ACTUAL current code from get_snippet>');
+  parts.push('      change_summary: "<one sentence on the edit>"');
+  parts.push('      callers_after_change: <integer from trace_calls>');
+  parts.push('  surrounding_context:');
+  parts.push('    - name: "<symbol name>"');
+  parts.push('      location: "<file>:<line>"');
+  parts.push('      why_relevant: "<one sentence>"');
+  parts.push('```');
+  parts.push('');
+  parts.push('RULES (HARD):');
+  parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT call exec for anything destructive (read-only `ls`/`cat`/`--version`/`git status`/`git log` are fine).');
+  parts.push('- Do NOT write the plan in this turn. The plan comes in the next (BUILDING) turn.');
+  parts.push('- Do NOT emit PLAN_READY in this turn. RESEARCH_DONE is the marker for this turn.');
+  parts.push('- For files_to_modify, current_excerpt MUST come from `get_snippet` — do not paraphrase or invent. If the symbol isn\'t in the index, fall back to `read_file` and excerpt the relevant lines.');
+  parts.push('- For files_to_create, pseudocode MUST be the function shape (types, return, key call sites) — not "// TODO" or "// implement here".');
+  parts.push(']');
+  return parts.join('\n');
+}
+
+// BUILDING phase prompt — fires when the CLI sends [BUILD_PLAN] after
+// detecting a RESEARCH_DONE block in the prior assistant turn. Reads
+// the prior turn's RESEARCH_DONE: from conversation history (which the
+// agent sees as messages[]) and produces the final plan + Verification
+// + PLAN_READY. Much shorter than RESEARCH because the agent isn't
+// gathering anything new — just shaping the plan around the cached findings.
+function buildPlanBuildingSection(api, opts) {
+  const parts = [];
+  parts.push('## Plan Mode — BUILDING phase (acorn CLI)');
+  parts.push('[MODE: Plan only — BUILDING turn. The user has approved the research and is now waiting for the actual plan. The previous assistant message in this conversation contains a RESEARCH_DONE: yaml block — that is your INPUT for this turn. Use its `external.recommended_approach`, `code_targets.files_to_create`, `code_targets.files_to_modify`, and `surrounding_context` directly when shaping the steps below. Do NOT redo research — if a target is missing from RESEARCH_DONE, that\'s a gap to flag in your risk section, not something to go hunt for now.');
+  parts.push('');
+  parts.push('OUTPUT — the plan, in this exact structure:');
+  parts.push('');
+  parts.push('## Approach');
+  parts.push('One short paragraph: the chosen direction (from `external.recommended_approach`) and why.');
+  parts.push('');
+  parts.push('## Steps');
+  parts.push('Numbered list of discrete steps. Each step:');
+  parts.push('  - Short header (5–10 words) — copied verbatim into a `task_create` row at execution time.');
+  parts.push('  - File path(s) it touches — pulled directly from RESEARCH_DONE.code_targets.');
+  parts.push('  - One or two sentences describing the change. Reference the `current_excerpt` or `pseudocode` from RESEARCH_DONE — don\'t re-derive.');
+  parts.push('  - Dependencies / order — note when a step depends on a prior step landing first.');
+  parts.push('  - **Parallelism marker** — append `[parallel: <group-name>]` to the step header when this step is INDEPENDENT of other steps in the same group. Independent = touches different files (or a different region of the same file) AND does not depend on anything created/modified by the other steps in the group. The execute-mode runner fires all steps in a parallel group simultaneously.');
+  parts.push('Aim for 4–10 steps. Each step should be small enough that one task_create row covers it.');
+  parts.push('');
+  parts.push('**Parallelism heuristic — be aggressive about identifying parallel groups.** Most plans have at least 2–4 steps that can run together. Common parallel patterns:');
+  parts.push('  - Creating multiple new files in different directories with no cross-references between them');
+  parts.push('  - Modifying multiple unrelated files (different cluster from the Codebase Map)');
+  parts.push('  - Adding a new route + its server handler + its types definition (3 files, no order dependency)');
+  parts.push('  - Writing tests for already-existing code (reads only)');
+  parts.push('Common SERIAL patterns (do NOT mark parallel):');
+  parts.push('  - Step B reads a file Step A just wrote');
+  parts.push('  - Step B exec\'s a command (npm install, build, migrate) that Step A\'s changes need to land first');
+  parts.push('  - Two steps editing the same file (line-number drift)');
+  parts.push('  - A step that adds a function and another step that imports/calls it');
+  parts.push('Format: `1. Create the API client [parallel: setup]` — group name is free-form, just consistent across the steps that should fire together. A step with no `[parallel: ...]` runs serially in plan order. Within a parallel group, the steps fire together but task_progress still tracks each individually.');
+  parts.push('');
+  parts.push('## Risks');
+  parts.push('Bulleted. Pull `callers_after_change` from RESEARCH_DONE.code_targets.files_to_modify — anything >20 callers is a hot edge that warrants explicit verification. Add any caveats from `external.caveats`. Note any gaps in RESEARCH_DONE that the user should know about.');
+  parts.push('');
+  parts.push('## Verification');
+  parts.push('Bulleted, 2–5 concrete runnable checks. Each check is a specific command or observation with a pass criterion, e.g.:');
+  parts.push('  - `bun test src/foo.test.ts` should exit 0, 3 tests passing');
+  parts.push('  - `curl -s http://localhost:3000/api/health` should return `{"ok":true}`');
+  parts.push('  - `read_file config.ts` — `port` should be `8081`, not `8080`');
+  parts.push('Avoid "it should feel better" or "make sure it looks right" — those aren\'t verifications. **For ANY symbol you create or modify, ALSO include a `verify_implementation` check** (the goal-backward 4-level audit: exists → substantive → wired → export-level — catches stub bodies, unwired components, comment-only files):');
+  parts.push('  - `verify_implementation({ qnames: ["src/foo.ts::Bar.baz", ...] })` — all listed must report exists/substantive/wired/export_level true');
+  parts.push('Pick checks that use existing project tooling and have an unambiguous pass signal.');
+  parts.push('');
+  parts.push('PLAN_READY');
+  parts.push('');
+  parts.push('RULES (HARD):');
+  parts.push('- Do NOT call write_file/edit_file/exec mutating commands. Read-only inspection only.');
+  parts.push('- Do NOT redo research. The previous turn\'s RESEARCH_DONE is your input — use it.');
+  parts.push('- Do NOT emit a QUESTIONS: block — that was the RESEARCH phase\'s opportunity.');
+  parts.push('- End with `PLAN_READY` on its own line — that\'s the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.');
+  parts.push('- After the user clicks Execute, the SAME plan is replayed as a NEW turn with mode=execute — that\'s when you actually run write_file etc. Do not pre-emptively write now.]');
+  return parts.join('\n');
+}
+
+function buildPlanModeSection_LEGACY(api, opts) {
   if (opts.platform !== 'cli' || !opts.projectContext || opts.projectContext.mode !== 'plan') return null;
   const pc = opts.projectContext;
   const parts = [];
@@ -643,12 +998,34 @@ function buildPlanModeSection(api, opts) {
   parts.push('');
   if (pc.hasCodeIndex) {
     parts.push('PHASE 2 — CODEBASE SCAN (structural-first):');
-    parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}). Prefer structural queries over reading files — a single search_symbols result is roughly 50× cheaper in tokens than the equivalent grep + read_file pair. Order:`);
-    parts.push('  1. `architecture` — once, to learn module clusters, entry points, hot paths, and tech stack. Read the `notes` field for any partial-coverage caveats. THEN immediately pass the result through `update_code_graph_summary` so the project node\'s `code_graph` aspect reflects it — that\'s how cross-session and cross-machine memory of this codebase\'s shape gets persisted in the graph viewer.');
-    parts.push('  2. For each concept named in the user\'s request, `search_symbols({ name: "<concept>" })` (optionally narrow by `kind`, `file`, or `language`).');
-    parts.push('  3. For each plausible target symbol, `trace_calls({ name: "<name>", direction: "callers", depth: 3 })` to learn who depends on it. Use `direction: "callees"` to learn what it depends on.');
-    parts.push('  4. Only after the structural pass is exhausted: `get_snippet({ qname: "..." })` for the 3-5 symbols you will actually modify. Do not read whole files unless the symbol is missing from the index.');
-    parts.push('  5. Before producing the plan, `impact({ paths: [<files you intend to edit>] })` and include the affected-callers count in your risk section. Hot edges (e.g. >20 transitive callers) deserve explicit per-step verification in PHASE 6.');
+
+    // Inject cached architecture summary so the agent enters this
+    // phase already oriented. When present, the prompt below skips the
+    // `architecture()` first-call requirement — same data is already
+    // here, just costs no tool call.
+    const learner = api._appContext?.learner;
+    const userId = opts.userId || opts.userName || 'anon';
+    const map = renderCodeGraphMap(learner, userId, pc.cwd);
+    if (map) {
+      parts.push('');
+      parts.push(map);
+      parts.push('');
+      parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}). The Codebase Map above is the cached architecture summary — use it as your starting orientation. Prefer structural queries over reading files — a single search_symbols result is roughly 50× cheaper in tokens than the equivalent grep + read_file pair. Order:`);
+      parts.push('  1. **Skip `architecture()`** — the Codebase Map above already gives you clusters, hot paths, entry points, and tech stack. Only call it if `index_head` looks stale or a cluster\'s listed paths don\'t match what you find when you probe further.');
+      parts.push('  2. For each concept named in the user\'s request, `search_symbols({ name: "<concept>" })` (optionally narrow by `kind`, `file`, or `language`). Use the cluster names as a hint for which area to look in.');
+      parts.push('  3. For each plausible target symbol, `trace_calls({ name: "<name>", direction: "callers", depth: 3 })` to learn who depends on it. Use `direction: "callees"` to learn what it depends on. Cross-check against the hot_paths list — if your target is on it, the change touches many callers.');
+      parts.push('  4. Only after the structural pass is exhausted: `get_snippet({ qname: "..." })` for the 3-5 symbols you will actually modify. Do not read whole files unless the symbol is missing from the index.');
+      parts.push('  5. Before producing the plan, `impact({ paths: [<files you intend to edit>] })` and include the affected-callers count in your risk section. Hot edges (e.g. >20 transitive callers) deserve explicit per-step verification in PHASE 6.');
+      parts.push('  6. If you DO call `architecture()` because the cached map looked stale, immediately ship the result via `update_code_graph_summary` so the cached map refreshes for the next session.');
+    } else {
+      // No cached map yet — fall back to the original "architecture first" sequence.
+      parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}) but no \`code_graph\` aspect is cached yet — your first job is to populate it. Prefer structural queries over reading files. Order:`);
+      parts.push('  1. `architecture` — once, to learn module clusters, entry points, hot paths, and tech stack. Read the `notes` field for any partial-coverage caveats. THEN immediately pass the result through `update_code_graph_summary` so the project node\'s `code_graph` aspect reflects it — that\'s how cross-session and cross-machine memory of this codebase\'s shape gets persisted in the graph viewer (and how future plan-mode sessions can skip this call).');
+      parts.push('  2. For each concept named in the user\'s request, `search_symbols({ name: "<concept>" })` (optionally narrow by `kind`, `file`, or `language`).');
+      parts.push('  3. For each plausible target symbol, `trace_calls({ name: "<name>", direction: "callers", depth: 3 })` to learn who depends on it. Use `direction: "callees"` to learn what it depends on.');
+      parts.push('  4. Only after the structural pass is exhausted: `get_snippet({ qname: "..." })` for the 3-5 symbols you will actually modify. Do not read whole files unless the symbol is missing from the index.');
+      parts.push('  5. Before producing the plan, `impact({ paths: [<files you intend to edit>] })` and include the affected-callers count in your risk section. Hot edges (e.g. >20 transitive callers) deserve explicit per-step verification in PHASE 6.');
+    }
     parts.push('Do NOT use `grep`, `glob`, or `read_file` for symbol discovery during PHASE 2 unless a tool returned `{ ok: false, error: "unsupported-language" }` for that file\'s extension, OR a search_symbols query came back empty for a name that you can SEE in the file tree. The index is best-effort: Go is precise (stdlib parser); TS/JS is regex-based and may miss nested classes, decorators, or inline object methods — fall back to grep for those exact cases. If the M2 architecture notes flagged "no CALLS edges yet" or similar coverage gaps, treat trace_calls/impact results as hints, not authoritative.');
     parts.push('If the index looks stale (last_modified mismatch with current git state, or your search came back surprisingly empty), call `index_codebase({ force: true })` once and continue.');
   } else {
@@ -670,6 +1047,12 @@ function buildPlanModeSection(api, opts) {
   parts.push('Why delegate instead of web_search yourself: (1) parallel — three sub-agents finish in the time of one. (2) focused — each persona uses a narrow tool set and returns a structured Findings/Caveats/Recommendation summary you can splice straight into the plan. (3) cheap — sub-agents have their own context budget so they do not eat yours. Aim for 1-3 parallel researchers per non-trivial plan; do not delegate trivial lookups (single fact you already know). Codebase reading (read_file, grep, glob) stays in YOUR turns — sub-agents do not have access to the user\'s machine.');
   parts.push('');
   parts.push('After delegating, the harness wakes you when each sub-agent finishes. Wait for at least the first batch of findings before moving to PHASE 5 — do NOT emit PLAN_READY in the same turn you delegated.');
+  parts.push('');
+  parts.push('**Research toolbox (plan-phase work — only relevant during planning, not execution):**');
+  parts.push('- **Web lookups**: For things you can\'t learn from the user\'s machine — current library versions, framework docs, API changes, error messages, "is X deprecated", recent breaking changes — `web_search` for candidate URLs, then `web_fetch` the 1-3 most authoritative (official docs > GitHub > Stack Overflow > random blog). Always include the current year for recent topics. Quote exact error strings. Cite source URLs.');
+  parts.push('- **Research-and-record loop**: Before working with anything you don\'t know cold — a CLI flag, library API, error code, framework convention, config schema — `graph_query({ query: "<thing>" })` FIRST to see if a prior session learned it. If nothing useful, do NOT improvise from training data: `web_search` (with the year) + `web_fetch`, then SAVE what you learned via `graph_update({ nodeId: "<slug>", label: "...", type: "tool|library|framework|concept", aspects: [{ name: "overview", attributes: [...] }, { name: "gotchas", attributes: [...] }] })` so the next session finds it. "No node for <thing> in the graph — looking it up" beats guessing.');
+  parts.push('- **3-strikes rule**: If the same class of exec command fails twice, the THIRD attempt MUST be `web_search` the error/topic before running another shell command. Most "hitting a wall" moments are a google-able stale-training-data issue (framework version, changed CLI, deprecated flag).');
+  parts.push('- **Load gotchas at session start**: When the Project Context shows a project using a known framework/tool (expo, react-native, next, tailwind, docker, etc.), `graph_query({ query: "<tool name>" })` early to load the existing gotchas aspect. Skipping this means re-hitting walls earlier sessions already documented. Run multiple in parallel.');
   parts.push('');
   parts.push('PHASE 4 — CLARIFY:');
   parts.push("If the request leaves ANY material ambiguity — framework choice, scope, audience, design direction, target language, file layout, naming, technical approach — you MUST ask before proceeding to PHASE 5. A request like \"build me a website about bridges\" is ambiguous: framework? styling? data source? routing? deployment target? Ask. Default to asking when uncertain — the user can always say \"you choose\" if they don't care, but they cannot un-do an unwanted scaffolded project.");
@@ -719,7 +1102,7 @@ function buildPlanModeSection(api, opts) {
   parts.push("If you have questions, output ONLY the QUESTIONS: block and STOP — do NOT include PLAN_READY in the same response. Wait for answers before presenting the plan.");
   parts.push('');
   parts.push('PHASE 5 — PLAN:');
-  parts.push('Only after questions are answered (or if you have none), present a detailed plan with prerequisites, step-by-step changes with file paths, new files vs existing files to modify, dependencies to install, and commands to run. Structure the plan as a numbered list of discrete steps — each step should be small enough to task_create as its own checklist row at execution time (see PHASE 6 + the Execution Checklist rule below).');
+  parts.push('Only after questions are answered (or if you have none), present a detailed plan with prerequisites, step-by-step changes with file paths, new files vs existing files to modify, dependencies to install, and commands to run. Structure the plan as a numbered list of discrete steps — each step is small enough to be one `task_create` row when the plan is replayed in execute mode.');
   parts.push('');
   parts.push('PHASE 6 — VERIFICATION:');
   parts.push('Every plan MUST end with a **VERIFICATION** section listing 2–5 concrete, runnable checks that confirm the change actually works. Each check is a specific command or observation with a pass criterion, e.g.:');
@@ -745,9 +1128,40 @@ function buildPlanModeSection(api, opts) {
   parts.push('- Do NOT emit PLAN_READY without a `## Verification` section. A plan without verification is incomplete.');
   parts.push("- End your plan with \"PLAN_READY\" on its own line — that's the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.");
   parts.push("- After the user clicks Execute, the SAME plan is replayed as a NEW turn with mode=execute — that's when you actually run write_file etc. Do not pre-emptively try to skip plan mode by writing now.]");
-  parts.push('');
-  parts.push('**Execution Checklist (the execute-mode rule):** When the plan is replayed for execution, your FIRST set of tool calls MUST be `task_create` — one per plan step AND one per verification check. Use short `subject` strings (5–10 words) copied from the plan\'s step headers. As you complete each step, call `task_progress({id, status: "done"})` IMMEDIATELY — do not batch updates at the end. Before starting a step, call `task_progress({id, status: "in_progress"})` so the user can see which one you\'re on. If a step fails, `task_progress({id, status: "error", note: "<what failed>"})` and either propose a fix or ask the user. After all implementation steps are `done`, run the verification checks in order, updating each to `done` or `error`. You may only declare the work complete once every task in the checklist (impl + verification) is `done`. The user watches this checklist to see progress — skipping updates means they can\'t tell where you are.');
 
+  return parts.join('\n');
+}
+
+// Execute mode — emitted when projectContext.mode === 'execute' on a cli
+// session. Carries the task_create / task_progress checklist contract that
+// used to live (incorrectly) inside the Plan Mode section. The plan-mode
+// turn doesn't need it (the agent is just emitting the plan); the
+// execute-mode turn very much does, and previously the prompt didn't
+// carry it AT ALL once mode flipped — leaving the agent without the
+// checklist rule on the very turn it was supposed to follow.
+function buildExecuteModeSection(api, opts) {
+  if (opts.platform !== 'cli' || !opts.projectContext || opts.projectContext.mode !== 'execute') return null;
+  const parts = [];
+  parts.push('## Execute Mode (acorn CLI)');
+  parts.push('You are executing a plan that the user already approved. Your FIRST set of tool calls MUST be `task_create` — one per plan step AND one per verification check from the plan\'s `## Verification` section. Use short `subject` strings (5–10 words) copied from each plan step\'s header.');
+  parts.push('');
+  parts.push('Execution order — group steps by their plan-mode `[parallel: <group-name>]` marker:');
+  parts.push('  - **Steps in the same parallel group fire together** as a single tool batch — multiple `tool_use` blocks in the same response. The Anthropic API supports parallel tool calls and the harness dispatches them concurrently. Don\'t serialize what the plan said could parallelize.');
+  parts.push('  - Steps with NO `[parallel: ...]` marker run one-by-one in plan order.');
+  parts.push('');
+  parts.push('For each step (whether serial or part of a parallel group):');
+  parts.push('  1. `task_progress({id, status: "in_progress"})` BEFORE starting work. For a parallel group, fire the in_progress updates for all steps in the group together (one tool batch with the in_progress calls) BEFORE the work batch — keeps the user\'s checklist accurate.');
+  parts.push('  2. Do the work (write_file / edit_file / exec / etc). For a parallel group, fire all the work tools in ONE batch — a response with N tool_use blocks where N = group size.');
+  parts.push('  3. `task_progress({id, status: "done"})` IMMEDIATELY after each step completes. For a parallel group, fire the done updates together as a batch once all the work tools have returned.');
+  parts.push('  4. If a step fails: `task_progress({id, status: "error", note: "<what failed>"})` and either propose a fix or ask the user. A failure in one step of a parallel group does NOT cancel the others — let the rest finish, then deal with the failure.');
+  parts.push('');
+  parts.push('Parallel-batch SAFETY rules:');
+  parts.push('  - Do NOT include two write/edit calls targeting the SAME file in one batch — line-number drift between concurrent edits will corrupt the file.');
+  parts.push('  - Do NOT batch an `exec` of a build/migration/install command with file writes — the exec needs the writes to land first.');
+  parts.push('  - When in doubt, run the steps serially — a wrong parallelism call wastes time recovering, a serial run just takes a bit longer.');
+  parts.push('');
+  parts.push('After all implementation steps are `done`, run the verification checks in the same order (these are typically serial since each tests something specific), updating each task to `done` or `error`. You may only declare the work complete when every task in the checklist (impl + verification) is `done`.');
+  parts.push('The user watches this checklist as the live progress signal — skipping updates means they can\'t tell where you are.');
   return parts.join('\n');
 }
 
@@ -940,6 +1354,7 @@ module.exports = function register(api) {
   // auto-prefix.
   api.registerPromptSection('*', 'Project Context', ({ opts }) => buildProjectContextSection(api, opts));
   api.registerPromptSection('*', 'Plan Mode',       ({ opts }) => buildPlanModeSection(api, opts));
+  api.registerPromptSection('*', 'Execute Mode',    ({ opts }) => buildExecuteModeSection(api, opts));
 
   // afterToolExec middleware — owns the graphcorn temp-tagging contract
   // for graph_update. When a graph_update call inside an acorn ctx

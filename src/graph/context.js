@@ -94,7 +94,18 @@ class GraphContext {
     reflections: 500,
     derived: 800,
     gaps: 300,
-    plugin: 2000,
+    // plugin section carries both Project Context and Plan Mode for the
+    // acorn-cli plugin. Plan Mode alone is ~2500 tokens (PHASES 1-6 +
+    // QUESTIONS protocol + tooling-question list + RULES + execution
+    // checklist), Project Context can be 2000-3000 tokens (cwd, tree,
+    // tools list, ACORN.md, project_memory_summary). Combined ~5000.
+    // The old 2000 cap silently truncated the END of the combined text,
+    // dropping Plan Mode's `## Plan Mode` header and `RULES` block —
+    // confirmed via `[plan-mode] system prompt MISSING markers:
+    // planHeader, rulesHeader` warnings on every plan-mode turn. Same
+    // failure mode (and same fix) as the runtime budget bump from 500
+    // to 3000 above.
+    plugin: 6000,
     episodes: 8000,
   };
   static TOTAL_BUDGET = 40000;
@@ -374,8 +385,8 @@ class GraphContext {
       selfknowledge: () => this._truncateToTokenBudget(this._getCachedSection('selfknowledge', () => this._buildSelfKnowledgeSection()), B.selfknowledge),
       anti: () => this._truncateToTokenBudget(this._getCachedSection('anti', () => this._buildAntiPatternsSection()), B.anti),
       tooling: () => this._truncateToTokenBudget(this._buildToolingSection(), B.tooling),
-      reflections: () => this._truncateToTokenBudget(this._buildReflectionsSection(), B.reflections),
-      gaps: () => this._truncateToTokenBudget(this._buildGapsSection(), B.gaps),
+      reflections: () => this._truncateToTokenBudget(this._buildReflectionsSection({ userId: opts.userId, projectContext: opts.projectContext }), B.reflections),
+      gaps: () => this._truncateToTokenBudget(this._buildGapsSection({ userId: opts.userId, projectContext: opts.projectContext }), B.gaps),
       plugin: () => this._truncateToTokenBudget(this._buildPluginSection(), B.plugin),
     };
 
@@ -403,8 +414,8 @@ class GraphContext {
     const parts = [
       inc('channel') ? this._truncateToTokenBudget(this._buildChannelSection(opts.channelId, opts.channelName), B.channel) : null,
       inc('person') && opts.userName ? this._truncateToTokenBudget(this._buildPersonSection(opts.userId, opts.userName), B.person) : null,
-      inc('relevant') && opts.messageContent ? this._truncateToTokenBudget(this._buildRelevantContext(opts.messageContent, { _precomputedResults: opts._precomputedResults, _referenceDate: opts._referenceDate }), B.relevant) : null,
-      inc('episodes') && opts.messageContent ? this._truncateToTokenBudget(this._buildEpisodesSection(opts.messageContent), B.episodes) : null,
+      inc('relevant') && opts.messageContent ? this._truncateToTokenBudget(this._buildRelevantContext(opts.messageContent, { _precomputedResults: opts._precomputedResults, _referenceDate: opts._referenceDate, userId: opts.userId, projectContext: opts.projectContext }), B.relevant) : null,
+      inc('episodes') && opts.messageContent ? this._truncateToTokenBudget(this._buildEpisodesSection(opts.messageContent, undefined, { userId: opts.userId, projectContext: opts.projectContext }), B.episodes) : null,
       inc('feed') ? this._truncateToTokenBudget(this._buildCrossSessionSection(opts), B.feed) : null,
       inc('behavior') ? this._truncateToTokenBudget(this._buildConversationBehavior(opts), B.behavior) : null,
       inc('runtime') ? this._truncateToTokenBudget(this._buildRuntimeSection(opts), B.runtime) : null,
@@ -731,7 +742,7 @@ class GraphContext {
       person: allowedKeys.has('person') && opts.userName ? this._truncateToTokenBudget(
         this._buildPersonSection(opts.userId, opts.userName), B.person) : null,
       relevant: allowedKeys.has('relevant') && opts.messageContent ? this._truncateToTokenBudget(
-        this._buildRelevantContext(opts.messageContent, { _precomputedResults: opts._precomputedResults, _referenceDate: opts._referenceDate, _queryType: opts._queryType, _queryParams: opts._queryParams }), B.relevant) : null,
+        this._buildRelevantContext(opts.messageContent, { _precomputedResults: opts._precomputedResults, _referenceDate: opts._referenceDate, _queryType: opts._queryType, _queryParams: opts._queryParams, userId: opts.userId, projectContext: opts.projectContext }), B.relevant) : null,
       anti: allowedKeys.has('anti') ? this._truncateToTokenBudget(
         this._getCachedSection('anti', () => this._buildAntiPatternsSection()), B.anti) : null,
       feed: allowedKeys.has('feed') ? this._truncateToTokenBudget(
@@ -744,15 +755,15 @@ class GraphContext {
         this._buildRuntimeSection(opts), B.runtime) : null,
       cluster: allowedKeys.has('runtime') ? this._buildClusterAccessSection() : null,
       reflections: allowedKeys.has('reflections') ? this._truncateToTokenBudget(
-        this._buildReflectionsSection(), B.reflections) : null,
+        this._buildReflectionsSection({ userId: opts.userId, projectContext: opts.projectContext }), B.reflections) : null,
       derived: allowedKeys.has('derived') ? this._truncateToTokenBudget(
-        this._buildDerivedFactsSection(opts.messageContent), B.derived) : null,
+        this._buildDerivedFactsSection(opts.messageContent, { userId: opts.userId, projectContext: opts.projectContext }), B.derived) : null,
       gaps: allowedKeys.has('gaps') ? this._truncateToTokenBudget(
-        this._buildGapsSection(), B.gaps) : null,
+        this._buildGapsSection({ userId: opts.userId, projectContext: opts.projectContext }), B.gaps) : null,
       plugin: allowedKeys.has('plugin') ? this._truncateToTokenBudget(
         this._buildPluginSection(), B.plugin) : null,
       episodes: allowedKeys.has('episodes') && opts.messageContent ? this._truncateToTokenBudget(
-        this._buildEpisodesSection(opts.messageContent, opts._queryParams), B.episodes) : null,
+        this._buildEpisodesSection(opts.messageContent, opts._queryParams, { userId: opts.userId, projectContext: opts.projectContext }), B.episodes) : null,
     };
 
     const orderedKeys = GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full;

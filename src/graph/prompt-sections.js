@@ -27,12 +27,18 @@ function _parseIsoDateOnly(s) {
 function applyPromptSectionsMixin(GraphContext) {
   const proto = GraphContext.prototype;
 
-  proto._buildEpisodesSection = function _buildEpisodesSection(messageContent, queryParams) {
+  proto._buildEpisodesSection = function _buildEpisodesSection(messageContent, queryParams, scopeOpts) {
     if (!messageContent) return null;
     const { QUERY_TYPE_PARAMS, _expandQueryTerms, SEARCH_STOPWORDS } = require('./retrieval');
     const qp = queryParams || QUERY_TYPE_PARAMS.specific;
 
-    const episodes = this._searchEpisodes(messageContent, qp.episodeCount);
+    const episodes = this._searchEpisodes(messageContent, qp.episodeCount, scopeOpts);
+
+    // Project scope shared between FTS path (above) and LIKE fallback
+    // (below). _searchEpisodes already filters its own results; we
+    // need to filter the LIKE-fallback path manually since it bypasses
+    // _searchEpisodes.
+    const projScope = scopeOpts ? this._computeProjectScope(scopeOpts) : null;
 
     const seenIds = new Set(episodes.map(e => e.id));
     try {
@@ -42,16 +48,23 @@ function applyPromptSectionsMixin(GraphContext) {
       if (words.length > 0) {
         const likeClauses = words.map(() => 'e.content LIKE ?').join(' OR ');
         const params = words.map(w => `%${w}%`);
+        // Over-fetch when scoping so post-filter doesn't starve us.
+        const fetchLimit = projScope && projScope.allowedSessionIds.size > 0
+          ? Math.max(12, (qp.episodeCount - episodes.length) * 4)
+          : Math.max(3, qp.episodeCount - episodes.length);
         const extra = this.db.prepare(`
           SELECT e.id, e.content, e.observed_at, e.session_id
           FROM episodes e WHERE (${likeClauses})
           ORDER BY e.observed_at DESC LIMIT ?
-        `).all(...params, Math.max(3, qp.episodeCount - episodes.length));
+        `).all(...params, fetchLimit);
         for (const r of extra) {
-          if (!seenIds.has(r.id)) {
-            episodes.push({ id: r.id, content: r.content, observedAt: r.observed_at, sessionId: r.session_id });
-            seenIds.add(r.id);
+          if (seenIds.has(r.id)) continue;
+          if (projScope && projScope.allowedSessionIds.size > 0 && r.session_id && !projScope.allowedSessionIds.has(r.session_id)) {
+            continue; // cross-project episode — drop
           }
+          episodes.push({ id: r.id, content: r.content, observedAt: r.observed_at, sessionId: r.session_id });
+          seenIds.add(r.id);
+          if (episodes.length >= qp.episodeCount) break;
         }
       }
     } catch (e) { this.log.warn('[prompt-sections] messageContent.toLowerCase failed: ' + e.message); }
@@ -171,27 +184,47 @@ function applyPromptSectionsMixin(GraphContext) {
     return parts.length > 0 ? `## Rules\n${parts.join('\n\n')}` : null;
   };
 
-  proto._buildReflectionsSection = function _buildReflectionsSection() {
+  proto._buildReflectionsSection = function _buildReflectionsSection(scopeOpts) {
     if (!this.db) return null;
     try {
+      // Over-fetch when project-scoping is active so the post-filter
+      // doesn't starve us below the displayed limit.
+      const scope = scopeOpts ? this._computeProjectScope(scopeOpts) : null;
+      const fetchLimit = scope ? 30 : 5;
       const rows = this.db.prepare(
-        `SELECT r.content, n.label FROM reflections r
+        `SELECT r.content, r.node_id, n.label, n.type FROM reflections r
          LEFT JOIN nodes n ON n.id = r.node_id
-         ORDER BY r.created DESC LIMIT 5`
-      ).all();
+         ORDER BY r.created DESC LIMIT ?`
+      ).all(fetchLimit);
       if (!rows || rows.length === 0) return null;
-      const lines = rows.map(r => `- ${r.label ? `[${r.label}] ` : ''}${r.content}`);
+      // Project-scope filter: drop reflections attached to OTHER
+      // projects' nodes (or sessions in other projects). General
+      // reflections (no node_id) and reflections on the current
+      // project are kept.
+      let kept = rows;
+      if (scope) {
+        kept = rows.filter(r => {
+          if (!r.node_id) return true; // unscoped general reflection
+          return this._nodeAllowedInProjectScope({ id: r.node_id, type: r.type || '' }, scope);
+        });
+      }
+      kept = kept.slice(0, 5);
+      if (kept.length === 0) return null;
+      const lines = kept.map(r => `- ${r.label ? `[${r.label}] ` : ''}${r.content}`);
       return `## Recent Reflections\n${lines.join('\n')}`;
     } catch { return null; }
   };
 
-  proto._buildDerivedFactsSection = function _buildDerivedFactsSection(messageContent) {
+  proto._buildDerivedFactsSection = function _buildDerivedFactsSection(messageContent, scopeOpts) {
     if (!this.db) return null;
     try {
       const hasTbl = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='derived_facts'").get();
       if (!hasTbl) return null;
 
       let facts = [];
+      const scope = scopeOpts ? this._computeProjectScope(scopeOpts) : null;
+      // Over-fetch when scoping so post-filter doesn't starve us.
+      const fetchMul = scope ? 4 : 1;
 
       // If we have a query, find derived facts relevant to the search results
       if (messageContent) {
@@ -207,8 +240,8 @@ function applyPromptSectionsMixin(GraphContext) {
             SELECT df.content, df.reasoning_type, df.confidence, df.premises, df.source_node_ids
             FROM derived_facts df
             WHERE df.invalidated_at IS NULL AND (${likeClauses})
-            ORDER BY df.created DESC LIMIT 8
-          `).all(...params);
+            ORDER BY df.created DESC LIMIT ?
+          `).all(...params, 8 * fetchMul);
         }
       }
 
@@ -219,7 +252,7 @@ function applyPromptSectionsMixin(GraphContext) {
           FROM derived_facts df
           WHERE df.invalidated_at IS NULL AND df.confidence IN ('high', 'medium')
           ORDER BY df.created DESC LIMIT ?
-        `).all(8 - facts.length);
+        `).all((8 - facts.length) * fetchMul);
         const seen = new Set(facts.map(f => f.content));
         for (const r of recent) {
           if (!seen.has(r.content)) {
@@ -228,6 +261,25 @@ function applyPromptSectionsMixin(GraphContext) {
           }
         }
       }
+
+      // Project-scope filter: drop facts whose source_node_ids point at
+      // OTHER projects' nodes. source_node_ids is a JSON array string.
+      if (scope) {
+        facts = facts.filter(f => {
+          if (!f.source_node_ids) return true; // unsourced — keep
+          let ids;
+          try { ids = JSON.parse(f.source_node_ids); } catch { return true; }
+          if (!Array.isArray(ids) || ids.length === 0) return true;
+          // Keep if AT LEAST ONE source is in current project (or generic).
+          for (const id of ids) {
+            if (typeof id !== 'string') continue;
+            const synthetic = { id, type: id.startsWith('project-') ? 'project' : (id.startsWith('session-') ? 'session' : '') };
+            if (this._nodeAllowedInProjectScope(synthetic, scope)) return true;
+          }
+          return false;
+        });
+      }
+      facts = facts.slice(0, 8);
 
       if (facts.length === 0) return null;
 
@@ -241,16 +293,30 @@ function applyPromptSectionsMixin(GraphContext) {
     } catch { return null; }
   };
 
-  proto._buildGapsSection = function _buildGapsSection() {
+  proto._buildGapsSection = function _buildGapsSection(scopeOpts) {
     if (!this.db) return null;
     try {
+      const scope = scopeOpts ? this._computeProjectScope(scopeOpts) : null;
+      const fetchLimit = scope ? 30 : 5;
       const rows = this.db.prepare(
-        `SELECT g.content, n.label FROM gaps g
+        `SELECT g.content, g.node_id, n.label, n.type FROM gaps g
          LEFT JOIN nodes n ON n.id = g.node_id
-         WHERE g.status = 'open' ORDER BY g.created DESC LIMIT 5`
-      ).all();
+         WHERE g.status = 'open' ORDER BY g.created DESC LIMIT ?`
+      ).all(fetchLimit);
       if (!rows || rows.length === 0) return null;
-      const lines = rows.map(g => `- ${g.label ? `[${g.label}] ` : ''}${g.content}`);
+      // Project-scope filter: drop open questions attached to OTHER
+      // projects' nodes — those gaps belong to another codebase and
+      // would mislead the agent in the current project.
+      let kept = rows;
+      if (scope) {
+        kept = rows.filter(g => {
+          if (!g.node_id) return true;
+          return this._nodeAllowedInProjectScope({ id: g.node_id, type: g.type || '' }, scope);
+        });
+      }
+      kept = kept.slice(0, 5);
+      if (kept.length === 0) return null;
+      const lines = kept.map(g => `- ${g.label ? `[${g.label}] ` : ''}${g.content}`);
       return `## Open Questions\nThings you're curious about or want to explore when relevant:\n${lines.join('\n')}`;
     } catch { return null; }
   };
@@ -659,7 +725,6 @@ function applyPromptSectionsMixin(GraphContext) {
       DEEPGRAM_API_KEY: 'Deepgram — speech-to-text transcription',
       XI_API_KEY: 'ElevenLabs — text-to-speech voice synthesis',
       OPENAI_API_KEY: 'OpenAI — GPT models, DALL-E, embeddings',
-      GEMINI_API_KEY: 'Google Gemini — multimodal AI (embeddings)',
       SEARXNG_URL: 'SearXNG — primary web search (self-hosted metasearch). Base URL.',
       BRAVE_API_KEY: 'Brave Search — fallback web search (used when SearXNG is unset or empty)',
       REPLICATE_API_TOKEN: 'Replicate — run ML models',

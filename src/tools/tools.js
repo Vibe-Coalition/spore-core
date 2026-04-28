@@ -41,6 +41,29 @@ const MUTATING_TOOLS = new Set([
   'notify_user', 'env_manage', 'save_tool',
 ]);
 
+// Tools that are meaningless for cli (acorn) sessions and should NOT be
+// advertised to the model when platform === 'cli'. Stripping them from the
+// catalog reclaims ~1800 tokens per prompt and prevents the agent from
+// reaching for tools it can't usefully invoke (web_serve is refused locally
+// by the Go binary; anima_*/spore_message target the multi-agent mesh;
+// remote_*/ssh_tunnel are for sidecar-machine flows; browser is a
+// container-side puppeteer; message_* are Discord/Telegram surfaces
+// distinct from the cli TUI; env_manage / startup_tasks / data_poller /
+// list_custom_tools are SPORE-server admin). Keep graph_*, query_about,
+// delegate_task, task_*, schedule_*, web_search, web_fetch, ask_user,
+// notify_user, save_tool, sleep, skill_*, session_*, log_watch_*, plus
+// every plugin-contributed tool — those all work cleanly from a cli turn.
+const TOOLS_EXCLUDED_FROM_CLI = new Set([
+  'web_serve', 'browser',
+  'message_send', 'message_react', 'message_edit', 'message_read',
+  'env_manage',
+  'remote_exec', 'remote_tail', 'remote_tmux_kill',
+  'remote_read_file', 'remote_write_file', 'ssh_tunnel',
+  'startup_tasks', 'data_poller',
+  'anima_list', 'spore_message', 'anima_graph', 'anima_manage',
+  'list_custom_tools',
+]);
+
 class ToolSystem {
   constructor(config, logger, discordClient, graphContext, anthropicClient) {
     this.config = config;
@@ -146,11 +169,15 @@ class ToolSystem {
   }
 
   _currentConversationTarget() {
-    const channelId = this._currentChannelId;
+    // Prefer AsyncLocalStorage (per-session, race-safe) over the
+    // singleton legacy globals so concurrent sessions don't cross-route
+    // each other's messages.
+    const ctx = this._ctx?.() || {};
+    const channelId = ctx.channelId ?? this._currentChannelId;
     if (!channelId) return null;
     const raw = String(channelId);
     if (/^[a-z]+:/i.test(raw)) return raw;
-    const platform = String(this._currentPlatform || 'discord').toLowerCase();
+    const platform = String(ctx.platform ?? this._currentPlatform ?? 'discord').toLowerCase();
     return `${platform}:${raw}`;
   }
 
@@ -160,7 +187,8 @@ class ToolSystem {
 
   _resolveMessageTargetMeta(input = {}) {
     const target = this._resolveMessageTargetInput(input);
-    let platform = String(input.platform || this._currentPlatform || 'discord').toLowerCase();
+    const ctx = this._ctx?.() || {};
+    let platform = String(input.platform || ctx.platform || this._currentPlatform || 'discord').toLowerCase();
     if (this.platformManager) {
       const parsed = this.platformManager.parseTarget({ target, platform });
       return { target, platform: parsed.platform, id: parsed.id };
@@ -174,10 +202,26 @@ class ToolSystem {
   }
 
   /**
-   * Get tool definitions for the Anthropic API
+   * Get tool definitions for the Anthropic API.
+   *
+   * When the active session is acorn-cli (platform='cli'), the catalog is
+   * filtered through TOOLS_EXCLUDED_FROM_CLI so the model only sees tools
+   * it can actually use on the user's machine + via SPORE. Significantly
+   * shrinks the prompt and stops the agent from reaching for things like
+   * web_serve (refused locally) or anima_* (multi-agent mesh).
+   *
+   * Platform resolution order (most → least specific):
+   *   1. explicit `opts.platform` arg — caller knows the session
+   *   2. AsyncLocalStorage `_execContext.getStore().platform` — when called
+   *      from inside an executeTool() wrap
+   *   3. `this._currentPlatform` — legacy global, best-effort fallback that
+   *      can race when concurrent sessions of different platforms run
+   *      together (e.g. web + cli at once). DO NOT rely on this fallback
+   *      for new code; the explicit-arg or AsyncLocalStorage paths are
+   *      session-safe.
    */
-  getToolDefinitions() {
-    return [
+  getToolDefinitions(opts = {}) {
+    const all = [
       {
         name: 'exec',
         description: 'Execute a shell command. ONLY for running scripts, installing packages, git, or commands with no dedicated tool. Do NOT use exec for reading files (use read_file), writing files (use write_file), or searching file contents (use read_file). Using grep/sed/cat via exec wastes iterations when read_file/write_file exist.',
@@ -859,6 +903,13 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       ...this._getRemoteToolDefinitions(),
       ...this._getSkillToolDefinitions(),
     ];
+    const platform = opts.platform
+      || _execContext.getStore()?.platform
+      || this._currentPlatform;
+    if (platform === 'cli') {
+      return all.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
+    }
+    return all;
   }
 
 _getRemoteToolDefinitions() {
@@ -1401,14 +1452,19 @@ Set wait:false when you've submitted a long background job and just want to retu
         if (!vetResult.allowed) {
           const blockedNames = vetResult.results.filter(r => r.risk === RISK_LEVEL.BLOCK).map(r => r.name);
           this.log.warn(`[package-vet] BLOCKED install: ${blockedNames.join(', ')}`);
-          if (this._agent && this._currentChannelId) {
-            try {
-              const gateway = this.platformManager?.getGateway(this._currentPlatform || 'discord');
-              if (gateway?.sendMessage) {
-                gateway.sendMessage(this._currentChannelId,
-                  `🛡️ **Package install blocked**\n${vetResult.summary}`);
-              }
-            } catch (e) { this.log.warn('[tools] getGateway failed: ' + e.message); }
+          {
+            const ctx = this._ctx?.() || {};
+            const channelId = ctx.channelId ?? this._currentChannelId;
+            const platform = ctx.platform ?? this._currentPlatform ?? 'discord';
+            if (this._agent && channelId) {
+              try {
+                const gateway = this.platformManager?.getGateway(platform);
+                if (gateway?.sendMessage) {
+                  gateway.sendMessage(channelId,
+                    `🛡️ **Package install blocked**\n${vetResult.summary}`);
+                }
+              } catch (e) { this.log.warn('[tools] getGateway failed: ' + e.message); }
+            }
           }
           return {
             error: `Package install blocked by security vetting:\n${vetResult.summary}\nIf you believe this is safe, ask the user for approval.`,
@@ -1417,11 +1473,14 @@ Set wait:false when you've submitted a long background job and just want to retu
         }
         if (vetResult.warned > 0) {
           this.log.warn(`[package-vet] Install warnings: ${vetResult.summary}`);
-          if (this._agent && this._currentChannelId) {
+          const ctx = this._ctx?.() || {};
+          const channelId = ctx.channelId ?? this._currentChannelId;
+          const platform = ctx.platform ?? this._currentPlatform ?? 'discord';
+          if (this._agent && channelId) {
             try {
-              const gateway = this.platformManager?.getGateway(this._currentPlatform || 'discord');
+              const gateway = this.platformManager?.getGateway(platform);
               if (gateway?.sendMessage) {
-                gateway.sendMessage(this._currentChannelId,
+                gateway.sendMessage(channelId,
                   `⚠️ **Package install warning**\n${vetResult.summary}\nProceeding anyway.`);
               }
             } catch (e) { this.log.warn('[tools] getGateway failed: ' + e.message); }
@@ -1435,7 +1494,7 @@ Set wait:false when you've submitted a long background job and just want to retu
     // Block exec from modifying framework files during lull/background triggers
     const frameworkWritePattern = /(?:sed\s+-i|tee|cp\s|mv\s|>\s*|>>|node\s+-e.*writeFile|echo\s.*>).*\/app\/(?:agent|discord|context|tools|config|sessions|learner|feed|gateway|maintainer|embedder|spore)\.(js|json)/;
     if (frameworkWritePattern.test(command)) {
-      const trigger = this._currentTrigger;
+      const trigger = this._ctx?.()?.trigger ?? this._currentTrigger;
       if (!trigger || trigger === 'lull') {
         return { error: `Blocked: cannot modify framework files via exec during a ${trigger || 'background'} trigger. Only allowed when a user directly asks. Prefer edit_file for framework changes.` };
       }
@@ -2574,19 +2633,29 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (!this._delegatedTasks) this._delegatedTasks = new Map();
     const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const abortCtrl = new AbortController();
+    // Snapshot the originating session's context. AsyncLocalStorage
+    // (this._ctx()) is the per-session-call source of truth — without
+    // this the legacy _currentXxx singletons would leak whichever
+    // session most-recently set them into a parallel session's
+    // delegate_task. Critical for concurrent users: imagine user A
+    // delegates research while user B's loop just wrote
+    // _currentUserId='B' — without _ctx() priority, A's subagent would
+    // come back as if B asked, and the wake-up turn would target B's
+    // channel + B's projectContext.
+    const _dctx = this._ctx?.() || {};
     this._delegatedTasks.set(taskId, {
       status: 'running',
       startedAt: Date.now(),
-      channelId: this._currentChannelId || null,
-      platform: this._currentPlatform || 'discord',
-      userId: this._currentUserId || 'operator',
-      originalUserMessage: this._currentUserMessage || task,
-      originalUserName: this._currentUserName || null,
+      channelId:           _dctx.channelId           ?? this._currentChannelId       ?? null,
+      platform:            _dctx.platform            ?? this._currentPlatform        ?? 'discord',
+      userId:              _dctx.userId              ?? this._currentUserId          ?? 'operator',
+      originalUserMessage: _dctx.userMessage         ?? this._currentUserMessage     ?? task,
+      originalUserName:    _dctx.userName            ?? this._currentUserName        ?? null,
       // Snapshot so the completion-delivery turn (see
       // _deliverTaskResult) can re-feed the same acorn project
       // context to processMessage. Without this the wake-up turn
       // wouldn't know the cwd/tools/tree the user was working in.
-      projectContext: this._currentProjectContext || null,
+      projectContext:      _dctx.projectContext      ?? this._currentProjectContext  ?? null,
       abortCtrl,
     });
 
@@ -4103,7 +4172,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     if (isWrite && this._isFrameworkFile(resolved)) {
       if (this.config.srcEditable) return { path: resolved };
-      const trigger = this._currentTrigger;
+      const trigger = this._ctx?.()?.trigger ?? this._currentTrigger;
       if (!trigger || trigger === 'lull') {
         return { error: `Blocked: cannot modify framework file ${resolved} during a ${trigger || 'background'} trigger. Self-modification is only allowed when a user directly asks. (To enable persistent self-modification, set SPORE_SRC_EDITABLE=true and bind-mount src/.)` };
       }
@@ -5280,7 +5349,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const { action, host, template, interval, pollerId } = input;
     if (!action) return { error: 'action is required (start, stop, list, or templates)' };
 
-    const trigger = this._currentTrigger;
+    const trigger = this._ctx?.()?.trigger ?? this._currentTrigger;
     if (action === 'start' && (!trigger || trigger === 'lull')) {
       return { error: 'Pollers can only be started during an active conversation (not during lull/background).' };
     }
@@ -5325,12 +5394,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const port = this.config.webPort;
     if (!port) return { error: 'webPort not configured' };
 
-    // Resolve session cookie for the target user
-    const targetUser = as_user || this._currentUserName || 'operator';
+    // Resolve session cookie for the target user. Prefer AsyncLocalStorage
+    // — without it, two web users hitting webapp_request concurrently
+    // could swap session tokens (whoever wrote _currentSessionToken last
+    // wins the singleton field), and the wrong user's cookies would be
+    // sent on the proxied request.
+    const _wctx = this._ctx?.() || {};
+    const targetUser = as_user || _wctx.userName || this._currentUserName || 'operator';
+    const sessionToken = _wctx.sessionToken ?? this._currentSessionToken;
     let cookieHeader = '';
     let authenticated = false;
-    if (!as_user && this._currentSessionToken) {
-      cookieHeader = `anima_session=${this._currentSessionToken}`;
+    if (!as_user && sessionToken) {
+      cookieHeader = `anima_session=${sessionToken}`;
       authenticated = true;
     } else {
       const sess = this.gateway.getSessionForUser(targetUser);

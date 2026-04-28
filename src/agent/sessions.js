@@ -568,12 +568,38 @@ class SessionManager {
     }
 
     const head = allMessages.slice(0, headEnd);
-    const toRemove = allMessages.slice(headEnd, cutIdx);
+    let toRemove = allMessages.slice(headEnd, cutIdx);
     const tail = allMessages.slice(cutIdx);
 
     if (toRemove.length === 0) return;
 
-    this.log.info(`Compacting ${key}: ${allMessages.length} msgs, removing ${toRemove.length}, keeping ${head.length}+${tail.length}`);
+    // Filter out useless messages (acks, cleared tool stubs, blanks).
+    // They get DELETED from the DB without contributing to the summary.
+    // Same _isMessageUseless logic as loop.js's _compactHistory; lifted
+    // inline here because sessions.js doesn't share the AgentLoop class.
+    const _isUseless = (m) => this._sessionsCompactIsMessageUseless(m);
+    const droppedUseless = [];
+    toRemove = toRemove.filter(m => {
+      if (_isUseless(m)) {
+        droppedUseless.push(m);
+        return false;
+      }
+      return true;
+    });
+    if (droppedUseless.length > 0) {
+      // Delete the useless rows from DB outright — they vanish without
+      // a summary trace.
+      const ids = droppedUseless.map(m => m.id);
+      const placeholders = ids.map(() => '?').join(',');
+      this.db.prepare(
+        `DELETE FROM messages WHERE session_key = ? AND id IN (${placeholders})`
+      ).run(key, ...ids);
+      this.log.info(`[compact-sessions] Skipped ${droppedUseless.length} useless messages from summarization (acks, cleared stubs, blanks)`);
+    }
+
+    if (toRemove.length === 0) return;
+
+    this.log.info(`Compacting ${key}: ${allMessages.length} msgs, removing ${toRemove.length} (+${droppedUseless.length} useless), keeping ${head.length}+${tail.length}`);
 
     // Pre-compaction knowledge flush — extract facts before discarding
     if (this.learner) {
@@ -614,8 +640,11 @@ class SessionManager {
           this._compactionSummaries.delete(this._compactionSummaries.keys().next().value);
         }
         this._compactionSummaries.set(key, summary);
+        // Same wrapper rewrite as loop.js _compactHistory — frame the
+        // summary as ACTIVE working memory, not background context.
+        // The old wording made the agent treat compaction as a reset.
         this.db.prepare(`UPDATE messages SET content = ? WHERE id = ?`)
-          .run(`[CONTEXT COMPACTION — ${toRemove.length} earlier turns compacted]\n${summary}\n[END CONTEXT COMPACTION]`, summaryRowId);
+          .run(`[ACTIVE SESSION STATE — ${toRemove.length} earlier turns compressed below. THIS IS YOUR WORKING MEMORY for the rest of this session: the user's goal, decisions already made, files touched, what's done, what's in progress, and what's next. The messages after this block are the most recent exchanges — combine them with the state here to know where you are. DO NOT restart the conversation or treat this as background; continue the work in progress.]\n${summary}\n[END SESSION STATE]`, summaryRowId);
       } else {
         this.db.prepare(`DELETE FROM messages WHERE id = ?`).run(summaryRowId);
       }
@@ -634,6 +663,56 @@ class SessionManager {
       if (snippet) topics.add(snippet);
     }
     return `${messages.length} messages compacted. Topics: ${[...topics].slice(0, 5).join('; ')}`;
+  }
+
+  // Mirror of AgentLoop._isMessageUseless. SessionManager rows store
+  // content as a JSON string (or plain string), so we parse before
+  // applying the same logic. Used by _compact above to drop useless
+  // rows without burning summarizer tokens on them.
+  _sessionsCompactIsMessageUseless(row) {
+    if (!row) return true;
+    let c = row.content;
+    if (c == null) return true;
+    if (typeof c === 'string') {
+      // Try parsing as JSON-encoded array (tool blocks); if not, treat as text.
+      const trimmed = c.trim();
+      if (trimmed === '') return true;
+      if (trimmed === '[Acknowledged.]') return true;
+      if (this._sessionsCompactHasMarker(trimmed)) return false;
+      if (trimmed.startsWith('[Old tool output cleared')) return true;
+      if (trimmed.length < 5) return true;
+      // Attempt JSON parse only if it looks structured
+      if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+        try { c = JSON.parse(trimmed); } catch { return false; }
+      } else {
+        return false;
+      }
+    }
+    if (!Array.isArray(c) || c.length === 0) return true;
+    if (c.some(b => b && b.type === 'tool_use')) return false; // tool calls always carry signal
+    return c.every(b => {
+      if (!b) return true;
+      if (b.type === 'tool_result') {
+        const tc = typeof b.content === 'string' ? b.content : '';
+        if (!tc || tc.startsWith('[Old tool output cleared') || tc.length < 5) return true;
+        if (this._sessionsCompactHasMarker(tc)) return false;
+        return false;
+      }
+      if (b.type === 'text') {
+        const tx = (b.text || '').trim();
+        if (!tx) return true;
+        if (this._sessionsCompactHasMarker(tx)) return false;
+        if (tx === '[Acknowledged.]') return true;
+        if (tx.length < 5) return true;
+        return false;
+      }
+      return false; // unknown block — preserve to be safe
+    });
+  }
+
+  _sessionsCompactHasMarker(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /\b(RESEARCH_DONE:|PLAN_READY|NO_INTERVIEW_NEEDED:|NO_FOLLOWUP_QUESTIONS:|QUESTIONS:|\[BUILD_PLAN\]|\[REVIEW\]|\[RESEARCH\])/.test(text);
   }
   
   /**

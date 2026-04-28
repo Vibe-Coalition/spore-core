@@ -96,21 +96,31 @@ function _isOnboardingNeeded(dataDir, config) {
   if (prefs.onboardingCompleted === true) return false;
   if (prefs.onboardingCompleted === false) return true;
   // Auto-backfill for pre-existing installs: if the instance already has
-  // webapp users or a usable model+provider configured, treat it as already
+  // webapp users + a usable model+provider configured, treat it as already
   // onboarded so we don't ambush returning operators with the wizard.
+  //
+  // CRITICAL: only fire when webapp-users.json was created more than 5
+  // minutes ago. Without that age check, the auto-backfill triggers
+  // mid-wizard the moment the operator creates their account at step 4
+  // (which writes webapp-users.json) — flipping onboardingCompleted
+  // before they finish, which 403s subsequent /api/onboarding/*
+  // endpoints out of their own data.
   if (config) {
     let hasUsers = false;
-    try { hasUsers = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8')).length > 0; } catch { /* silent: malformed JSON → fallback */ }
+    let usersFileAge = 0;
+    const usersPath = path.join(dataDir, 'webapp-users.json');
+    try {
+      hasUsers = JSON.parse(fs.readFileSync(usersPath, 'utf8')).length > 0;
+      usersFileAge = Date.now() - fs.statSync(usersPath).mtimeMs;
+    } catch { /* silent: malformed JSON → fallback */ }
     const hasProvider = !!(
       config.anthropicApiKey || config.openaiApiKey || config.openrouterApiKey ||
       config.localModelBaseUrl ||
       (config.customProviders && Object.keys(config.customProviders).length > 0)
     );
     const hasModel = !!(config.plannerModel || config.normalModel || config.casualModel);
-    // Both signals required. A lone user (created mid-wizard at step 4) or a
-    // lone provider isn't enough — only treat as "already onboarded" when the
-    // install can actually serve a request.
-    if (hasUsers && hasProvider && hasModel) {
+    const FRESH_INSTALL_GRACE_MS = 5 * 60 * 1000;
+    if (hasUsers && hasProvider && hasModel && usersFileAge > FRESH_INSTALL_GRACE_MS) {
       try {
         prefs.onboardingCompleted = true;
         prefs.onboardingBackfilledAt = Date.now();
@@ -156,12 +166,10 @@ function _ephemeralConfig(formProviders = {}) {
     openrouterReferer: formProviders.openrouter?.referer || '',
     localModelBaseUrl: formProviders.local?.baseUrl || '',
     localModelApiKey: formProviders.local?.apiKey || '',
-    // geminiApiKey persists to GEMINI_API_KEY env. Used by GeminiClient
-    // (chat completions) and read as a legacy fallback by the
-    // gemini-embedder plugin. The plugin's own settings pane is the
-    // recommended way to configure the embedder; this field stays for
-    // chat-completion users until that path also moves to a plugin.
-    geminiApiKey: formProviders.gemini?.apiKey || '',
+    // OAI-compatible auth header — bearer (default) / x-api-key / x-key.
+    // Read by local-oai-provider's buildLocalClient; some self-hosted
+    // endpoints (e.g. BFL) require x-key instead of Authorization Bearer.
+    localModelAuthHeader: formProviders.local?.authHeader || '',
     customProviders: cp,
     apiTimeoutMs: 240000,
   };
@@ -184,7 +192,17 @@ async function _probeProvider(name, body) {
     // Probe /models endpoint — lighter than a chat call and doesn't need a model name
     const url = (cfg.localModelBaseUrl.replace(/\/$/, '')) + '/models';
     const t0 = Date.now();
-    const headers = cfg.localModelApiKey ? { Authorization: `Bearer ${cfg.localModelApiKey}` } : {};
+    // Honor the configured auth header — some self-hosted endpoints
+    // (BFL, certain vLLM tunnels) reject Authorization Bearer and want
+    // x-key / x-api-key instead. localModelAuthHeader comes from the
+    // wizard's OAI-compatible auth-header dropdown via _ephemeralConfig.
+    const auth = (cfg.localModelAuthHeader || 'bearer').toLowerCase();
+    const headers = {};
+    if (cfg.localModelApiKey) {
+      if (auth === 'x-api-key')      headers['x-api-key'] = cfg.localModelApiKey;
+      else if (auth === 'x-key')     headers['x-key']     = cfg.localModelApiKey;
+      else                           headers['Authorization'] = `Bearer ${cfg.localModelApiKey}`;
+    }
     try {
       const r = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
       if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
@@ -911,10 +929,6 @@ class WebGateway {
           apiKeySet: !!this.config.localModelApiKey,
           baseUrl: this.config.localModelBaseUrl || '',
         },
-        gemini: {
-          apiKey: this.config.geminiApiKey || '',
-          apiKeySet: !!this.config.geminiApiKey,
-        },
         custom: customProviders,
       },
       webSearch: {
@@ -1005,6 +1019,12 @@ class WebGateway {
 
   _persistSettingsPatch(body = {}) {
     this._ensurePluginConfigPersister();
+    // Diagnostic: surface the body shape so we can pinpoint who's
+    // writing what. Plugins keys especially noisy — scope to those.
+    if (body.plugins) {
+      const pluginKeys = Object.keys(body.plugins);
+      this.log.info(`[persist] body.plugins keys=[${pluginKeys.join(',')}] sample=${JSON.stringify(body.plugins).slice(0, 240)}`);
+    }
     const fileConfig = this._readSettingsConfigFile();
     const nextConfig = {
       ...fileConfig,
@@ -1150,8 +1170,15 @@ class WebGateway {
       const providers = body.providers;
       const assignProviderField = (bodyValue, envKey, runtimeKey) => {
         const nextValue = String(bodyValue || '').trim();
-        envUpdates[envKey] = nextValue || null;
-        runtimePatch[runtimeKey] = nextValue || '';
+        // Empty value = "no change", NOT "clear". The wizard / settings
+        // UIs send the full providers payload on every save; an empty
+        // form input for a field the operator never touched would
+        // otherwise wipe persisted values (caused the famous "wizard
+        // saved my baseUrl, then later Settings save dropped it"
+        // regression). Operators clear by removing the env line directly.
+        if (!nextValue) return;
+        envUpdates[envKey] = nextValue;
+        runtimePatch[runtimeKey] = nextValue;
         providerTouched = true;
       };
 
@@ -1183,17 +1210,24 @@ class WebGateway {
       }
 
       if (providers.local && typeof providers.local === 'object') {
+        // Diagnostic log: surfaces the inbound payload shape so we can
+        // catch wizard-side bugs where fields don't reach the server
+        // (e.g. baseUrl dropped → endpoint goes through the wrong path).
+        // Mask the key — log only its length.
+        this.log.info(`[settings] providers.local keys=${Object.keys(providers.local).join(',')} baseUrl="${providers.local.baseUrl||''}" authHeader="${providers.local.authHeader||''}" apiKeyLen=${(providers.local.apiKey||'').length}`);
         if (Object.prototype.hasOwnProperty.call(providers.local, 'apiKey')) {
           assignProviderField(providers.local.apiKey, 'LOCAL_MODEL_API_KEY', 'localModelApiKey');
         }
         if (Object.prototype.hasOwnProperty.call(providers.local, 'baseUrl')) {
           assignProviderField(providers.local.baseUrl, 'LOCAL_MODEL_BASE_URL', 'localModelBaseUrl');
         }
-      }
-
-      if (providers.gemini && typeof providers.gemini === 'object') {
-        if (Object.prototype.hasOwnProperty.call(providers.gemini, 'apiKey')) {
-          assignProviderField(providers.gemini.apiKey, 'GEMINI_API_KEY', 'geminiApiKey');
+        if (Object.prototype.hasOwnProperty.call(providers.local, 'authHeader')) {
+          // Persist the OAI-compatible auth header (bearer / x-api-key /
+          // x-key). Read by buildLocalClient at chat time; without this,
+          // the OAI tile's auth-header dropdown selection survives the
+          // wizard's test step but vanishes on save → buildLocalClient
+          // falls back to bearer → endpoints expecting x-key 403.
+          assignProviderField(providers.local.authHeader, 'LOCAL_MODEL_AUTH_HEADER', 'localModelAuthHeader');
         }
       }
 
@@ -1362,13 +1396,32 @@ class WebGateway {
         if (!patch || typeof patch !== 'object') continue;
         const before = { ...(nextPlugins[pluginId] || {}) };
         const next = { ...before };
+        let changed = false;
         for (const key of Object.keys(patch)) {
           const v = patch[key];
-          if (v === null) delete next[key];
-          else next[key] = v;
+          // Empty string = "no change" (form input the user never
+          // touched). Without this, the settings UI's auto-collected
+          // payload — which includes EVERY field even unedited ones
+          // with default schema values — clobbers persisted slot
+          // values whenever the operator hits Save without changing
+          // anything. Applies only to strings; explicit null still
+          // deletes.
+          if (v === null) {
+            if (key in next) { delete next[key]; changed = true; }
+          } else if (typeof v === 'string' && v === '') {
+            // skip — preserve existing
+          } else if (next[key] !== v) {
+            next[key] = v;
+            changed = true;
+          }
         }
-        nextPlugins[pluginId] = next;
-        pluginsTouched.push({ pluginId, before, after: next });
+        // Only mark touched if something actually changed — prevents
+        // dispatchConfigChange firing on no-op saves and re-mirroring
+        // existing values back to env.
+        if (changed) {
+          nextPlugins[pluginId] = next;
+          pluginsTouched.push({ pluginId, before, after: next });
+        }
       }
       nextConfig.plugins = nextPlugins;
     }
@@ -1413,7 +1466,7 @@ class WebGateway {
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openrouterReferer')) this.config.openrouterReferer = runtimePatch.openrouterReferer;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelApiKey')) this.config.localModelApiKey = runtimePatch.localModelApiKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelBaseUrl')) this.config.localModelBaseUrl = runtimePatch.localModelBaseUrl;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'geminiApiKey')) this.config.geminiApiKey = runtimePatch.geminiApiKey;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelAuthHeader')) this.config.localModelAuthHeader = runtimePatch.localModelAuthHeader;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'customProviders')) this.config.customProviders = runtimePatch.customProviders;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'browserBackend')) this.config.browserBackend = runtimePatch.browserBackend;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'inviteKey')) this.config.inviteKey = runtimePatch.inviteKey;
@@ -2765,6 +2818,45 @@ class WebGateway {
       }
 
       // ── First-run onboarding ──
+      // Plugin discovery for the wizard. Public, gated on whether the
+      // operator has EXPLICITLY completed the wizard (prefs.onboardingCompletedAt
+      // is set only by /api/onboarding/complete, not by the auto-backfill
+      // heuristic in _isOnboardingNeeded). Without this distinction, the
+      // auto-backfill flagging onboardingCompleted=true mid-wizard (the
+      // moment the operator created their account + had a provider in env)
+      // would 403 the live wizard out of its own data.
+      if (urlPath === '/api/onboarding/plugins' && req.method === 'GET') {
+        let explicitlyComplete = false;
+        try {
+          const prefs = JSON.parse(fs.readFileSync(path.join(this.config.dataDir, 'preferences.json'), 'utf8'));
+          explicitlyComplete = !!prefs.onboardingCompletedAt;
+        } catch { /* silent: missing/malformed → wizard still in progress */ }
+        if (explicitlyComplete) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Onboarding already complete' }));
+          return;
+        }
+        const mgr = this.tools?._pluginManager;
+        if (!mgr) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Plugin manager unavailable' }));
+          return;
+        }
+        const available = mgr.listAvailable?.() || [];
+        const panes = mgr.getSettingsPanes?.() || [];
+        const panesById = Object.fromEntries(panes.map(p => [p.pluginId, p]));
+        // Recommended defaults — wizard preselects these on render.
+        const RECOMMENDED_ON = new Set(['session-graph', 'acorn-cli', 'embedder-gemma', 'whisper']);
+        const enriched = available.map(p => ({
+          ...p,
+          recommended: RECOMMENDED_ON.has(p.id),
+          pane: panesById[p.id] || null,
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ plugins: enriched }));
+        return;
+      }
+
       if (urlPath === '/api/onboarding/state' && req.method === 'GET') {
         const needed = _isOnboardingNeeded(this.config.dataDir, this.config);
         const hasWebappUsers = loadWebappUsers().length > 0;
@@ -2780,7 +2872,6 @@ class WebGateway {
               openai: { apiKeySet: s.providers.openai.apiKeySet, baseUrl: s.providers.openai.baseUrl },
               openrouter: { apiKeySet: s.providers.openrouter.apiKeySet, baseUrl: s.providers.openrouter.baseUrl },
               local: { apiKeySet: s.providers.local.apiKeySet, baseUrl: s.providers.local.baseUrl },
-              gemini: { apiKeySet: s.providers.gemini.apiKeySet },
               custom: s.providers.custom.map(p => ({ name: p.name, url: p.url })),
             },
             models: s.models,
@@ -3041,8 +3132,24 @@ class WebGateway {
       if (urlPath === '/api/onboarding/complete' && req.method === 'POST') {
         const cookies = parseCookies(req);
         const sid = cookies['anima_session'] || cookies['anima_webapp'];
-        const sess = sid && _sessions.get(sid);
-        if (!sess) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"No session"}'); return; }
+        let sess = sid && _sessions.get(sid);
+        // Onboarding-flow recovery: container restarts during the wizard
+        // wipe the in-memory _sessions map. The operator's cookie still
+        // exists client-side but doesn't resolve. If we're still in the
+        // onboarding window AND exactly one webapp user exists (the one
+        // they just created at step 4), trust that user as the session.
+        // This is safe because /api/onboarding/complete writes prefs +
+        // optional plugin config — no privilege-elevation surface.
+        if (!sess && _isOnboardingNeeded(this.config.dataDir, this.config)) {
+          try {
+            const users = loadWebappUsers();
+            if (users.length === 1) {
+              sess = { user: users[0].username, created: Date.now(), type: 'creator' };
+              this.log.info(`[onboarding] No live session; treating sole webapp user "${users[0].username}" as the onboarding operator`);
+            }
+          } catch { /* silent: no webapp-users.json yet → fall through to 401 */ }
+        }
+        if (!sess) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"No session — your wizard cookie expired (likely a server restart mid-setup). Refresh the page and log in to continue."}'); return; }
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 64 * 1024) { req.destroy(); return; } }
         let parsed;
@@ -3052,6 +3159,43 @@ class WebGateway {
           parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers);
           // 1. Persist settings through the existing pipeline
           const newState = this._persistSettingsPatch(parsed);
+          // 1b. Belt-and-suspenders for the wizard's client-side finish
+          // gate: refuse to complete onboarding unless at least one
+          // provider plugin is registered AND configured. Runs AFTER
+          // persistSettingsPatch so each plugin's isConfigured(config)
+          // sees the freshly-saved keys/baseUrls. Without that ordering,
+          // every wizard finish 400s because the gate runs against the
+          // pre-save config and naturally finds no configured provider.
+          const mgrCheck = this.tools?._pluginManager;
+          if (mgrCheck && typeof mgrCheck.getProviders === 'function') {
+            const providers = mgrCheck.getProviders().filter(p => p.configured);
+            if (providers.length === 0) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'No provider plugin is registered + configured. Install at least one (anthropic-provider, openai-provider, openrouter-provider, local-oai-provider, gemini-provider) and configure its API key before completing onboarding.' }));
+              return;
+            }
+          }
+          // 1a. Plugin selections — wizard sent `plugins: { disabled: [...], configs: { id: {...} } }`.
+          // For each disabled id: hot-uninstall (which also adds to plugins-disabled.json so
+          // subsequent boots skip it). For each config: persist into config.plugins[id].
+          if (parsed.plugins && typeof parsed.plugins === 'object') {
+            const mgr = this.tools?._pluginManager;
+            if (mgr) {
+              const configs = parsed.plugins.configs || {};
+              for (const [pluginId, partial] of Object.entries(configs)) {
+                if (!partial || typeof partial !== 'object') continue;
+                try { await mgr.persistPluginConfig(pluginId, partial); } catch (e) {
+                  this.log.warn(`[onboarding] plugin config (${pluginId}) failed: ${e.message}`);
+                }
+              }
+              const disabledIds = Array.isArray(parsed.plugins.disabled) ? parsed.plugins.disabled : [];
+              for (const pluginId of disabledIds) {
+                try { await mgr.uninstallPlugin(pluginId); } catch (e) {
+                  this.log.warn(`[onboarding] plugin uninstall (${pluginId}) failed: ${e.message}`);
+                }
+              }
+            }
+          }
           // 2. Theme preference
           const PREFS_PATH = path.join(this.config.dataDir, 'preferences.json');
           const VALID_THEMES = ['midnight', 'dark', 'paper', 'terminal', 'ember', 'arctic', 'neon', 'forest'];
@@ -3060,6 +3204,12 @@ class WebGateway {
           const theme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : 'midnight';
           if (!prefs[sess.user]) prefs[sess.user] = {};
           prefs[sess.user].theme = theme;
+          // The operator just completed the full wizard — that subsumes
+          // the slim per-user wizard, so flag it done. Without this, the
+          // creator user would land in startUserWizard("Set up your
+          // account") on the very next page load, since /api/auth/check
+          // reports wizardNeeded based on prefs[user].wizardCompleted.
+          prefs[sess.user].wizardCompleted = true;
           prefs._lastUsed = { theme, ts: Date.now() };
           prefs.onboardingCompleted = true;
           prefs.onboardingCompletedAt = Date.now();
@@ -5056,7 +5206,22 @@ class WebGateway {
             // in plan mode?".
             let userContent = msg.content + fileNote;
             if (isCli && msg.projectContext && msg.projectContext.mode === 'plan') {
-              userContent = '[PLAN MODE — read ## Plan Mode in your system prompt before responding. Do NOT call write_file/edit_file/exec mutating commands. End with `PLAN_READY` (after PHASE 5) OR a `QUESTIONS:` block (during PHASE 4). Vague request ⇒ ASK.]\n\n' + userContent;
+              // Skip the inline marker for multi-stage workflow sentinels
+              // ([RESEARCH], [REVIEW], [BUILD_PLAN]) — those messages carry
+              // their own phase-specific intent and the system prompt for
+              // that phase has the right instructions. Prepending the
+              // generic "End with PLAN_READY" marker contradicts the
+              // RESEARCH/ROUTER 2 prompts (which forbid PLAN_READY) and
+              // the agent honors the user-message marker over the system
+              // prompt — that's the bug that caused research turns to
+              // emit a plan instead of RESEARCH_DONE.
+              const trimmed = userContent.trimStart();
+              const isStageSentinel = trimmed.startsWith('[RESEARCH]') || trimmed.startsWith('[RESEARCH ')
+                                   || trimmed.startsWith('[REVIEW]')   || trimmed.startsWith('[REVIEW ')
+                                   || trimmed.startsWith('[BUILD_PLAN]') || trimmed.startsWith('[BUILD_PLAN ');
+              if (!isStageSentinel) {
+                userContent = '[PLAN MODE — read your ## Plan Mode system prompt section. Do NOT call write_file/edit_file/exec mutating commands. Follow the phase instructions there.]\n\n' + userContent;
+              }
             }
 
             const agentOpts = {
@@ -5163,7 +5328,10 @@ class WebGateway {
                 isCli ? sessionId : 'web:control-panel', !isCli, userId
               );
 
-              const injected = this.tools._agent.interject(waitKey, msg.content + fileNote);
+              // Pass agentOpts so the loop can detect a mode toggle
+              // (plan↔execute) carried by this message and rebuild the
+              // system prompt before the next iteration.
+              const injected = this.tools._agent.interject(waitKey, msg.content + fileNote, agentOpts);
               if (injected) {
                 // Loop will pick it up on next iteration — notify client and return
                 this.log.info(`[ws] Interjection accepted for ${sessionId}`);
