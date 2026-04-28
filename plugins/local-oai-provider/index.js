@@ -12,7 +12,7 @@
 // `../../local-oai-provider/lib/oai-compat-client` and instantiate it
 // with their own baseURL + apiKey shape.
 
-const { OAICompatClient } = require('./lib/oai-compat-client');
+const { OAICompatClient, listOaiCompatModels } = require('./lib/oai-compat-client');
 
 function buildLocalClient(config) {
   const slot = config?.plugins?.['local-oai-provider'] || {};
@@ -71,6 +71,28 @@ module.exports = function register(api) {
     capabilities: { tools: true, vision: false, audio: false, video: false },
     isConfigured: (config) => !!(config.localModelBaseUrl || process.env.LOCAL_MODEL_BASE_URL),
     defaultBaseUrl: 'http://localhost:11434/v1',
+    // Wizard "populate models" → plain OAI-compat /models probe. ctx is
+    // resolved from the response fields (vLLM's max_model_len,
+    // OpenAI-shaped context_length, etc.) — no per-vendor table here
+    // because the operator supplied the endpoint, we don't know the vendor.
+    listModels: async (body) => {
+      const baseUrl = (body?.baseUrl || '').trim()
+        || process.env.LOCAL_MODEL_BASE_URL
+        || api.getHostConfig()?.localModelBaseUrl
+        || api.getConfig()?.baseUrl
+        || '';
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.LOCAL_MODEL_API_KEY
+        || api.getHostConfig()?.localModelApiKey
+        || api.getConfig()?.apiKey
+        || '';
+      const authHeader = (body?.authHeader || '').trim()
+        || process.env.LOCAL_MODEL_AUTH_HEADER
+        || api.getHostConfig()?.localModelAuthHeader
+        || api.getConfig()?.authHeader
+        || 'bearer';
+      return listOaiCompatModels({ baseUrl, apiKey, authHeader });
+    },
   });
 
   // Custom-prefixed providers (legacy SPORE_PROVIDER_<NAME>_*). Register
@@ -109,6 +131,15 @@ module.exports = function register(api) {
       prefixes: customPrefixes,
       capabilities: { tools: true, vision: false, audio: false, video: false },
       isConfigured: (config) => customPrefixes.some(p => config.customProviders?.[p]?.url),
+      // /api/providers/list-models with kind:'custom' — wizard sends the
+      // baseUrl + apiKey + authHeader explicitly. Plain OAI-compat probe.
+      listModels: async (body) => {
+        return listOaiCompatModels({
+          baseUrl: (body?.baseUrl || body?.url || '').trim(),
+          apiKey: (body?.apiKey || body?.key || '').trim(),
+          authHeader: (body?.authHeader || '').trim() || 'bearer',
+        });
+      },
     });
   }
 

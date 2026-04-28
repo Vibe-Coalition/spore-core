@@ -4,7 +4,7 @@
 // OpenRouter's defaults. Adds the HTTP-Referer + X-Title headers
 // OpenRouter uses for attribution. Claims the 'openrouter' model prefix.
 
-const { OAICompatClient } = require('../local-oai-provider/lib/oai-compat-client');
+const { OAICompatClient, listOaiCompatModels } = require('../local-oai-provider/lib/oai-compat-client');
 
 function backfillLegacyConfig(api) {
   const current = api.getConfig();
@@ -52,6 +52,33 @@ module.exports = function register(api) {
       return !!(process.env.OPENROUTER_API_KEY || config?.openrouterApiKey || slot.apiKey);
     },
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
+    // OpenRouter ships rich metadata in /v1/models — context_length AND
+    // top_provider.context_length AND top_provider.max_completion_tokens.
+    // listOaiCompatModels reads all three; the transform here just adds
+    // displayName and family hints so the wizard can group/sort.
+    listModels: async (body) => {
+      const host = api.getHostConfig();
+      const slot = api.getConfig();
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.OPENROUTER_API_KEY
+        || host?.openrouterApiKey
+        || slot?.apiKey
+        || '';
+      const baseUrl = (body?.baseUrl || '').trim()
+        || process.env.OPENROUTER_BASE_URL
+        || host?.openrouterBaseUrl
+        || slot?.baseUrl
+        || 'https://openrouter.ai/api/v1';
+      const r = await listOaiCompatModels({
+        baseUrl, apiKey, authHeader: 'bearer',
+        transform: (m, base) => ({
+          ...base,
+          displayName: m.name || base.displayName,
+          family: (m.id || '').split('/')[0] || null, // anthropic / openai / meta-llama / etc.
+        }),
+      });
+      return r;
+    },
   });
 
   api.registerSettingsPane({

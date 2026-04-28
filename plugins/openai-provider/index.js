@@ -4,7 +4,55 @@
 // OpenAI's defaults (api.openai.com, Bearer auth). Claims the 'openai'
 // model prefix.
 
-const { OAICompatClient } = require('../local-oai-provider/lib/oai-compat-client');
+const { OAICompatClient, listOaiCompatModels, resolveByPrefix } = require('../local-oai-provider/lib/oai-compat-client');
+
+// OpenAI's /v1/models has no context_window field, so augment via this
+// table. Longest-prefix-wins. Sources: platform.openai.com docs.
+// Reasoning models (o-series) carry their max-output limits which the
+// agent loop reads via maxTokens override at chat time.
+const _OPENAI_MODEL_META = [
+  // GPT-5 line (rumored / staged — keep generic 128K default until launch)
+  { prefix: 'gpt-5',           contextLength: 128000, maxOutput: 16000, family: 'gpt' },
+  // o-series (reasoning)
+  { prefix: 'o4-mini',         contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
+  { prefix: 'o4',              contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
+  { prefix: 'o3-mini',         contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
+  { prefix: 'o3',              contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
+  { prefix: 'o1-mini',         contextLength: 128000, maxOutput: 65536,  family: 'reasoning' },
+  { prefix: 'o1-preview',      contextLength: 128000, maxOutput: 32768,  family: 'reasoning' },
+  { prefix: 'o1',              contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
+  // GPT-4.1
+  { prefix: 'gpt-4.1-nano',    contextLength: 1000000, maxOutput: 32768, family: 'gpt' },
+  { prefix: 'gpt-4.1-mini',    contextLength: 1000000, maxOutput: 32768, family: 'gpt' },
+  { prefix: 'gpt-4.1',         contextLength: 1000000, maxOutput: 32768, family: 'gpt' },
+  // GPT-4o
+  { prefix: 'gpt-4o-mini',     contextLength: 128000, maxOutput: 16384, family: 'gpt' },
+  { prefix: 'gpt-4o',          contextLength: 128000, maxOutput: 16384, family: 'gpt' },
+  { prefix: 'chatgpt-4o',      contextLength: 128000, maxOutput: 16384, family: 'gpt' },
+  // GPT-4 turbo / classic
+  { prefix: 'gpt-4-turbo',     contextLength: 128000, maxOutput: 4096,  family: 'gpt' },
+  { prefix: 'gpt-4-32k',       contextLength: 32768,  maxOutput: 8192,  family: 'gpt' },
+  { prefix: 'gpt-4',           contextLength: 8192,   maxOutput: 8192,  family: 'gpt' },
+  // GPT-3.5
+  { prefix: 'gpt-3.5-turbo',   contextLength: 16385,  maxOutput: 4096,  family: 'gpt' },
+];
+
+// Filter: tier-routable chat-completion models only.
+// Drop embedding/audio/image/moderation lines AND specialty variants
+// (deep-research, realtime, audio, image, search-preview, transcribe,
+// tts, instruct/base legacy) that aren't useful for general agent
+// routing. Without this filter, OpenAI's /v1/models returns 100+ ids
+// — the tier dropdown becomes unusable.
+const _OPENAI_NON_CHAT_PREFIX = /^(text-embedding-|tts-|whisper-|dall-e-|omni-moderation-|babbage-|davinci-|computer-use-|codex-|chatgpt-image-)/;
+// Substring patterns — these tokens make a model non-chat regardless
+// of their position in the id (gpt-image-X, gpt-4o-realtime-Y, etc.).
+const _OPENAI_NON_CHAT_TOKEN = /(?:^|-)(realtime|audio|image|transcribe|tts|deep-research|search-preview|search-api|instruct|base)(?:-|$)/;
+function _isOpenAIChatModel(id) {
+  if (!id) return false;
+  if (_OPENAI_NON_CHAT_PREFIX.test(id)) return false;
+  if (_OPENAI_NON_CHAT_TOKEN.test(id)) return false;
+  return /^(gpt-|o\d|chatgpt-)/i.test(id);
+}
 
 function backfillLegacyConfig(api) {
   const current = api.getConfig();
@@ -47,6 +95,42 @@ module.exports = function register(api) {
       return !!(process.env.OPENAI_API_KEY || config?.openaiApiKey || slot.apiKey);
     },
     defaultBaseUrl: 'https://api.openai.com/v1',
+    // Wizard "populate models" hits this. /v1/models gives id + nothing
+    // useful for sizing — augment via the meta table. Filters out
+    // non-chat assets (embeddings, audio, image, moderation) so the
+    // tier dropdowns aren't drowned in 100+ irrelevant ids.
+    listModels: async (body) => {
+      const host = api.getHostConfig();
+      const slot = api.getConfig();
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.OPENAI_API_KEY
+        || host?.openaiApiKey
+        || slot?.apiKey
+        || '';
+      const baseUrl = (body?.baseUrl || '').trim()
+        || process.env.OPENAI_BASE_URL
+        || host?.openaiBaseUrl
+        || slot?.baseUrl
+        || 'https://api.openai.com/v1';
+      const r = await listOaiCompatModels({
+        baseUrl, apiKey, authHeader: 'bearer',
+        transform: (m, base) => {
+          if (!_isOpenAIChatModel(base.id)) return null;
+          const meta = resolveByPrefix(base.id, _OPENAI_MODEL_META);
+          if (!meta) return base;
+          return {
+            ...base,
+            contextLength: base.contextLength || meta.contextLength,
+            maxOutput: base.maxOutput || meta.maxOutput,
+            family: meta.family,
+          };
+        },
+      });
+      if (!r.ok) return r;
+      // Strip nulls left by transform's filter, sort newest-first.
+      const models = r.models.filter(Boolean).sort((a, b) => b.id.localeCompare(a.id));
+      return { ok: true, models };
+    },
   });
 
   api.registerSettingsPane({

@@ -13,6 +13,56 @@
 
 const { GeminiClient } = require('./lib/gemini-client');
 
+// Gemini's /v1beta/models is shaped differently from OAI-compat — it
+// returns `{ models: [{ name: 'models/gemini-X', inputTokenLimit,
+// outputTokenLimit, supportedGenerationMethods }] }`. We strip the
+// `models/` prefix from the returned id and filter to entries that
+// support generateContent (drops embedding-only and tuning models).
+async function _listGeminiModels({ apiKey }) {
+  if (!apiKey) return { ok: false, error: 'missing apiKey' };
+  try {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {
+      headers: { 'x-goog-api-key': apiKey },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      return { ok: false, error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 160) : ''}` };
+    }
+    const d = await r.json().catch(() => null);
+    if (!d || !Array.isArray(d.models)) return { ok: false, error: 'no `models` array in response' };
+    const models = d.models.map(m => {
+      const name = String(m.name || ''); // e.g. "models/gemini-2.5-flash"
+      const id = name.startsWith('models/') ? name.slice('models/'.length) : name;
+      if (!id) return null;
+      // Filter to text/multimodal Gemini chat models. /v1beta/models also
+      // returns image-gen (imagen, nano-banana), audio-gen (lyria), video-gen
+      // (veo), and embedding (embedding-001) entries that all happen to
+      // declare generateContent support. Operator wants tier-routable
+      // chat-shaped models only.
+      if (!/^gemini-/.test(id)) return null;
+      // Drop specialty variants — TTS, image-gen, computer-use, robotics —
+      // they declare generateContent support but aren't general chat
+      // models. Keep `pro`, `flash`, `flash-lite` core lines.
+      if (/(?:^|-)(tts|image|embedding|computer-use|robotics)(?:-|$)/.test(id)) return null;
+      const methods = Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
+      if (!methods.includes('generateContent')) return null;
+      return {
+        id,
+        contextLength: Number(m.inputTokenLimit) > 0 ? Math.floor(Number(m.inputTokenLimit)) : null,
+        maxOutput: Number(m.outputTokenLimit) > 0 ? Math.floor(Number(m.outputTokenLimit)) : null,
+        family: id.split('-').slice(0, 2).join('-') || null, // "gemini-2.5", "gemini-1.5", etc.
+        displayName: m.displayName || null,
+      };
+    }).filter(Boolean);
+    // Newer first within each family.
+    models.sort((a, b) => b.id.localeCompare(a.id));
+    return { ok: true, models };
+  } catch (e) {
+    return { ok: false, error: (e?.message || String(e)).slice(0, 200) };
+  }
+}
+
 function backfillLegacyConfig(api) {
   const current = api.getConfig();
   if (Object.keys(current).length > 0) return;
@@ -54,6 +104,20 @@ module.exports = function register(api) {
     isConfigured: (config) => {
       const slot = config?.plugins?.['gemini-provider'] || {};
       return !!(process.env.GEMINI_API_KEY || config?.geminiApiKey || slot.apiKey);
+    },
+    // /v1beta/models exposes inputTokenLimit + outputTokenLimit directly,
+    // so no per-vendor table needed. Filter to generateContent-capable
+    // entries — embedding/tuning-only models would fill the dropdown
+    // with non-routable ids.
+    listModels: async (body) => {
+      const host = api.getHostConfig();
+      const slot = api.getConfig();
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.GEMINI_API_KEY
+        || host?.geminiApiKey
+        || slot?.apiKey
+        || '';
+      return _listGeminiModels({ apiKey });
     },
   });
 
