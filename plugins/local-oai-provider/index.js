@@ -14,6 +14,53 @@
 
 const { OAICompatClient, listOaiCompatModels } = require('./lib/oai-compat-client');
 
+// Reasoning-effort translator for OAI-compatible backends. Each
+// upstream model family has its own knob; we dispatch by model-id
+// pattern. Lives here because the local-oai plugin is the catch-all
+// for OAI-compat custom prefixes (xai/grok, qwen/, glm/, deepseek/,
+// vendor-specific tunnels) and operators routing through it expect
+// the right vendor flag to land on the wire.
+function applyOaiCompatReasoningEffort(req, model, effort) {
+  const m = String(model || '').toLowerCase();
+  const out = { ...req };
+
+  // xAI Grok: grok-4 reasons unconditionally and rejects the knob;
+  // grok-3-mini accepts low/high.
+  if (/grok-4/.test(m)) return out;
+  if (/^xai\//.test(m) || /grok/.test(m)) {
+    if (effort === 'off') { delete out.reasoning_effort; return out; }
+    out.reasoning_effort = (effort === 'high' || effort === 'max') ? 'high' : 'low';
+    return out;
+  }
+
+  // Qwen 3 — chat_template_kwargs.enable_thinking
+  if (/qwen-?3|qwen3/.test(m)) {
+    out.chat_template_kwargs = { ...(out.chat_template_kwargs || {}), enable_thinking: effort !== 'off' };
+    return out;
+  }
+
+  // Zhipu GLM 4.5 / 4.6 — thinking.type
+  if (/^glm[-/]|glm-?4\.[56]/.test(m)) {
+    out.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' };
+    return out;
+  }
+
+  // DeepSeek vLLM-style
+  if (/deepseek/.test(m)) {
+    out.chat_template_kwargs = { ...(out.chat_template_kwargs || {}), thinking: effort !== 'off' };
+    return out;
+  }
+
+  // Generic OAI-compat — try reasoning_effort passthrough.
+  if (effort && effort !== 'off') {
+    const v = effort === 'minimal' ? 'low' : (effort === 'max' ? 'high' : effort);
+    out.reasoning_effort = v;
+  } else if (effort === 'off') {
+    delete out.reasoning_effort;
+  }
+  return out;
+}
+
 function buildLocalClient(config) {
   const slot = config?.plugins?.['local-oai-provider'] || {};
   // Env wins over slot. The wizard writes to env (.env file, persisted
@@ -93,6 +140,7 @@ module.exports = function register(api) {
         || 'bearer';
       return listOaiCompatModels({ baseUrl, apiKey, authHeader });
     },
+    applyReasoningEffort: applyOaiCompatReasoningEffort,
   });
 
   // Custom-prefixed providers (legacy SPORE_PROVIDER_<NAME>_*). Register
@@ -140,6 +188,7 @@ module.exports = function register(api) {
           authHeader: (body?.authHeader || '').trim() || 'bearer',
         });
       },
+      applyReasoningEffort: applyOaiCompatReasoningEffort,
     });
   }
 

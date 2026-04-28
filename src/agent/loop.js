@@ -1593,8 +1593,14 @@ class AgentLoop {
     return null;
   }
 
-  // Translator: turns a categorical reasoning effort (off/minimal/low/medium/
-  // high/max) into whatever field each provider family actually accepts.
+  // Translator: turns a categorical reasoning effort
+  // (off/minimal/low/medium/high/max) into whatever field each provider
+  // family actually accepts. Now plugin-first — each provider plugin
+  // owns its own vendor switch (see e.g. plugins/anthropic-provider's
+  // applyAnthropicReasoningEffort, plugins/openai-provider's
+  // applyOpenAIReasoningEffort). Core only carries the no-plugin
+  // fallback (generic OAI-compat reasoning_effort passthrough) for
+  // models that route through a backend without a plugin attached.
   // Static so the probe endpoint can reuse it without constructing a loop.
   static applyReasoningEffort(req, model, effort) {
     return AgentLoop._applyReasoningEffortImpl(req, model, effort);
@@ -1603,90 +1609,23 @@ class AgentLoop {
     return AgentLoop._applyReasoningEffortImpl(req, model, effort);
   }
   static _applyReasoningEffortImpl(req, model, effort) {
-    const m = String(model || '').toLowerCase();
+    // Plugin-first: any registered provider plugin whose name matches
+    // detectBackend(model) and that exposes applyReasoningEffort wins.
+    try {
+      const { applyReasoningEffortViaPlugin } = require('../providers');
+      const viaPlugin = applyReasoningEffortViaPlugin(req, model, effort);
+      if (viaPlugin) return viaPlugin;
+    } catch (e) {
+      // Module load errors fall through to the generic fallback below.
+    }
+
+    // No-plugin fallback — generic OAI-compat reasoning_effort passthrough.
+    // Only fires when the model's backend has no provider plugin attached
+    // (early boot or operator-disabled). Keeps the agent loop alive on
+    // unfamiliar endpoints.
     const out = { ...req };
-
-    // OpenAI (o-series, gpt-5) — categorical reasoning_effort
-    if (/^openai\//.test(m) || /^(o1|o3|o4|gpt-5)/.test(m)) {
-      if (effort === 'off') { delete out.reasoning_effort; return out; }
-      const supportsMinimal = /gpt-5/.test(m);
-      let v = effort;
-      if (v === 'max') v = 'high';
-      if (v === 'minimal' && !supportsMinimal) v = 'low';
-      out.reasoning_effort = v;
-      return out;
-    }
-
-    // Anthropic Claude — two flavors of extended-thinking config:
-    //   - Adaptive (opus-4-6, opus-4-7): { thinking: { type: 'adaptive' } }
-    //     plus top-level { output_config: { effort: 'low'|'medium'|'high' } }.
-    //   - Budget (everything else with thinking — sonnet 4.x, opus 4.0/4.1/4.5,
-    //     haiku 4.x): legacy { thinking: { type: 'enabled', budget_tokens: N } }.
-    //
-    // Forcing the legacy shape on an adaptive-only model returns
-    // `thinking.type.enabled is not supported for this model`. Forcing
-    // adaptive on a budget-only model returns `adaptive thinking is not
-    // supported on this model`. Verified against api.anthropic.com 2026-04;
-    // opus-4-5 docs say 4.5+ but tested API rejects adaptive on 4.5,
-    // accepts it on 4.6 / 4.7. Future models will need additions here.
-    if (/sonnet|opus|haiku-4/i.test(m) && !/3-5|3\.5/i.test(m)) {
-      const isAdaptive = /^claude-opus-4-[67](-|$)/i.test(m);
-      if (effort === 'off') {
-        out.thinking = { type: 'disabled' };
-        return out;
-      }
-      if (isAdaptive) {
-        // adaptive accepts low / medium / high; collapse minimal→low and max→high.
-        const efMap = { minimal: 'low', low: 'low', medium: 'medium', high: 'high', max: 'high' };
-        const ef = efMap[effort] || 'medium';
-        out.thinking = { type: 'adaptive' };
-        out.output_config = { ...(out.output_config || {}), effort: ef };
-        return out;
-      }
-      const budgets = { minimal: 1024, low: 2048, medium: 10000, high: 24000, max: 32000 };
-      const budget = budgets[effort] || 10000;
-      const need = budget + 1024;
-      if ((out.max_tokens || 0) < need) out.max_tokens = need;
-      out.thinking = { type: 'enabled', budget_tokens: budget };
-      return out;
-    }
-
-    // Gemini 2.5 — thinking_config.thinking_budget
-    if (/gemini[-/]?2\.5/.test(m)) {
-      const budgets = { off: 0, minimal: 256, low: 2000, medium: 8000, high: 24000, max: 32000 };
-      const bud = budgets[effort] ?? -1;
-      out.generationConfig = { ...(out.generationConfig || {}), thinkingConfig: { thinkingBudget: bud } };
-      return out;
-    }
-
-    // xAI Grok: grok-4 reasons unconditionally and rejects the knob; grok-3-mini accepts low/high
-    if (/grok-4/.test(m)) return out;
-    if (/^xai\//.test(m) || /grok/.test(m)) {
-      if (effort === 'off') { delete out.reasoning_effort; return out; }
-      out.reasoning_effort = (effort === 'high' || effort === 'max') ? 'high' : 'low';
-      return out;
-    }
-
-    // Qwen 3 — chat_template_kwargs.enable_thinking
-    if (/qwen-?3|qwen3/.test(m)) {
-      out.chat_template_kwargs = { ...(out.chat_template_kwargs || {}), enable_thinking: effort !== 'off' };
-      return out;
-    }
-
-    // Zhipu GLM 4.5/4.6 — thinking.type
-    if (/^glm[-/]|glm-?4\.[56]/.test(m)) {
-      out.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' };
-      return out;
-    }
-
-    // DeepSeek vLLM-style
-    if (/deepseek/.test(m)) {
-      out.chat_template_kwargs = { ...(out.chat_template_kwargs || {}), thinking: effort !== 'off' };
-      return out;
-    }
-
-    // Generic OAI-compat proxy — try reasoning_effort passthrough
-    if (effort && effort !== 'off') {
+    if (effort === 'off') { delete out.reasoning_effort; return out; }
+    if (effort) {
       const v = effort === 'minimal' ? 'low' : (effort === 'max' ? 'high' : effort);
       out.reasoning_effort = v;
     }
@@ -2012,26 +1951,31 @@ class AgentLoop {
     const maxTokens = _perModelMax > 0
       ? _perModelMax
       : (this.config.maxTokens !== 8192 ? this.config.maxTokens : this._modelMaxOutputTokens(model));
-    const supportsThinking = /sonnet|opus/i.test(model) && !/3-5|3\.5/i.test(model);
-    const thinkingBudget = supportsThinking ? (this.config.thinkingBudget || 10000) : 0;
-    const openaiReasoningEffort = /^openai\//i.test(model)
-      ? (this.config.openaiReasoningEffort || null)
-      : null;
-    // opus 4.5+ rejects the legacy thinking.type='enabled' / budget_tokens
-    // shape. Use the adaptive config form for those — see _applyReasoningEffort
-    // for the equivalent on the per-model effort-override path.
-    const isAdaptiveThinking = /^claude-opus-4-[67](-|$)/i.test(model);
     let requestOpts = {
       max_tokens: maxTokens,
       ...resolvedRequest,
       model,
-      ...(openaiReasoningEffort ? { reasoning_effort: openaiReasoningEffort } : {}),
-      ...(thinkingBudget > 0 && isAdaptiveThinking
-        ? { thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } }
-        : thinkingBudget > 0
-          ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } }
-          : {}),
     };
+    // Default reasoning effort — derived from per-vendor host config.
+    // Both knobs flow through the unified _applyReasoningEffort dispatch
+    // (which routes to the model's owning plugin), so vendor-specific
+    // request shape lives next to the client that has to talk that wire.
+    //
+    // Translation: for Claude with a configured thinkingBudget, treat
+    // it as effort='medium' (the plugin maps medium→adaptive medium for
+    // opus 4.6/4.7 and budget_tokens=10000 for budget-shape models).
+    // For OpenAI with openaiReasoningEffort, pass the categorical value
+    // straight through (the plugin understands low/medium/high/minimal).
+    // Either knob being null means "no default reasoning override".
+    let _defaultEffort = null;
+    if (this.config.openaiReasoningEffort && /^openai\/|^(o1|o3|o4|gpt-5)/i.test(model)) {
+      _defaultEffort = this.config.openaiReasoningEffort;
+    } else if (this.config.thinkingBudget && /sonnet|opus|haiku-4/i.test(model) && !/3-5|3\.5/i.test(model)) {
+      _defaultEffort = 'medium';
+    }
+    if (_defaultEffort) {
+      requestOpts = this._applyReasoningEffort(requestOpts, model, _defaultEffort);
+    }
     // Per-model reasoning effort override (categorical: off/minimal/low/medium/high/max).
     // Translated to whatever knob each provider family actually accepts.
     const _effort = _modelLim?.reasoningEffort || null;

@@ -18,6 +18,22 @@ const { GeminiClient } = require('./lib/gemini-client');
 // outputTokenLimit, supportedGenerationMethods }] }`. We strip the
 // `models/` prefix from the returned id and filter to entries that
 // support generateContent (drops embedding-only and tuning models).
+// Gemini 2.5 / 3.x extended-thinking config — generationConfig.thinkingConfig.thinkingBudget.
+// Categorical effort → token budget (matches the rest of the providers'
+// off/minimal/low/medium/high/max scale). Older Gemini (1.5, 2.0) doesn't
+// support thinkingBudget — silently no-op for those.
+function applyGeminiReasoningEffort(req, model, effort) {
+  if (!/^gemini\/.*2\.5|^gemini\/.*3\.|gemini[-/]?2\.5|gemini[-/]?3/.test(String(model || '').toLowerCase())) return req;
+  const out = { ...req };
+  const budgets = { off: 0, minimal: 256, low: 2000, medium: 8000, high: 24000, max: 32000 };
+  const bud = budgets[effort] ?? -1;
+  out.generationConfig = {
+    ...(out.generationConfig || {}),
+    thinkingConfig: { thinkingBudget: bud },
+  };
+  return out;
+}
+
 async function _listGeminiModels({ apiKey }) {
   if (!apiKey) return { ok: false, error: 'missing apiKey' };
   try {
@@ -125,6 +141,7 @@ module.exports = function register(api) {
         || '';
       return _listGeminiModels({ apiKey });
     },
+    applyReasoningEffort: applyGeminiReasoningEffort,
   });
 
   api.registerSettingsPane({

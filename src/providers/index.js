@@ -60,6 +60,39 @@ function _resolvePluginProvider(model) {
   }
 }
 
+// Resolve via detectBackend's answer, including bare names like
+// 'claude-opus-4-7' that resolveProviderForModel doesn't handle (it
+// only walks slash-prefixed forms). Used by callers that want the
+// plugin entry whose `applyReasoningEffort` / similar method should
+// own the model — `detectBackend` already knows how to map both
+// slash and bare forms to a backend name.
+function _resolvePluginByBackend(model) {
+  if (!_providerManager?.getProviders) return null;
+  try {
+    const backendName = detectBackend(model);
+    return _providerManager.getProviders().find(p => p.name === backendName) || null;
+  } catch (e) {
+    console.error('[providers] _resolvePluginByBackend threw:', e.message);
+    return null;
+  }
+}
+
+// Apply a categorical reasoning effort via the model's owning plugin.
+// Returns the modified request when a plugin handles it; returns the
+// special sentinel `null` when no plugin claims the model so the caller
+// can fall through to its in-tree branches. Keeps the dispatch in one
+// place so agent/loop, tool runners, and probes all hit the same path.
+function applyReasoningEffortViaPlugin(req, model, effort) {
+  const entry = _resolvePluginByBackend(model);
+  if (!entry?.applyReasoningEffort) return null;
+  try {
+    return entry.applyReasoningEffort(req, model, effort);
+  } catch (e) {
+    console.error(`[providers] applyReasoningEffort(${entry.name}) threw:`, e.message);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1467,4 +1500,4 @@ class MultiProvider {
 // moves the full implementations into the plugins; for now the plugins
 // require these from core to avoid duplicating ~500 lines of stream-parsing
 // code while the contract is still settling.
-module.exports = { MultiProvider, createClientForModel, detectBackend, stripPrefix, setProviderManager, OAICompatClient, GeminiClient, _hasImages, _inferCapabilities };
+module.exports = { MultiProvider, createClientForModel, detectBackend, stripPrefix, setProviderManager, OAICompatClient, GeminiClient, _hasImages, _inferCapabilities, applyReasoningEffortViaPlugin };

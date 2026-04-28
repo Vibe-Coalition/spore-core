@@ -813,6 +813,7 @@ class PluginManager {
           prefixes: p.prefixes,
           capabilities: p.capabilities,
           listModels: p.listModels || null,
+          applyReasoningEffort: p.applyReasoningEffort || null,
           defaultBaseUrl: p.defaultBaseUrl,
           configured,
         });

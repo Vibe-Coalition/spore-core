@@ -518,6 +518,18 @@ class PluginAPI {
    *   augments via an internal prefix table). Without this, the wizard
    *   falls back to core's _listModelsForProvider which only knows the
    *   raw OAI-compat fields.
+   *
+   * @param {Function} [opts.applyReasoningEffort] — (req, model, effort) => req.
+   *   Translates a categorical reasoning effort
+   *   (off/minimal/low/medium/high/max) into the vendor-specific
+   *   request-shape knob: Anthropic's `thinking.type='adaptive'` +
+   *   `output_config.effort` (opus 4.6/4.7) vs `thinking.type='enabled'`
+   *   + `budget_tokens` (everything else with thinking); OpenAI's
+   *   `reasoning_effort` field; Gemini's
+   *   `generationConfig.thinkingConfig.thinkingBudget`; etc. Without
+   *   this, core falls back to its in-tree vendor switch — keeping the
+   *   per-vendor logic next to the client that has to talk that vendor's
+   *   wire shape.
    */
   registerProvider(name, factory, opts = {}) {
     if (!name || typeof name !== 'string') throw new Error('registerProvider requires a string name');
@@ -532,6 +544,7 @@ class PluginAPI {
     );
     const isConfigured = typeof opts.isConfigured === 'function' ? opts.isConfigured : () => true;
     const listModels = typeof opts.listModels === 'function' ? opts.listModels : null;
+    const applyReasoningEffort = typeof opts.applyReasoningEffort === 'function' ? opts.applyReasoningEffort : null;
     this._llmProviders.push({
       name,
       factory,
@@ -539,6 +552,7 @@ class PluginAPI {
       capabilities,
       isConfigured,
       listModels,
+      applyReasoningEffort,
       defaultBaseUrl: opts.defaultBaseUrl || null,
     });
     this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);

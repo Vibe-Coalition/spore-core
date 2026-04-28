@@ -49,6 +49,23 @@ const _OPENAI_MODEL_META = [
   { prefix: 'gpt-3.5-turbo',   contextLength: 16385,  maxOutput: 4096,  family: 'gpt', capabilities: _TXT },
 ];
 
+// OpenAI reasoning-effort translator — categorical effort → reasoning_effort
+// field on the request. gpt-5 family accepts 'minimal' as a value; the
+// o-series (o1/o3/o4) does not, so collapse minimal→low for those.
+// 'off' deletes the field so the request looks like a non-reasoning chat.
+function applyOpenAIReasoningEffort(req, model, effort) {
+  const m = String(model || '').toLowerCase();
+  if (!(/^openai\//.test(m) || /^(o1|o3|o4|gpt-5)/.test(m))) return req;
+  const out = { ...req };
+  if (effort === 'off') { delete out.reasoning_effort; return out; }
+  const supportsMinimal = /gpt-5/.test(m);
+  let v = effort;
+  if (v === 'max') v = 'high';
+  if (v === 'minimal' && !supportsMinimal) v = 'low';
+  out.reasoning_effort = v;
+  return out;
+}
+
 // Filter: tier-routable chat-completion models only.
 // Drop embedding/audio/image/moderation lines AND specialty variants
 // (deep-research, realtime, audio, image, search-preview, transcribe,
@@ -144,6 +161,7 @@ module.exports = function register(api) {
       const models = r.models.filter(Boolean).sort((a, b) => b.id.localeCompare(a.id));
       return { ok: true, models };
     },
+    applyReasoningEffort: applyOpenAIReasoningEffort,
   });
 
   api.registerSettingsPane({

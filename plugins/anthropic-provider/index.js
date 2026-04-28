@@ -40,6 +40,40 @@ const _ANTHROPIC_MODEL_META = [
   { prefix: 'claude-3-haiku',     contextLength: 200000,  maxOutput: 4096,  family: 'haiku',  capabilities: _CLAUDE_MULTIMODAL },
 ];
 
+// Anthropic extended-thinking config translator. Two flavors:
+//   - Adaptive (opus 4.6 / 4.7): { thinking: { type: 'adaptive' } } plus
+//     top-level { output_config: { effort: 'low' | 'medium' | 'high' } }.
+//   - Budget (everything else with thinking — sonnet 4.x, opus 4.0/4.1/4.5,
+//     haiku 4.x): { thinking: { type: 'enabled', budget_tokens: N } }.
+//
+// Adaptive-only models reject the budget shape ("thinking.type.enabled
+// is not supported for this model"); budget-only models reject adaptive
+// ("adaptive thinking is not supported on this model"). Verified against
+// api.anthropic.com 2026-04 across all 9 currently-listed Claude models.
+function applyAnthropicReasoningEffort(req, model, effort) {
+  const m = String(model || '').toLowerCase();
+  // Skip any model that isn't a thinking-capable Claude.
+  if (!/sonnet|opus|haiku-4/i.test(m) || /3-5|3\.5/i.test(m)) return req;
+  const out = { ...req };
+  if (effort === 'off') {
+    out.thinking = { type: 'disabled' };
+    return out;
+  }
+  const isAdaptive = /^claude-opus-4-[67](-|$)/i.test(m);
+  if (isAdaptive) {
+    const efMap = { minimal: 'low', low: 'low', medium: 'medium', high: 'high', max: 'high' };
+    const ef = efMap[effort] || 'medium';
+    out.thinking = { type: 'adaptive' };
+    out.output_config = { ...(out.output_config || {}), effort: ef };
+    return out;
+  }
+  const budgets = { minimal: 1024, low: 2048, medium: 10000, high: 24000, max: 32000 };
+  const budget = budgets[effort] || 10000;
+  if ((out.max_tokens || 0) < budget + 1024) out.max_tokens = budget + 1024;
+  out.thinking = { type: 'enabled', budget_tokens: budget };
+  return out;
+}
+
 function _resolveAnthropicMeta(modelId) {
   if (!modelId) return null;
   // Longest match wins so `claude-opus-4-7-20251010` picks the 1M entry,
@@ -155,6 +189,7 @@ module.exports = function register(api) {
         || '';
       return _listAnthropicModels({ apiKey });
     },
+    applyReasoningEffort: applyAnthropicReasoningEffort,
   });
 
   api.registerSettingsPane({

@@ -6,6 +6,21 @@
 
 const { OAICompatClient, listOaiCompatModels } = require('../local-oai-provider/lib/oai-compat-client');
 
+// OpenRouter forwards to whatever upstream model the operator picks.
+// Most thinking-capable upstreams accept the OAI-shape reasoning_effort
+// field (OpenRouter normalizes internally per model). Use it as a
+// generic passthrough; OpenRouter's `supported_parameters` would let
+// us skip the field for models that don't take it, but sending an
+// unsupported param is a no-op there, not an error.
+function applyOpenRouterReasoningEffort(req, model, effort) {
+  if (!/^openrouter\//.test(String(model || '').toLowerCase())) return req;
+  const out = { ...req };
+  if (effort === 'off') { delete out.reasoning_effort; return out; }
+  const v = effort === 'minimal' ? 'low' : (effort === 'max' ? 'high' : effort);
+  out.reasoning_effort = v;
+  return out;
+}
+
 function backfillLegacyConfig(api) {
   const current = api.getConfig();
   if (Object.keys(current).length > 0) return;
@@ -95,6 +110,7 @@ module.exports = function register(api) {
       });
       return r;
     },
+    applyReasoningEffort: applyOpenRouterReasoningEffort,
   });
 
   api.registerSettingsPane({
