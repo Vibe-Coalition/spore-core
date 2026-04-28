@@ -1617,9 +1617,30 @@ class AgentLoop {
       return out;
     }
 
-    // Anthropic Claude Sonnet/Opus 4+ — token budget
-    if (/sonnet|opus/i.test(m) && !/3-5|3\.5/i.test(m)) {
-      if (effort === 'off') { out.thinking = { type: 'disabled' }; return out; }
+    // Anthropic Claude — two flavors of extended-thinking config:
+    //   - Adaptive (opus 4.5+): { thinking: { type: 'adaptive' } } plus
+    //     top-level { output_config: { effort: 'low'|'medium'|'high' } }.
+    //     Newer-style; replaces the budget_tokens knob.
+    //   - Budget (sonnet 4.x, opus 4.0/4.1, haiku 4.x): legacy
+    //     { thinking: { type: 'enabled', budget_tokens: N } }.
+    //
+    // Forcing the legacy shape on an adaptive-only model returns
+    // `thinking.type.enabled is not supported for this model`. Detect
+    // adaptive by opus version: 4-5, 4-6, 4-7, … (any 4.[5-9]+ or 4.10+).
+    if (/sonnet|opus|haiku-4/i.test(m) && !/3-5|3\.5/i.test(m)) {
+      const isAdaptive = /^claude-opus-4-([5-9]|\d{2,})/i.test(m);
+      if (effort === 'off') {
+        out.thinking = { type: 'disabled' };
+        return out;
+      }
+      if (isAdaptive) {
+        // adaptive accepts low / medium / high; collapse minimal→low and max→high.
+        const efMap = { minimal: 'low', low: 'low', medium: 'medium', high: 'high', max: 'high' };
+        const ef = efMap[effort] || 'medium';
+        out.thinking = { type: 'adaptive' };
+        out.output_config = { ...(out.output_config || {}), effort: ef };
+        return out;
+      }
       const budgets = { minimal: 1024, low: 2048, medium: 10000, high: 24000, max: 32000 };
       const budget = budgets[effort] || 10000;
       const need = budget + 1024;
@@ -1994,12 +2015,20 @@ class AgentLoop {
     const openaiReasoningEffort = /^openai\//i.test(model)
       ? (this.config.openaiReasoningEffort || null)
       : null;
+    // opus 4.5+ rejects the legacy thinking.type='enabled' / budget_tokens
+    // shape. Use the adaptive config form for those — see _applyReasoningEffort
+    // for the equivalent on the per-model effort-override path.
+    const isAdaptiveThinking = /^claude-opus-4-([5-9]|\d{2,})/i.test(model);
     let requestOpts = {
       max_tokens: maxTokens,
       ...resolvedRequest,
       model,
       ...(openaiReasoningEffort ? { reasoning_effort: openaiReasoningEffort } : {}),
-      ...(thinkingBudget > 0 ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
+      ...(thinkingBudget > 0 && isAdaptiveThinking
+        ? { thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } }
+        : thinkingBudget > 0
+          ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } }
+          : {}),
     };
     // Per-model reasoning effort override (categorical: off/minimal/low/medium/high/max).
     // Translated to whatever knob each provider family actually accepts.
