@@ -47,11 +47,17 @@ async function _listGeminiModels({ apiKey }) {
       if (/(?:^|-)(tts|image|embedding|computer-use|robotics)(?:-|$)/.test(id)) return null;
       const methods = Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
       if (!methods.includes('generateContent')) return null;
+      // capabilities — Gemini 1.5+, 2.x, 3.x are all natively multimodal:
+      // image + audio + video + tools. GeminiClient now converts
+      // Anthropic-shape image/audio/video/file blocks to inline_data parts,
+      // so the client transports what the model accepts.
+      const family = id.split('-').slice(0, 2).join('-') || null; // "gemini-2.5", "gemini-1.5", etc.
       return {
         id,
         contextLength: Number(m.inputTokenLimit) > 0 ? Math.floor(Number(m.inputTokenLimit)) : null,
         maxOutput: Number(m.outputTokenLimit) > 0 ? Math.floor(Number(m.outputTokenLimit)) : null,
-        family: id.split('-').slice(0, 2).join('-') || null, // "gemini-2.5", "gemini-1.5", etc.
+        family,
+        capabilities: { tools: true, vision: true, audio: true, video: true },
         displayName: m.displayName || null,
       };
     }).filter(Boolean);

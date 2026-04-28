@@ -71,11 +71,27 @@ module.exports = function register(api) {
         || 'https://openrouter.ai/api/v1';
       const r = await listOaiCompatModels({
         baseUrl, apiKey, authHeader: 'bearer',
-        transform: (m, base) => ({
-          ...base,
-          displayName: m.name || base.displayName,
-          family: (m.id || '').split('/')[0] || null, // anthropic / openai / meta-llama / etc.
-        }),
+        transform: (m, base) => {
+          // OpenRouter exposes per-model modalities + supported params.
+          // architecture.input_modalities is an array like ['text','image']
+          // (sometimes also 'audio', 'video'). supported_parameters lists
+          // everything the model accepts on its chat-completion endpoint.
+          // OAICompatClient transports image/audio/video, so the
+          // capability claim is just (model supports it).
+          const im = Array.isArray(m.architecture?.input_modalities) ? m.architecture.input_modalities : [];
+          const sp = Array.isArray(m.supported_parameters) ? m.supported_parameters : [];
+          return {
+            ...base,
+            displayName: m.name || base.displayName,
+            family: (m.id || '').split('/')[0] || null,
+            capabilities: {
+              tools: sp.includes('tools') || sp.includes('tool_choice'),
+              vision: im.includes('image'),
+              audio:  im.includes('audio'),
+              video:  im.includes('video'),
+            },
+          };
+        },
       });
       return r;
     },

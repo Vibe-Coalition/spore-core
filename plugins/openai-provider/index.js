@@ -6,35 +6,47 @@
 
 const { OAICompatClient, listOaiCompatModels, resolveByPrefix } = require('../local-oai-provider/lib/oai-compat-client');
 
-// OpenAI's /v1/models has no context_window field, so augment via this
-// table. Longest-prefix-wins. Sources: platform.openai.com docs.
-// Reasoning models (o-series) carry their max-output limits which the
-// agent loop reads via maxTokens override at chat time.
+// OpenAI's /v1/models has no context_window field or modality info, so
+// augment via this table. Longest-prefix-wins. Reasoning models
+// (o-series) carry max-output limits the agent loop reads via maxTokens
+// override at chat time.
+//
+// capabilities = (model supports it) ∧ (our OAICompatClient transports it):
+//   - vision: gpt-4o, gpt-4.1, gpt-4-turbo, o1, o3, o4 — yes. gpt-3.5,
+//     legacy gpt-4 (8K/32K), o1-mini, o1-preview — no.
+//   - audio: NO across the board. gpt-4o-audio-preview is the only OAI
+//     model that takes audio input, and our chat-completion filter
+//     drops it (see _OPENAI_NON_CHAT_TOKEN). Real-time audio uses a
+//     different endpoint we don't speak.
+//   - video: NO. OpenAI doesn't accept video on /v1/chat/completions.
+const _VIS = { tools: true, vision: true, audio: false, video: false };
+const _TXT = { tools: true, vision: false, audio: false, video: false };
 const _OPENAI_MODEL_META = [
-  // GPT-5 line (rumored / staged — keep generic 128K default until launch)
-  { prefix: 'gpt-5',           contextLength: 128000, maxOutput: 16000, family: 'gpt' },
-  // o-series (reasoning)
-  { prefix: 'o4-mini',         contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
-  { prefix: 'o4',              contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
-  { prefix: 'o3-mini',         contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
-  { prefix: 'o3',              contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
-  { prefix: 'o1-mini',         contextLength: 128000, maxOutput: 65536,  family: 'reasoning' },
-  { prefix: 'o1-preview',      contextLength: 128000, maxOutput: 32768,  family: 'reasoning' },
-  { prefix: 'o1',              contextLength: 200000, maxOutput: 100000, family: 'reasoning' },
-  // GPT-4.1
-  { prefix: 'gpt-4.1-nano',    contextLength: 1000000, maxOutput: 32768, family: 'gpt' },
-  { prefix: 'gpt-4.1-mini',    contextLength: 1000000, maxOutput: 32768, family: 'gpt' },
-  { prefix: 'gpt-4.1',         contextLength: 1000000, maxOutput: 32768, family: 'gpt' },
+  // GPT-5 line (rumored / staged — assume modern multimodal until docs say otherwise)
+  { prefix: 'gpt-5',           contextLength: 128000, maxOutput: 16000, family: 'gpt',       capabilities: _VIS },
+  // o-series (reasoning) — o1 and o3+/o4+ are vision-capable; o1-mini
+  // and o1-preview are text-only.
+  { prefix: 'o4-mini',         contextLength: 200000, maxOutput: 100000, family: 'reasoning', capabilities: _VIS },
+  { prefix: 'o4',              contextLength: 200000, maxOutput: 100000, family: 'reasoning', capabilities: _VIS },
+  { prefix: 'o3-mini',         contextLength: 200000, maxOutput: 100000, family: 'reasoning', capabilities: _VIS },
+  { prefix: 'o3',              contextLength: 200000, maxOutput: 100000, family: 'reasoning', capabilities: _VIS },
+  { prefix: 'o1-mini',         contextLength: 128000, maxOutput: 65536,  family: 'reasoning', capabilities: _TXT },
+  { prefix: 'o1-preview',      contextLength: 128000, maxOutput: 32768,  family: 'reasoning', capabilities: _TXT },
+  { prefix: 'o1',              contextLength: 200000, maxOutput: 100000, family: 'reasoning', capabilities: _VIS },
+  // GPT-4.1 (1M context)
+  { prefix: 'gpt-4.1-nano',    contextLength: 1000000, maxOutput: 32768, family: 'gpt', capabilities: _VIS },
+  { prefix: 'gpt-4.1-mini',    contextLength: 1000000, maxOutput: 32768, family: 'gpt', capabilities: _VIS },
+  { prefix: 'gpt-4.1',         contextLength: 1000000, maxOutput: 32768, family: 'gpt', capabilities: _VIS },
   // GPT-4o
-  { prefix: 'gpt-4o-mini',     contextLength: 128000, maxOutput: 16384, family: 'gpt' },
-  { prefix: 'gpt-4o',          contextLength: 128000, maxOutput: 16384, family: 'gpt' },
-  { prefix: 'chatgpt-4o',      contextLength: 128000, maxOutput: 16384, family: 'gpt' },
-  // GPT-4 turbo / classic
-  { prefix: 'gpt-4-turbo',     contextLength: 128000, maxOutput: 4096,  family: 'gpt' },
-  { prefix: 'gpt-4-32k',       contextLength: 32768,  maxOutput: 8192,  family: 'gpt' },
-  { prefix: 'gpt-4',           contextLength: 8192,   maxOutput: 8192,  family: 'gpt' },
-  // GPT-3.5
-  { prefix: 'gpt-3.5-turbo',   contextLength: 16385,  maxOutput: 4096,  family: 'gpt' },
+  { prefix: 'gpt-4o-mini',     contextLength: 128000, maxOutput: 16384, family: 'gpt', capabilities: _VIS },
+  { prefix: 'gpt-4o',          contextLength: 128000, maxOutput: 16384, family: 'gpt', capabilities: _VIS },
+  { prefix: 'chatgpt-4o',      contextLength: 128000, maxOutput: 16384, family: 'gpt', capabilities: _VIS },
+  // GPT-4 turbo (vision in turbo-2024-04-09+) / classic gpt-4 (text-only)
+  { prefix: 'gpt-4-turbo',     contextLength: 128000, maxOutput: 4096,  family: 'gpt', capabilities: _VIS },
+  { prefix: 'gpt-4-32k',       contextLength: 32768,  maxOutput: 8192,  family: 'gpt', capabilities: _TXT },
+  { prefix: 'gpt-4',           contextLength: 8192,   maxOutput: 8192,  family: 'gpt', capabilities: _TXT },
+  // GPT-3.5 (text-only)
+  { prefix: 'gpt-3.5-turbo',   contextLength: 16385,  maxOutput: 4096,  family: 'gpt', capabilities: _TXT },
 ];
 
 // Filter: tier-routable chat-completion models only.
@@ -123,6 +135,7 @@ module.exports = function register(api) {
             contextLength: base.contextLength || meta.contextLength,
             maxOutput: base.maxOutput || meta.maxOutput,
             family: meta.family,
+            capabilities: meta.capabilities || null,
           };
         },
       });

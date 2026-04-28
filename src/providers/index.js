@@ -263,12 +263,35 @@ const _AUDIO_PATTERNS  = /audio|realtime|4o-audio/i;
 const _VIDEO_PATTERNS  = /\bvl\b|video/i;
 
 /**
- * Infer capabilities from a model name using heuristics.
+ * Resolve capabilities for a model. Order of preference:
+ *   1. Per-model override from config.modelLimits[model].capabilities —
+ *      populated by each provider plugin's listModels at wizard finish
+ *      and on every settings save (see _enrichModelLimits in the web
+ *      gateway). This is the AUTHORITATIVE source: each plugin's
+ *      listModels intersects (model supports modality) ∧ (client
+ *      transports modality) so the cache reflects what will actually
+ *      work over the wire.
+ *   2. Provider blanket — fallback when no per-model entry exists yet
+ *      (model populated by a non-plugin path, or wizard never ran).
+ *   3. Regex on model name — last-resort heuristic for unknown backends.
+ *
  * Returns { tools, vision, audio, video } where each is true/false/null.
- * null = genuinely unknown, will be probed at runtime.
+ * null = genuinely unknown, will be probed at runtime via OAICompatClient's
+ * onCapability error callback.
  */
-function _inferCapabilities(model) {
+function _inferCapabilities(model, config) {
   if (!model) return { tools: null, vision: null, audio: null, video: null };
+
+  const override = config?.modelLimits?.[model]?.capabilities;
+  if (override && typeof override === 'object') {
+    return {
+      tools:  typeof override.tools  === 'boolean' ? override.tools  : true,
+      vision: typeof override.vision === 'boolean' ? override.vision : false,
+      audio:  typeof override.audio  === 'boolean' ? override.audio  : false,
+      video:  typeof override.video  === 'boolean' ? override.video  : false,
+    };
+  }
+
   const backend = detectBackend(model);
 
   if (backend === 'anthropic') return { tools: true, vision: true, audio: false, video: false };
@@ -1085,15 +1108,46 @@ class GeminiClient {
       ? params.system.filter(b => b.type === 'text').map(b => b.text).join('\n\n')
       : (params.system || '');
 
+    // Convert Anthropic-shape content blocks → Gemini `parts`.
+    // Gemini expects { text } or { inline_data: { mime_type, data } } for
+    // base64 image/audio/video content. file_data:{file_uri} exists for
+    // Files-API-uploaded blobs but the agent loop sends base64 directly,
+    // so we use inline_data for all media. Without this conversion, every
+    // image/audio/video block from upstream would silently drop and the
+    // model would respond as if the user sent text-only — exactly the
+    // failure mode that motivated declaring caps as model ∧ client.
     const contents = [];
     for (const msg of params.messages || []) {
       const role = msg.role === 'assistant' ? 'model' : 'user';
-      const text = typeof msg.content === 'string'
-        ? msg.content
-        : Array.isArray(msg.content)
-          ? msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
-          : JSON.stringify(msg.content);
-      contents.push({ role, parts: [{ text }] });
+      const parts = [];
+      if (typeof msg.content === 'string') {
+        if (msg.content) parts.push({ text: msg.content });
+      } else if (Array.isArray(msg.content)) {
+        for (const b of msg.content) {
+          if (b.type === 'text' && b.text) {
+            parts.push({ text: b.text });
+          } else if ((b.type === 'image' || b.type === 'audio' || b.type === 'input_audio' || b.type === 'video') && b.source?.type === 'base64' && b.source.data) {
+            // input_audio is Anthropic's spelling for OAI parity; both map
+            // to inline_data with the source media_type.
+            parts.push({
+              inline_data: {
+                mime_type: b.source.media_type || (b.type === 'image' ? 'image/png' : b.type === 'video' ? 'video/mp4' : 'audio/mpeg'),
+                data: b.source.data,
+              },
+            });
+          } else if (b.type === 'file' && b.source?.type === 'base64' && b.source.data) {
+            parts.push({
+              inline_data: {
+                mime_type: b.source.media_type || 'application/octet-stream',
+                data: b.source.data,
+              },
+            });
+          }
+        }
+      } else if (msg.content) {
+        parts.push({ text: JSON.stringify(msg.content) });
+      }
+      if (parts.length > 0) contents.push({ role, parts });
     }
 
     const body = {
@@ -1227,7 +1281,9 @@ class MultiProvider {
 
   _getCaps(model) {
     if (!this._capabilities.has(model)) {
-      this._capabilities.set(model, _inferCapabilities(model));
+      // Pass config so per-model overrides from modelLimits[model].capabilities
+      // win over the provider-blanket fallback.
+      this._capabilities.set(model, _inferCapabilities(model, this.config));
     }
     return this._capabilities.get(model);
   }

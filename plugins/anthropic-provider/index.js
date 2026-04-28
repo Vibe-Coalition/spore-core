@@ -11,27 +11,33 @@
 
 const { createAnthropicClient } = require('./lib/anthropic-client');
 
-// Per-family metadata. Anthropic's /v1/models doesn't expose context_window
-// or max output, so we augment with this table. Longest-prefix-wins on
-// match — `claude-opus-4-7` is more specific than `claude-opus-4`.
+// Per-family metadata. Anthropic's /v1/models doesn't expose context_window,
+// max output, or per-model modalities, so we augment with this table.
+// Longest-prefix-wins — `claude-opus-4-7` more specific than `claude-opus-4`.
 //
-// Sources: api.anthropic.com docs (model overview), 1M-context beta header
-// for opus-4-7. maxOutput is the *standard* default (extended-output beta
-// raises it for some Sonnet 4.x models — left as the conservative default).
+// All Claude 3+/4+ models accept image input (vision: true). None of the
+// chat-completion models accept audio or video as user content via the
+// standard messages API; opus-4-7 supports video via the Files API but
+// that's a separate ingest path, not a chat-message modality.
+//
+// Sources: api.anthropic.com/docs/models, 1M-context beta header for
+// opus-4-7. maxOutput is the standard default (extended-output beta
+// raises it on some Sonnet 4.x — kept conservative).
+const _CLAUDE_MULTIMODAL = { tools: true, vision: true, audio: false, video: false };
 const _ANTHROPIC_MODEL_META = [
-  { prefix: 'claude-opus-4-7',    contextLength: 1000000, maxOutput: 32000, family: 'opus' },
-  { prefix: 'claude-opus-4-1',    contextLength: 200000,  maxOutput: 32000, family: 'opus' },
-  { prefix: 'claude-opus-4',      contextLength: 200000,  maxOutput: 32000, family: 'opus' },
-  { prefix: 'claude-sonnet-4-6',  contextLength: 200000,  maxOutput: 64000, family: 'sonnet' },
-  { prefix: 'claude-sonnet-4-5',  contextLength: 200000,  maxOutput: 64000, family: 'sonnet' },
-  { prefix: 'claude-sonnet-4',    contextLength: 200000,  maxOutput: 64000, family: 'sonnet' },
-  { prefix: 'claude-haiku-4-5',   contextLength: 200000,  maxOutput: 8192,  family: 'haiku'  },
-  { prefix: 'claude-haiku-4',     contextLength: 200000,  maxOutput: 8192,  family: 'haiku'  },
-  { prefix: 'claude-3-5-sonnet',  contextLength: 200000,  maxOutput: 8192,  family: 'sonnet' },
-  { prefix: 'claude-3-5-haiku',   contextLength: 200000,  maxOutput: 8192,  family: 'haiku'  },
-  { prefix: 'claude-3-opus',      contextLength: 200000,  maxOutput: 4096,  family: 'opus'   },
-  { prefix: 'claude-3-sonnet',    contextLength: 200000,  maxOutput: 4096,  family: 'sonnet' },
-  { prefix: 'claude-3-haiku',     contextLength: 200000,  maxOutput: 4096,  family: 'haiku'  },
+  { prefix: 'claude-opus-4-7',    contextLength: 1000000, maxOutput: 32000, family: 'opus',   capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-opus-4-1',    contextLength: 200000,  maxOutput: 32000, family: 'opus',   capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-opus-4',      contextLength: 200000,  maxOutput: 32000, family: 'opus',   capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-sonnet-4-6',  contextLength: 200000,  maxOutput: 64000, family: 'sonnet', capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-sonnet-4-5',  contextLength: 200000,  maxOutput: 64000, family: 'sonnet', capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-sonnet-4',    contextLength: 200000,  maxOutput: 64000, family: 'sonnet', capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-haiku-4-5',   contextLength: 200000,  maxOutput: 8192,  family: 'haiku',  capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-haiku-4',     contextLength: 200000,  maxOutput: 8192,  family: 'haiku',  capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-3-5-sonnet',  contextLength: 200000,  maxOutput: 8192,  family: 'sonnet', capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-3-5-haiku',   contextLength: 200000,  maxOutput: 8192,  family: 'haiku',  capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-3-opus',      contextLength: 200000,  maxOutput: 4096,  family: 'opus',   capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-3-sonnet',    contextLength: 200000,  maxOutput: 4096,  family: 'sonnet', capabilities: _CLAUDE_MULTIMODAL },
+  { prefix: 'claude-3-haiku',     contextLength: 200000,  maxOutput: 4096,  family: 'haiku',  capabilities: _CLAUDE_MULTIMODAL },
 ];
 
 function _resolveAnthropicMeta(modelId) {
@@ -72,6 +78,12 @@ async function _listAnthropicModels({ apiKey }) {
         contextLength: meta?.contextLength || null,
         maxOutput: meta?.maxOutput || null,
         family: meta?.family || null,
+        // capabilities = INTERSECTION of (what model supports) AND (what
+        // our client transports). The Anthropic SDK natively handles
+        // image content blocks; audio/video aren't a chat-message
+        // modality on api.anthropic.com (Files API is a separate ingest
+        // path) so we don't claim them.
+        capabilities: meta?.capabilities || null,
         displayName: m.display_name || null,
       };
     }).filter(Boolean);

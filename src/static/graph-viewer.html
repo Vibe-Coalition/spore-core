@@ -6803,13 +6803,17 @@ function _obRecordModelLimits(providerPrefix, modelObjs) {
   for (const m of (modelObjs || [])) {
     if (!m?.id || !m?.contextLength) continue;
     const ref = (providerPrefix && providerPrefix !== 'anthropic') ? `${providerPrefix}/${m.id}` : m.id;
-    // Capture maxOutput too — anthropic-provider's listModels returns it
-    // (Anthropic /v1/models doesn't expose it; the plugin augments via
-    // its prefix table). Used when enriching modelLimits server-side and
-    // available for tier-row prefill if the wizard ever surfaces it.
+    // Cache maxOutput + capabilities too — the wizard finish payload
+    // doesn't ship caps directly (modelLimits only carries ctx/compact/
+    // maxTokens/effort form fields), but the server's _enrichModelLimits
+    // re-runs each provider's listModels and persists capabilities into
+    // modelLimits[ref].capabilities. Storing them here means future
+    // wizard UI (per-tier modality filters, custom-OAI capability
+    // checkboxes) can read straight from the cache without a re-probe.
     _obKnownModelLimits[ref] = {
       contextLength: m.contextLength,
       ...(m.maxOutput ? { maxOutput: m.maxOutput } : {}),
+      ...(m.capabilities ? { capabilities: m.capabilities } : {}),
     };
     count++;
   }

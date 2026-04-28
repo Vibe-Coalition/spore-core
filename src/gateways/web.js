@@ -316,15 +316,23 @@ async function _enrichModelLimits(modelLimits, models, providers, pluginManager)
     const provider = tier.provider || 'anthropic';
     const model = tier.model;
     const key = (provider && provider !== 'anthropic') ? `${provider}/${model}` : model;
-    if (out[key]?.contextWindow > 0) continue;
+    if (out[key]?.contextWindow > 0 && out[key]?.capabilities) continue;
     const probed = await probeProvider(provider);
     if (!probed?.ok) continue;
-    // Fold in EVERY model with a known ctx so we have a ready cache for future
-    // tier changes too — not just the active one.
+    // Fold in EVERY model with known meta so we have a ready cache for
+    // future tier changes too — not just the active one. Each call
+    // takes whichever fields the plugin populated (ctx + maxOutput +
+    // capabilities) and never overwrites existing operator-provided
+    // values.
     for (const m of (probed.models || [])) {
-      if (!m?.contextLength) continue;
+      if (!m?.id) continue;
       const k = (provider && provider !== 'anthropic') ? `${provider}/${m.id}` : m.id;
-      if (!out[k]?.contextWindow) out[k] = { ...(out[k] || {}), contextWindow: m.contextLength };
+      const cur = out[k] || {};
+      const next = { ...cur };
+      if (!cur.contextWindow && m.contextLength) next.contextWindow = m.contextLength;
+      if (!cur.maxTokens && m.maxOutput) next.maxTokens = m.maxOutput;
+      if (!cur.capabilities && m.capabilities) next.capabilities = m.capabilities;
+      if (Object.keys(next).length) out[k] = next;
     }
   }
   return out;
