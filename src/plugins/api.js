@@ -545,6 +545,12 @@ class PluginAPI {
     const isConfigured = typeof opts.isConfigured === 'function' ? opts.isConfigured : () => true;
     const listModels = typeof opts.listModels === 'function' ? opts.listModels : null;
     const applyReasoningEffort = typeof opts.applyReasoningEffort === 'function' ? opts.applyReasoningEffort : null;
+    // (model, hostConfig) → 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | null
+    // Lets a plugin declare its host-config-driven default effort for a
+    // given model so the agent loop doesn't need to hardcode the
+    // vendor-specific config-field name (anthropic uses thinkingBudget,
+    // openai uses openaiReasoningEffort, etc.).
+    const getDefaultReasoningEffort = typeof opts.getDefaultReasoningEffort === 'function' ? opts.getDefaultReasoningEffort : null;
     this._llmProviders.push({
       name,
       factory,
@@ -553,6 +559,7 @@ class PluginAPI {
       isConfigured,
       listModels,
       applyReasoningEffort,
+      getDefaultReasoningEffort,
       defaultBaseUrl: opts.defaultBaseUrl || null,
     });
     this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);

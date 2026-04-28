@@ -93,6 +93,23 @@ function applyReasoningEffortViaPlugin(req, model, effort) {
   }
 }
 
+// Resolve the operator's host-config-driven default reasoning effort
+// for a model via the owning plugin. Each provider plugin knows which
+// host-config field is its knob (anthropic→thinkingBudget,
+// openai→openaiReasoningEffort, etc.) so the agent loop doesn't have
+// to hardcode that mapping. Returns null when no plugin claims the
+// model OR when the operator hasn't configured a default.
+function getDefaultReasoningEffort(model, hostConfig) {
+  const entry = _resolvePluginByBackend(model);
+  if (!entry?.getDefaultReasoningEffort) return null;
+  try {
+    return entry.getDefaultReasoningEffort(model, hostConfig) || null;
+  } catch (e) {
+    console.error(`[providers] getDefaultReasoningEffort(${entry.name}) threw:`, e.message);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -216,13 +233,22 @@ function _parseToolInput(rawArgs, toolName) {
   };
 }
 
-/** Strip provider prefix from model string: "openrouter/x/y" → "x/y", "together/llama" → "llama" */
+/** Strip provider prefix from model string: "openrouter/x/y" → "x/y", "together/llama" → "llama".
+ *  Walks plugin-registered prefixes plus the legacy customProviders
+ *  set. _BUILTIN_PREFIXES is kept as a transitional safety net for
+ *  early boot before the plugin manager wires in. */
 function stripPrefix(model) {
   const slash = model.indexOf('/');
   if (slash === -1) return model;
   const prefix = model.substring(0, slash);
   if (_BUILTIN_PREFIXES.has(prefix) || _customProviderNames.has(prefix)) {
     return model.substring(slash + 1);
+  }
+  // Plugin-registered prefixes (the source of truth post-extraction).
+  if (_providerManager?.getProviders) {
+    for (const entry of _providerManager.getProviders()) {
+      if (entry.prefixes.includes(prefix)) return model.substring(slash + 1);
+    }
   }
   return model;
 }
@@ -235,17 +261,29 @@ let _customProviderNames = new Set();
  *  no plugin manager wired or no plugin claims the prefix. */
 function detectBackend(model) {
   if (!model) return 'none';
+  // Plugin-first: every prefix-claiming provider lives in a plugin
+  // (openai-provider, gemini-provider, openrouter-provider,
+  // local-oai-provider, anthropic-provider via 'claude' bare-name match
+  // below). Slash-prefixed forms route through resolveProviderForModel.
   const pluginEntry = _resolvePluginProvider(model);
-  if (pluginEntry) return pluginEntry.name; // e.g. 'openai', 'anthropic', 'local'
-  if (model.startsWith('openai/')) return 'openai';
-  if (model.startsWith('openrouter/')) return 'openrouter';
-  if (model.startsWith('local/')) return 'local';
-  if (model.startsWith('gemini/')) return 'gemini';
-  const slash = model.indexOf('/');
-  if (slash > 0) {
-    const prefix = model.substring(0, slash);
-    if (_customProviderNames.has(prefix)) return 'custom';
+  if (pluginEntry) return pluginEntry.name;
+  // Bare names (no slash) — walk plugins and match the longest prefix.
+  // anthropic-provider declares prefixes:['claude'], so 'claude-opus-4-7'
+  // and 'claude-haiku-4-5' route here. Fallback below is for the
+  // pre-plugins boot window where _providerManager is null.
+  if (_providerManager?.getProviders) {
+    let best = null;
+    for (const entry of _providerManager.getProviders()) {
+      for (const p of entry.prefixes) {
+        if (model.startsWith(p) && (!best || p.length > best.matchLen)) {
+          best = { entry, matchLen: p.length };
+        }
+      }
+    }
+    if (best) return best.entry.name;
   }
+  // Last-resort fallback — treat unprefixed strings as Anthropic
+  // (the historical default before plugin extraction).
   return 'anthropic';
 }
 
@@ -315,6 +353,9 @@ const _VIDEO_PATTERNS  = /\bvl\b|video/i;
 function _inferCapabilities(model, config) {
   if (!model) return { tools: null, vision: null, audio: null, video: null };
 
+  // 1. Per-model override from modelLimits — populated by each plugin's
+  //    listModels at wizard finish and on every settings save. Most
+  //    authoritative; reflects model ∧ client transport.
   const override = config?.modelLimits?.[model]?.capabilities;
   if (override && typeof override === 'object') {
     return {
@@ -325,12 +366,17 @@ function _inferCapabilities(model, config) {
     };
   }
 
-  const backend = detectBackend(model);
+  // 2. Plugin-declared default capabilities — each provider plugin's
+  //    registerProvider({ capabilities }) is the family blanket. Used
+  //    when modelLimits hasn't been populated yet (early boot, or
+  //    operator picked a model without running listModels).
+  const pluginEntry = _resolvePluginByBackend(model);
+  if (pluginEntry?.capabilities) {
+    return { ...pluginEntry.capabilities };
+  }
 
-  if (backend === 'anthropic') return { tools: true, vision: true, audio: false, video: false };
-  if (backend === 'openai')    return { tools: true, vision: true, audio: false, video: false };
-  if (backend === 'gemini')    return { tools: true, vision: true, audio: true,  video: true  };
-
+  // 3. Last-resort regex heuristic — for models routing through a
+  //    backend with no plugin attached. Conservative defaults.
   const name = stripPrefix(model).toLowerCase();
   return {
     tools:  null,
@@ -1500,4 +1546,4 @@ class MultiProvider {
 // moves the full implementations into the plugins; for now the plugins
 // require these from core to avoid duplicating ~500 lines of stream-parsing
 // code while the contract is still settling.
-module.exports = { MultiProvider, createClientForModel, detectBackend, stripPrefix, setProviderManager, OAICompatClient, GeminiClient, _hasImages, _inferCapabilities, applyReasoningEffortViaPlugin };
+module.exports = { MultiProvider, createClientForModel, detectBackend, stripPrefix, setProviderManager, OAICompatClient, GeminiClient, _hasImages, _inferCapabilities, applyReasoningEffortViaPlugin, getDefaultReasoningEffort };

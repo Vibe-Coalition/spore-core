@@ -162,6 +162,15 @@ module.exports = function register(api) {
       return { ok: true, models };
     },
     applyReasoningEffort: applyOpenAIReasoningEffort,
+    // host config field is `openaiReasoningEffort` (categorical:
+    // off/minimal/low/medium/high/max). Pass straight through — the
+    // applyReasoningEffort translator handles gpt-5 vs o-series
+    // 'minimal' compatibility.
+    getDefaultReasoningEffort: (model, hostConfig) => {
+      const m = String(model || '').toLowerCase();
+      if (!(/^openai\//.test(m) || /^(o1|o3|o4|gpt-5)/.test(m))) return null;
+      return hostConfig?.openaiReasoningEffort || null;
+    },
   });
 
   api.registerSettingsPane({

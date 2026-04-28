@@ -1956,23 +1956,17 @@ class AgentLoop {
       ...resolvedRequest,
       model,
     };
-    // Default reasoning effort — derived from per-vendor host config.
-    // Both knobs flow through the unified _applyReasoningEffort dispatch
-    // (which routes to the model's owning plugin), so vendor-specific
-    // request shape lives next to the client that has to talk that wire.
-    //
-    // Translation: for Claude with a configured thinkingBudget, treat
-    // it as effort='medium' (the plugin maps medium→adaptive medium for
-    // opus 4.6/4.7 and budget_tokens=10000 for budget-shape models).
-    // For OpenAI with openaiReasoningEffort, pass the categorical value
-    // straight through (the plugin understands low/medium/high/minimal).
-    // Either knob being null means "no default reasoning override".
+    // Default reasoning effort — each provider plugin declares
+    // getDefaultReasoningEffort(model, hostConfig) and knows which
+    // host-config field is its knob (anthropic.thinkingBudget vs
+    // openai.openaiReasoningEffort vs ...). The translator then maps
+    // the categorical effort to the vendor's wire shape. Vendor logic
+    // lives in the plugin, not duplicated here.
     let _defaultEffort = null;
-    if (this.config.openaiReasoningEffort && /^openai\/|^(o1|o3|o4|gpt-5)/i.test(model)) {
-      _defaultEffort = this.config.openaiReasoningEffort;
-    } else if (this.config.thinkingBudget && /sonnet|opus|haiku-4/i.test(model) && !/3-5|3\.5/i.test(model)) {
-      _defaultEffort = 'medium';
-    }
+    try {
+      const { getDefaultReasoningEffort } = require('../providers');
+      _defaultEffort = getDefaultReasoningEffort(model, this.config);
+    } catch { /* module load — fall through, no default effort applied */ }
     if (_defaultEffort) {
       requestOpts = this._applyReasoningEffort(requestOpts, model, _defaultEffort);
     }

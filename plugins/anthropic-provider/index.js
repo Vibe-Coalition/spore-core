@@ -190,6 +190,16 @@ module.exports = function register(api) {
       return _listAnthropicModels({ apiKey });
     },
     applyReasoningEffort: applyAnthropicReasoningEffort,
+    // host config field is `thinkingBudget` (numeric, kept for backward
+    // compat with existing operator setups). Treat any positive value
+    // as "operator wants thinking on" and map to medium effort. The
+    // applyReasoningEffort translator turns medium → adaptive medium
+    // for 4.6/4.7 and budget_tokens=10000 for the budget-shape models.
+    getDefaultReasoningEffort: (model, hostConfig) => {
+      const m = String(model || '').toLowerCase();
+      if (!/sonnet|opus|haiku-4/i.test(m) || /3-5|3\.5/i.test(m)) return null;
+      return (hostConfig?.thinkingBudget > 0) ? 'medium' : null;
+    },
   });
 
   api.registerSettingsPane({
