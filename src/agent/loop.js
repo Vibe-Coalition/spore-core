@@ -1618,17 +1618,19 @@ class AgentLoop {
     }
 
     // Anthropic Claude — two flavors of extended-thinking config:
-    //   - Adaptive (opus 4.5+): { thinking: { type: 'adaptive' } } plus
-    //     top-level { output_config: { effort: 'low'|'medium'|'high' } }.
-    //     Newer-style; replaces the budget_tokens knob.
-    //   - Budget (sonnet 4.x, opus 4.0/4.1, haiku 4.x): legacy
-    //     { thinking: { type: 'enabled', budget_tokens: N } }.
+    //   - Adaptive (opus-4-6, opus-4-7): { thinking: { type: 'adaptive' } }
+    //     plus top-level { output_config: { effort: 'low'|'medium'|'high' } }.
+    //   - Budget (everything else with thinking — sonnet 4.x, opus 4.0/4.1/4.5,
+    //     haiku 4.x): legacy { thinking: { type: 'enabled', budget_tokens: N } }.
     //
     // Forcing the legacy shape on an adaptive-only model returns
-    // `thinking.type.enabled is not supported for this model`. Detect
-    // adaptive by opus version: 4-5, 4-6, 4-7, … (any 4.[5-9]+ or 4.10+).
+    // `thinking.type.enabled is not supported for this model`. Forcing
+    // adaptive on a budget-only model returns `adaptive thinking is not
+    // supported on this model`. Verified against api.anthropic.com 2026-04;
+    // opus-4-5 docs say 4.5+ but tested API rejects adaptive on 4.5,
+    // accepts it on 4.6 / 4.7. Future models will need additions here.
     if (/sonnet|opus|haiku-4/i.test(m) && !/3-5|3\.5/i.test(m)) {
-      const isAdaptive = /^claude-opus-4-([5-9]|\d{2,})/i.test(m);
+      const isAdaptive = /^claude-opus-4-[67](-|$)/i.test(m);
       if (effort === 'off') {
         out.thinking = { type: 'disabled' };
         return out;
@@ -2018,7 +2020,7 @@ class AgentLoop {
     // opus 4.5+ rejects the legacy thinking.type='enabled' / budget_tokens
     // shape. Use the adaptive config form for those — see _applyReasoningEffort
     // for the equivalent on the per-model effort-override path.
-    const isAdaptiveThinking = /^claude-opus-4-([5-9]|\d{2,})/i.test(model);
+    const isAdaptiveThinking = /^claude-opus-4-[67](-|$)/i.test(model);
     let requestOpts = {
       max_tokens: maxTokens,
       ...resolvedRequest,
