@@ -279,7 +279,11 @@ function _resolveContextLength(rawModel, kind) {
 // have a contextWindow entry, probe the relevant provider's /models endpoint
 // and fill it in. Guarantees per-model ctx is captured even if the wizard UI
 // didn't pre-fill correctly. Probes each provider at most once per save.
-async function _enrichModelLimits(modelLimits, models, providers) {
+//
+// `pluginManager` is optional — when provided, plugin-registered listModels
+// (e.g. anthropic-provider's vendor-aware probe) is preferred over the
+// in-tree _listModelsForProvider.
+async function _enrichModelLimits(modelLimits, models, providers, pluginManager) {
   const out = { ...(modelLimits || {}) };
   const tierEntries = Object.values(models || {}).filter(t => t?.model);
   if (!tierEntries.length) return out;
@@ -296,7 +300,14 @@ async function _enrichModelLimits(modelLimits, models, providers) {
       if (c?.url) probeArgs = { kind: 'custom', baseUrl: c.url, apiKey: c.key, authHeader: c.authHeader };
     }
     if (!probeArgs) { probedProviders.set(providerName, null); return null; }
-    const res = await _listModelsForProvider(probeArgs).catch(() => null);
+    // Plugin-aware: if a provider plugin registered listModels, prefer it.
+    let res = null;
+    const entry = pluginManager?.getProviders?.().find(pp => pp.name === probeArgs.kind);
+    if (entry?.listModels) {
+      res = await entry.listModels(probeArgs).catch(() => null);
+    } else {
+      res = await _listModelsForProvider(probeArgs).catch(() => null);
+    }
     probedProviders.set(providerName, res);
     return res;
   };
@@ -3156,7 +3167,7 @@ class WebGateway {
         try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
         try {
           // 0. Auto-fill any missing per-model ctx by probing the configured providers' /models endpoints.
-          parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers);
+          parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers, this.tools?._pluginManager);
           // 1. Persist settings through the existing pipeline
           const newState = this._persistSettingsPatch(parsed);
           // 1b. Belt-and-suspenders for the wizard's client-side finish
@@ -3551,7 +3562,7 @@ class WebGateway {
           try {
             const parsed = body ? JSON.parse(body) : {};
             // Auto-fill missing per-model ctx by probing the configured providers' /models endpoints.
-            parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers);
+            parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers, this.tools?._pluginManager);
             const settings = this._persistSettingsPatch(parsed);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, settings }));
@@ -6547,10 +6558,24 @@ class WebGateway {
     }
 
     // ── List models from a provider's /models endpoint ──
+    // Plugin-aware: if a provider plugin registered listModels under the
+    // requested kind, prefer that — it can augment the vendor's response
+    // with ctx/maxOutput from a vendor-specific table (e.g. Anthropic's
+    // /v1/models doesn't expose ctx, anthropic-provider's listModels
+    // augments via prefix). Falls back to core's _listModelsForProvider
+    // for legacy custom-OAI probes (`kind: 'custom'`) and providers that
+    // don't implement listModels.
     if (urlPath === '/api/providers/list-models' && req.method === 'POST') {
       const body = await _readJsonBody(req);
       try {
-        const result = await _listModelsForProvider(body);
+        const mgr = this.tools?._pluginManager;
+        const entry = mgr?.getProviders?.().find(p => p.name === body.kind);
+        let result;
+        if (entry?.listModels) {
+          result = await entry.listModels(body);
+        } else {
+          result = await _listModelsForProvider(body);
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (e) {

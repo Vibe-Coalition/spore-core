@@ -812,6 +812,7 @@ class PluginManager {
           factory: p.factory,
           prefixes: p.prefixes,
           capabilities: p.capabilities,
+          listModels: p.listModels || null,
           defaultBaseUrl: p.defaultBaseUrl,
           configured,
         });

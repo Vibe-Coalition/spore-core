@@ -510,6 +510,14 @@ class PluginAPI {
    * @param {object} [opts.capabilities] — { tools, vision, audio, video }; defaults all false except tools
    * @param {Function} [opts.isConfigured]
    * @param {string} [opts.defaultBaseUrl]
+   * @param {Function} [opts.listModels] — async ({apiKey, baseUrl, authHeader, ...}) =>
+   *   { ok, models: [{ id, contextLength?, maxOutput?, family? }], error? }.
+   *   Lets the wizard's "populate models" button hit a vendor-aware probe
+   *   that returns ctx + max-output where the vendor doesn't expose it
+   *   (e.g. Anthropic /v1/models has no context_window field; the plugin
+   *   augments via an internal prefix table). Without this, the wizard
+   *   falls back to core's _listModelsForProvider which only knows the
+   *   raw OAI-compat fields.
    */
   registerProvider(name, factory, opts = {}) {
     if (!name || typeof name !== 'string') throw new Error('registerProvider requires a string name');
@@ -523,12 +531,14 @@ class PluginAPI {
       opts.capabilities || {}
     );
     const isConfigured = typeof opts.isConfigured === 'function' ? opts.isConfigured : () => true;
+    const listModels = typeof opts.listModels === 'function' ? opts.listModels : null;
     this._llmProviders.push({
       name,
       factory,
       prefixes,
       capabilities,
       isConfigured,
+      listModels,
       defaultBaseUrl: opts.defaultBaseUrl || null,
     });
     this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);

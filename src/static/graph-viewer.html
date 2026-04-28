@@ -6803,7 +6803,14 @@ function _obRecordModelLimits(providerPrefix, modelObjs) {
   for (const m of (modelObjs || [])) {
     if (!m?.id || !m?.contextLength) continue;
     const ref = (providerPrefix && providerPrefix !== 'anthropic') ? `${providerPrefix}/${m.id}` : m.id;
-    _obKnownModelLimits[ref] = { contextLength: m.contextLength };
+    // Capture maxOutput too — anthropic-provider's listModels returns it
+    // (Anthropic /v1/models doesn't expose it; the plugin augments via
+    // its prefix table). Used when enriching modelLimits server-side and
+    // available for tier-row prefill if the wizard ever surfaces it.
+    _obKnownModelLimits[ref] = {
+      contextLength: m.contextLength,
+      ...(m.maxOutput ? { maxOutput: m.maxOutput } : {}),
+    };
     count++;
   }
   return count;

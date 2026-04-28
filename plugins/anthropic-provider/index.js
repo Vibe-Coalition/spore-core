@@ -11,6 +11,84 @@
 
 const { createAnthropicClient } = require('./lib/anthropic-client');
 
+// Per-family metadata. Anthropic's /v1/models doesn't expose context_window
+// or max output, so we augment with this table. Longest-prefix-wins on
+// match — `claude-opus-4-7` is more specific than `claude-opus-4`.
+//
+// Sources: api.anthropic.com docs (model overview), 1M-context beta header
+// for opus-4-7. maxOutput is the *standard* default (extended-output beta
+// raises it for some Sonnet 4.x models — left as the conservative default).
+const _ANTHROPIC_MODEL_META = [
+  { prefix: 'claude-opus-4-7',    contextLength: 1000000, maxOutput: 32000, family: 'opus' },
+  { prefix: 'claude-opus-4-1',    contextLength: 200000,  maxOutput: 32000, family: 'opus' },
+  { prefix: 'claude-opus-4',      contextLength: 200000,  maxOutput: 32000, family: 'opus' },
+  { prefix: 'claude-sonnet-4-6',  contextLength: 200000,  maxOutput: 64000, family: 'sonnet' },
+  { prefix: 'claude-sonnet-4-5',  contextLength: 200000,  maxOutput: 64000, family: 'sonnet' },
+  { prefix: 'claude-sonnet-4',    contextLength: 200000,  maxOutput: 64000, family: 'sonnet' },
+  { prefix: 'claude-haiku-4-5',   contextLength: 200000,  maxOutput: 8192,  family: 'haiku'  },
+  { prefix: 'claude-haiku-4',     contextLength: 200000,  maxOutput: 8192,  family: 'haiku'  },
+  { prefix: 'claude-3-5-sonnet',  contextLength: 200000,  maxOutput: 8192,  family: 'sonnet' },
+  { prefix: 'claude-3-5-haiku',   contextLength: 200000,  maxOutput: 8192,  family: 'haiku'  },
+  { prefix: 'claude-3-opus',      contextLength: 200000,  maxOutput: 4096,  family: 'opus'   },
+  { prefix: 'claude-3-sonnet',    contextLength: 200000,  maxOutput: 4096,  family: 'sonnet' },
+  { prefix: 'claude-3-haiku',     contextLength: 200000,  maxOutput: 4096,  family: 'haiku'  },
+];
+
+function _resolveAnthropicMeta(modelId) {
+  if (!modelId) return null;
+  // Longest match wins so `claude-opus-4-7-20251010` picks the 1M entry,
+  // not the generic `claude-opus-4` 200K row.
+  let best = null;
+  for (const meta of _ANTHROPIC_MODEL_META) {
+    if (modelId.startsWith(meta.prefix)) {
+      if (!best || meta.prefix.length > best.prefix.length) best = meta;
+    }
+  }
+  return best;
+}
+
+async function _listAnthropicModels({ apiKey }) {
+  if (!apiKey) {
+    apiKey = process.env.ANTHROPIC_API_KEY || '';
+    if (!apiKey) return { ok: false, error: 'missing apiKey' };
+  }
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/models?limit=1000', {
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      return { ok: false, error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 160) : ''}` };
+    }
+    const d = await r.json().catch(() => null);
+    if (!d || !Array.isArray(d.data)) return { ok: false, error: 'no `data` array in response' };
+    const models = d.data.map(m => {
+      const id = m.id || '';
+      if (!id) return null;
+      const meta = _resolveAnthropicMeta(id);
+      return {
+        id,
+        contextLength: meta?.contextLength || null,
+        maxOutput: meta?.maxOutput || null,
+        family: meta?.family || null,
+        displayName: m.display_name || null,
+      };
+    }).filter(Boolean);
+    // Sort opus first, then sonnet, then haiku, alphabetically inside family.
+    const familyOrder = { opus: 0, sonnet: 1, haiku: 2 };
+    models.sort((a, b) => {
+      const fa = familyOrder[a.family] ?? 99;
+      const fb = familyOrder[b.family] ?? 99;
+      if (fa !== fb) return fa - fb;
+      return b.id.localeCompare(a.id); // newer-first inside family (date suffix)
+    });
+    return { ok: true, models };
+  } catch (e) {
+    return { ok: false, error: (e?.message || String(e)).slice(0, 200) };
+  }
+}
+
 function backfillLegacyConfig(api) {
   const current = api.getConfig();
   if (Object.keys(current).length > 0) return;
@@ -49,6 +127,21 @@ module.exports = function register(api) {
     isConfigured: (config) => {
       const slot = config?.plugins?.['anthropic-provider'] || {};
       return !!(process.env.ANTHROPIC_API_KEY || config?.anthropicApiKey || slot.apiKey);
+    },
+    // Wizard "populate models" + tier ctx auto-enrichment hits this. The
+    // body { kind: 'anthropic', apiKey } comes either from the wizard's
+    // editor or from _enrichModelLimits at save time. apiKey-from-body
+    // honored first (operator may be probing a key they haven't saved yet),
+    // env / host config / slot as fallbacks.
+    listModels: async (body) => {
+      const host = api.getHostConfig();
+      const slot = api.getConfig();
+      const apiKey = (body?.apiKey || '').trim()
+        || process.env.ANTHROPIC_API_KEY
+        || host?.anthropicApiKey
+        || slot?.apiKey
+        || '';
+      return _listAnthropicModels({ apiKey });
     },
   });
 
