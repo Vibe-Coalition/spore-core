@@ -37,7 +37,7 @@
       <div style="margin-top:6px;color:var(--text-dim)">Polling status until connected…</div>
     </div>
     <label style="display:block;font-size:.7rem;margin-top:14px">Hostname for this container on the tailnet
-      <input id="ts-hostname" type="text" autocomplete="off" placeholder="spore-<agent>" style="display:block;margin-top:3px;width:100%;max-width:520px;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+      <input id="ts-hostname" type="text" autocomplete="off" placeholder="spore-<agent>" style="display:block;margin-top:3px;width:100%;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
       <div class="settings-note" style="margin-top:3px">Sent as <code>tailscale up --hostname &lt;value&gt;</code>. Defaults to <code>spore-&lt;agentId&gt;</code>. Saved separately from the central Save button — use <button class="settings-btn-secondary" type="button" id="ts-hostname-save" style="font-size:.62rem;padding:1px 6px">save</button> to apply.</div>
     </label>
   `;
