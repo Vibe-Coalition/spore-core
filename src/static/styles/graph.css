@@ -1,0 +1,1063 @@
+/* graph.css — graph canvas (#canvas, #graph-svg), canvas tab bar,
+   view-mode switcher, event-log widget, node animations, drop menu. */
+
+  /* ── Graph Canvas (center) ── */
+  /* Petri canvas surface — panel-elevated --graph-bg with three soft
+     radial-gradient glows in warm / accent / slate. Mirrors the
+     atmospheric glow in dir-petri.jsx PetriGraph. Applied to #canvas
+     itself so it shows under every view mode (graph, list, typemap,
+     work). Tokens carry the values so it flips cleanly on theme change. */
+  #canvas {
+    flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column;
+    font-family: var(--font-body);
+    background-color: var(--graph-bg);
+    background-image:
+      radial-gradient(circle at 22% 32%, var(--graph-glow-1) 0%, transparent 42%),
+      radial-gradient(circle at 78% 68%, var(--graph-glow-2) 0%, transparent 48%),
+      radial-gradient(circle at 55% 85%, var(--graph-glow-3) 0%, transparent 40%);
+    transition: background-color 200ms ease;
+  }
+  #canvas > svg, #canvas #graph-svg, #canvas #view-typemap-svg { width: 100%; flex: 1; min-height: 0; }
+  #graph-svg.is-marquee-selecting { cursor: crosshair; }
+  .graph-selection-rect {
+    fill: color-mix(in srgb, var(--accent2) 14%, transparent);
+    stroke: var(--accent2);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    pointer-events: none;
+  }
+  .graph-context-menu {
+    position: fixed;
+    display: none;
+    min-width: 190px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 12px 30px rgba(0,0,0,.45);
+    padding: 6px;
+    z-index: 1200;
+  }
+  .graph-context-menu button {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .graph-context-menu button:hover { background: rgba(var(--hl-rgb),.08); }
+  .graph-context-menu button.danger { color: var(--danger); }
+
+  /* ── Canvas Tab Bar ── */
+  #canvas-tabs {
+    display: none; flex-shrink: 0; background: var(--element);
+    border-bottom: 1px solid var(--border); padding: 0 8px;
+    gap: 0; align-items: stretch; height: 30px; z-index: 5;
+    opacity: 0; transition: opacity .2s ease;
+  }
+  #canvas-tabs.active { display: flex; opacity: 1; }
+  .canvas-tab {
+    padding: 0 14px; font-size: 12px; cursor: pointer; white-space: nowrap;
+    color: var(--text-dim); border-bottom: 2px solid transparent;
+    display: flex; align-items: center; gap: 6px;
+    transition: color .15s, border-color .15s; user-select: none;
+  }
+  .canvas-tab:hover { color: var(--text); }
+  .canvas-tab.active { color: var(--accent2); border-bottom-color: var(--accent2); }
+  .canvas-tab .ct-icon { font-size: 10px; opacity: .6; }
+  .canvas-tab .ct-badge {
+    font-size: 8px; padding: 1px 5px; border-radius: 3px;
+    background: var(--accent2); color: #fff; font-weight: 700;
+  }
+  .canvas-tab-close {
+    margin-left: 4px; opacity: .3; cursor: pointer; font-size: 13px; line-height: 1;
+  }
+  .canvas-tab-close:hover { opacity: 1; }
+  #canvas.cv-tab-active #graph-svg,
+  #canvas.cv-tab-active #controls,
+  #canvas.cv-tab-active #search,
+  #canvas.cv-tab-active #event-feed,
+  #canvas.cv-tab-active #stats,
+  #canvas.cv-tab-active #lme-hud { display: none; }
+  #canvas.cv-tab-active #terminal-pane { display: none !important; }
+
+  /* ── View mode switcher — anchored top-right, persistent across all
+     views. Hosts the theme toggle as a trailing button after a divider,
+     mirroring the prototype's floating toolbar pattern. */
+  #view-mode-bar {
+    position: absolute; top: 12px; right: 12px;
+    z-index: 50; display: flex; align-items: center; gap: 2px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 3px;
+    font-family: var(--font-body); font-size: .82rem; font-weight: 500;
+    box-shadow: 0 4px 12px rgba(0,0,0,.18);
+  }
+  /* Active-pill matches the chat send chip — ink bg with paper text.
+     No border (the chip itself is the contrast). */
+  #view-mode-bar .vm-pill {
+    position: absolute; top: 3px; bottom: 3px; left: 0; width: 0;
+    background: var(--text-bright);
+    border-radius: 6px; pointer-events: none; z-index: 0;
+    opacity: 0;
+    transition: left .28s cubic-bezier(.4,.05,.2,1), width .28s cubic-bezier(.4,.05,.2,1), opacity .2s ease;
+  }
+  #view-mode-bar button {
+    position: relative; z-index: 1;
+    background: transparent; border: 0; color: var(--text-dim); padding: 5px 12px;
+    border-radius: 6px; cursor: pointer;
+    font-family: var(--font-body); font-size: inherit; font-weight: 500;
+    transition: color .22s ease, transform .22s ease;
+  }
+  #view-mode-bar button:hover { color: var(--text); }
+  /* Active button gets paper text on the ink pill behind it. */
+  #view-mode-bar button.active { color: var(--bg); background: transparent; transform: translateY(-.5px); }
+  #view-mode-bar .vm-divider {
+    width: 1px; height: 18px; background: var(--border); margin: 0 4px;
+    flex-shrink: 0;
+  }
+  #view-mode-bar #theme-toggle {
+    /* Override the inline style this button ships with so it integrates
+       into the mode bar instead of looking like a 30px boxed button.
+       Fixed width keeps the bar from resizing when the icon swaps
+       between ☀ (narrow) and 🌙 (wide emoji) on theme toggle. */
+    all: unset; cursor: pointer; padding: 5px 0; border-radius: 6px;
+    width: 28px; flex-shrink: 0;
+    color: var(--text-dim); font-family: var(--font-mono); font-size: .82rem;
+    line-height: 1; transition: color .15s, background .15s;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  #view-mode-bar #theme-toggle:hover {
+    color: var(--text); background: rgba(var(--hl-rgb), .04);
+  }
+
+  /* Hide graph-related elements in non-graph modes via opacity (animatable) */
+  #graph-svg, #search, #event-feed, #stats {
+    transition: opacity .24s ease;
+  }
+  #canvas:not(.view-graph) #graph-svg,
+  #canvas:not(.view-graph) #search,
+  #canvas:not(.view-graph) #event-feed,
+  #canvas:not(.view-graph) #stats {
+    opacity: 0; pointer-events: none;
+  }
+
+  /* Menu button is gone — all its functions are in the Settings floating pane now */
+  #controls #tools-menu-wrap { display: none !important; }
+
+  /* In non-graph modes, hide graph-only controls (filter/center/+node/separator). */
+  #canvas:not(.view-graph) #filter-type,
+  #canvas:not(.view-graph) #btn-center,
+  #canvas:not(.view-graph) #btn-new-node,
+  #canvas:not(.view-graph) #controls > span { display: none !important; }
+
+  /* View containers fill the canvas top-to-bottom. The floating
+     #view-mode-bar at top: 12px floats over them on its own paper layer;
+     content inside each view applies its own padding-top to clear it. */
+  #view-list, #view-typemap, #view-work {
+    position: absolute; inset: 0; box-sizing: border-box;
+    opacity: 0; pointer-events: none; transform: translateY(6px);
+    transition: opacity .24s ease, transform .28s cubic-bezier(.4,.05,.2,1);
+  }
+  #view-list { display: flex; }
+  #view-typemap { display: block; }
+  #view-work { display: flex; flex-direction: column; }
+  #canvas.view-list #view-list,
+  #canvas.view-typemap #view-typemap,
+  #canvas.view-work #view-work {
+    opacity: 1; pointer-events: auto; transform: translateY(0);
+  }
+
+  /* List view — aside is a translucent paper rail floating over the
+     atmospheric canvas, picking up subtle warmth from the gradient
+     beneath. Mirrors the floating-panel aesthetic in dir-petri.jsx
+     PetriInspector / PetriActivityStrip. */
+  #view-list-aside {
+    width: 38%; min-width: 280px; max-width: 460px; border-right: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #view-list-search {
+    padding: 14px 14px 12px 14px; border-bottom: 1px solid var(--border);
+  }
+  #view-list-search input {
+    width: 100%; box-sizing: border-box; padding: 9px 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    color: var(--text-bright); font-size: .82rem; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  #view-list-search input:focus { border-color: var(--border-active); box-shadow: 0 0 0 1px var(--border-active); }
+  #view-list-search input::placeholder { color: var(--text-muted); }
+  #view-list-tree {
+    flex: 1; overflow-y: auto; padding: 8px 4px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  #view-list-tree::-webkit-scrollbar { width: 4px; }
+  #view-list-tree::-webkit-scrollbar-track { background: transparent; }
+  #view-list-tree::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  #view-list-tree::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
+  .vlt-type {
+    margin: 2px 0; padding: 6px 10px; cursor: pointer; user-select: none;
+    display: flex; align-items: center; gap: 8px; border-radius: 5px;
+    font-size: .82rem; color: var(--text);
+    transition: background .1s;
+  }
+  .vlt-type:hover { background: rgba(var(--hl-rgb),.04); }
+  .vlt-chevron { font-size: 10px; opacity: .5; width: 10px; }
+  .vlt-type-label { flex: 1; }
+  .vlt-type-count {
+    font-size: .65rem; color: var(--text-dim); opacity: .7;
+    background: rgba(var(--hl-rgb),.06); padding: 1px 6px; border-radius: 8px;
+  }
+  .vlt-nodes { margin: 0 0 6px 22px; display: none; }
+  .vlt-type.expanded + .vlt-nodes { display: block; }
+  .vlt-node {
+    padding: 4px 10px; cursor: pointer; border-radius: 4px;
+    font-size: .8rem; color: var(--text-dim);
+    display: flex; align-items: center; gap: 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .vlt-node:hover { background: rgba(var(--hl-rgb),.04); color: var(--text); }
+  .vlt-node.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  .vlt-node-imp { font-size: .58rem; opacity: .55; flex-shrink: 0; }
+  .vlt-shape { width: 10px; height: 10px; flex-shrink: 0; }
+
+  #view-list-detail {
+    flex: 1; overflow-y: auto; padding: 60px 22px 18px 22px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  /* Detail keeps its 60px top padding because the mode bar floats over
+     the right side of the canvas — that's where the detail pane sits. */
+  #view-list-detail::-webkit-scrollbar { width: 4px; }
+  #view-list-detail::-webkit-scrollbar-track { background: transparent; }
+  #view-list-detail::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  #view-list-detail::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
+
+  /* People & projects view — toolbar floats top-left at the same row as
+     the mode selector (mirrors #controls in graph mode). No bar bg,
+     just the search pill and count text inline. */
+  #view-work-toolbar {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0; background: transparent; border: none;
+  }
+  #vw-search {
+    flex: 1; max-width: 340px; box-sizing: border-box;
+    padding: 9px 16px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; color: var(--text-bright);
+    font-family: var(--font-body); font-size: .8rem; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  #vw-search:focus { border-color: var(--border-active); box-shadow: 0 0 0 1px var(--border-active); }
+  #vw-search::placeholder { color: var(--text-muted); }
+  #vw-count {
+    font-family: var(--font-body); font-size: .62rem;
+    color: var(--text-dim); opacity: .75; letter-spacing: .04em;
+  }
+  #view-work-body {
+    flex: 1; overflow-y: auto; padding: 60px 24px 18px 24px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  #view-work-body::-webkit-scrollbar { width: 4px; }
+  #view-work-body::-webkit-scrollbar-track { background: transparent; }
+  #view-work-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  #view-work-body::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
+
+  .vw-section { margin-bottom: 32px; }
+  .vw-section-title {
+    font-family: var(--font-body); font-size: .68rem;
+    text-transform: uppercase; letter-spacing: .1em;
+    color: var(--text-dim); opacity: .8;
+    margin: 0 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .vw-section-count {
+    font-size: .58rem; padding: 2px 8px;
+    background: color-mix(in srgb, var(--accent2) 10%, transparent); color: var(--accent2);
+    border-radius: 10px; font-weight: normal; letter-spacing: .02em;
+  }
+  .vw-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+
+  .vw-card {
+    background: rgba(var(--hl-rgb),.02); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px;
+    transition: border-color .15s, background .15s;
+    display: flex; flex-direction: column; gap: 10px;
+    min-width: 0;
+  }
+  .vw-card:hover {
+    border-color: var(--accent2);
+    background: rgba(var(--hl-rgb),.035);
+  }
+  @keyframes vw-flash {
+    0%   { background: color-mix(in srgb, var(--accent2) 24%, transparent); border-color: var(--accent2); }
+    100% { background: rgba(var(--hl-rgb),.02); }
+  }
+  .vw-card.vw-flash { animation: vw-flash 0.9s ease-out; }
+
+  .vw-card-head {
+    display: flex; align-items: center; gap: 6px;
+    min-width: 0; overflow: hidden;
+  }
+  .vw-shape {
+    width: 16px; height: 16px;
+    flex: 0 0 16px;
+  }
+  .vw-title {
+    font-family: var(--font-body); font-size: .88rem; line-height: 1.2;
+    color: var(--text-bright); cursor: pointer;
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .vw-title:hover { color: var(--accent2); }
+  .vw-imp {
+    font-family: var(--font-body); font-size: .56rem;
+    color: var(--text-dim); opacity: .65;
+    padding: 1px 6px; background: rgba(var(--hl-rgb),.04);
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+
+  .vw-desc {
+    font-size: .74rem; color: var(--text); line-height: 1.5;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden;
+    opacity: .85;
+  }
+
+  .vw-aspects { display: flex; flex-direction: column; gap: 8px; }
+  .vw-aspect {
+    border-left: 2px solid var(--border); padding: 0 0 0 10px;
+  }
+  .vw-aspect-name {
+    font-family: var(--font-body); font-size: .6rem;
+    text-transform: uppercase; letter-spacing: .08em;
+    color: var(--text-dim); opacity: .7;
+    display: block; margin-bottom: 4px;
+  }
+  .vw-attr {
+    font-size: .72rem; color: var(--text); line-height: 1.4;
+    margin: 2px 0; opacity: .9;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+
+  .vw-rels {
+    display: flex; flex-direction: column; gap: 6px;
+    margin-top: 2px; padding-top: 8px; border-top: 1px solid var(--border);
+  }
+  .vw-rel-row {
+    display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap;
+  }
+  .vw-rel-label {
+    font-family: var(--font-body); font-size: .58rem;
+    text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-dim); opacity: .65;
+    margin-right: 2px; flex-shrink: 0; line-height: 20px;
+  }
+  .vw-rel-chip {
+    display: inline-flex; align-items: center; padding: 2px 8px;
+    background: color-mix(in srgb, var(--accent2) 10%, transparent); color: var(--accent2);
+    border: 1px solid transparent; border-radius: 10px;
+    font-family: var(--font-body); font-size: .66rem;
+    cursor: pointer; transition: background .1s, border-color .1s;
+    max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .vw-rel-chip:hover {
+    background: color-mix(in srgb, var(--accent2) 18%, transparent);
+    border-color: var(--accent2);
+  }
+
+  .vw-empty {
+    font-family: var(--font-body); font-size: .72rem;
+    color: var(--text-dim); opacity: .5; text-align: center;
+    padding: 24px; grid-column: 1 / -1;
+  }
+
+  #vld-empty {
+    display: flex; align-items: center; justify-content: center; height: 100%;
+    color: var(--text-dim); font-size: .85rem; opacity: .5; font-style: italic;
+  }
+  .vld-card { display: none; }
+  .vld-card.active { display: block; }
+  .vld-header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .vld-title { font-size: 1.2rem; font-weight: 600; color: var(--text-bright); letter-spacing: -0.01em; }
+  .vld-type-badge {
+    font-size: .68rem; padding: 3px 9px; border-radius: 10px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .vld-section { margin-bottom: 22px; }
+  .vld-section-title {
+    font-size: .7rem; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--text-dim); opacity: .7; margin-bottom: 8px;
+  }
+  .vld-desc { font-size: .85rem; color: var(--text); line-height: 1.5; }
+  .vld-aspect {
+    border-left: 2px solid var(--border); padding: 4px 0 4px 12px; margin-bottom: 10px;
+  }
+  .vld-aspect-name {
+    font-size: .76rem; font-weight: 600; color: var(--accent); margin-bottom: 4px;
+  }
+  .vld-attr { font-size: .8rem; color: var(--text); margin: 3px 0; line-height: 1.4; }
+  .vld-attr-meta { font-size: .62rem; color: var(--text-dim); opacity: .6; margin-left: 6px; }
+  .vld-edges-list { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; font-size: .76rem; }
+  .vld-edge-type { font-size: .68rem; color: var(--text-dim); }
+  .vld-edge-target {
+    cursor: pointer; color: var(--text); padding: 2px 4px; border-radius: 3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .vld-edge-target:hover { background: rgba(var(--hl-rgb),.05); color: var(--accent); }
+  .vld-edge-direction { font-size: .58rem; color: var(--text-dim); opacity: .6; }
+  .vld-mini {
+    margin-top: 14px; height: 320px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); position: relative; overflow: hidden;
+  }
+  .vld-mini svg { width: 100%; height: 100%; display: block; }
+
+  /* Type Map view — minimal, monospace, fits the rest of the app */
+  #view-typemap { background: transparent; }
+  #view-typemap-svg { width: 100%; height: 100%; display: block; }
+  #view-typemap-search {
+    position: absolute; top: 16px; right: 16px; z-index: 40;
+    width: 220px; pointer-events: auto;
+  }
+  #view-typemap-search input {
+    width: 100%; box-sizing: border-box; padding: 6px 12px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text);
+    font-size: 0.78rem; outline: none;
+  }
+  #view-typemap-search input:focus { border-color: var(--accent); }
+  #view-typemap-search input::placeholder { color: var(--text-dim); opacity: .6; }
+  #view-typemap-search-clear {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    background: none; border: 0; color: var(--text-dim); cursor: pointer;
+    font-size: .9rem; padding: 0 8px; line-height: 1;
+  }
+  #view-typemap-search-clear:hover { color: var(--text); }
+  /* Mobile / narrow viewport: match graph #search behavior */
+  @media (max-width: 720px) {
+    #view-typemap-search { top: 50px; right: 6px; left: 6px; width: auto; }
+  }
+
+  /* Search-driven highlights on the type map — minimal, accent color, no glow */
+  .tm-bubble.tm-match .tm-bubble-circle {
+    stroke: var(--accent) !important;
+    stroke-width: 2; stroke-opacity: 1;
+  }
+  .tm-bubble.tm-match .tm-bubble-fill {
+    fill: var(--accent) !important; fill-opacity: 0.18 !important;
+  }
+  .tm-bubble.tm-match .tm-bubble-label {
+    fill: var(--accent);
+  }
+  .tm-bubble.tm-no-match { opacity: .18; }
+  .tm-match-badge {
+    font-family: var(--font-body); font-size: 9px;
+    fill: var(--accent); text-anchor: middle; dominant-baseline: hanging;
+    pointer-events: none; user-select: none; letter-spacing: 0.04em; opacity: .9;
+  }
+  .tm-bubble-dot.tm-dot-match {
+    fill: var(--accent); fill-opacity: 1;
+  }
+
+  /* Search-driven highlight inside the drilldown window */
+  .tmw-node.tmw-match .tmw-shape {
+    stroke: var(--accent); stroke-width: 2;
+  }
+  .tmw-node.tmw-match .tmw-label {
+    fill: var(--accent);
+  }
+  .tm-bubble { cursor: pointer; transition: opacity .15s; transform-box: fill-box; transform-origin: center; }
+  .tm-bubble:hover .tm-bubble-circle { stroke-opacity: 1; stroke-width: 2; }
+  .tm-bubble:hover .tm-bubble-fill { fill-opacity: 1; }
+  .tm-bubble.tm-dimmed { opacity: .2; }
+  .tm-bubble-fill { transition: fill-opacity .15s; }
+  .tm-bubble-circle {
+    fill: none; stroke-width: 1.6; stroke-opacity: 0.85;
+    transition: stroke-opacity .15s, stroke-width .15s;
+    stroke-linejoin: round; stroke-linecap: round;
+  }
+  .tm-bubble-label {
+    font-family: var(--font-body); pointer-events: none; user-select: none;
+    text-anchor: middle; dominant-baseline: hanging;
+    fill: var(--text-bright); font-size: 12px; font-weight: 500;
+  }
+  .tm-bubble:hover .tm-bubble-label { fill: var(--accent); }
+  .tm-bubble-count {
+    font-family: var(--font-body); pointer-events: none; user-select: none;
+    fill: var(--text-dim); text-anchor: middle; dominant-baseline: hanging;
+    font-size: 10px; opacity: .8;
+  }
+  .tm-bubble-dot { pointer-events: none; }
+  .tm-edge { fill: none; pointer-events: none; transition: stroke-opacity .15s; stroke-linecap: round; }
+  .tm-edge.tm-edge-hi { stroke-opacity: .9 !important; }
+  .tm-edge.tm-edge-dim { stroke-opacity: .03 !important; }
+  .tm-bg-grid { stroke: rgba(var(--hl-rgb),.022); stroke-width: 1; }
+  /* Type subgraph window — uses the app's floating-pane look */
+  #tm-window {
+    position: fixed; left: 80px; top: 96px;
+    width: min(900px, 70vw); height: min(720px, 70vh);
+    display: none; flex-direction: column;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    border: 1px solid var(--border); border-radius: 18px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.45);
+    backdrop-filter: blur(14px);
+    resize: both; overflow: hidden;
+    z-index: 60;
+  }
+  #tm-window.tm-window-open { display: flex; }
+  #tm-window-count {
+    font-family: var(--font-body); font-size: .65rem;
+    padding: 2px 8px; border-radius: 999px;
+    background: color-mix(in srgb, var(--accent2) 14%, transparent); color: var(--accent2, #7fb3ff);
+  }
+  #tm-window-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+  #tm-window-svg { width: 100%; height: 100%; display: block; cursor: grab; background: transparent; }
+  #tm-window-svg:active { cursor: grabbing; }
+  #tm-window-empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-family: var(--font-body); font-size: .8rem; opacity: .5;
+    pointer-events: none;
+  }
+  .tmw-node { cursor: pointer; transition: opacity .15s; }
+  .tmw-node:hover .tmw-shape { stroke-width: 2.6; }
+  .tmw-node.tmw-selected .tmw-shape { stroke-width: 2.8 !important; stroke: var(--accent) !important; }
+  .tmw-shape { stroke-width: 1.6; }
+  .tmw-glyph {
+    font-family: var(--font-body); font-weight: 700; font-size: 9px;
+    text-anchor: middle; dominant-baseline: middle; pointer-events: none; user-select: none;
+  }
+  .tmw-label {
+    font-family: var(--font-body); font-size: 11px;
+    text-anchor: middle; dominant-baseline: hanging; pointer-events: none; user-select: none;
+    fill: var(--text, #c8c8d8);
+    /* Halo stroke matches the canvas surface so labels stay readable in
+       both themes (was hardcoded near-black — invisible-on-light-paper). */
+    paint-order: stroke fill; stroke: var(--graph-bg); stroke-opacity: 0.85;
+    stroke-width: 3px; stroke-linejoin: round;
+  }
+  .tmw-edge { stroke-width: 1; pointer-events: none; }
+  .tmw-edge-hi { stroke: var(--accent) !important; stroke-opacity: .9 !important; stroke-width: 1.6 !important; }
+  /* Push controls/search below the tab bar when it's visible */
+  #canvas-tabs.active ~ #controls { top: 46px; }
+  #canvas-tabs.active ~ #search { top: 46px; }
+
+  #controls {
+    position: absolute; top: 16px; left: 16px; display: flex; gap: 8px; z-index: 10;
+    font-family: var(--font-body); font-size: 0.78rem;
+  }
+  #controls button, #controls select {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+    padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    font-family: var(--font-body); font-size: inherit;
+  }
+  #controls button:hover, #controls select:hover { border-color: var(--border-active); color: var(--text); }
+  #controls .active { border-color: var(--accent); color: var(--accent); }
+  #btn-open-node, #btn-toggle-sidebar, #btn-open-logs, #btn-toggle-chat { display: none; }
+  .tools-menu-item { display:flex; align-items:center; gap:8px; padding:7px 12px; border-radius:5px; cursor:pointer; font-size:.74rem; color:var(--text); transition:background .15s; white-space:nowrap; }
+  .tools-menu-item:hover { background:rgba(var(--hl-rgb),.08); color:var(--accent); }
+  #lme-hud { display:none; position:absolute; top:48px; right:16px; z-index:20; width:300px; font-family:var(--font-body); pointer-events:auto; }
+  #lme-hud.open { display:block; }
+  #lme-hud.expanded { width:520px; }
+  .lme-panel { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 14px; box-shadow:0 8px 32px rgba(0,0,0,.5); max-height:calc(100vh - 80px); overflow-y:auto; }
+  .lme-title-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .lme-title { font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--accent); }
+  .lme-x { background:none; border:none; color:var(--text-dim); font-size:.9rem; cursor:pointer; padding:2px 6px; line-height:1; }
+  .lme-x:hover { color:var(--text); }
+  .lme-select, .lme-input { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:5px 8px; border-radius:5px; font-family:inherit; font-size:.7rem; width:100%; }
+  .lme-select:focus, .lme-input:focus { outline:none; border-color:var(--accent); }
+  .lme-row { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+  .lme-row label { font-size:.62rem; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); font-weight:600; min-width:52px; flex-shrink:0; }
+  .lme-btn { padding:5px 14px; border:none; border-radius:5px; font-family:inherit; font-size:.7rem; cursor:pointer; font-weight:600; transition:all .15s; }
+  .lme-btn-go { background:var(--text-bright); color:var(--bg); transition: opacity .15s; }
+  .lme-btn-go:hover { opacity: 0.85; }
+  .lme-btn-go:hover { filter:brightness(1.15); }
+  .lme-btn-stop { background:var(--danger,#ef4444); color:#fff; }
+  .lme-btn-stop:hover { filter:brightness(1.15); }
+  .lme-chip { display:inline-flex; align-items:center; gap:3px; font-size:.58rem !important; min-width:auto !important; padding:2px 7px; border-radius:4px; border:1px solid var(--border); cursor:pointer; transition:all .15s; text-transform:none !important; font-weight:500 !important; }
+  .lme-chip:has(input:checked) { background:var(--accent2); border-color:var(--accent2); color:var(--bg); }
+  .lme-chip input { display:none; }
+  .lme-cost { font-size:.6rem; color:var(--text-dim); margin:6px 0 8px; }
+  .lme-bar { width:100%; height:6px; background:var(--bg); border-radius:3px; overflow:hidden; margin:6px 0; }
+  .lme-bar-fill { height:100%; background:var(--accent); border-radius:3px; transition:width .3s; }
+  .lme-phase { font-size:.62rem; text-transform:uppercase; letter-spacing:.05em; color:var(--accent); font-weight:700; }
+  .lme-pct { font-size:.62rem; color:var(--text-dim); }
+  .lme-stats { display:flex; gap:10px; margin:6px 0; flex-wrap:wrap; }
+  .lme-st { text-align:center; }
+  .lme-st-v { font-size:1rem; font-weight:700; line-height:1.2; }
+  .lme-st-v.good { color:#22c55e; }
+  .lme-st-v.ok { color:#eab308; }
+  .lme-st-v.bad { color:#ef4444; }
+  .lme-st-l { font-size:.55rem; text-transform:uppercase; letter-spacing:.03em; color:var(--text-dim); }
+  .lme-log { max-height:100px; overflow-y:auto; font-size:.58rem; color:var(--text-dim); border-top:1px solid var(--border); margin-top:6px; padding-top:6px; transition:max-height .25s ease; }
+  #lme-hud.expanded .lme-log { max-height:300px; }
+  .lme-log-line { padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lme-log-line.pass { color:#22c55e; }
+  .lme-log-line.fail { color:#ef4444; }
+  .lme-log-line .log-meta { color:var(--text-dim); opacity:.6; }
+  .lme-expand-toggle { background:none; border:none; color:var(--text-dim); font-size:.75rem; cursor:pointer; padding:2px 6px; line-height:1; transition:transform .2s; }
+  .lme-expand-toggle:hover { color:var(--text); }
+  #lme-hud.expanded .lme-expand-toggle { transform:rotate(180deg); }
+  #lme-expanded-stats { display:none; margin:8px 0; }
+  #lme-hud.expanded #lme-expanded-stats { display:block; }
+  .lme-cat-table { width:100%; border-collapse:collapse; font-size:.6rem; margin:4px 0; }
+  .lme-cat-table th { text-align:left; padding:2px 5px; font-size:.5rem; text-transform:uppercase; color:var(--text-dim); letter-spacing:.03em; border-bottom:1px solid var(--border); }
+  .lme-cat-table td { padding:2px 5px; border-bottom:1px solid rgba(var(--hl-rgb),.04); }
+  .lme-cat-table .cat-acc { font-weight:700; text-align:right; }
+  .lme-cat-table .cat-acc.good { color:#22c55e; }
+  .lme-cat-table .cat-acc.ok { color:#eab308; }
+  .lme-cat-table .cat-acc.bad { color:#ef4444; }
+  .lme-eff-row { display:flex; gap:6px; margin:6px 0; flex-wrap:wrap; }
+  .lme-eff { text-align:center; flex:1; min-width:55px; }
+  .lme-eff-v { font-size:.75rem; font-weight:700; line-height:1.2; color:var(--text); }
+  .lme-eff-l { font-size:.48rem; text-transform:uppercase; letter-spacing:.03em; color:var(--text-dim); }
+  .lme-elapsed { font-size:.6rem; color:var(--text-dim); font-variant-numeric:tabular-nums; }
+  .lme-results-table { width:100%; border-collapse:collapse; margin:6px 0; font-size:.65rem; }
+  .lme-results-table th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--border); font-size:.55rem; text-transform:uppercase; color:var(--text-dim); }
+  .lme-results-table td { padding:3px 6px; border-bottom:1px solid var(--border); }
+  .lme-results-table .pass-rate { font-weight:700; }
+  .lme-hero { text-align:center; padding:8px 0; }
+  .lme-hero .pct { font-size:2rem; font-weight:900; letter-spacing:-.03em; }
+  .lme-hero .sub { font-size:.6rem; color:var(--text-dim); }
+  .lme-ref { display:flex; align-items:center; gap:6px; margin:2px 0; font-size:.6rem; }
+  .lme-ref .bar-track { flex:1; height:8px; background:var(--bg); border-radius:3px; overflow:hidden; max-width:140px; }
+  .lme-ref .bar-fill { height:100%; border-radius:3px; }
+  .lme-ref .bar-label { width:80px; text-align:right; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lme-ref .bar-val { font-weight:600; width:40px; }
+  /* Theme toggle button — sun/moon swap. Uses the same color tokens as
+     the rest of the header so it inherits both themes automatically. */
+  #theme-toggle:hover { border-color: var(--accent); background: var(--surface); }
+
+  #stats {
+    position: absolute; bottom: 16px; left: 16px;
+    font-size: 0.72rem; color: var(--text-dim); z-index: 10;
+    display: flex; flex-direction: column; gap: 6px; max-width: 60vw;
+  }
+  .stats-line {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    user-select: none;
+  }
+  .stats-line:hover { color: var(--text); }
+  .stats-chevron {
+    display: inline-block; width: 10px; font-size: 9px; opacity: .55;
+    transition: transform .15s;
+  }
+  #stats.stats-open .stats-chevron { transform: rotate(90deg); }
+  #stats-legend {
+    display: none; flex-wrap: wrap; gap: 2px 0;
+    padding: 8px 10px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px;
+    max-width: 520px;
+  }
+  #stats.stats-open #stats-legend { display: flex; }
+
+  /* ── Event log widget (embedded in the dock) ── */
+  #event-log {
+    position: relative;
+    cursor: pointer; user-select: none;
+    border-bottom: 1px solid var(--border);
+    /* Round the top corners to match the dock's outer rounding so hover bg
+       and focus ring follow the curve instead of clipping into a rectangle. */
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+    /* Lock the widget's width so expanding/collapsing the history panel
+       doesn't re-measure the dock every time a long event-item lands. This
+       also means webapp users (who have a narrower dock row) still see a
+       consistent 340px log. */
+    width: min(340px, calc(100vw - 32px));
+    max-width: min(340px, calc(100vw - 32px));
+    box-sizing: border-box;
+    transition: background .15s ease;
+    outline: none;
+  }
+  /* Activity indicator — an accent stripe slides across the bottom edge
+     while events are firing. Sits flush with the log's border-bottom and
+     is always visible regardless of how many rows are stacked. */
+  #event-log::before {
+    content: '';
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      transparent 30%,
+      var(--accent2) 50%,
+      transparent 70%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    opacity: 0;
+    transition: opacity .25s ease;
+    pointer-events: none;
+    z-index: 1;
+  }
+  #event-log.has-activity::before {
+    opacity: 0.95;
+    animation: event-log-stripe 1.8s linear infinite;
+  }
+  @keyframes event-log-stripe {
+    from { background-position: -100% 0; }
+    to   { background-position: 100% 0; }
+  }
+  #event-log:hover { background: color-mix(in srgb, var(--surface) 85%, var(--accent2) 6%); }
+  #event-log:focus-visible {
+    /* Inset shadow instead of outline so it respects the dock's overflow:hidden
+       rounded corners. */
+    box-shadow: inset 0 0 0 1px var(--accent2);
+  }
+  #event-log.open { cursor: default; }
+  /* When the panel is open, the ticker stack is redundant (the full list shows
+     the same events) — hide it so the panel header sits at the top. */
+  #event-log.open #event-log-stack { display: none; }
+  #event-log-stack {
+    display: flex; flex-direction: column-reverse;
+    padding: 4px 10px; gap: 2px;
+    width: 100%;
+    box-sizing: border-box;
+    /* Smooth growth / contraction when rows are added or the stack
+       collapses back to one line. Height is driven by a --row-count var
+       set from JS, multiplied by per-row height (~18px) + 8px padding. */
+    --row-count: 1;
+    max-height: calc(var(--row-count) * 18px + 8px);
+    overflow: hidden;
+    transition: max-height .28s cubic-bezier(.2,.8,.2,1);
+  }
+  .event-log-row {
+    font-size: 0.7rem;
+    line-height: 1.35;
+    color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    opacity: 1;
+    animation: event-log-row-in 0.18s ease;
+  }
+  .event-log-row.idle { opacity: 0.55; font-style: italic; }
+  .event-log-row .ev-op { color: var(--accent2); }
+  .event-log-row .ev-detail { color: var(--text); }
+  .event-log-row .ev-src { color: var(--accent3); opacity: 0.7; margin-left: 6px; }
+  @keyframes event-log-row-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  /* Expanded full history panel — always present so height transitions
+     work; visibility driven by a max-height flip on .open. */
+  #event-log-panel {
+    display: flex; flex-direction: column;
+    width: 100%;
+    box-sizing: border-box;
+    border-top: 1px solid transparent;
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-4px);
+    overflow: hidden;
+    cursor: default;
+    transition: max-height .32s cubic-bezier(.22,.95,.28,1),
+                opacity .22s ease .04s,
+                transform .28s cubic-bezier(.22,.95,.28,1),
+                border-top-color .22s ease;
+  }
+  #event-log.open #event-log-panel {
+    max-height: 320px;
+    opacity: 1;
+    transform: translateY(0);
+    border-top-color: var(--border);
+  }
+  /* Collapse runs in reverse — panel content fades out before height
+     collapses, so the drawer looks like it's sliding back up smoothly
+     rather than clipping mid-animation. */
+  #event-log:not(.open) #event-log-panel {
+    transition: max-height .28s cubic-bezier(.4,0,.8,.4) .08s,
+                opacity .12s ease,
+                transform .22s cubic-bezier(.4,0,.8,.4),
+                border-top-color .16s ease .1s;
+  }
+  #event-log-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; font-size: 0.58rem;
+    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  #event-log-head span:first-child { flex: 1; }
+  #event-log-head button {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-dim); padding: 2px 6px; border-radius: 4px;
+    font-family: inherit; font-size: 0.56rem; cursor: pointer;
+    transition: color .12s, border-color .12s;
+  }
+  #event-log-head button:hover { color: var(--accent2); border-color: var(--accent2); }
+  #event-log-list {
+    flex: 1; overflow-y: auto; padding: 4px 0;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  #event-log-list::-webkit-scrollbar { width: 4px; }
+  #event-log-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .event-item {
+    font-size: 0.6rem;
+    padding: 3px 10px;
+    color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-left: 2px solid transparent;
+  }
+  .event-item:hover { background: rgba(var(--hl-rgb),.02); border-left-color: var(--accent2); }
+  .event-item .ev-time { color: var(--text-dim); opacity: 0.6; margin-right: 6px; }
+  .event-item .ev-op { color: var(--accent2); }
+  .event-item .ev-src { color: var(--accent3); margin-left: 6px; opacity: 0.7; }
+
+
+  /* ── Graph animations ──────────────────────────────────────────────
+     Design principles:
+     • Theme colors only (var(--accent…)). No hardcoded gold/orange.
+     • Short — most one-shots are 400–900ms.
+     • One concept per event: a node ripples, a node fades, a node breathes.
+       No layered stroke jumps + colour flashes + scale changes simultaneously.
+     • Continuous states (temp, self-active) breathe slowly via opacity only.
+     • Glow ring is the workhorse: a fading expanding circle behind the node.
+       The node's own stroke/fill almost never animates. */
+
+  /* Soft expanding ripple — used by appear / pulse / access / self. */
+  @keyframes graphRippleOnce {
+    0%   { opacity: 0.55; transform: scale(0.85); }
+    100% { opacity: 0;    transform: scale(1.55); }
+  }
+  /* Continuous slow breathing — used by self-active and temp. */
+  @keyframes graphBreathe {
+    0%, 100% { opacity: 0.05; transform: scale(1.00); }
+    50%      { opacity: 0.40; transform: scale(1.18); }
+  }
+  /* One-shot quick fade-in for new nodes' main shape. */
+  @keyframes graphAppearShape {
+    0%   { opacity: 0; transform: scale(0.55); }
+    100% { opacity: 1; transform: scale(1.00); }
+  }
+  /* Edge fade-in — no dashes, no flashes. */
+  @keyframes graphEdgeAppear {
+    0%   { opacity: 0; }
+    100% { opacity: 1; }
+  }
+  /* Edge fade-out for deletes. */
+  @keyframes graphEdgeDelete {
+    0%   { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  /* Node fade-out for deletes. */
+  @keyframes graphNodeDelete {
+    0%   { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  /* Continuous fade for temp nodes — reads "transient". */
+  @keyframes graphTempBreathe {
+    0%, 100% { stroke-opacity: 0.55; }
+    50%      { stroke-opacity: 0.22; }
+  }
+
+  /* ── Temp nodes ── */
+  .node-temp { opacity: 0.7; }
+  .node-temp .node-circle { animation: graphTempBreathe 3s ease-in-out infinite; }
+  .node-temp .node-label { font-style: italic; opacity: 0.7; }
+
+  /* ── New node (one-shot appear) ── */
+  .node-new .node-circle {
+    animation: graphAppearShape .42s cubic-bezier(.16, 1, .3, 1) both;
+  }
+  .node-new .glow-ring {
+    fill: var(--accent2);
+    animation: graphRippleOnce .9s ease-out both;
+  }
+
+  /* ── Updated node (one-shot ripple — no stroke jump) ── */
+  .node-pulse .glow-ring {
+    fill: var(--accent2);
+    animation: graphRippleOnce .8s ease-out both;
+  }
+
+  /* ── Accessed node (one-shot ripple, slightly slower & dimmer) ── */
+  .node-accessed .glow-ring {
+    fill: var(--accent);
+    animation: graphRippleOnce 1.1s ease-out both;
+  }
+
+  /* ── New edge (just fade in) ── */
+  .edge-new {
+    animation: graphEdgeAppear .42s ease-out both;
+  }
+
+  /* ── Self-node = F01 "Six-petal" Spore mark.
+     Spec lives in /mnt/user/appdata/anima/design_stuff/spore logo and node/.
+     Six-petal flower-as-graph-node: ink center disc + ink spokes +
+     amber petal-nodes. Geometry is laid out by JS in _upsertNodeVisuals
+     using spec proportions scaled by node radius; this block just
+     handles colour. The composite .node-circle path and the .node-glyph
+     are hidden — the flower elements ARE the icon. */
+  :root {
+    --spore-ink: #1a1a1a;
+    --spore-amber: #c8762c;
+  }
+  /* Dark variant of the F01 mark — F15/F16 in the design deck. Ink
+     inverts to cream so the spokes/center read against the dark
+     background; amber stays put (brand-locked, theme-agnostic). */
+  [data-theme="dark"] {
+    --spore-ink: #f5ead2;
+  }
+  .graph-node[data-node-type="self"] .node-circle {
+    fill: transparent !important;
+    stroke: transparent !important;
+    pointer-events: all;  /* keep hit area for click/select */
+  }
+  .graph-node[data-node-type="self"] .node-glyph { display: none; }
+  .graph-node[data-node-type="self"] .glow-ring  { display: none; }
+  .self-spoke {
+    stroke: var(--spore-ink);
+    stroke-linecap: round;
+    fill: none;
+    pointer-events: none;
+  }
+  .self-petal {
+    fill: var(--spore-amber);
+    pointer-events: none;
+  }
+  .self-center {
+    fill: var(--spore-ink);
+    pointer-events: none;
+  }
+  .self-halo {
+    fill: none;
+    stroke: var(--spore-amber);
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  /* ── Delete (fade out only — DON'T animate transform on <g>; the d3
+     simulation sets transform="translate(x,y)" each tick and a CSS
+     transform would snap it to origin). */
+  .node-deleting { animation: graphNodeDelete .55s ease-in forwards; pointer-events: none; }
+
+  /* Glow ring base style — hidden by default, animations reveal it */
+  .glow-ring { opacity: 0; pointer-events: none; }
+  .node-shape {
+    vector-effect: non-scaling-stroke;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .node-glyph, .node-label, .node-sub-label { pointer-events: none; user-select: none; }
+  .node-glyph {
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    dominant-baseline: middle;
+  }
+  .node-label {
+    opacity: 0;
+    fill: var(--text-dim);
+    transition: opacity 140ms ease, fill 200ms ease;
+  }
+  .node-sub-label { opacity: 0; }
+  .node-deleting .node-shape { stroke: var(--danger) !important; fill: var(--danger) !important; fill-opacity: 0.3 !important; }
+  .node-deleting .node-glyph,
+  .node-deleting .node-label { fill: var(--danger) !important; }
+
+  .edge-deleting {
+    animation: graphEdgeDelete .45s ease-in forwards;
+    stroke: var(--danger) !important;
+  }
+
+  /* Graph edges — use --text (ink2) per dir-petri.jsx skin.edge.
+     --border is too close to the canvas bg in dark mode (both warm earth
+     tones at similar luminance), and the inline attr('stroke', ...) on
+     the JS side doesn't resolve CSS vars, so this rule is the source of
+     truth. EDGE_KIND opacity (0.45/0.6/0.85) lives on the line element. */
+  #graph-svg g.links line {
+    stroke: var(--text);
+    stroke-width: 0.6;
+  }
+  #graph-svg defs #arrowhead path { fill: var(--text); fill-opacity: 0.55; }
+
+  /* Selected node edge highlighting */
+  .edge-highlighted { stroke: var(--accent) !important; stroke-width: 1.4 !important; stroke-opacity: 0.85 !important; }
+  /* Petri focus: dim non-neighbor nodes/edges when something's selected so
+     attention follows the picked node and its one-hop context. */
+  .node-faded { opacity: 0.22; transition: opacity 180ms ease; }
+  .edge-faded { stroke-opacity: 0.10 !important; transition: stroke-opacity 180ms ease; }
+  .focus-edge-label {
+    font-family: var(--font-body); font-size: 9.5px; letter-spacing: 0.04em;
+    fill: var(--text-dim, #8a8aa0); pointer-events: none; user-select: none;
+    /* Halo stroke matches the active canvas surface so labels remain
+       readable in both themes (was hardcoded near-black for dark only). */
+    paint-order: stroke fill; stroke: var(--graph-bg); stroke-opacity: 0.85;
+    stroke-width: 3px; stroke-linejoin: round;
+  }
+  .node-selected-multi .node-circle {
+    stroke: var(--accent2) !important;
+    stroke-width: 2.4 !important;
+    fill-opacity: 0.24 !important;
+  }
+  .node-selected-multi .glow-ring {
+    opacity: 0.22;
+    fill: var(--accent2) !important;
+  }
+  .node-selected-multi .node-glyph,
+  .node-selected-multi .node-label { fill: var(--text) !important; }
+
+  /* ── Drag states ── */
+  .graph-node.node-dragging {
+    cursor: grabbing;
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,.45));
+    pointer-events: none;
+  }
+  .graph-node.node-dragging .node-circle {
+    stroke: var(--accent) !important;
+    stroke-width: 2.5 !important;
+  }
+  .graph-node.node-drag-target .node-circle {
+    stroke: var(--accent) !important;
+    stroke-width: 3 !important;
+    filter: drop-shadow(0 0 6px var(--accent));
+  }
+  .graph-node.node-drag-target .glow-ring {
+    opacity: 0.35;
+    fill: var(--accent) !important;
+  }
+
+  /* ── Drop menu (pops up where a node is dropped onto another) ── */
+  #graph-drop-menu {
+    position: fixed;
+    z-index: 200;
+    min-width: 220px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.55);
+    font-family: var(--font-body);
+    display: none;
+    overflow: hidden;
+  }
+  #graph-drop-menu.open { display: block; }
+  #graph-drop-menu .gdm-title {
+    padding: 8px 10px 6px;
+    font-size: .62rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 85%, transparent);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #graph-drop-menu .gdm-title code { color: var(--accent2); }
+  #graph-drop-menu button {
+    display: block; width: 100%; text-align: left;
+    background: transparent; border: none; color: var(--text);
+    font: inherit; font-size: .72rem;
+    padding: 8px 12px; cursor: pointer;
+  }
+  #graph-drop-menu button:hover { background: rgba(var(--hl-rgb),.04); color: var(--accent2); }
+  #graph-drop-menu button.gdm-danger:hover { color: var(--danger); }
+  #graph-drop-menu .gdm-hint {
+    padding: 0 12px 8px; font-size: .58rem; color: var(--text-dim);
+  }
+

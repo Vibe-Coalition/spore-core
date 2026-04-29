@@ -1,0 +1,179 @@
+/* layout.css — top-level app layout (#chat-panel, panel collapse tabs,
+   #mobile-nav, the @media (max-width:768px) tab-switching block). */
+
+  /* ── Chat Panel (right-side docked sidebar) ── */
+  #chat-panel {
+    position: relative;
+    order: 3;
+    flex-shrink: 0;
+    width: var(--chat-width); min-width: 0; max-width: 70vw;
+    height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh;
+    /* Paper layer (one tier below --panel). Matches PetriChat's
+       `background: t.paper` — flat, no gradient. Atmospheric glow lives
+       only on the graph canvas in the prototype. */
+    background: var(--surface);
+    border: none; border-left: 1px solid var(--border); border-radius: 0;
+    box-shadow: none;
+    display: flex; flex-direction: column; overflow: hidden;
+    z-index: 40;
+    transition: width var(--chat-anim), border-left-color var(--chat-anim);
+  }
+  /* Animate the chat sidebar slide rather than using display:none. */
+  #chat-panel.collapsed {
+    width: 0 !important;
+    border-left-color: transparent;
+  }
+  /* Hide focusable controls inside the collapsed panel so tabbing skips them. */
+  #chat-panel.collapsed > * { visibility: hidden; pointer-events: none; }
+  #chat-panel.fill-remaining { flex: 1; width: auto !important; min-width: 0 !important; border-left: 1px solid var(--border); }
+  /* Resize handle on the LEFT edge of the chat sidebar. */
+  #chat-resize-handle {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 6px; margin-left: -3px; z-index: 50;
+    cursor: col-resize; background: transparent;
+    transition: background .12s;
+    touch-action: none;
+  }
+  #chat-resize-handle::before {
+    content: ''; position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 2px; height: 36px; border-radius: 2px;
+    background: var(--border); opacity: 0; transition: opacity .12s;
+  }
+  #chat-resize-handle:hover::before, #chat-resize-handle.dragging::before { opacity: 1; }
+  #chat-resize-handle:hover, #chat-resize-handle.dragging { background: color-mix(in srgb, var(--accent2) 18%, transparent); }
+  #chat-panel.collapsed #chat-resize-handle { display: none; }
+  body.chat-resizing { cursor: col-resize !important; user-select: none !important; }
+  body.chat-resizing #chat-panel { transition: none !important; }
+  body.chat-resizing #desktop-dock,
+  body.chat-resizing #canvas { transition: none !important; }
+  #right-panel.fill-remaining { flex: 1; width: auto !important; min-width: 0 !important; border-right: none; }
+
+  /* ── Panel Collapse Tabs ── */
+  .collapse-tab {
+    display: none; writing-mode: vertical-rl; text-orientation: mixed;
+    background: var(--surface); border: 1px solid var(--border);
+    cursor: pointer; padding: 12px 4px; font-family: var(--font-body);
+    font-size: .58rem; text-transform: lowercase; letter-spacing: .22em;
+    color: var(--text-dim); transition: color .15s, background .15s;
+    flex-shrink: 0; user-select: none; z-index: 5;
+  }
+  .collapse-tab:hover { color: var(--accent); background: var(--element); }
+  .collapse-tab.active { display: flex; align-items: center; justify-content: center; }
+  #tab-right-panel { order: -2; border-right: none; border-radius: 0; min-height: 80px; }
+  #tab-canvas { order: 0; border-left: none; border-right: none; min-height: 60px; }
+  #tab-chat { order: 2; border-left: none; border-radius: 0; min-height: 80px; }
+  .collapse-chevron {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    width: 16px; height: 32px; background: var(--surface); border: 1px solid var(--border);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    font-size: .55rem; color: var(--text-dim); z-index: 25; transition: all .15s;
+    border-radius: 4px; opacity: 0;
+  }
+  .collapse-chevron:hover { color: var(--accent); border-color: var(--accent); opacity: 1 !important; }
+  #right-panel:hover .collapse-chevron, #chat-panel:hover .collapse-chevron,
+  #canvas:hover .collapse-chevron { opacity: .6; }
+  #chevron-right-panel { right: -8px; border-top-left-radius: 0; border-bottom-left-radius: 0; }
+  #chevron-chat { left: -8px; border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  #chevron-canvas-l { left: 4px; }
+  #chevron-canvas-r { right: 4px; }
+  #canvas.panel-collapsed { display: none; }
+  .panel-collapse-btn {
+    background: none; border: 1px solid var(--border); color: var(--text-dim);
+    cursor: pointer; font-size: .54rem; padding: 2px 8px; border-radius: 4px;
+    font-family: var(--font-body); transition: all .15s; opacity: .5;
+    white-space: nowrap; text-transform: lowercase; letter-spacing: .18em;
+  }
+  .panel-collapse-btn:hover { color: var(--accent); border-color: var(--accent); opacity: 1; }
+  .collapse-tab, .resize-handle, .resize-handle-right { display: none !important; }
+
+
+  /* ── Mobile nav ── */
+  #mobile-nav {
+    display: none; background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 0; flex-shrink: 0;
+  }
+  #mobile-nav button {
+    flex: 1; padding: 10px 0; background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--text-dim); font-size: .82rem;
+    cursor: pointer; transition: all .2s;
+  }
+  #mobile-nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  #mobile-nav button:hover { color: var(--text); }
+
+  /* ── Mobile / Tablet ── */
+  @media (max-width: 768px) {
+    :root { --chat-width: 100%; }
+
+    #app {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      flex-direction: column; overflow: hidden;
+      height: auto;
+    }
+    #mobile-nav { display: flex; flex-shrink: 0; }
+    .resize-handle, .resize-handle-right { display: none !important; }
+    .collapse-tab { display: none !important; }
+
+    #chat-panel {
+      position: static; top: auto; right: auto;
+      width: 100% !important; min-width: 0; max-width: none; flex: 1 1 0%;
+      order: 0; border-left: none; border-right: none;
+      display: none;
+      overflow: hidden; min-height: 0; height: auto; max-height: none; resize: none;
+      border-radius: 0; box-shadow: none; backdrop-filter: none;
+    }
+    #chat-panel.mobile-active {
+      display: flex; flex-direction: column;
+    }
+    #chat-panel.collapsed { display: none !important; }
+
+    #chat-header { padding: 6px 10px; flex-shrink: 0; }
+    #chat-header h2 { font-size: .8rem; }
+    #chat-header .chat-window-actions { display: none; }
+    #chat-header .window-action-legacy { display: flex; }
+    #util-bar { display: none; }
+
+    #chat-messages { flex: 1 1 0%; min-height: 0; overflow-y: auto; }
+    #subagent-container { flex-shrink: 0; overflow: hidden; max-height: 100px; }
+    #agent-activity { flex-shrink: 0; }
+    #chat-input-area {
+      flex-shrink: 0; padding: 8px 10px;
+      padding-bottom: max(8px, env(safe-area-inset-bottom));
+    }
+    #canvas { flex: 1 1 0%; display: none; min-height: 0; }
+    #canvas.mobile-active { display: flex; }
+    #btn-terminal-header { font-size: 0.55rem; padding: 2px 6px; }
+    #desktop-dock { display: none; }
+    #btn-open-node, #btn-toggle-sidebar, #btn-open-logs, #btn-toggle-chat { display: inline-flex; }
+
+    #right-panel {
+      position: static; inset: auto; width: 100% !important; min-width: 0; flex: 1 1 0%; min-height: 0;
+      display: none !important; pointer-events: auto; background: var(--panel); border-right: none;
+    }
+    #right-panel:not(.closed).mobile-active { display: flex !important; }
+    #rp-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .floating-pane-head { display: none; }
+    .rp-pane.window-open, .rp-pane.active {
+      position: static; display: none; border: none; box-shadow: none; border-radius: 0;
+      background: transparent; backdrop-filter: none; resize: none; width: auto !important; height: auto !important;
+      left: auto !important; top: auto !important; bottom: auto !important;
+    }
+    .rp-pane.active { display: flex; }
+    .floating-pane-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+    #controls { bottom: auto; top: 6px; left: 6px; right: auto; }
+    #event-feed { display: none; }
+    #terminal-pane {
+      position: static; left: auto; top: auto; width: auto !important; height: auto !important;
+      min-width: 0; min-height: 0; border: none; border-top: 1px solid var(--border);
+      border-radius: 0; box-shadow: none; backdrop-filter: none; resize: none;
+      background: var(--bg);
+    }
+    #terminal-resize-handle { display: block; }
+
+    .chat-msg { max-width: 100%; font-size: .8rem; }
+    .chat-msg pre { font-size: .7rem; }
+
+    #search { top: 50px; right: 6px; left: 6px; width: auto; }
+  }
+

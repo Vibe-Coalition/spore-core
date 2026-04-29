@@ -3245,6 +3245,33 @@ class WebGateway {
         return;
       }
 
+      // Frontend split — graph-viewer.html sources its CSS/JS from
+      // /styles/*.css and /scripts/*.js. Files live under
+      // src/static/{styles,scripts}/. Cache-busted via ?v=… query
+      // params on the link tags so a redeploy invalidates client caches.
+      if (urlPath.startsWith('/styles/') && /^\/styles\/[a-zA-Z0-9_.-]+\.css$/.test(urlPath)) {
+        try {
+          const filePath = path.join(__dirname, '..', 'static', urlPath);
+          res.writeHead(200, {
+            'Content-Type': 'text/css; charset=utf-8',
+            'Cache-Control': 'public, max-age=300',
+          });
+          res.end(fs.readFileSync(filePath));
+        } catch { res.writeHead(404); res.end('Not found'); }
+        return;
+      }
+      if (urlPath.startsWith('/scripts/') && /^\/scripts\/[a-zA-Z0-9_.-]+\.js$/.test(urlPath)) {
+        try {
+          const filePath = path.join(__dirname, '..', 'static', urlPath);
+          res.writeHead(200, {
+            'Content-Type': 'application/javascript; charset=utf-8',
+            'Cache-Control': 'public, max-age=300',
+          });
+          res.end(fs.readFileSync(filePath));
+        } catch { res.writeHead(404); res.end('Not found'); }
+        return;
+      }
+
       // ── Plugin path aliases (e.g. acorn-cli registers /api/acorn/* →
       // /api/plugins/acorn-cli/*) ──
       // Plugins call api.registerPathAlias('<prefix>', { cors, notFoundCode })

@@ -1,0 +1,117 @@
+/* base.css — palette, fonts, body reset. Loaded first; every other
+   stylesheet inherits these tokens. */
+
+  /* Self-hosted fonts. spacegrotesk.woff2 is the upstream Florian Karsten
+     variable font (wght 300..700) — its nameID 16 (typographic family) is
+     "Space Grotesk", which @font-face below resolves correctly. Absolute
+     /fonts/ paths so the URL works at any page-prefix the proxy serves at. */
+  @font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 400 600; font-display: swap; src: url('/fonts/fraunces.woff2?v=20260425b') format('woff2'); }
+  @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/jetbrainsmono.woff2?v=20260425b') format('woff2'); }
+  @font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/spacegrotesk.woff2?v=20260425b') format('woff2'); }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    /* ── Base palette (Petri dark — warm earth, per dir-petri.jsx PETRI_THEMES.dark) ── */
+    --bg: #131511; --surface: #1a1d17; --panel: #21241d; --element: #2a2d24;
+    --border: #2c2f26; --border-active: #4a4d42; --border-subtle: #1f221b;
+    --graph-hair: #2c2f26;
+    /* Graph canvas — very dark solid base. Glows below land on this
+       and read as actual color hints rather than washes on near-paper. */
+    --graph-bg: #0d100b; --graph-cream: var(--graph-bg);
+    /* Atmospheric glows on the very-dark canvas — pulled back near the
+       prototype's original 0.13/0.16/0.13 alphas. */
+    --graph-glow-1: rgba(227, 139, 95, 0.13);
+    --graph-glow-2: rgba(142, 183, 124, 0.15);
+    --graph-glow-3: rgba(58, 106, 163, 0.12);
+    /* Polarity-aware highlight base: white in dark mode, ink in light.
+       Used by subtle hover/divider overlays so they flip cleanly across
+       themes — see the `rgba(var(--hl-rgb), X)` rules below. */
+    --hl-rgb: 255, 255, 255;
+    --text: #b5b0a0; --text-dim: #706c62; --text-bright: #ece7d5; --text-muted: #5c5849;
+    /* Accent is leaf green per the Petri prototype (the README mis-spec'd
+       this as amber/rust; prototype is the canonical reference). Brand mark
+       in brand.js stays amber #c8762c — locked, theme-agnostic. */
+    --accent: #8eb77c; --accent2: #7aa583; --accent3: #e38b5f;
+    --danger: #d94e3a; --warn: #e38b5f; --success: #8eb77c; --info: #7aa7d6;
+
+    /* ── Markdown tokens ── */
+    --md-heading: #ece7d5; --md-heading-marker: #8eb77c;
+    --md-link: #7aa7d6; --md-link-text: #e38b5f;
+    --md-code: #8eb77c; --md-code-bg: rgba(142,183,124,.08);
+    --md-code-block-bg: rgba(0,0,0,.4); --md-code-block-border: #2c2f26;
+    --md-blockquote: #8a8676; --md-blockquote-border: #8eb77c;
+    --md-emph: #e38b5f; --md-strong: #f4c89a;
+    --md-list-marker: #8eb77c; --md-hr: #2c2f26;
+    --md-table-header-bg: rgba(142,183,124,.06); --md-table-border: #2c2f26;
+
+    /* ── Diff tokens ── */
+    --diff-added: #8eb77c; --diff-added-bg: rgba(142,183,124,.08);
+    --diff-removed: #e89488; --diff-removed-bg: rgba(232,148,136,.07);
+    --diff-context: #8a8676; --diff-hunk: #e38b5f;
+    --diff-line-num: #5c5849;
+
+    /* ── Graph nodes (Petri TYPE_COLORS, dark) ──
+       8 hue families from dir-petri.jsx: coral, slate, plum, leaf,
+       ochre, rose, teal, clay — extended types map onto the same palette. */
+    --node-self: #e38b5f; --node-person: #7aa7d6; --node-channel: #e3b567;
+    --node-concept: #c29ad0; --node-rule: #6fb1b1; --node-project: #d89f6a;
+    --node-tool: #e3b567; --node-memory: #c29ad0; --node-skill: #8eb77c;
+    --node-capability: #6fb1b1; --node-event: #e38b5f; --node-preference: #d67a7a;
+    --node-organization: #d89f6a; --node-topic: #706c62; --node-location: #6fb1b1;
+    --node-default: #706c62;
+    --chat-width: 460px;
+    --chat-anim: 280ms cubic-bezier(.4, 0, .2, 1);
+    /* ── Fonts (Petri direction) ── */
+    --font-body: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+    --font-serif: 'Fraunces', 'Newsreader', Georgia, serif;
+  }
+  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font-body) !important; font-weight: 400; font-variation-settings: 'wght' 450; }
+  /* Force the body font onto common UI chrome with !important so any
+     browser-extension stylesheet (FontAwesome injectors, "Stylus" user
+     styles, accessibility overrides, etc.) that adds rules like
+     `font-family: inherit !important` or `font-family: var(--fa-family-classic) !important`
+     can't make our buttons / inputs / selects look mono. The few places
+     we genuinely need monospace (.chat-msg pre/code, #logs-content,
+     terminal/ACE editor, SSH key textareas, file viewer) override this
+     back to var(--font-mono) further down the cascade. */
+  button, input, select, textarea, label,
+  h1, h2, h3, h4, h5, h6, p, span, div, a, td, th,
+  #view-mode-bar, #view-mode-bar button,
+  #search, #search input,
+  #controls, #controls button, #controls select,
+  #canvas-tabs, .canvas-tab,
+  #fp-toolbar, #fp-body, #fp-breadcrumb, #fp-viewer-header, #fp-viewer-name,
+  .fp-btn, .fp-mount-btn, .fp-source-select,
+  #chat-header, #chat-input,
+  #util-bar, #util-bar button,
+  #stats, #stats-legend,
+  .vlt-type, .vlt-node, .vld-card, .vld-title, .vld-section-title,
+  .floating-pane-title, .floating-pane-btn,
+  .event-log-row, .event-item,
+  #mobile-nav button,
+  #settings-pane, #settings-pane *,
+  #settings-overlay, #settings-overlay *,
+  .settings-section, .settings-section *,
+  .settings-card, .settings-card *,
+  .settings-tab, .settings-note, .settings-hint,
+  .settings-test-btn, .settings-test-result, .settings-test-row,
+  .settings-btn-secondary, .settings-status-line,
+  .modal, .modal *, .gp-search, .gp-result {
+    font-family: var(--font-body) !important;
+  }
+  /* Genuine code/log/terminal/SSH-key surfaces — restore mono after the
+     blanket override above. Each rule below has equal-or-higher specificity
+     than the catch-all, so it wins. */
+  #fp-viewer-content pre, #fp-viewer-content pre code, #fp-viewer-content pre * ,
+  #fp-edit-highlight, #fp-edit-highlight code, #fp-edit-highlight *,
+  #fp-editor,
+  #logs-content, #logs-content *,
+  #sk-viewer-content code,
+  #code-viewer-content code, #code-viewer-content code *,
+  .chat-msg pre, .chat-msg pre code, .chat-msg pre *,
+  .chat-msg code, .chat-msg .diff-block, .chat-msg .diff-block * {
+    font-family: var(--font-mono) !important;
+  }
+
+  /* Login lives at its own /login page now (static/login.html). */
+

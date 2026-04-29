@@ -1,0 +1,7 @@
+/* mobile.css — phone/tablet overrides. Loaded LAST so its @media rules
+   layer over component-specific styles.
+
+   Empty during the split refactor. Future mobile work lands HERE only — see
+   /root/.claude/plans/elegant-frolicking-wilkes.md (Phase 4: mobile pass).
+*/
+
