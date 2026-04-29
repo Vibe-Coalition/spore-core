@@ -16,6 +16,27 @@
   const tabs = document.querySelectorAll('#m-tab-bar button[data-m-view]');
   if (!tabs.length) return; // not mobile shell — bail
 
+  // ── Suppress desktop right-panel auto-restore ──
+  // Desktop's panels.js#restorePanelState() reopens whichever pane (files,
+  // logs, skills, node) the user last had open. On mobile that pane is a
+  // full-screen slide-up sheet, which means the page launches with the
+  // file manager covering everything. Clear floatingTabs / activeRpTab
+  // before boot.js resumes (this IIFE runs during the await yield in
+  // boot.js, BEFORE showApp() → initApp() → restorePanelState() runs).
+  try {
+    const STATE_KEY = '_panelState';
+    const s = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
+    if ((s.floatingTabs && s.floatingTabs.length) || s.activeRpTab) {
+      delete s.floatingTabs;
+      delete s.activeRpTab;
+      localStorage.setItem(STATE_KEY, JSON.stringify(s));
+    }
+  } catch {}
+  // Force closed now (idempotent — restorePanelState's else branch
+  // does the same when floatingTabs is empty, but if anything else
+  // touched the class earlier we want to override it).
+  document.getElementById('right-panel')?.classList.add('closed');
+
   // ── Tab bar ──
   function setView(view) {
     body.classList.remove('m-view-chat', 'm-view-graph', 'm-view-settings');
