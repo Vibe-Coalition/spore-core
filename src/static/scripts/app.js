@@ -2609,8 +2609,17 @@ function _obUpdateFinishGate() {
   const btn = document.getElementById('ob-next');
   if (!btn) return;
   const total = _obStepCount();
-  if (_obStep !== total) return; // gate only applies on the Finish step
-  if (_obMode !== 'operator') return;
+  // Off the Finish step, always re-enable: the gate only applies on
+  // the very last step. Without this, navigating back from the Finish
+  // step leaves btn.disabled=true stuck through every prior step,
+  // until the operator either finds the Finish step again with a
+  // verified provider OR refreshes the page. Only Skip stays usable
+  // since it has its own button.
+  if (_obStep !== total || _obMode !== 'operator') {
+    btn.disabled = false;
+    btn.title = '';
+    return;
+  }
   const ok = _obIsAnyProviderVerified();
   btn.disabled = !ok;
   btn.title = ok ? '' : 'Run the test on at least one provider before finishing.';
