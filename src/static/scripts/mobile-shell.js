@@ -60,31 +60,13 @@
     tabs.forEach(t => t.classList.toggle('active', t.dataset.mView === view));
     const title = document.getElementById('m-title');
     if (title) {
-      title.textContent = view === 'chat' ? 'SPORE'
-        : view === 'graph' ? 'Graph'
-        : 'Settings';
+      title.textContent = view === 'chat' ? 'spore'
+        : view === 'graph' ? 'graph'
+        : 'settings';
     }
-    closeDrawer();
   }
   tabs.forEach(t => t.addEventListener('click', () => setView(t.dataset.mView)));
   setView('chat');
-
-  // ── Drawer ──
-  function openDrawer() { body.classList.add('m-drawer-open'); }
-  function closeDrawer() { body.classList.remove('m-drawer-open'); }
-
-  document.getElementById('m-menu-btn')?.addEventListener('click', openDrawer);
-  document.getElementById('m-drawer-close')?.addEventListener('click', closeDrawer);
-  document.getElementById('m-drawer-scrim')?.addEventListener('click', closeDrawer);
-
-  document.getElementById('m-drawer-theme')?.addEventListener('click', () => {
-    if (typeof window.toggleTheme === 'function') window.toggleTheme();
-    syncThemeIcon();
-  });
-  document.getElementById('m-drawer-graphs')?.addEventListener('click', () => {
-    closeDrawer();
-    document.getElementById('tmi-graphs')?.click();
-  });
 
   // ── Header theme toggle ──
   document.getElementById('m-theme-btn')?.addEventListener('click', () => {

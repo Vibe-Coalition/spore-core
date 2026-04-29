@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="styles/mobile.css?v=20260429c">
 <!-- mobile-shell.css overrides everything above when body.mobile-shell.
      Loaded ONLY by mobile-viewer.html; desktop never sees it. -->
-<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429g">
+<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429h">
 </head>
 <body class="mobile-shell">
 <!-- Mobile chrome — sits above the desktop body content. CSS hides the
@@ -24,44 +24,25 @@
      styles #chat-panel and #canvas to fill the gap between header and
      tab bar. The element IDs the JS modules expect all still exist. -->
 <header id="m-header" role="banner">
-  <button id="m-menu-btn" type="button" aria-label="Menu">☰</button>
-  <h1 id="m-title">SPORE</h1>
+  <span class="m-header-spacer" aria-hidden="true"></span>
+  <h1 id="m-title">spore</h1>
   <button id="m-theme-btn" type="button" aria-label="Toggle theme" title="Toggle light / dark theme">🌙</button>
 </header>
 
-<!-- Slide-out drawer (left). Hidden by default; #m-menu-btn toggles
-     body.m-drawer-open to slide it in. -->
-<aside id="m-drawer" aria-hidden="true">
-  <div id="m-drawer-head">
-    <span id="m-drawer-title">SPORE</span>
-    <button id="m-drawer-close" type="button" aria-label="Close menu">×</button>
-  </div>
-  <div id="m-drawer-body">
-    <button id="m-drawer-theme" type="button" class="m-drawer-row">
-      <span class="m-drawer-icon">🎨</span>
-      <span class="m-drawer-label">Toggle theme</span>
-    </button>
-    <button id="m-drawer-graphs" type="button" class="m-drawer-row">
-      <span class="m-drawer-icon">📚</span>
-      <span class="m-drawer-label">Graphs</span>
-    </button>
-    <a id="m-drawer-desktop" class="m-drawer-row" href="../graph">
-      <span class="m-drawer-icon">🖥</span>
-      <span class="m-drawer-label">Desktop view</span>
-    </a>
-  </div>
-</aside>
-<div id="m-drawer-scrim" aria-hidden="true"></div>
-
 <nav id="m-tab-bar" role="navigation">
-  <button data-m-view="chat" class="active" type="button">
-    <span class="m-tab-icon">💬</span><span class="m-tab-label">Chat</span>
+  <button data-m-view="chat" class="active" type="button" aria-label="Chat">
+    <span class="m-tab-icon" aria-hidden="true">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M2.5 4.5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H7l-3 2.5v-2.5h-.5a1 1 0 0 1-1-1z"/></svg>
+    </span>
+    <span class="m-tab-label">chat</span>
   </button>
-  <button data-m-view="graph" type="button">
-    <span class="m-tab-icon">📊</span><span class="m-tab-label">Graph</span>
+  <button data-m-view="graph" type="button" aria-label="Graph">
+    <span class="m-tab-icon" aria-hidden="true">◎</span>
+    <span class="m-tab-label">graph</span>
   </button>
-  <button data-m-view="settings" type="button">
-    <span class="m-tab-icon">⚙</span><span class="m-tab-label">Settings</span>
+  <button data-m-view="settings" type="button" aria-label="Settings">
+    <span class="m-tab-icon" aria-hidden="true">⚙</span>
+    <span class="m-tab-label">settings</span>
   </button>
 </nav>
 
@@ -855,7 +836,7 @@
 
 <!-- Mobile tab-bar wiring. Runs after every module has loaded so the
      desktop functions it calls (openSettingsPanel, etc.) are in scope. -->
-<script defer src="scripts/mobile-shell.js?v=20260429d"></script>
+<script defer src="scripts/mobile-shell.js?v=20260429e"></script>
 
 <!-- New Graph Modal -->
 <div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">

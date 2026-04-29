@@ -261,9 +261,13 @@ body.mobile-shell #m-composer #chat-stop {
   font-family: var(--font-body);
   font-size: 0.92rem;
   font-weight: 500;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.18em;
   text-transform: lowercase;
   color: var(--text-bright);
+}
+#m-header .m-header-spacer {
+  width: 44px; height: 44px;
+  flex: 0 0 44px;
 }
 #m-header button {
   width: 44px; height: 44px;
@@ -304,78 +308,21 @@ body.mobile-shell #m-composer #chat-stop {
 }
 #m-tab-bar button.active { color: var(--accent); }
 #m-tab-bar button:active { background: var(--element); }
-#m-tab-bar .m-tab-icon { font-size: 18px; line-height: 1; font-family: var(--font-body); }
+#m-tab-bar .m-tab-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 20px; line-height: 1;
+  font-family: var(--font-body);
+  width: 22px; height: 22px;
+}
+#m-tab-bar .m-tab-icon svg {
+  width: 20px; height: 20px;
+  display: block;
+}
 #m-tab-bar .m-tab-label {
   font-size: 0.58rem;
   letter-spacing: 0.16em;
   text-transform: lowercase;
 }
-
-/* ────────────────────────────────────────────────────────────────────
-   DRAWER (left slide-in)
-   ──────────────────────────────────────────────────────────────────── */
-
-#m-drawer {
-  position: fixed;
-  top: 0; left: 0; bottom: 0;
-  width: 80vw; max-width: 320px;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  transform: translateX(-100%);
-  transition: transform 0.22s ease;
-  z-index: 110;
-  display: flex; flex-direction: column;
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
-}
-body.m-drawer-open #m-drawer { transform: translateX(0); }
-#m-drawer-scrim {
-  position: fixed; inset: 0;
-  background: rgba(0,0,0,0.5);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.22s ease;
-  z-index: 105;
-}
-body.m-drawer-open #m-drawer-scrim {
-  opacity: 1;
-  pointer-events: auto;
-}
-#m-drawer-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
-}
-#m-drawer-title {
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  letter-spacing: 0.16em;
-  text-transform: lowercase;
-  color: var(--text-bright);
-}
-#m-drawer-close {
-  width: 36px; height: 36px;
-  background: transparent; border: none;
-  font-size: 22px; color: var(--text);
-  cursor: pointer; border-radius: 8px;
-}
-#m-drawer-body { flex: 1; overflow-y: auto; padding: 8px 0; }
-.m-drawer-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 14px 16px;
-  width: 100%;
-  border: none; background: transparent;
-  color: var(--text);
-  font-family: var(--font-body);
-  font-size: 0.85rem;
-  text-align: left;
-  text-decoration: none;
-  cursor: pointer;
-  min-height: 48px;
-}
-.m-drawer-row:active { background: var(--element); }
-.m-drawer-icon { font-size: 16px; flex: 0 0 24px; text-align: center; opacity: 0.7; }
-.m-drawer-label { flex: 1; }
 
 /* ────────────────────────────────────────────────────────────────────
    ONBOARDING WIZARD — full screen.
