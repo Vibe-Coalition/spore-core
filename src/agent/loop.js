@@ -11,6 +11,30 @@
 const { MultiProvider, detectBackend } = require('../providers');
 const graphEvents = require('../graph/events');
 
+// ── Budget-scaling constants ─────────────────────────────────────────
+// All message-budget fractions are expressed against the active model's
+// contextWindow. Documented here so changes are explicit and reviewable
+// instead of buried in expressions inside the loop body.
+//
+// Compaction-trigger thresholds:
+const CTX_HARD_CEILING_FRACTION   = 0.85;  // compact when systemTokens+msgTokens crosses this
+const CTX_HARD_CEILING_FALLBACK   = 0.75;  // when neither modelLimits.compactAt nor 0.85 ceiling is set
+const CTX_SOFT_BUDGET_CASUAL      = 0.05;  // casual chat in-loop trigger — 5% of window
+const CTX_SOFT_BUDGET_COMPLEX     = 0.20;  // complex/coding in-loop trigger — 20% of window
+// Pressure warnings (caution / urgent) along the way to compaction:
+const CTX_PRESSURE_CAUTION        = 0.70;  // warn at 70% of compactionThreshold
+const CTX_PRESSURE_URGENT         = 0.90;  // urgent warn at 90% of compactionThreshold
+// Compaction internals:
+const COMPACT_HEAD_GUARD_FRACTION = 0.5;   // if head messages alone > N% of target, drop to single-msg head
+// Floors below the dynamic scaling (sized for 200k Sonnet/Haiku
+// historic behavior). Operators can override via config; setting any
+// to 0 effectively disables the floor for that tier.
+const SOFT_BUDGET_FLOOR_CASUAL    = 30000;
+const SOFT_BUDGET_FLOOR_COMPLEX   = 80000;
+// Default contextWindow when the active model has no modelLimits entry
+// AND no global config.contextWindow override.
+const DEFAULT_CONTEXT_WINDOW      = 200000;
+
 class AgentLoop {
   constructor(config, logger, graphContext, sessionManager, toolSystem, learner) {
     this.config = config;
@@ -455,15 +479,15 @@ class AgentLoop {
     const _modelLimit = this._lookupModelLimit(_activeForLimits);
     const contextWindow = (_modelLimit?.contextWindow && Number(_modelLimit.contextWindow) > 0)
       ? Number(_modelLimit.contextWindow)
-      : 200000;
+      : DEFAULT_CONTEXT_WINDOW;
     const configuredCeiling = (_modelLimit?.compactAt && Number(_modelLimit.compactAt) > 0)
       ? Number(_modelLimit.compactAt)
-      : Math.floor(contextWindow * 0.85);
+      : Math.floor(contextWindow * CTX_HARD_CEILING_FRACTION);
     const hardCeiling = Math.min(
       contextWindow,
       configuredCeiling && configuredCeiling > 0
         ? configuredCeiling
-        : Math.floor(contextWindow * 0.75)
+        : Math.floor(contextWindow * CTX_HARD_CEILING_FALLBACK)
     );
     const systemTokens = this._estimateTokens(systemPrompt);
     let msgTokens = messages.reduce((sum, m) => sum + this._estimateTokens(
@@ -473,8 +497,26 @@ class AgentLoop {
     // Complexity-aware message budget: casual chat gets a tight budget so
     // simple greetings don't drag 30K of history. Complex requests get more
     // room. The hard ceiling stays as a safety cap for multi-iteration loops.
-    const casualBudget = this.config.casualMessageBudget || 30000;
-    const complexBudget = this.config.complexMessageBudget || 80000;
+    //
+    // Both soft budgets scale with the model's actual context window. The
+    // 30k/80k defaults were sized for 200k Sonnet/Haiku — fixed values
+    // would compact a 1M-context Opus 4.7 session at ~3-8% of capacity,
+    // dropping mid-session state the model could easily hold in working
+    // memory. We take the MAX of the configured floor and a percentage
+    // of contextWindow so:
+    //   - small-context models (Sonnet 200k) keep their historic 30k/80k
+    //     behavior (200k * 5%/20% = 10k/40k, both below the floor),
+    //   - large-context models (Opus 4.7 1M) get 50k/200k respectively,
+    //     letting deep coding sessions accumulate state appropriate to
+    //     the model's reach.
+    // Operators can still pin explicit budgets via casualMessageBudget /
+    // complexMessageBudget; setting either to 0 disables the floor.
+    const casualFloor  = this.config.casualMessageBudget  ?? SOFT_BUDGET_FLOOR_CASUAL;
+    const complexFloor = this.config.complexMessageBudget ?? SOFT_BUDGET_FLOOR_COMPLEX;
+    const ctxScaledCasual  = Math.floor(contextWindow * CTX_SOFT_BUDGET_CASUAL);
+    const ctxScaledComplex = Math.floor(contextWindow * CTX_SOFT_BUDGET_COMPLEX);
+    const casualBudget  = Math.max(casualFloor,  ctxScaledCasual);
+    const complexBudget = Math.max(complexFloor, ctxScaledComplex);
     const softBudget = isCasualChat ? casualBudget : complexBudget;
 
     if (msgTokens > softBudget) {
@@ -572,8 +614,8 @@ class AgentLoop {
 
       // Progressive context pressure warnings tied to compaction threshold
       const compactionThreshold = hardCeiling;
-      const cautionAt = Math.floor(compactionThreshold * 0.70);
-      const urgentAt = Math.floor(compactionThreshold * 0.90);
+      const cautionAt = Math.floor(compactionThreshold * CTX_PRESSURE_CAUTION);
+      const urgentAt  = Math.floor(compactionThreshold * CTX_PRESSURE_URGENT);
       const currentTokens = systemTokens + msgTokens;
       if (contextPressureLevel < 2 && currentTokens > urgentAt) {
         contextPressureLevel = 2;
@@ -2496,7 +2538,7 @@ class AgentLoop {
     }
 
     let headTokens = head.reduce((s, m) => s + _tokOf(m), 0);
-    if (headTokens > targetTokens * 0.5) {
+    if (headTokens > targetTokens * COMPACT_HEAD_GUARD_FRACTION) {
       head = messages.slice(0, 1);
       middle = messages.slice(1, messages.length - tailProtect);
       headTokens = head.reduce((s, m) => s + _tokOf(m), 0);

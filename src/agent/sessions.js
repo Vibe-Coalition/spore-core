@@ -20,6 +20,14 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
+// ── Compaction-threshold scaling constants ───────────────────────────
+// Mirror the budget scaling in loop.js so the per-insert (this file) and
+// in-loop (loop.js) paths agree on when to start compacting. Operator can
+// still pin an absolute value via config.compactTokenThreshold.
+const COMPACT_THRESHOLD_FRACTION = 0.20; // 20% of largest model's contextWindow
+const COMPACT_THRESHOLD_FLOOR    = 80000; // historic floor — small-ctx deployments don't regress
+const DEFAULT_CONTEXT_WINDOW     = 200000;
+
 class SessionManager {
   constructor(config, logger, learner) {
     this.config = config;
@@ -252,7 +260,14 @@ class SessionManager {
     
     // Token-aware compaction: estimate session tokens and compact when needed.
     // Runs async to avoid blocking the tool execution loop.
-    const tokenThreshold = this.config.compactTokenThreshold || 80000;
+    //
+    // Threshold scales with the LARGEST model's contextWindow we know
+    // about (across modelLimits + the global config.contextWindow).
+    // 80k default was sized for 200k Sonnet/Haiku — Opus 4.7 with 1M ctx
+    // would otherwise compact at 8% of capacity. The floor stays at 80k
+    // so small-context-only deployments keep historic behavior.
+    const tokenThreshold = this._compactTokenThreshold ?? this._computeCompactTokenThreshold();
+    if (this._compactTokenThreshold == null) this._compactTokenThreshold = tokenThreshold;
     const sessionTokens = this._estimateSessionTokens(key);
     if (sessionTokens > tokenThreshold && !this._compacting?.has(key)) {
       if (!this._compacting) this._compacting = new Set();
@@ -541,6 +556,29 @@ class SessionManager {
   _estimateTokens(text) {
     if (!text) return 0;
     return Math.ceil(text.length / 3.5);
+  }
+
+  // Computes the per-insert async compaction threshold once per
+  // SessionManager. Operator can pin via config.compactTokenThreshold;
+  // otherwise we scale with the largest contextWindow we know about
+  // across modelLimits[] + config.contextWindow. The floor is the
+  // historic 80k so small-context-only deployments don't regress.
+  _computeCompactTokenThreshold() {
+    const explicit = this.config.compactTokenThreshold;
+    if (explicit && Number.isFinite(Number(explicit))) {
+      return Number(explicit);
+    }
+    let maxCtx = Number(this.config.contextWindow) || DEFAULT_CONTEXT_WINDOW;
+    for (const lim of Object.values(this.config.modelLimits || {})) {
+      const c = Number(lim?.contextWindow) || 0;
+      if (c > maxCtx) maxCtx = c;
+    }
+    const scaled = Math.floor(maxCtx * COMPACT_THRESHOLD_FRACTION);
+    const threshold = Math.max(COMPACT_THRESHOLD_FLOOR, scaled);
+    if (this.log?.info) {
+      this.log.info(`[sessions] compactTokenThreshold = ${threshold} (ctx=${maxCtx}, fraction=${COMPACT_THRESHOLD_FRACTION}, floor=${COMPACT_THRESHOLD_FLOOR})`);
+    }
+    return threshold;
   }
 
   _estimateSessionTokens(key) {
