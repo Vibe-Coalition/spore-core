@@ -193,6 +193,14 @@ function applyGraphTheme(name) {
   } catch (e) { console.warn('theme retint failed', e); }
 }
 
+// Auth headers stub — currently empty (auth is cookie-based). Lives in core.js
+// because tools-menu.js calls it at top level (Enhanced Recall init fetch),
+// and tools-menu.js loads before voice.js where it used to be defined. Plugin
+// frontend assets also depend on it via window.authHeaders.
+function authHeaders() {
+  return {};
+}
+
 async function toggleTheme() {
   const next = _currentTheme === 'light' ? 'dark' : 'light';
   applyGraphTheme(next);

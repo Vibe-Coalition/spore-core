@@ -373,10 +373,6 @@ async function loadAgentIdentity() {
   } catch {}
 }
 
-function authHeaders() {
-  return {};
-}
-
 btnVoiceCall.addEventListener('click', async () => {
   if (voiceCallActive) {
     stopVoiceCall();
