@@ -10,7 +10,6 @@
   "graphDbPath": "./data/graph.db",
   "maxSessionMessages": 200,
   "compactTokenThreshold": 120000,
-  "compactKeepTail": 20,
   "sessionIdleTimeoutMinutes": 60,
   "sessionDailyResetHour": 4,
   "maxMessageLength": 2000,

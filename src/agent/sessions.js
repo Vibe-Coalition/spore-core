@@ -1,16 +1,14 @@
 /**
  * sessions.js — Session Manager
- * 
- * SQLite-backed conversation history per channel/user.
- * Handles context window limits with compaction.
- * 
+ *
+ * SQLite-backed conversation history per channel/user. Storage layer
+ * only: insert / select / delete + a maxSessionMessages hard cap on
+ * insert. Token-aware smart compaction lives in agent/loop.js — see
+ * AgentLoop._compactHistory.
+ *
  * Session key format:
  *   channel:{channelId}  — guild channel sessions
  *   dm:{userId}          — direct message sessions
- * 
- * PERF PATCHES (2026-03-20):
- *   - Enforce maxSessionMessages on every insert (trim oldest immediately)
- *   - Truncate consumed tool results after model has processed them
  */
 
 const graphEvents = require('../graph/events');
@@ -20,13 +18,11 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-// ── Compaction-threshold scaling constants ───────────────────────────
-// Mirror the budget scaling in loop.js so the per-insert (this file) and
-// in-loop (loop.js) paths agree on when to start compacting. Operator can
-// still pin an absolute value via config.compactTokenThreshold.
-const COMPACT_THRESHOLD_FRACTION = 0.20; // 20% of largest model's contextWindow
-const COMPACT_THRESHOLD_FLOOR    = 80000; // historic floor — small-ctx deployments don't regress
-const DEFAULT_CONTEXT_WINDOW     = 200000;
+// SessionManager owns dumb storage: insert/select/delete + a
+// maxSessionMessages hard cap. Smart compaction (head/tail protect,
+// LLM summary, model-aware budgets) lives in agent/loop.js so the
+// model-routing and prompt-mode context that drives those decisions
+// stays at one layer.
 
 class SessionManager {
   constructor(config, logger, learner) {
@@ -260,29 +256,11 @@ class SessionManager {
       `).run(key, excess);
       this.log.debug(`[session-trim] Trimmed ${excess} oldest messages from ${key} (${count} → ${maxMessages})`);
     }
-    
-    // Token-aware compaction: estimate session tokens and compact when needed.
-    // Runs async to avoid blocking the tool execution loop.
-    //
-    // Threshold scales with the LARGEST model's contextWindow we know
-    // about (across modelLimits + the global config.contextWindow).
-    // 80k default was sized for 200k Sonnet/Haiku — Opus 4.7 with 1M ctx
-    // would otherwise compact at 8% of capacity. The floor stays at 80k
-    // so small-context-only deployments keep historic behavior.
-    const tokenThreshold = this._compactTokenThreshold ?? this._computeCompactTokenThreshold();
-    if (this._compactTokenThreshold == null) this._compactTokenThreshold = tokenThreshold;
-    const sessionTokens = this._estimateSessionTokens(key);
-    if (sessionTokens > tokenThreshold && !this._compacting?.has(key)) {
-      if (!this._compacting) this._compacting = new Set();
-      this._compacting.add(key);
-      // _compact returns a promise that resolves after the async summary
-      // tail completes — keep the lock held until then so a second
-      // compaction can't start concurrently for the same key.
-      Promise.resolve()
-        .then(() => this._compact(key))
-        .catch((e) => this.log.warn(`[compact] Error compacting ${key}: ${e.message}`))
-        .finally(() => this._compacting.delete(key));
-    }
+    // Token-aware smart compaction (head/tail protect + LLM summary)
+    // lives in loop.js — that's the only path that knows which model
+    // is about to run, what mode the turn is in, and which summary
+    // wrapper to use. SessionManager just keeps maxSessionMessages as
+    // a dumb hard cap so a runaway loader never explodes the DB.
   }
 
   /**
@@ -561,233 +539,6 @@ class SessionManager {
     return Math.ceil(text.length / 3.5);
   }
 
-  // Computes the per-insert async compaction threshold once per
-  // SessionManager. Operator can pin via config.compactTokenThreshold;
-  // otherwise we scale with the largest contextWindow we know about
-  // across modelLimits[] + config.contextWindow. The floor is the
-  // historic 80k so small-context-only deployments don't regress.
-  _computeCompactTokenThreshold() {
-    const explicit = this.config.compactTokenThreshold;
-    if (explicit && Number.isFinite(Number(explicit))) {
-      return Number(explicit);
-    }
-    let maxCtx = Number(this.config.contextWindow) || DEFAULT_CONTEXT_WINDOW;
-    for (const lim of Object.values(this.config.modelLimits || {})) {
-      const c = Number(lim?.contextWindow) || 0;
-      if (c > maxCtx) maxCtx = c;
-    }
-    const scaled = Math.floor(maxCtx * COMPACT_THRESHOLD_FRACTION);
-    const threshold = Math.max(COMPACT_THRESHOLD_FLOOR, scaled);
-    if (this.log?.info) {
-      this.log.info(`[sessions] compactTokenThreshold = ${threshold} (ctx=${maxCtx}, fraction=${COMPACT_THRESHOLD_FRACTION}, floor=${COMPACT_THRESHOLD_FLOOR})`);
-    }
-    return threshold;
-  }
-
-  _estimateSessionTokens(key) {
-    const row = this.db.prepare(
-      'SELECT SUM(LENGTH(content)) as total_chars FROM messages WHERE session_key = ?'
-    ).get(key);
-    return Math.ceil((row?.total_chars || 0) / 3.5);
-  }
-
-  /**
-   * Compact a session: protect first 2 messages + last N messages,
-   * extract knowledge from discarded messages, then LLM-summarize them.
-   */
-  _compact(key) {
-    const allMessages = this.db.prepare(
-      'SELECT id, role, content FROM messages WHERE session_key = ? ORDER BY id ASC'
-    ).all(key);
-
-    if (allMessages.length <= 6) return;
-
-    const protectHead = Math.min(2, allMessages.length);
-    const keepTailCount = this.config.compactKeepTail || 20;
-    let protectTail = Math.min(keepTailCount, allMessages.length - protectHead);
-
-    // Adjust boundaries so we never split a tool_use/tool_result pair.
-    const _hasToolUse = (msg) => {
-      try {
-        const p = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;
-        return Array.isArray(p) && p.some(b => b.type === 'tool_use');
-      } catch { return false; }
-    };
-    const _hasToolResult = (msg) => {
-      try {
-        const p = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;
-        return Array.isArray(p) && p.some(b => b.type === 'tool_result');
-      } catch { return false; }
-    };
-
-    // Head side: if last head message has tool_use, pull its tool_result in too
-    let headEnd = protectHead;
-    while (headEnd < allMessages.length - 2 && _hasToolUse(allMessages[headEnd - 1])) {
-      headEnd++;
-      if (!_hasToolResult(allMessages[headEnd - 1])) continue;
-      break;
-    }
-
-    // Tail side: walk the cut point back until the first tail message isn't an orphaned tool_result
-    let cutIdx = allMessages.length - protectTail;
-    if (cutIdx < headEnd) cutIdx = headEnd;
-    while (cutIdx > headEnd && cutIdx < allMessages.length) {
-      const msg = allMessages[cutIdx];
-      if (msg.role === 'user' && _hasToolResult(msg)) {
-        cutIdx--;
-      } else {
-        break;
-      }
-    }
-
-    const head = allMessages.slice(0, headEnd);
-    let toRemove = allMessages.slice(headEnd, cutIdx);
-    const tail = allMessages.slice(cutIdx);
-
-    if (toRemove.length === 0) return;
-
-    // Filter out useless messages (acks, cleared tool stubs, blanks).
-    // They get DELETED from the DB without contributing to the summary.
-    // Same _isMessageUseless logic as loop.js's _compactHistory; lifted
-    // inline here because sessions.js doesn't share the AgentLoop class.
-    const _isUseless = (m) => this._sessionsCompactIsMessageUseless(m);
-    const droppedUseless = [];
-    toRemove = toRemove.filter(m => {
-      if (_isUseless(m)) {
-        droppedUseless.push(m);
-        return false;
-      }
-      return true;
-    });
-    if (droppedUseless.length > 0) {
-      // Delete the useless rows from DB outright — they vanish without
-      // a summary trace.
-      const ids = droppedUseless.map(m => m.id);
-      const placeholders = ids.map(() => '?').join(',');
-      this.db.prepare(
-        `DELETE FROM messages WHERE session_key = ? AND id IN (${placeholders})`
-      ).run(key, ...ids);
-      this.log.info(`[compact-sessions] Skipped ${droppedUseless.length} useless messages from summarization (acks, cleared stubs, blanks)`);
-    }
-
-    if (toRemove.length === 0) return;
-
-    this.log.info(`Compacting ${key}: ${allMessages.length} msgs, removing ${toRemove.length} (+${droppedUseless.length} useless), keeping ${head.length}+${tail.length}`);
-
-    // Pre-compaction knowledge flush — extract facts before discarding
-    if (this.learner) {
-      const exchange = toRemove.map(m => {
-        const c = typeof m.content === 'string' ? m.content : '[structured]';
-        const limit = m.role === 'user' ? 2000 : 500;
-        return `${m.role}: ${c.substring(0, limit)}`;
-      }).join('\n');
-      this.learner.extractAndLearn(exchange, null, {})
-        .catch(e => this.log.error('[compaction] Pre-flush extraction error:', e.message));
-    }
-
-    // Retrieve previous summary for iterative update
-    if (!this._compactionSummaries) this._compactionSummaries = new Map();
-    const previousSummary = this._compactionSummaries.get(key) || null;
-
-    const summaryPromise = this.learner
-      ? this.learner.summarizeForCompaction(toRemove, previousSummary)
-      : Promise.resolve(this._fallbackSummary(toRemove));
-
-    const placeholderRow = this.db.prepare(
-      `INSERT INTO messages (session_key, role, content) VALUES (?, 'user', ?)`
-    ).run(key, `[Compacting ${toRemove.length} messages...]`);
-    const summaryRowId = placeholderRow.lastInsertRowid;
-
-    const idsToRemove = toRemove.map(m => m.id);
-    if (idsToRemove.length > 0) {
-      const placeholders = idsToRemove.map(() => '?').join(',');
-      this.db.prepare(
-        `DELETE FROM messages WHERE session_key = ? AND id IN (${placeholders})`
-      ).run(key, ...idsToRemove);
-    }
-
-    return summaryPromise.then(summary => {
-      if (summary) {
-        // Cap at 200 sessions (insertion-order eviction).
-        if (!this._compactionSummaries.has(key) && this._compactionSummaries.size >= 200) {
-          this._compactionSummaries.delete(this._compactionSummaries.keys().next().value);
-        }
-        this._compactionSummaries.set(key, summary);
-        // Same wrapper rewrite as loop.js _compactHistory — frame the
-        // summary as ACTIVE working memory, not background context.
-        // The old wording made the agent treat compaction as a reset.
-        this.db.prepare(`UPDATE messages SET content = ? WHERE id = ?`)
-          .run(`[ACTIVE SESSION STATE — ${toRemove.length} earlier turns compressed below. THIS IS YOUR WORKING MEMORY for the rest of this session: the user's goal, decisions already made, files touched, what's done, what's in progress, and what's next. The messages after this block are the most recent exchanges — combine them with the state here to know where you are. DO NOT restart the conversation or treat this as background; continue the work in progress.]\n${summary}\n[END SESSION STATE]`, summaryRowId);
-      } else {
-        this.db.prepare(`DELETE FROM messages WHERE id = ?`).run(summaryRowId);
-      }
-    }).catch(e => {
-      this.log.error('[compaction] Summary injection failed:', e.message);
-      this.db.prepare(`DELETE FROM messages WHERE id = ?`).run(summaryRowId);
-    });
-  }
-
-  _fallbackSummary(messages) {
-    if (!messages || messages.length === 0) return null;
-    const topics = new Set();
-    for (const msg of messages) {
-      const content = typeof msg.content === 'string' ? msg.content : '';
-      const snippet = content.substring(0, 120).trim();
-      if (snippet) topics.add(snippet);
-    }
-    return `${messages.length} messages compacted. Topics: ${[...topics].slice(0, 5).join('; ')}`;
-  }
-
-  // Mirror of AgentLoop._isMessageUseless. SessionManager rows store
-  // content as a JSON string (or plain string), so we parse before
-  // applying the same logic. Used by _compact above to drop useless
-  // rows without burning summarizer tokens on them.
-  _sessionsCompactIsMessageUseless(row) {
-    if (!row) return true;
-    let c = row.content;
-    if (c == null) return true;
-    if (typeof c === 'string') {
-      // Try parsing as JSON-encoded array (tool blocks); if not, treat as text.
-      const trimmed = c.trim();
-      if (trimmed === '') return true;
-      if (trimmed === '[Acknowledged.]') return true;
-      if (this._sessionsCompactHasMarker(trimmed)) return false;
-      if (trimmed.startsWith('[Old tool output cleared')) return true;
-      if (trimmed.length < 5) return true;
-      // Attempt JSON parse only if it looks structured
-      if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-        try { c = JSON.parse(trimmed); } catch { return false; }
-      } else {
-        return false;
-      }
-    }
-    if (!Array.isArray(c) || c.length === 0) return true;
-    if (c.some(b => b && b.type === 'tool_use')) return false; // tool calls always carry signal
-    return c.every(b => {
-      if (!b) return true;
-      if (b.type === 'tool_result') {
-        const tc = typeof b.content === 'string' ? b.content : '';
-        if (!tc || tc.startsWith('[Old tool output cleared') || tc.length < 5) return true;
-        if (this._sessionsCompactHasMarker(tc)) return false;
-        return false;
-      }
-      if (b.type === 'text') {
-        const tx = (b.text || '').trim();
-        if (!tx) return true;
-        if (this._sessionsCompactHasMarker(tx)) return false;
-        if (tx === '[Acknowledged.]') return true;
-        if (tx.length < 5) return true;
-        return false;
-      }
-      return false; // unknown block — preserve to be safe
-    });
-  }
-
-  _sessionsCompactHasMarker(text) {
-    if (!text || typeof text !== 'string') return false;
-    return /\b(RESEARCH_DONE:|PLAN_READY|NO_INTERVIEW_NEEDED:|NO_FOLLOWUP_QUESTIONS:|QUESTIONS:|\[BUILD_PLAN\]|\[REVIEW\]|\[RESEARCH\])/.test(text);
-  }
-  
   /**
    * Get session metadata
    */

@@ -85,7 +85,6 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
   // Session + Compaction
   maxSessionMessages: 200,
   compactTokenThreshold: 120000,
-  compactKeepTail: 20,
   sessionIdleTimeoutMinutes: 60,
   sessionDailyResetHour: 4,
 
@@ -388,7 +387,6 @@ function loadConfigFresh() {
     const n = parseInt(process.env.SPORE_MAX_TOOL_RESULT_CHARS, 10);
     if (Number.isFinite(n) && n > 0) config.maxToolResultChars = n;
   }
-  if (process.env.SPORE_COMPACT_KEEP_TAIL) config.compactKeepTail = parseInt(process.env.SPORE_COMPACT_KEEP_TAIL, 10);
   if (process.env.SPORE_LEARNING_MODE) config.learningMode = process.env.SPORE_LEARNING_MODE;
   if (process.env.SPORE_MAINTAINER_IDLE_ONLY) config.maintainerIdleOnly = process.env.SPORE_MAINTAINER_IDLE_ONLY === 'true';
 

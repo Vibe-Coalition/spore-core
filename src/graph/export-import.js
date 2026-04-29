@@ -66,7 +66,6 @@ const PORTABLE_SETTINGS_PLAIN = [
   'subagentMaxTokens',
   'maxSessionMessages',
   'compactTokenThreshold',
-  'compactKeepTail',
   'sessionIdleTimeoutMinutes',
   'sessionDailyResetHour',
   'maxMessageLength',

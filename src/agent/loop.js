@@ -529,12 +529,20 @@ class AgentLoop {
     const configuredCeiling = (_modelLimit?.compactAt && Number(_modelLimit.compactAt) > 0)
       ? Number(_modelLimit.compactAt)
       : Math.floor(contextWindow * CTX_HARD_CEILING_FRACTION);
-    const hardCeiling = Math.min(
+    let hardCeiling = Math.min(
       contextWindow,
       configuredCeiling && configuredCeiling > 0
         ? configuredCeiling
         : Math.floor(contextWindow * CTX_HARD_CEILING_FALLBACK)
     );
+    // Operator-pinned absolute hardCeiling override (Settings → Agent →
+    // Context budgets). Caps below the model-derived ceiling so
+    // operators can force tighter compaction on a session-by-session
+    // basis without touching per-model contextWindow entries.
+    const _absoluteCeiling = Number(this.config.compactTokenThreshold);
+    if (Number.isFinite(_absoluteCeiling) && _absoluteCeiling > 0) {
+      hardCeiling = Math.min(hardCeiling, _absoluteCeiling);
+    }
     if (!_modelLimit?.contextWindow) {
       this.log.debug(`[budget] No modelLimits entry for ${activeModel || '(no model)'}; falling back to ${contextWindow.toLocaleString()}-token default. Set per-model context in Settings → Providers to scale budgets correctly.`);
     }
