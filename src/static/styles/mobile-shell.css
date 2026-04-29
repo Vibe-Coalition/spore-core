@@ -108,6 +108,10 @@ body.mobile-shell #m-graph-view {
 #m-g-create-menu {
   position: absolute; top: calc(100% + 6px); left: 0;
   min-width: 180px;
+  /* Defensive viewport clamp — `[+]` lives at the left edge so the menu
+     starts at left:0; without max-width it could push past the right
+     edge if items get long. */
+  max-width: calc(100vw - 24px);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -216,6 +220,63 @@ body.mobile-shell #m-g-canvas-slot #search {
   display: none !important;
 }
 
+/* ── Alt-view modes inside #m-g-canvas-slot ──
+   The desktop layouts (graph.css ~158-260) expect a 720px+ canvas.
+   Override for phone width so list / typemap / work mode are usable. */
+
+/* List view: hide the desktop's right-hand detail pane and let the
+   aside (search + tree) fill 100%. Tapping a tree row already calls
+   selectNode → populates #panel-body → our MutationObserver opens
+   the bottom detail sheet, so users still get full node detail just
+   shaped for phone. */
+body.mobile-shell #m-g-canvas-slot #view-list-detail {
+  display: none !important;
+}
+body.mobile-shell #m-g-canvas-slot #view-list-aside {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  width: 100% !important;
+  max-width: none !important;
+  border-right: none !important;
+}
+
+/* Type-map view: float the search across the top of the canvas slot. */
+body.mobile-shell #m-g-canvas-slot #view-typemap-search {
+  position: absolute !important;
+  top: 8px !important;
+  left: 8px !important;
+  right: 8px !important;
+  width: auto !important;
+}
+body.mobile-shell #m-g-canvas-slot #view-typemap-search input {
+  width: 100% !important;
+  font-size: 16px !important; /* iOS zoom-prevent */
+}
+
+/* Work view: trim the desktop's huge toolbar+body padding and force
+   inner grids into a single column. */
+body.mobile-shell #m-g-canvas-slot #view-work-toolbar {
+  padding: 8px 12px !important;
+}
+body.mobile-shell #m-g-canvas-slot #view-work-body {
+  padding: 14px 12px 18px 12px !important;
+}
+body.mobile-shell #m-g-canvas-slot #view-work-body [style*="grid-template-columns"],
+body.mobile-shell #m-g-canvas-slot #view-work-body .vw-grid,
+body.mobile-shell #m-g-canvas-slot #view-work-body .vw-row {
+  grid-template-columns: 1fr !important;
+}
+
+/* Strip the bleeding 4px webkit scrollbars desktop sets on the
+   moved/visible tree containers — let mobile use native overlay. */
+body.mobile-shell #panel-body::-webkit-scrollbar,
+body.mobile-shell #view-list-tree::-webkit-scrollbar,
+body.mobile-shell #view-list-detail::-webkit-scrollbar,
+body.mobile-shell #view-work-body::-webkit-scrollbar,
+body.mobile-shell #m-g-detail-body::-webkit-scrollbar {
+  display: none;
+}
+
 /* ── Bottom detail panel ──
      .collapsed: 52px handle row only
      .open:      55vh; #panel-body content visible */
@@ -289,6 +350,29 @@ body.mobile-shell #m-g-detail-body #panel-body {
   padding: 0 !important;
   margin: 0 !important;
   box-shadow: none !important;
+}
+/* Guard the moved editor's children from overflowing the ~370px
+   detail body. Inputs/textareas force-fit, edge / aspect rows clip
+   their text instead of bursting horizontally. */
+body.mobile-shell #m-g-detail-body input,
+body.mobile-shell #m-g-detail-body textarea,
+body.mobile-shell #m-g-detail-body select {
+  box-sizing: border-box !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  font-size: 16px; /* iOS zoom-prevent on focus */
+}
+body.mobile-shell #m-g-detail-body .panel-row,
+body.mobile-shell #m-g-detail-body .edge-row,
+body.mobile-shell #m-g-detail-body .aspect-row,
+body.mobile-shell #m-g-detail-body .attr-row {
+  flex-wrap: wrap !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+}
+body.mobile-shell #m-g-detail-body * {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 /* ── Mobile views container ── */

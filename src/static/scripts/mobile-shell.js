@@ -204,15 +204,29 @@ function initMobileGraphView() {
   }
 
   // ── Search input ──
-  // Wire to the desktop's #search-input (inside #search) so the
-  // existing graph.js search highlighting + filter logic fires.
+  // Fan out to every mode's search input so one mobile search box
+  // works in any active view. Inactive mode's input is hidden, so
+  // receiving an `input` event is a no-op visually; the active mode's
+  // existing handler reads its own value and filters its content.
+  //   #search-input             — graph mode (live force-graph search)
+  //   #vl-search                — list mode (filters node tree)
+  //   #view-typemap-search input — typemap mode (filters tiles)
   const mSearchEl = document.getElementById('m-g-search-input');
-  const desktopSearchEl = document.getElementById('search-input');
   if (mSearchEl) {
     mSearchEl.addEventListener('input', () => {
-      if (!desktopSearchEl) return;
-      desktopSearchEl.value = mSearchEl.value;
-      desktopSearchEl.dispatchEvent(new Event('input', { bubbles: true }));
+      const targets = [
+        document.getElementById('search-input'),
+        document.getElementById('vl-search'),
+        document.querySelector('#view-typemap-search input'),
+      ];
+      for (const el of targets) {
+        if (!el) continue;
+        el.value = mSearchEl.value;
+        // Each desktop handler may throw if its data isn't loaded yet
+        // (e.g. graph.js's gNodes.selectAll before initGraph runs).
+        // Swallow per-target so one mode failing doesn't stop the rest.
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+      }
     });
   }
 
