@@ -5,15 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SPORE</title>
 <script src="brand.js"></script>
-<link rel="stylesheet" href="styles/base.css?v=20260429e">
-<link rel="stylesheet" href="styles/onboarding.css?v=20260429e">
-<link rel="stylesheet" href="styles/layout.css?v=20260429e">
-<link rel="stylesheet" href="styles/panes.css?v=20260429e">
-<link rel="stylesheet" href="styles/settings.css?v=20260429e">
-<link rel="stylesheet" href="styles/chat.css?v=20260429e">
-<link rel="stylesheet" href="styles/graph.css?v=20260429e">
-<link rel="stylesheet" href="styles/misc.css?v=20260429e">
-<link rel="stylesheet" href="styles/mobile.css?v=20260429e">
+<link rel="stylesheet" href="styles/base.css?v=20260429f">
+<link rel="stylesheet" href="styles/onboarding.css?v=20260429f">
+<link rel="stylesheet" href="styles/layout.css?v=20260429f">
+<link rel="stylesheet" href="styles/panes.css?v=20260429f">
+<link rel="stylesheet" href="styles/settings.css?v=20260429f">
+<link rel="stylesheet" href="styles/chat.css?v=20260429f">
+<link rel="stylesheet" href="styles/graph.css?v=20260429f">
+<link rel="stylesheet" href="styles/misc.css?v=20260429f">
+<link rel="stylesheet" href="styles/mobile.css?v=20260429f">
 </head>
 <body>
 <!-- Onboarding Wizard Overlay -->
@@ -741,36 +741,36 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <!-- Foundation (loaded first) -->
-<script defer src="scripts/bootstrap.js?v=20260429e"></script>
-<script defer src="scripts/core.js?v=20260429e"></script>
-<script defer src="scripts/auth.js?v=20260429e"></script>
-<script defer src="scripts/tools-menu.js?v=20260429e"></script>
+<script defer src="scripts/bootstrap.js?v=20260429f"></script>
+<script defer src="scripts/core.js?v=20260429f"></script>
+<script defer src="scripts/auth.js?v=20260429f"></script>
+<script defer src="scripts/tools-menu.js?v=20260429f"></script>
 
 <!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
      can find the original at top-level evaluation time. -->
-<script defer src="scripts/settings.js?v=20260429e"></script>
+<script defer src="scripts/settings.js?v=20260429f"></script>
 
 <!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
-<script defer src="scripts/effects.js?v=20260429e"></script>
+<script defer src="scripts/effects.js?v=20260429f"></script>
 
 <!-- Alternate views: list + type map -->
-<script defer src="scripts/extras.js?v=20260429e"></script>
+<script defer src="scripts/extras.js?v=20260429f"></script>
 
 <!-- Feature modules — wire DOM events, no top-level cross-script deps -->
-<script defer src="scripts/terminal.js?v=20260429e"></script>
-<script defer src="scripts/longmemeval.js?v=20260429e"></script>
-<script defer src="scripts/shared-skills.js?v=20260429e"></script>
-<script defer src="scripts/graph-picker.js?v=20260429e"></script>
-<script defer src="scripts/files.js?v=20260429e"></script>
-<script defer src="scripts/right-panel.js?v=20260429e"></script>
-<script defer src="scripts/voice.js?v=20260429e"></script>
-<script defer src="scripts/onboarding.js?v=20260429e"></script>
-<script defer src="scripts/graph.js?v=20260429e"></script>
-<script defer src="scripts/chat.js?v=20260429e"></script>
-<script defer src="scripts/panels.js?v=20260429e"></script>
+<script defer src="scripts/terminal.js?v=20260429f"></script>
+<script defer src="scripts/longmemeval.js?v=20260429f"></script>
+<script defer src="scripts/shared-skills.js?v=20260429f"></script>
+<script defer src="scripts/graph-picker.js?v=20260429f"></script>
+<script defer src="scripts/files.js?v=20260429f"></script>
+<script defer src="scripts/right-panel.js?v=20260429f"></script>
+<script defer src="scripts/voice.js?v=20260429f"></script>
+<script defer src="scripts/onboarding.js?v=20260429f"></script>
+<script defer src="scripts/graph.js?v=20260429f"></script>
+<script defer src="scripts/chat.js?v=20260429f"></script>
+<script defer src="scripts/panels.js?v=20260429f"></script>
 
 <!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
-<script defer src="scripts/boot.js?v=20260429e"></script>
+<script defer src="scripts/boot.js?v=20260429f"></script>
 
 <!-- New Graph Modal -->
 <div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">
@@ -1286,6 +1286,24 @@ build/
             <div class="settings-test-row">
               <button type="button" class="settings-test-btn" data-provider-test="openrouter">test</button>
               <span class="settings-test-result" data-provider-result="openrouter"></span>
+            </div>
+          </div>
+
+          <div class="settings-provider-group">
+            <div class="settings-provider-head"><strong>Z.ai (GLM)</strong></div>
+            <div class="settings-inline">
+              <div>
+                <label for="settings-provider-zai-base-url">Base URL</label>
+                <input id="settings-provider-zai-base-url" type="text" placeholder="https://api.z.ai/api/paas/v4">
+              </div>
+              <div>
+                <label for="settings-provider-zai-key">API Key</label>
+                <input id="settings-provider-zai-key" type="password" placeholder="z.ai api key">
+              </div>
+            </div>
+            <div class="settings-test-row">
+              <button type="button" class="settings-test-btn" data-provider-test="zai">test</button>
+              <span class="settings-test-result" data-provider-result="zai"></span>
             </div>
           </div>
 

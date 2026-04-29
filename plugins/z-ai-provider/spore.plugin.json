@@ -1,0 +1,9 @@
+{
+  "id": "z-ai-provider",
+  "name": "Z.ai (GLM)",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": ["local-oai-provider"],
+  "description": "Z.ai cloud chat-completion provider (GLM-4.x / GLM-Z1 / charglm). Claims the 'zai' model prefix (e.g. 'zai/glm-4.6'). Wraps the canonical OAICompatClient from local-oai-provider with Z.ai's defaults (api.z.ai/api/paas/v4). Reads the API key from plugins.z-ai-provider.apiKey or the ZAI_API_KEY env var."
+}

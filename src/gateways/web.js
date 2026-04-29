@@ -892,6 +892,17 @@ class WebGateway {
           apiKeySet: !!this.config.localModelApiKey,
           baseUrl: this.config.localModelBaseUrl || '',
         },
+        // Z.ai (GLM) — z-ai-provider plugin owns the values; we surface
+        // a thin view here so the settings UI can list-models alongside
+        // the other built-ins. apiKeySet is derived from any of the
+        // resolution paths the plugin honors (env, host config, plugin
+        // slot) so the wizard's "configured?" badge matches reality.
+        zai: (() => {
+          const slot = this.config?.plugins?.['z-ai-provider'] || {};
+          const apiKey = process.env.ZAI_API_KEY || this.config.zaiApiKey || slot.apiKey || '';
+          const baseUrl = process.env.ZAI_BASE_URL || this.config.zaiBaseUrl || slot.baseUrl || '';
+          return { apiKey, apiKeySet: !!apiKey, baseUrl };
+        })(),
         custom: customProviders,
       },
       webSearch: {
@@ -1220,6 +1231,29 @@ class WebGateway {
           // wizard's test step but vanishes on save → buildLocalClient
           // falls back to bearer → endpoints expecting x-key 403.
           assignProviderField(providers.local.authHeader, 'LOCAL_MODEL_AUTH_HEADER', 'localModelAuthHeader');
+        }
+      }
+
+      if (providers.zai && typeof providers.zai === 'object') {
+        // Z.ai (GLM) — z-ai-provider plugin reads the persisted slot
+        // first, falls back to legacy host-config keys (zaiApiKey /
+        // zaiBaseUrl) and ZAI_* env vars. Mirror to all three so a
+        // future plugin uninstall doesn't lose the configuration.
+        if (Object.prototype.hasOwnProperty.call(providers.zai, 'apiKey')) {
+          assignProviderField(providers.zai.apiKey, 'ZAI_API_KEY', 'zaiApiKey');
+        }
+        if (Object.prototype.hasOwnProperty.call(providers.zai, 'baseUrl')) {
+          assignProviderField(providers.zai.baseUrl, 'ZAI_BASE_URL', 'zaiBaseUrl');
+        }
+        // Also write into the plugin's own config slot so the plugin's
+        // onConfigChange fires and the OAICompatClient picks up the
+        // new key without a restart.
+        const zaiPatch = {};
+        if (typeof providers.zai.apiKey === 'string'  && providers.zai.apiKey.trim())  zaiPatch.apiKey  = providers.zai.apiKey.trim();
+        if (typeof providers.zai.baseUrl === 'string' && providers.zai.baseUrl.trim()) zaiPatch.baseUrl = providers.zai.baseUrl.trim();
+        if (Object.keys(zaiPatch).length > 0) {
+          body.plugins = body.plugins || {};
+          body.plugins['z-ai-provider'] = { ...(body.plugins['z-ai-provider'] || {}), ...zaiPatch };
         }
       }
 

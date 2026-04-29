@@ -554,11 +554,14 @@ async function _settingsAutoDetectModelLimits(data) {
       }
     }).catch(() => {}));
   }
-  // Built-in providers (only if they have a key set)
+  // Built-in providers (only if they have a key set). New entries
+  // here automatically pick up auto-probe on panel open AND on key
+  // input via the change handler bound below.
   const builtins = [
     ['anthropic', data.providers?.anthropic],
     ['openai', data.providers?.openai],
     ['openrouter', data.providers?.openrouter],
+    ['zai', data.providers?.zai],
   ];
   for (const [kind, cfg] of builtins) {
     if (!cfg?.apiKeySet && !cfg?.apiKey) continue;
@@ -580,6 +583,72 @@ async function _settingsAutoDetectModelLimits(data) {
   for (const [key] of (typeof SETTINGS_MODEL_FIELDS !== 'undefined' ? SETTINGS_MODEL_FIELDS : [])) {
     _settingsRefreshTierModelList(key);
     _settingsRefreshTierPlaceholders(key);
+  }
+}
+
+// Live model-list refresh — lets the operator paste an API key into a
+// provider input and watch the per-tier datalists populate without
+// having to hit Save first. Triggered on debounced 'input' for each
+// built-in provider's apiKey field. Uses the form's CURRENT values
+// (not the persisted snapshot) so unsaved keys still drive the probe.
+//
+// Built-in providers list mirrors _settingsAutoDetectModelLimits; when
+// you add a new built-in provider, also add its input ids here.
+const _SETTINGS_PROVIDER_LIVE_PROBE = [
+  // [kind, apiKeyInputId, baseUrlInputId|null]
+  ['anthropic',  'settings-provider-anthropic-key',  null],
+  ['openai',     'settings-provider-openai-key',     'settings-provider-openai-base-url'],
+  ['openrouter', 'settings-provider-openrouter-key', 'settings-provider-openrouter-base-url'],
+  ['zai',        'settings-provider-zai-key',        'settings-provider-zai-base-url'],
+];
+
+let _settingsLiveProbeTimer = null;
+function _settingsLiveProbeOneProvider(kind, apiKey, baseUrl) {
+  return fetch(API + '/api/providers/list-models', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ kind, apiKey: apiKey || '', baseUrl: baseUrl || '' }),
+  }).then(r => r.json()).then(d => {
+    if (!d?.ok) return;
+    for (const m of (d.models || [])) {
+      if (!m?.id) continue;
+      const ref = (kind === 'anthropic') ? m.id : `${kind}/${m.id}`;
+      const prev = _settingsKnownLimits[ref];
+      _settingsKnownLimits[ref] = { contextLength: m.contextLength || prev?.contextLength || 0 };
+    }
+    // Repaint the tier rows so the just-fetched models appear in
+    // datalists + the contextLength placeholders update.
+    for (const [key] of (typeof SETTINGS_MODEL_FIELDS !== 'undefined' ? SETTINGS_MODEL_FIELDS : [])) {
+      _settingsRefreshTierModelList(key);
+      _settingsRefreshTierPlaceholders(key);
+    }
+  }).catch(() => {});
+}
+
+function _bindSettingsProviderLiveProbe() {
+  for (const [kind, keyId, baseId] of _SETTINGS_PROVIDER_LIVE_PROBE) {
+    const keyInp = document.getElementById(keyId);
+    if (!keyInp || keyInp.dataset.liveProbeBound === '1') continue;
+    keyInp.dataset.liveProbeBound = '1';
+    const fire = () => {
+      const apiKey = (keyInp.value || '').trim();
+      if (!apiKey || apiKey === '***hidden***') return;
+      const baseUrl = baseId ? (document.getElementById(baseId)?.value.trim() || '') : '';
+      clearTimeout(_settingsLiveProbeTimer);
+      _settingsLiveProbeTimer = setTimeout(
+        () => _settingsLiveProbeOneProvider(kind, apiKey, baseUrl),
+        // 1.2s debounce — long enough to stop firing mid-paste, short
+        // enough to feel responsive after the operator stops typing.
+        1200
+      );
+    };
+    keyInp.addEventListener('input', fire);
+    if (baseId) {
+      const baseInp = document.getElementById(baseId);
+      if (baseInp && baseInp.dataset.liveProbeBound !== '1') {
+        baseInp.dataset.liveProbeBound = '1';
+        baseInp.addEventListener('input', fire);
+      }
+    }
   }
 }
 
@@ -719,6 +788,7 @@ async function openSettingsPanel() {
     _settingsSwitchTab(lastTab);
     setSettingsBusy(false, '');
     _settingsAutoDetectModelLimits(data);
+    _bindSettingsProviderLiveProbe();
   } catch (e) {
     setSettingsBusy(false, e?.message || 'Failed to load settings');
   }
@@ -1185,6 +1255,10 @@ async function saveSettingsPanel() {
       local: {
         baseUrl: document.getElementById('settings-provider-local-base-url').value.trim(),
         apiKey: document.getElementById('settings-provider-local-key').value.trim(),
+      },
+      zai: {
+        baseUrl: document.getElementById('settings-provider-zai-base-url')?.value.trim() || '',
+        apiKey:  document.getElementById('settings-provider-zai-key')?.value.trim() || '',
       },
       custom: collectSettingsCustomProviders(),
     },

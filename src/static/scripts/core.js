@@ -713,6 +713,11 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-provider-openrouter-referer').value = data.providers?.openrouter?.referer || '';
   document.getElementById('settings-provider-local-base-url').value = data.providers?.local?.baseUrl || '';
   document.getElementById('settings-provider-local-key').value = data.providers?.local?.apiKey || '';
+  // Z.ai (GLM) — z-ai-provider plugin. Same shape as OpenRouter.
+  const _zaiBase = document.getElementById('settings-provider-zai-base-url');
+  const _zaiKey  = document.getElementById('settings-provider-zai-key');
+  if (_zaiBase) _zaiBase.value = data.providers?.zai?.baseUrl || '';
+  if (_zaiKey)  _zaiKey.value  = data.providers?.zai?.apiKey  || '';
 
   document.getElementById('settings-browser-backend').value = data.browser?.backend || 'zendriver';
 
