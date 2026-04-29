@@ -1,43 +1,28 @@
-/* mobile-shell.css — mobile-native shell. Loaded ONLY when
-   body.mobile-shell is set (mobile-viewer.html). graph-viewer.html
-   never sees this file.
+/* mobile-shell.css — applies ONLY when body.mobile-shell is set
+   (mobile-viewer.html). graph-viewer.html never loads this file.
 
-   Phase N1: chat surface is a real mobile-native UI — iMessage-style
-   bubbles, sticky bottom composer with rounded controls, no desktop
-   chrome anywhere on screen. Graph + Settings views render their own
-   mobile-first content (built in N2, N3) — for now they show a
-   placeholder card pointing at the desktop view.
+   Design rule: do NOT override SPORE's brand styling on chat. Bubbles,
+   composer, fonts, icons all stay as desktop renders them — Space
+   Grotesk body / mono-caps "send" "mic" labels / slate user chips /
+   paper assistant cards / 16px composer pill. The mobile shell only:
 
-   Architecture:
-     #m-header     fixed top, 56px (☰ title 🌙)
-     #m-views      between header and tab bar
-       #m-chat-view, #m-graph-view, #m-settings-view (one shown at a time)
-     #m-tab-bar    fixed bottom, 60px + safe-area
-     #m-drawer     slide-in left
-     #m-rp-sheet   slide-up bottom sheet for node detail
-
-   The desktop DOM (#app, #chat-panel, etc.) is fully hidden. The chat
-   message DOM (#chat-messages and its .chat-row / .chat-msg children
-   that chat.js builds) is moved into #m-chat-view by mobile-shell.js
-   at init, so chat.js keeps writing to #chat-messages but the user
-   sees it under our mobile chrome.
+     1. Adds a fixed top header and bottom tab bar (mobile chrome)
+     2. Adds a slide-in drawer (multi-graph picker, theme toggle,
+        switch-to-desktop)
+     3. Stretches chat rows to full width so bubbles align right/left
+        instead of collapsing to content width (desktop's flex column
+        align-self trick doesn't work in mobile container)
+     4. Hides desktop-shell-only artifacts (#util-bar, #right-panel,
+        #terminal-pane, #desktop-dock, etc.)
+     5. Renders graph + settings as placeholder views until N2 / N3
+        ship native versions
 */
 
-/* ── Body reset + font override ──
-   The carved CSS sets `font-family: var(--font-body)` explicitly on
-   most descendants (.chat-msg, #chat-input, #m-title, etc.). To make
-   the mobile shell feel native we redefine --font-body itself for the
-   mobile-shell scope so all those rules pick up the system font stack
-   automatically. --font-mono is overridden too so #btn-mic et al.
-   don't fall back to a console font. */
+/* ── Body reset ──
+   Don't override --font-body or --font-mono — desktop's Space Grotesk
+   + monospace ARE the SPORE brand identity, and the chat module
+   relies on them for the lowercase mono-caps "send"/"mic" treatment. */
 body.mobile-shell {
-  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
-  --font-mono: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
-  /* Slight bg/surface adjustment to sharpen bubble contrast in light
-     theme — assistant bubble was nearly indistinguishable from bg. */
-  --m-bubble-asst-bg: color-mix(in srgb, var(--text) 6%, transparent);
-  --m-bubble-asst-border: color-mix(in srgb, var(--text) 12%, transparent);
-
   margin: 0; padding: 0;
   width: 100vw;
   height: 100vh; height: 100dvh;
@@ -45,14 +30,14 @@ body.mobile-shell {
   display: block !important;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
 
-/* ── Hide every desktop-shell artifact ──
-   We use the chat message DOM via JS-move; the rest of #app's children
-   should never be visible on mobile. */
+/* ── Hide desktop-shell-only artifacts ──
+   Anything inside #app that doesn't carry chat content gets hidden.
+   Chat content (#chat-messages, #chat-input-area) is moved into the
+   mobile chat surface by mobile-shell.js. */
 body.mobile-shell #app,
 body.mobile-shell #util-bar,
 body.mobile-shell #desktop-dock,
@@ -72,11 +57,13 @@ body.mobile-shell #util-bar-floating,
 body.mobile-shell #toast {
   display: none !important;
 }
-/* Desktop graph canvas — hidden by default; we build a mobile-native
-   graph view instead. (Future N2: maybe show as fullscreen on demand.) */
 body.mobile-shell #canvas { display: none !important; }
+body.mobile-shell #settings-pane,
+body.mobile-shell #settings-pane.open {
+  display: none !important;
+}
 
-/* ── Mobile views container (between header and tab bar) ── */
+/* ── Mobile views container ── */
 #m-views {
   position: fixed;
   top: 56px;
@@ -99,15 +86,13 @@ body.mobile-shell.m-view-settings #m-settings-view {
 }
 
 /* ────────────────────────────────────────────────────────────────────
-   CHAT VIEW — mobile-native bubbles + composer
+   CHAT VIEW — desktop bubbles, mobile layout
    ──────────────────────────────────────────────────────────────────── */
 
 #m-chat-view {
   background: var(--bg);
 }
 
-/* The message stream — flexible, scrolls internally. chat.js targets
-   #chat-messages, which mobile-shell.js moves into here at init. */
 #m-chat-stream {
   flex: 1 1 auto; min-height: 0;
   overflow-y: auto;
@@ -116,7 +101,8 @@ body.mobile-shell.m-view-settings #m-settings-view {
   background: var(--bg);
 }
 
-/* Inside #m-chat-stream lives the moved #chat-messages — let it expand */
+/* The moved #chat-messages — give it the column layout it'd have on
+   desktop, no other styling overrides. */
 body.mobile-shell #m-chat-stream #chat-messages {
   display: flex;
   flex-direction: column;
@@ -126,139 +112,36 @@ body.mobile-shell #m-chat-stream #chat-messages {
   margin: 0 !important;
   overflow: visible !important;
   height: auto !important;
+  width: 100% !important;
 }
 
-/* ── Message bubbles ──
-   chat.js builds:
-     <div class="chat-row user|assistant">
-       <div class="chat-avatar ..."></div>
-       <div class="chat-msg user|assistant">text</div>
-     </div>
-   (system messages are bare `.chat-msg.system` with no row wrapper) */
-/* Rows span the full stream width so bubbles can right/left-align via
-   flex-direction. Desktop sets align-self:flex-end / flex-start which
-   collapses each row to its bubble's content width — overriden here. */
+/* ── Chat row layout ──
+   Desktop's chat.css does row alignment via
+     .chat-row.user { align-self: flex-end }
+     .chat-row.assistant { align-self: flex-start }
+   That collapses each row to its bubble's content width, which is
+   correct on desktop (centered chat panel ~600px) but on mobile it
+   means user bubbles end up tiny far-right blobs.
+
+   Mobile fix: stretch rows full-width, keep flex-direction so the
+   bubble lands on the right (user) or left (assistant) inside the row. */
 body.mobile-shell .chat-row {
-  display: flex !important;
-  align-items: flex-end !important;
-  gap: 6px !important;
-  margin: 4px 0 !important;
   width: 100% !important;
   max-width: 100% !important;
   align-self: stretch !important;
+  margin: 4px 0;
 }
-body.mobile-shell .chat-row.user {
-  flex-direction: row-reverse !important;
-  justify-content: flex-start !important;  /* with row-reverse, this is the right side */
-}
-body.mobile-shell .chat-row.assistant {
-  flex-direction: row !important;
-  justify-content: flex-start !important;
-}
-/* The bubble itself — cancel desktop's align-self overrides; flex-direction
-   on the row already places it correctly. */
 body.mobile-shell .chat-msg.user,
 body.mobile-shell .chat-msg.assistant {
   align-self: auto !important;
+  max-width: 78% !important;
 }
-
-body.mobile-shell .chat-avatar {
-  flex: 0 0 auto;
-  width: 28px; height: 28px;
-  border-radius: 50%;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: center;
-  overflow: hidden;
-  margin-bottom: 4px;
-}
-body.mobile-shell .chat-avatar svg { width: 16px; height: 16px; }
-body.mobile-shell .chat-avatar.user { background: var(--accent); border-color: var(--accent); color: var(--bg); }
-/* User has no avatar on mobile — bubbles align right is enough. */
-body.mobile-shell .chat-row.user .chat-avatar { display: none; }
-
-body.mobile-shell .chat-msg {
-  /* override desktop's full-bleed treatment */
-  position: relative;
-  max-width: 78%;
-  padding: 9px 13px !important;
-  border-radius: 18px !important;
-  font-size: 0.95rem !important;
-  line-height: 1.4 !important;
-  word-wrap: break-word;
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.05);
-  margin: 0 !important;
-  width: auto !important;
-  display: block;
-}
-/* User bubble — right-aligned, accent background, asymmetric corner */
-body.mobile-shell .chat-msg.user {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
-  border-bottom-right-radius: 4px;
-}
-body.mobile-shell .chat-msg.user a { color: var(--bg); text-decoration: underline; }
-/* Assistant bubble — left-aligned, tinted (theme-aware) so it stays
-   visible on both dark and light themes (raw --surface was nearly
-   invisible against --bg in light). */
-body.mobile-shell .chat-msg.assistant {
-  background: var(--m-bubble-asst-bg);
-  color: var(--text);
-  border-color: var(--m-bubble-asst-border);
-  border-bottom-left-radius: 4px;
-}
-/* System messages — centered, dim, no bubble */
 body.mobile-shell .chat-msg.system {
-  background: transparent !important;
-  border: none !important;
-  color: var(--text-dim) !important;
-  text-align: center;
-  font-size: 0.78rem;
-  max-width: 100%;
-  padding: 6px 12px;
-  margin: 8px auto !important;
+  align-self: center !important;
+  max-width: 92% !important;
 }
 
-/* Inset the avatar slightly under the bubble so the row's vertical
-   rhythm feels native. */
-body.mobile-shell .chat-row { align-items: flex-end; }
-
-/* Markdown content inside bubbles */
-body.mobile-shell .chat-msg p { margin: 0 0 6px !important; }
-body.mobile-shell .chat-msg p:last-child { margin: 0 !important; }
-body.mobile-shell .chat-msg pre {
-  background: rgba(0, 0, 0, 0.18);
-  border-radius: 10px;
-  padding: 8px 10px;
-  font-size: 0.78rem;
-  overflow-x: auto;
-  margin: 6px 0;
-}
-body.mobile-shell .chat-msg.user pre { background: rgba(255, 255, 255, 0.18); }
-body.mobile-shell .chat-msg code { font-size: 0.85em; }
-
-/* Attachments grid — keep it tight */
-body.mobile-shell .chat-msg .media-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 4px; margin-top: 6px;
-}
-body.mobile-shell .chat-msg .media-grid img,
-body.mobile-shell .chat-msg .media-grid video {
-  width: 100%; max-height: 200px; object-fit: cover; border-radius: 8px;
-}
-
-/* Typing indicator */
-body.mobile-shell .chat-typing {
-  font-size: 0.75rem; color: var(--text-dim);
-  padding: 6px 14px;
-  font-style: italic;
-}
-
-/* Subagent + activity rows — keep slim under the stream */
+/* Subagent + activity rows — keep slim. */
 body.mobile-shell #subagent-container {
   flex-shrink: 0;
   max-height: 80px; overflow-y: auto;
@@ -267,14 +150,13 @@ body.mobile-shell #subagent-container {
 body.mobile-shell #agent-activity {
   flex-shrink: 0;
   padding: 4px 14px;
-  font-size: 0.7rem;
-  color: var(--text-dim);
 }
 
-/* ── Composer (sticky bottom) ──
-   chat.js targets #chat-input-area which mobile-shell.js moves into
-   #m-composer. The composer is rounded, with attach + textarea + mic
-   + send laid out flat. */
+/* ── Composer ──
+   #chat-input-area is moved into #m-composer at boot. Desktop's pill
+   (#chat-text-row) styling stays — it already looks good and matches
+   the brand. We only sticky-position the composer at the bottom and
+   give the input a 16px font-size to defeat iOS's auto-zoom-on-focus. */
 #m-composer {
   flex-shrink: 0;
   padding: 8px 10px;
@@ -288,92 +170,23 @@ body.mobile-shell #m-composer #chat-input-area {
   padding: 0 !important;
   margin: 0 !important;
 }
-body.mobile-shell #m-composer #chat-attachments {
-  margin-bottom: 4px;
-}
-body.mobile-shell #m-composer #chat-text-row {
-  display: flex !important;
-  align-items: flex-end !important;
-  gap: 6px !important;
-  background: var(--m-bubble-asst-bg) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 22px !important;
-  padding: 4px 4px 4px 8px !important;
-  box-shadow: none !important;
-}
-body.mobile-shell #m-composer #chat-text-row:focus-within {
-  border-color: var(--accent) !important;
-}
+/* iOS zoom-prevention: any text input below 16px causes auto-zoom on
+   focus. Desktop's #chat-input is 0.82rem (~13px) which trips it. */
 body.mobile-shell #m-composer #chat-input {
-  flex: 1 1 auto !important;
-  min-height: 36px !important; max-height: 120px !important;
-  padding: 8px 6px !important;
-  font-size: 16px !important; /* iOS won't auto-zoom inputs ≥16px */
-  border-radius: 0 !important;
-  border: none !important;
-  background: transparent !important;
-  resize: none !important;
-  font-family: var(--font-body) !important;
-  color: var(--text) !important;
-  outline: none !important;
-  line-height: 1.4 !important;
-  width: auto !important;
+  font-size: 16px !important;
 }
-body.mobile-shell #m-composer #chat-input::placeholder {
-  color: var(--text-dim);
-}
-/* Round composer buttons — desktop sets padding/font that fights ours
-   even at higher specificity, so use !important to be unambiguous.
-   Text content is hidden (font-size 0); icons drawn via ::before. */
-body.mobile-shell #m-composer #btn-attach,
-body.mobile-shell #m-composer #btn-mic,
+/* Touch tap-target floor on composer buttons — desktop has them at
+   28×28 / smaller, which is below the 44px platform minimum. Bump
+   without changing background, color, or font (keeps the brand). */
+body.mobile-shell #m-composer #chat-text-row #btn-attach,
+body.mobile-shell #m-composer #chat-text-row #btn-mic,
 body.mobile-shell #m-composer #chat-send,
 body.mobile-shell #m-composer #chat-stop {
-  flex: 0 0 auto;
-  width: 38px !important;
-  height: 38px !important;
-  min-width: 38px !important;
-  min-height: 38px !important;
-  border-radius: 50% !important;
-  border: none !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  background: transparent !important;
-  color: var(--text-dim) !important;
-  font-size: 0 !important;
-  font-family: var(--font-body) !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-body.mobile-shell #m-composer button::before {
-  font-size: 18px;
-  line-height: 1;
-}
-body.mobile-shell #m-composer #btn-attach::before { content: '＋'; }
-body.mobile-shell #m-composer #btn-mic::before { content: '🎙'; font-size: 16px; }
-body.mobile-shell #m-composer #chat-send::before { content: '➤'; font-size: 17px; }
-body.mobile-shell #m-composer #chat-stop::before { content: '■'; font-size: 14px; }
-body.mobile-shell #m-composer #btn-attach:active,
-body.mobile-shell #m-composer #btn-mic:active {
-  background: var(--element) !important;
-  color: var(--text) !important;
-}
-body.mobile-shell #m-composer #chat-send:not(:disabled) {
-  background: var(--accent) !important;
-  color: var(--bg) !important;
-}
-body.mobile-shell #m-composer #chat-send:disabled { opacity: 0.35; }
-/* Mic recording state — keep the existing red recording feedback. */
-body.mobile-shell #m-composer #btn-mic.recording {
-  background: #ff4444 !important;
-  color: #fff !important;
+  min-height: 36px;
 }
 
 /* ────────────────────────────────────────────────────────────────────
-   GRAPH VIEW — placeholder for now (N2 will build the real list view)
+   GRAPH PLACEHOLDER
    ──────────────────────────────────────────────────────────────────── */
 
 #m-graph-view {
@@ -388,23 +201,36 @@ body.mobile-shell #m-composer #btn-mic.recording {
   align-items: center; gap: 14px;
 }
 .m-placeholder .m-placeholder-emoji { font-size: 48px; opacity: 0.7; }
-.m-placeholder h2 { margin: 0; font-size: 1.1rem; color: var(--text-bright); font-weight: 500; }
-.m-placeholder p { margin: 0; font-size: 0.85rem; color: var(--text-dim); line-height: 1.45; }
+.m-placeholder h2 {
+  margin: 0; font-size: 1.05rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-weight: 500;
+}
+.m-placeholder p {
+  margin: 0; font-size: 0.82rem;
+  color: var(--text-dim);
+  font-family: var(--font-body);
+  line-height: 1.5;
+}
 .m-placeholder a.m-cta-link {
   display: inline-flex; align-items: center; justify-content: center;
   margin-top: 6px;
-  padding: 12px 22px;
-  background: var(--accent);
+  padding: 10px 18px;
+  background: var(--text-bright);
   color: var(--bg);
-  border-radius: 22px;
+  border-radius: 12px;
   text-decoration: none;
-  font-size: 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: lowercase;
   font-weight: 500;
-  min-height: 44px;
+  min-height: 40px;
 }
 
 /* ────────────────────────────────────────────────────────────────────
-   SETTINGS VIEW — placeholder (N3 will build native drilldown)
+   SETTINGS PLACEHOLDER (uses same .m-placeholder block)
    ──────────────────────────────────────────────────────────────────── */
 
 #m-settings-view {
@@ -414,16 +240,8 @@ body.mobile-shell #m-composer #btn-mic.recording {
   gap: 16px;
 }
 
-/* The desktop settings modal must NOT show on mobile during N1, even
-   if openSettingsPanel() gets called somewhere. Until N3, the
-   Settings tab shows the placeholder card. */
-body.mobile-shell #settings-pane,
-body.mobile-shell #settings-pane.open {
-  display: none !important;
-}
-
 /* ────────────────────────────────────────────────────────────────────
-   HEADER (fixed top)
+   HEADER (fixed top) — uses --font-body so SPORE typography stands.
    ──────────────────────────────────────────────────────────────────── */
 
 #m-header {
@@ -440,22 +258,26 @@ body.mobile-shell #settings-pane.open {
   flex: 1;
   text-align: center;
   margin: 0;
-  font-size: 1rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: lowercase;
   color: var(--text-bright);
 }
 #m-header button {
   width: 44px; height: 44px;
   border: none; background: transparent;
-  font-size: 20px; color: var(--text);
+  font-family: var(--font-body);
+  font-size: 18px;
+  color: var(--text);
   cursor: pointer;
   border-radius: 8px;
 }
 #m-header button:active { background: var(--element); }
 
 /* ────────────────────────────────────────────────────────────────────
-   BOTTOM TAB BAR
+   BOTTOM TAB BAR — mono-caps lowercase to match the brand voice.
    ──────────────────────────────────────────────────────────────────── */
 
 #m-tab-bar {
@@ -475,16 +297,19 @@ body.mobile-shell #settings-pane.open {
   gap: 2px;
   border: none; background: transparent;
   color: var(--text-dim);
-  font-family: inherit;
-  font-size: 0.65rem;
   cursor: pointer;
   padding: 6px 0;
   transition: color 0.15s ease;
+  font-family: var(--font-mono);
 }
 #m-tab-bar button.active { color: var(--accent); }
 #m-tab-bar button:active { background: var(--element); }
-#m-tab-bar .m-tab-icon { font-size: 22px; line-height: 1; }
-#m-tab-bar .m-tab-label { font-size: 0.62rem; letter-spacing: 0.05em; }
+#m-tab-bar .m-tab-icon { font-size: 18px; line-height: 1; font-family: var(--font-body); }
+#m-tab-bar .m-tab-label {
+  font-size: 0.58rem;
+  letter-spacing: 0.16em;
+  text-transform: lowercase;
+}
 
 /* ────────────────────────────────────────────────────────────────────
    DRAWER (left slide-in)
@@ -518,10 +343,16 @@ body.m-drawer-open #m-drawer-scrim {
 }
 #m-drawer-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--border);
 }
-#m-drawer-title { font-size: 1rem; font-weight: 600; color: var(--text-bright); }
+#m-drawer-title {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: lowercase;
+  color: var(--text-bright);
+}
 #m-drawer-close {
   width: 36px; height: 36px;
   background: transparent; border: none;
@@ -535,20 +366,19 @@ body.m-drawer-open #m-drawer-scrim {
   width: 100%;
   border: none; background: transparent;
   color: var(--text);
-  font-family: inherit;
-  font-size: 0.9rem;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
   text-align: left;
   text-decoration: none;
   cursor: pointer;
   min-height: 48px;
 }
 .m-drawer-row:active { background: var(--element); }
-.m-drawer-icon { font-size: 18px; flex: 0 0 24px; text-align: center; }
+.m-drawer-icon { font-size: 16px; flex: 0 0 24px; text-align: center; opacity: 0.7; }
 .m-drawer-label { flex: 1; }
 
 /* ────────────────────────────────────────────────────────────────────
-   ONBOARDING WIZARD — full screen (existing wizard markup, not
-   redesigned in N1). When the user is in onboarding we let it dominate.
+   ONBOARDING WIZARD — full screen.
    ──────────────────────────────────────────────────────────────────── */
 
 body.mobile-shell #onboarding-overlay { z-index: 200; }
