@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="styles/mobile.css?v=20260429c">
 <!-- mobile-shell.css overrides everything above when body.mobile-shell.
      Loaded ONLY by mobile-viewer.html; desktop never sees it. -->
-<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429i">
+<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429j">
 </head>
 <body class="mobile-shell">
 <!-- Mobile chrome — sits above the desktop body content. CSS hides the
@@ -58,37 +58,14 @@
     <div id="m-composer"><!-- #chat-input-area moved here on boot --></div>
   </section>
 
-  <!-- Graph: searchable node list with type filters. Tap a node to
-       open a bottom-sheet detail view with attributes + edges. -->
+  <!-- Graph: real d3 canvas. mobile-shell.js moves the desktop #canvas
+       (which holds #graph-svg + the d3 force simulation populated by
+       graph.js) into this section's slot at boot, so the live graph
+       renders here. d3-zoom v7 handles touch pan/pinch natively;
+       long-press fires the context menu (graph.js Phase C). -->
   <section id="m-graph-view" class="m-view" aria-label="Graph">
-    <div id="m-g-toolbar">
-      <div id="m-g-search-row">
-        <input id="m-g-search" type="search" placeholder="search nodes…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-      </div>
-      <div id="m-g-filters" role="tablist" aria-label="Filter by type"></div>
-    </div>
-    <div id="m-g-stats" aria-live="polite"></div>
-    <div id="m-g-list" role="list"><!-- populated by mobile-shell.js --></div>
+    <!-- #canvas moved here on boot -->
   </section>
-
-  <!-- Node detail bottom sheet — slides up when a list row is tapped. -->
-  <div id="m-g-sheet-scrim" aria-hidden="true"></div>
-  <aside id="m-g-sheet" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Node detail">
-    <div id="m-g-sheet-handle" aria-hidden="true"></div>
-    <div id="m-g-sheet-head">
-      <div id="m-g-sheet-glyph" aria-hidden="true"></div>
-      <div id="m-g-sheet-titles">
-        <div id="m-g-sheet-label"></div>
-        <div id="m-g-sheet-type"></div>
-      </div>
-      <button id="m-g-sheet-close" type="button" aria-label="Close">&times;</button>
-    </div>
-    <div id="m-g-sheet-body">
-      <div id="m-g-sheet-desc" class="m-g-sheet-section"></div>
-      <div id="m-g-sheet-attrs" class="m-g-sheet-section"></div>
-      <div id="m-g-sheet-edges" class="m-g-sheet-section"></div>
-    </div>
-  </aside>
 
   <!-- Settings: placeholder until N3 ships the drilldown. -->
   <section id="m-settings-view" class="m-view" aria-label="Settings">
@@ -858,7 +835,7 @@
 
 <!-- Mobile tab-bar wiring. Runs after every module has loaded so the
      desktop functions it calls (openSettingsPanel, etc.) are in scope. -->
-<script defer src="scripts/mobile-shell.js?v=20260429f"></script>
+<script defer src="scripts/mobile-shell.js?v=20260429g"></script>
 
 <!-- New Graph Modal -->
 <div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">

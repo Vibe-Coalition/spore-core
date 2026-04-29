@@ -57,7 +57,80 @@ body.mobile-shell #util-bar-floating,
 body.mobile-shell #toast {
   display: none !important;
 }
-body.mobile-shell #canvas { display: none !important; }
+/* #canvas (the desktop d3 host) is moved into #m-graph-view by
+   mobile-shell.js. Hide it everywhere else; show it inside the graph
+   view stretched to fill. */
+body.mobile-shell #canvas {
+  display: none !important;
+}
+body.mobile-shell #m-graph-view #canvas {
+  display: flex !important;
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  flex-direction: column !important;
+  background: var(--bg) !important;
+  border: none !important;
+}
+/* Graph SVG fills the canvas. */
+body.mobile-shell #m-graph-view #graph-svg {
+  flex: 1 1 auto !important;
+  width: 100% !important;
+  height: 100% !important;
+  touch-action: none; /* let d3-zoom own pinch/pan */
+}
+/* Hide desktop chrome that lives inside #canvas:
+     #canvas-tabs       graph/code tabs (no code editor on mobile)
+     #view-mode-bar     graph / list / typemap pills (mobile = graph only)
+     #event-feed        floating event feed (no room on phone)
+     #view-list, #view-typemap, #view-work — alt views
+     #event-log         token log floating overlay
+   Keep #controls visible — restyled below as a slim mobile bottom bar. */
+body.mobile-shell #m-graph-view #canvas-tabs,
+body.mobile-shell #m-graph-view #view-mode-bar,
+body.mobile-shell #m-graph-view #event-feed,
+body.mobile-shell #m-graph-view #view-list,
+body.mobile-shell #m-graph-view #view-typemap,
+body.mobile-shell #m-graph-view #view-work,
+body.mobile-shell #m-graph-view #event-log,
+body.mobile-shell #m-graph-view #event-log-toggle,
+body.mobile-shell #m-graph-view #code-viewer {
+  display: none !important;
+}
+/* Mobile graph controls strip — sits at the bottom of #canvas, above
+   the tab bar. Horizontal scroll, slim chips. */
+body.mobile-shell #m-graph-view #controls {
+  position: absolute !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  top: auto !important;
+  flex-shrink: 0;
+  display: flex !important;
+  gap: 6px;
+  padding: 6px 8px;
+  background: linear-gradient(to top, var(--bg) 60%, transparent);
+  border: none !important;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  white-space: nowrap;
+  z-index: 5;
+}
+body.mobile-shell #m-graph-view #controls > * {
+  flex: 0 0 auto;
+  min-height: 36px;
+  font-size: 0.7rem;
+}
+/* Buttons that don't make sense on mobile. */
+body.mobile-shell #m-graph-view #btn-toggle-sidebar,
+body.mobile-shell #m-graph-view #btn-open-logs,
+body.mobile-shell #m-graph-view #btn-toggle-chat,
+body.mobile-shell #m-graph-view #btn-open-node,
+body.mobile-shell #m-graph-view #tools-menu-wrap,
+body.mobile-shell #m-graph-view #search {
+  display: none !important;
+}
 body.mobile-shell #settings-pane,
 body.mobile-shell #settings-pane.open {
   display: none !important;
@@ -183,305 +256,6 @@ body.mobile-shell #m-composer #chat-text-row #btn-mic,
 body.mobile-shell #m-composer #chat-send,
 body.mobile-shell #m-composer #chat-stop {
   min-height: 36px;
-}
-
-/* ────────────────────────────────────────────────────────────────────
-   GRAPH VIEW — searchable node list + bottom-sheet detail
-   ──────────────────────────────────────────────────────────────────── */
-
-#m-graph-view { background: var(--bg); }
-
-/* Sticky toolbar at top — search + type-filter chips. */
-#m-g-toolbar {
-  flex-shrink: 0;
-  padding: 8px 10px 4px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 1;
-}
-#m-g-search-row {
-  display: flex; align-items: center; gap: 8px;
-}
-#m-g-search {
-  flex: 1 1 auto;
-  height: 38px;
-  padding: 8px 14px;
-  font-size: 16px;
-  font-family: var(--font-body);
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  outline: none;
-  -webkit-appearance: none;
-  appearance: none;
-}
-#m-g-search:focus {
-  border-color: var(--border-active);
-  box-shadow: 0 0 0 1px var(--border-active);
-}
-#m-g-search::placeholder { color: var(--text-muted); }
-
-#m-g-filters {
-  display: flex; gap: 6px;
-  padding-top: 6px;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  white-space: nowrap;
-  scrollbar-width: none;
-}
-#m-g-filters::-webkit-scrollbar { display: none; }
-.m-g-chip {
-  flex: 0 0 auto;
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-dim);
-  border-radius: 14px;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  letter-spacing: 0.1em;
-  text-transform: lowercase;
-  cursor: pointer;
-  display: inline-flex; align-items: center; gap: 6px;
-}
-.m-g-chip.active {
-  background: var(--text-bright);
-  color: var(--bg);
-  border-color: var(--text-bright);
-}
-.m-g-chip-count {
-  font-size: 0.58rem; opacity: 0.7;
-}
-
-#m-g-stats {
-  flex-shrink: 0;
-  padding: 6px 14px;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  letter-spacing: 0.1em;
-  text-transform: lowercase;
-  color: var(--text-dim);
-}
-
-/* The scrollable list. */
-#m-g-list {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  padding: 4px 8px 12px;
-}
-
-.m-g-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 12px;
-  margin: 2px 0;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  cursor: pointer;
-  min-height: 56px;
-  transition: background 0.12s ease;
-}
-.m-g-row:active { background: var(--element); }
-.m-g-row-glyph {
-  flex: 0 0 auto;
-  width: 36px; height: 36px;
-  border-radius: 50%;
-  display: inline-flex; align-items: center; justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  font-weight: 600;
-  border: 1.5px solid currentColor;
-  background: color-mix(in srgb, currentColor 12%, transparent);
-}
-.m-g-row-body {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.m-g-row-label {
-  font-family: var(--font-body);
-  font-size: 0.92rem;
-  color: var(--text-bright);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.m-g-row-type {
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
-  letter-spacing: 0.1em;
-  text-transform: lowercase;
-  color: var(--text-dim);
-}
-.m-g-row-chev {
-  flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: 16px;
-}
-
-.m-g-empty {
-  text-align: center;
-  padding: 32px 16px;
-  font-family: var(--font-body);
-  font-size: 0.85rem;
-  color: var(--text-dim);
-}
-
-/* ── Node detail bottom sheet ── */
-#m-g-sheet-scrim {
-  position: fixed; inset: 0;
-  background: rgba(0,0,0,0.5);
-  opacity: 0; pointer-events: none;
-  transition: opacity 0.22s ease;
-  z-index: 120;
-}
-body.m-g-sheet-open #m-g-sheet-scrim {
-  opacity: 1; pointer-events: auto;
-}
-#m-g-sheet {
-  position: fixed; left: 0; right: 0;
-  bottom: 0;
-  height: 78vh; max-height: 78vh;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  border-top-left-radius: 18px;
-  border-top-right-radius: 18px;
-  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.3);
-  transform: translateY(100%);
-  transition: transform 0.24s ease;
-  z-index: 125;
-  display: flex; flex-direction: column;
-  padding-bottom: env(safe-area-inset-bottom);
-}
-body.m-g-sheet-open #m-g-sheet { transform: translateY(0); }
-
-#m-g-sheet-handle {
-  flex-shrink: 0;
-  width: 38px; height: 4px;
-  border-radius: 2px;
-  background: var(--text-muted);
-  opacity: 0.4;
-  margin: 8px auto 4px;
-}
-#m-g-sheet-head {
-  flex-shrink: 0;
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 14px 12px;
-  border-bottom: 1px solid var(--border);
-}
-#m-g-sheet-glyph {
-  flex: 0 0 auto;
-  width: 44px; height: 44px;
-  border-radius: 50%;
-  display: inline-flex; align-items: center; justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 0.95rem;
-  font-weight: 600;
-  border: 1.5px solid currentColor;
-  background: color-mix(in srgb, currentColor 14%, transparent);
-}
-#m-g-sheet-titles {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex; flex-direction: column; gap: 2px;
-}
-#m-g-sheet-label {
-  font-family: var(--font-body);
-  font-size: 1rem;
-  color: var(--text-bright);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-#m-g-sheet-type {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  letter-spacing: 0.12em;
-  text-transform: lowercase;
-  color: var(--text-dim);
-}
-#m-g-sheet-close {
-  flex: 0 0 auto;
-  width: 36px; height: 36px;
-  border: none; background: transparent;
-  font-size: 24px; line-height: 1;
-  color: var(--text-dim);
-  cursor: pointer; border-radius: 8px;
-}
-#m-g-sheet-close:active { background: var(--element); }
-
-#m-g-sheet-body {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  padding: 12px 14px 16px;
-}
-.m-g-sheet-section {
-  margin-bottom: 16px;
-}
-.m-g-sheet-section:empty { display: none; }
-.m-g-sheet-section-title {
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
-  letter-spacing: 0.14em;
-  text-transform: lowercase;
-  color: var(--text-dim);
-  margin-bottom: 6px;
-}
-#m-g-sheet-desc {
-  font-family: var(--font-body);
-  font-size: 0.86rem;
-  color: var(--text);
-  line-height: 1.5;
-}
-.m-g-attr {
-  display: flex; gap: 10px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 0.82rem;
-}
-.m-g-attr:last-child { border-bottom: none; }
-.m-g-attr-key {
-  flex: 0 0 38%;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-}
-.m-g-attr-val {
-  flex: 1; min-width: 0;
-  color: var(--text);
-  word-break: break-word;
-}
-.m-g-edge {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 4px;
-  border-bottom: 1px solid var(--border-subtle);
-  cursor: pointer;
-  min-height: 40px;
-}
-.m-g-edge:last-child { border-bottom: none; }
-.m-g-edge:active { background: var(--element); }
-.m-g-edge-arrow {
-  flex: 0 0 auto;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
-  width: 28px; text-align: center;
-}
-.m-g-edge-target {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--text-bright);
-  font-size: 0.86rem;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.m-g-edge-type {
-  flex: 0 0 auto;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  letter-spacing: 0.06em;
 }
 
 /* ────────────────────────────────────────────────────────────────────

@@ -105,256 +105,36 @@
   }
 
   // ── Mobile graph view ──
-  // Reads window.graphData (populated by graph.js after initApp →
-  // fetchGraph → initGraph). Renders a searchable type-filtered list;
-  // tapping a row opens a bottom-sheet detail with attributes + edges.
-  initMobileGraph();
-})();
-
-function initMobileGraph() {
-  const listEl = document.getElementById('m-g-list');
-  const searchEl = document.getElementById('m-g-search');
-  const filtersEl = document.getElementById('m-g-filters');
-  const statsEl = document.getElementById('m-g-stats');
-  if (!listEl || !searchEl || !filtersEl) return;
-
-  // ── Glyph helpers ──
-  // graph.js exposes getColor() / TYPE_VISUALS via top-level globals
-  // (effects.js / core.js). We read them lazily in renderRow because
-  // they may not be defined until the foundation modules complete
-  // their top-level execution.
-  function glyphFor(node) {
-    const visuals = window.TYPE_VISUALS || {};
-    return visuals[node.type]?.glyph || (node.type || '?')[0]?.toUpperCase() || '?';
-  }
-  function colorFor(node) {
-    return (typeof window.getColor === 'function')
-      ? window.getColor(node.type)
-      : 'var(--text-dim)';
+  // Move the desktop #canvas (which holds #graph-svg + the d3 force
+  // simulation populated by graph.js) into #m-graph-view so the live
+  // node graph renders here. d3-zoom v7 handles touch pan/pinch
+  // natively; long-press fires the same context menu as desktop
+  // right-click (graph.js Phase C handler).
+  const mGraphView = document.getElementById('m-graph-view');
+  const desktopCanvas = document.getElementById('canvas');
+  if (mGraphView && desktopCanvas) {
+    mGraphView.appendChild(desktopCanvas);
   }
 
-  let activeFilter = ''; // empty = all
-  let searchTerm = '';
-  let renderTimer = null;
-
-  function nodes() {
-    return (window.graphData?.nodes) || [];
-  }
-  function edges() {
-    return (window.graphData?.edges) || [];
-  }
-
-  function renderFilters() {
-    const counts = new Map();
-    for (const n of nodes()) {
-      const t = n.type || 'unknown';
-      counts.set(t, (counts.get(t) || 0) + 1);
-    }
-    const types = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-    filtersEl.innerHTML = '';
-    const all = makeChip('all', '', nodes().length);
-    if (!activeFilter) all.classList.add('active');
-    filtersEl.appendChild(all);
-    for (const [t, c] of types) {
-      const chip = makeChip(t, t, c);
-      if (activeFilter === t) chip.classList.add('active');
-      filtersEl.appendChild(chip);
-    }
-  }
-  function makeChip(label, value, count) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'm-g-chip';
-    b.dataset.filter = value;
-    b.innerHTML = `<span>${escapeAttr(label)}</span><span class="m-g-chip-count">${count}</span>`;
-    b.addEventListener('click', () => {
-      activeFilter = (activeFilter === value) ? '' : value;
-      renderFilters();
-      renderList();
-    });
-    return b;
-  }
-
-  function escapeAttr(s) {
-    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  function nodeMatchesSearch(n, q) {
-    if (!q) return true;
-    const hay = ((n.label || '') + ' ' + (n.id || '') + ' ' + (n.type || '') + ' ' + (n.description || '')).toLowerCase();
-    return hay.includes(q);
-  }
-
-  function renderList() {
-    const q = searchTerm.toLowerCase().trim();
-    const all = nodes()
-      .filter(n => !activeFilter || (n.type || 'unknown') === activeFilter)
-      .filter(n => nodeMatchesSearch(n, q))
-      .sort((a, b) => {
-        const ai = a.importance || 0;
-        const bi = b.importance || 0;
-        if (ai !== bi) return bi - ai;
-        return String(a.label || a.id).localeCompare(String(b.label || b.id));
+  // The d3 simulation sizes itself on init using the canvas's
+  // bounding box, which is 0 while #m-graph-view is display:none.
+  // When the user activates the graph tab for the first time we need
+  // to nudge d3 to re-measure and re-fit.
+  let firstGraphActivation = true;
+  const origSetView = window._mShellSetView;
+  // setView is closed over at the top of this IIFE — wrap by
+  // overriding on the body class observer instead.
+  const bodyObserver = new MutationObserver(() => {
+    if (document.body.classList.contains('m-view-graph') && firstGraphActivation) {
+      firstGraphActivation = false;
+      // Defer to next frame so the layout has the new visible box.
+      requestAnimationFrame(() => {
+        // Trigger d3 to refit. graph.js sizes via getBoundingClientRect
+        // inside its tick handler; firing a window resize forces it
+        // to recompute on next tick.
+        window.dispatchEvent(new Event('resize'));
       });
-
-    statsEl.textContent = all.length === nodes().length
-      ? `${all.length} nodes`
-      : `${all.length} of ${nodes().length} nodes`;
-
-    if (!all.length) {
-      listEl.innerHTML = `<div class="m-g-empty">${nodes().length ? 'no nodes match' : 'no nodes in this graph yet'}</div>`;
-      return;
     }
-    // Build all rows in a fragment for performance.
-    const frag = document.createDocumentFragment();
-    for (const n of all) {
-      const row = document.createElement('div');
-      row.className = 'm-g-row';
-      row.setAttribute('role', 'listitem');
-      row.dataset.nodeId = n.id;
-      const color = colorFor(n);
-      row.innerHTML = `
-        <div class="m-g-row-glyph" style="color:${color}">${escapeAttr(glyphFor(n))}</div>
-        <div class="m-g-row-body">
-          <div class="m-g-row-label">${escapeAttr(n.label || n.id)}</div>
-          <div class="m-g-row-type">${escapeAttr(n.type || 'unknown')}</div>
-        </div>
-        <div class="m-g-row-chev">›</div>
-      `;
-      row.addEventListener('click', () => openSheet(n.id));
-      frag.appendChild(row);
-    }
-    listEl.replaceChildren(frag);
-  }
-
-  function scheduleRender() {
-    clearTimeout(renderTimer);
-    renderTimer = setTimeout(() => {
-      renderFilters();
-      renderList();
-    }, 150);
-  }
-
-  // ── Search input ──
-  searchEl.addEventListener('input', (e) => {
-    searchTerm = e.target.value;
-    scheduleRender();
   });
-
-  // ── Watch graphData for changes ──
-  // graph.js mutates window.graphData when nodes/edges arrive over the
-  // WS. We re-render on any DOM mutation that flips the canvas (cheap
-  // proxy) plus poll for the first paint.
-  let lastSize = -1;
-  function pollGraphReady() {
-    const size = nodes().length + edges().length;
-    if (size !== lastSize) {
-      lastSize = size;
-      renderFilters();
-      renderList();
-    }
-  }
-  setInterval(pollGraphReady, 1500);
-  pollGraphReady();
-
-  // ── Sheet ──
-  const sheetEl = document.getElementById('m-g-sheet');
-  const scrimEl = document.getElementById('m-g-sheet-scrim');
-  document.getElementById('m-g-sheet-close')?.addEventListener('click', closeSheet);
-  scrimEl?.addEventListener('click', closeSheet);
-
-  function openSheet(nodeId) {
-    const n = nodes().find(x => x.id === nodeId);
-    if (!n) return;
-    document.getElementById('m-g-sheet-glyph').style.color = colorFor(n);
-    document.getElementById('m-g-sheet-glyph').textContent = glyphFor(n);
-    document.getElementById('m-g-sheet-label').textContent = n.label || n.id;
-    document.getElementById('m-g-sheet-type').textContent = n.type || 'unknown';
-    // Description
-    const descEl = document.getElementById('m-g-sheet-desc');
-    if (n.description) {
-      descEl.innerHTML = `<div class="m-g-sheet-section-title">description</div>${escapeAttr(n.description).replace(/\n/g, '<br>')}`;
-    } else {
-      descEl.innerHTML = '';
-    }
-    // Attributes
-    const attrsEl = document.getElementById('m-g-sheet-attrs');
-    const attrEntries = collectAttrs(n);
-    if (attrEntries.length) {
-      attrsEl.innerHTML = `<div class="m-g-sheet-section-title">attributes</div>` +
-        attrEntries.map(([k, v]) => `<div class="m-g-attr"><div class="m-g-attr-key">${escapeAttr(k)}</div><div class="m-g-attr-val">${escapeAttr(v)}</div></div>`).join('');
-    } else {
-      attrsEl.innerHTML = '';
-    }
-    // Edges
-    const edgesEl = document.getElementById('m-g-sheet-edges');
-    const incoming = edges().filter(e => (e.target?.id || e.target) === n.id);
-    const outgoing = edges().filter(e => (e.source?.id || e.source) === n.id);
-    const edgeRows = [
-      ...outgoing.map(e => ({ dir: '→', other: e.target?.id || e.target, type: e.type })),
-      ...incoming.map(e => ({ dir: '←', other: e.source?.id || e.source, type: e.type })),
-    ];
-    if (edgeRows.length) {
-      edgesEl.innerHTML = `<div class="m-g-sheet-section-title">edges (${edgeRows.length})</div>` +
-        edgeRows.map(e => {
-          const target = nodes().find(x => x.id === e.other);
-          const targetLabel = target ? (target.label || target.id) : e.other;
-          return `<div class="m-g-edge" data-other="${escapeAttr(e.other)}"><div class="m-g-edge-arrow">${e.dir}</div><div class="m-g-edge-target">${escapeAttr(targetLabel)}</div><div class="m-g-edge-type">${escapeAttr(e.type || '')}</div></div>`;
-        }).join('');
-      edgesEl.querySelectorAll('.m-g-edge').forEach(row => {
-        row.addEventListener('click', () => openSheet(row.dataset.other));
-      });
-    } else {
-      edgesEl.innerHTML = '';
-    }
-    document.body.classList.add('m-g-sheet-open');
-    sheetEl.setAttribute('aria-hidden', 'false');
-  }
-
-  function closeSheet() {
-    document.body.classList.remove('m-g-sheet-open');
-    sheetEl?.setAttribute('aria-hidden', 'true');
-  }
-
-  function collectAttrs(n) {
-    const out = [];
-    // Common informative fields
-    if (n.importance != null) out.push(['importance', String(n.importance)]);
-    if (n.created_at) out.push(['created', n.created_at]);
-    if (n.updated_at) out.push(['updated', n.updated_at]);
-    // Inline attrs (object) — common shape
-    if (n.attrs && typeof n.attrs === 'object') {
-      for (const [k, v] of Object.entries(n.attrs)) {
-        if (v && typeof v === 'object') out.push([k, JSON.stringify(v)]);
-        else out.push([k, String(v ?? '')]);
-      }
-    }
-    // Aspects (rich attributes per name) — collapse for list view
-    if (Array.isArray(n.aspects)) {
-      for (const a of n.aspects) {
-        if (a?.name && a?.value) out.push([a.name, String(a.value)]);
-      }
-    }
-    return out;
-  }
-
-  // Swipe-down to close the sheet
-  let touchStartY = null;
-  sheetEl?.addEventListener('touchstart', (e) => {
-    const offset = e.touches[0].clientY - sheetEl.getBoundingClientRect().top;
-    if (offset > 60) return; // only from the handle / head area
-    touchStartY = e.touches[0].clientY;
-  }, { passive: true });
-  sheetEl?.addEventListener('touchmove', (e) => {
-    if (touchStartY == null) return;
-    const dy = e.touches[0].clientY - touchStartY;
-    if (dy > 0) sheetEl.style.transform = `translateY(${dy}px)`;
-  }, { passive: true });
-  sheetEl?.addEventListener('touchend', (e) => {
-    if (touchStartY == null) return;
-    const dy = (e.changedTouches[0].clientY - touchStartY);
-    sheetEl.style.transform = '';
-    if (dy > 100) closeSheet();
-    touchStartY = null;
-  }, { passive: true });
-}
+  bodyObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+})();
