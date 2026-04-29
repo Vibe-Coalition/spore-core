@@ -69,3 +69,113 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
 }
+
+/* ── Phase B — Phone portrait (≤480px) wizard + settings fit ──
+   Layered on top of the 768px tablet rules. Anything that already
+   worked at tablet portrait (chat tab, rp tab) doesn't need a rule
+   here — this block fixes only what overflows or feels cramped at
+   phone width.
+
+   Onboarding markup comes from src/static/scripts/onboarding.js. The
+   data-ob-tier-* selectors match the children of .ob-tier-row exactly
+   (verified against the source — order: label → provider → model →
+   ctx → compact → test → result). */
+@media (max-width: 480px) {
+  /* B.1 — Theme swatch grid → auto-fit so 4 fixed cols at desktop wrap
+     to 3 / 2 cols on phone without forcing each tile under the
+     comfortable 80px tap target. */
+  #ob-theme-grid {
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  }
+
+  /* B.2 — Provider grid → auto-fit. 2 fixed cols at desktop becomes
+     1 col on phone where 220px is the comfortable card minimum. */
+  .ob-provider-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+
+  /* B.3 — Step-dot bar — 11 dots have to fit at 320–380px. Wrap and
+     shrink each dot. */
+  #onboarding-dots {
+    gap: 3px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  #onboarding-dots span {
+    width: 16px;
+    height: 2px;
+  }
+
+  /* B.4 — Tier picker — 7-col grid is impossible at phone width. Hide
+     the header label row (each input gets its own placeholder), then
+     restructure each row as a stacked card using grid-template-areas
+     so the children land in the right slots regardless of declaration
+     order. */
+  .ob-tier-header { display: none; }
+  .ob-tier-row {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "label    label"
+      "provider model"
+      "ctx      compact"
+      "test     result";
+    gap: 4px 6px;
+    padding: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+  }
+  .ob-tier-row > .label                   { grid-area: label;
+    font-size: .68rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .08em;
+  }
+  .ob-tier-row > [data-ob-tier-provider]  { grid-area: provider; }
+  .ob-tier-row > [data-ob-tier-model]     { grid-area: model; }
+  .ob-tier-row > [data-ob-tier-ctx]       { grid-area: ctx; }
+  .ob-tier-row > [data-ob-tier-compact]   { grid-area: compact; }
+  .ob-tier-row > [data-ob-tier-test]      { grid-area: test; min-height: 36px; }
+  .ob-tier-row > [data-ob-tier-result]    { grid-area: result; align-self: center; }
+
+  /* B.5 — Custom-OAI provider rows — same fixed-flex problem. Stack
+     prefix + URL + key + auth-header dropdown vertically. */
+  .ob-custom-row-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .ob-custom-row-head input,
+  .ob-custom-row-head select {
+    flex: 1 1 auto !important;
+    min-width: 0;
+  }
+
+  /* B.6 — Onboarding header padding — recover vertical space for the
+     content below it. */
+  #onboarding-head { padding: 12px 14px 8px; }
+  #onboarding-head h2 { font-size: 1.25rem; }
+  #onboarding-body { padding: 14px 14px; min-height: 240px; }
+
+  /* B.7 — Settings modal — full-bleed at phone width. The 860px
+     breakpoint already collapses the body to 1 column; this drops the
+     modal chrome so content gets the screen. */
+  #settings-pane .floating-pane-body,
+  #settings-pane .settings-body {
+    padding: 12px;
+    gap: 10px;
+  }
+  #settings-pane {
+    width: 96vw !important;
+    height: 92vh !important;
+  }
+}
+
+/* ── Phase B.8 — iPhone SE 1st gen (≤360px) ──
+   Even tighter overrides for the smallest in-use viewport. Keeps the
+   onboarding box almost full-screen so content has room to breathe. */
+@media (max-width: 360px) {
+  #onboarding-box { width: 96vw; height: 96vh; }
+  .ob-tier-row { padding: 6px; }
+  #onboarding-head { padding: 10px 12px 6px; }
+  #onboarding-body { padding: 10px 12px; }
+}
