@@ -455,10 +455,12 @@ class GraphContext {
       try {
         if (this.config.enhancedRecall && opts._llmClient) {
           this.log.info(`[graph] Enhanced Recall (${queryType}): decomposing query "${opts.messageContent.slice(0, 80)}..."`);
+          try { graphEvents.emit('change', { op: 'recall:start', source: 'recall', detail: `${queryType} · "${opts.messageContent.slice(0, 50)}"` }); } catch {}
           try {
             const decomposed = await this._llmDecomposeQuery(opts._llmClient, opts.messageContent);
             if (decomposed && decomposed.subQueries?.length > 0) {
               this.log.info(`[graph] Enhanced Recall: ${decomposed.subQueries.length} sub-queries: ${JSON.stringify(decomposed.subQueries)}`);
+              try { graphEvents.emit('change', { op: 'recall:decompose', source: 'recall', detail: `${decomposed.subQueries.length} sub-queries` }); } catch {}
               const allResults = new Map();
 
               const mainSearchLimit = queryType === 'aggregation' ? 25 : 15;
@@ -669,10 +671,12 @@ class GraphContext {
               }
             } else {
               this.log.info('[graph] Enhanced Recall: decomposition returned no sub-queries, using standard search');
+              try { graphEvents.emit('change', { op: 'recall:empty', source: 'recall', detail: 'no sub-queries — fell back to standard search' }); } catch {}
               opts._precomputedResults = await this.hybridSearchSelf(opts.messageContent, 20);
             }
           } catch (e) {
             this.log.warn(`[graph] Enhanced Recall: decomposition failed (${e.message}), falling back to standard search`);
+            try { graphEvents.emit('change', { op: 'recall:fail', source: 'recall', detail: (e.message || '').slice(0, 80) }); } catch {}
             opts._precomputedResults = await this.hybridSearchSelf(opts.messageContent, 20);
           }
         } else {

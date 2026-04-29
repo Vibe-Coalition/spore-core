@@ -702,6 +702,7 @@ function _eventLogFormat(evt) {
   else if (evt?.edge) detail = `${evt.edge.source} → ${evt.edge.target}`;
   else if (evt?.tool) detail = evt.tool;
   else if (evt?.attributeId) detail = `attr#${evt.attributeId}`;
+  else if (evt?.detail) detail = String(evt.detail).slice(0, 120); // generic carrier for read-path events (recall, scan, etc.)
   return { op, detail, source };
 }
 
