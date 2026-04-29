@@ -202,11 +202,9 @@
   .ob-step .ob-error { color: var(--danger); font-size: .78rem; margin-top: 6px; min-height: 1em; }
   .ob-step .ob-note { font-size: .72rem; color: var(--text-dim); margin-top: 4px; }
 
-  /* Theme swatch grid — 4 cols at desktop, auto-fit on narrow viewports
-     so themes wrap to 3 / 2 columns on phone portrait without forcing
-     each tile below the comfortable 80px minimum. */
+  /* Theme swatch grid */
   #ob-theme-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 10px; margin-top: 8px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 8px;
   }
   .ob-theme-tile {
     cursor: pointer; border: 2px solid var(--border); border-radius: 10px; padding: 14px 8px;
@@ -218,9 +216,8 @@
   .ob-theme-tile .swatch { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); }
   .ob-theme-tile .name { font-size: .72rem; color: var(--text); }
 
-  /* Provider grid — 2 cols at desktop, auto-fit so each card stays
-     ≥220px wide before wrapping to 1 column on phone portrait. */
-  .ob-provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 8px; }
+  /* Provider grid */
+  .ob-provider-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 8px; }
   .ob-provider-card {
     border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--panel);
     transition: border-color .2s ease;
@@ -3004,121 +3001,7 @@
     .chat-msg pre { font-size: .7rem; }
 
     #search { top: 50px; right: 6px; left: 6px; width: auto; }
-
-    /* Mobile-nav respects iPhone home-indicator safe area when it's the
-       bottom-most element. The chat input already does this; mobile-nav
-       sits above the chat input when chat is active, but is the bottom
-       element on canvas / right-panel tabs. */
-    #mobile-nav {
-      padding-bottom: env(safe-area-inset-bottom);
-    }
   }
-
-  /* ── Phone portrait — tighter overrides for ≤480px ──
-     Layered on top of the 768px tablet rules. Anything that already
-     works at tablet portrait (chat tab, rp tab) doesn't need a rule
-     here; this block fixes only what overflows or feels cramped at
-     phone width. */
-  @media (max-width: 480px) {
-    /* Tier picker — 7 fixed columns become a stacked card.
-       Provider+model on row 1, ctx+compact on row 2, test on row 3.
-       Header row hides since each input gets its own placeholder label. */
-    .ob-tier-header { display: none; }
-    .ob-tier-row {
-      grid-template-columns: 1fr 1fr;
-      grid-template-areas:
-        "label label"
-        "provider model"
-        "ctx compact"
-        "test result";
-      gap: 4px 6px;
-      padding: 8px;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      margin-bottom: 8px;
-    }
-    .ob-tier-row > .label { grid-area: label; font-size: .68rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .08em; }
-    .ob-tier-row > [data-ob-tier-provider] { grid-area: provider; }
-    .ob-tier-row > [data-ob-tier-model]    { grid-area: model; }
-    .ob-tier-row > [data-ob-tier-ctx]      { grid-area: ctx; }
-    .ob-tier-row > [data-ob-tier-compact]  { grid-area: compact; }
-    .ob-tier-row > [data-ob-tier-test]     { grid-area: test; min-height: 36px; }
-    .ob-tier-row > [data-ob-tier-result]   { grid-area: result; align-self: center; }
-
-    /* Custom-OAI provider rows — same fixed-flex problem. Stack the
-       prefix + URL + key + auth-header dropdown vertically. */
-    .ob-custom-row-head { flex-direction: column; align-items: stretch; gap: 4px; }
-    .ob-custom-row-head input,
-    .ob-custom-row-head select { flex: 1 1 auto !important; min-width: 0; }
-
-    /* Step-dot bar — 11 dots have to fit at 320-380px. */
-    #onboarding-dots { gap: 3px; flex-wrap: wrap; justify-content: center; }
-    #onboarding-dots span { width: 16px; height: 2px; }
-
-    /* Onboarding header padding — recover vertical space for content. */
-    #onboarding-head { padding: 12px 14px 8px; }
-    #onboarding-head h2 { font-size: 1.25rem; }
-    #onboarding-body { padding: 14px 14px; min-height: 240px; }
-
-    /* Settings modal — full-bleed at phone width. The 860px rule
-       already collapses the body to 1 column; this drops the chrome
-       so content gets the screen. */
-    #settings-pane .floating-pane-body,
-    #settings-pane .settings-body { padding: 12px; gap: 10px; }
-    #settings-pane { width: 96vw !important; height: 92vh !important; }
-
-    /* Wizard editor cards — give the text more room. */
-    .ob-step input[type="text"], .ob-step input[type="password"],
-    .ob-step input[type="url"], .ob-step select { padding: 10px 12px; font-size: .9rem; }
-  }
-
-  /* Tiny phones (iPhone 5 / SE 1st gen) — only what's needed. */
-  @media (max-width: 360px) {
-    #onboarding-box { width: 96vw; max-width: 96vw; max-height: 96vh; }
-    #onboarding-head h2 { font-size: 1.1rem; }
-    .ob-tier-row { padding: 6px; }
-  }
-
-  /* ── Touch-only adjustments ──
-     Browsers without hover (i.e. real touch devices) report hover:none.
-     Touch-only or hybrid input devices report pointer:coarse. Use these
-     to surface UI that desktop hides behind hover, and to bump tap
-     targets without hurting desktop density. */
-  @media (hover: none) and (pointer: coarse) {
-    /* File-browser actions, hover-only on desktop. */
-    .fp-actions { opacity: 1 !important; }
-    /* Collapse chevrons — fade-in to keep visual hierarchy but make
-       discoverable. Desktop kept the 0→.6 hover transition. */
-    .collapse-chevron { opacity: .4 !important; }
-    /* Dock tooltips don't make sense on touch — they require hover. */
-    .dock-tooltip { display: none !important; }
-    /* Provider entry remove buttons + similar action chips — full opacity. */
-    .ob-tier-row [data-ob-tier-test],
-    .settings-test-btn { opacity: 1 !important; }
-  }
-
-  @media (pointer: coarse) {
-    /* Tap-target floor — 44×44 per platform HIG. Desktop density
-       preserved; touch devices get bumps via this query. */
-    .ob-btn,
-    .ob-test-btn,
-    .settings-btn,
-    .settings-btn-secondary,
-    .settings-test-btn,
-    #mobile-nav button { min-height: 44px; min-width: 44px; }
-    /* Wizard input fields — comfortable tap height. */
-    .ob-step input, .ob-step select, .ob-step textarea { min-height: 44px; }
-    /* Plugin pane action chips — settings panes inject tap-eable UI. */
-    [data-plugin-field] input, [data-plugin-field] select { min-height: 44px; }
-  }
-
-  /* Plugin pane host-level constraint — many plugin static assets
-     (tailscale, compute-cluster) ship hardcoded `max-width: 520px` on
-     internal containers. Force them to flex within their host pane
-     instead of overflowing on phones. */
-  #rp-pane-plugins { max-width: 100%; overflow-x: auto; }
-  #rp-pane-plugins > * { max-width: 100%; box-sizing: border-box; }
 
   /* ── Graph Picker (Multi-Graph Selector) ── */
   .picker-dropdown {
@@ -13467,64 +13350,24 @@ function initGraph(data) {
   _upsertNodeVisuals(nodeG);
 
   svg.on('mousedown.marquee', (e) => _beginGraphMarquee(e));
-  // Helper: open the context menu at a screen position for the node
-  // that was hit (or the existing selection if no node was clicked).
-  // Shared by right-click (desktop) and long-press (touch).
-  const _openCtxMenuAt = (clientX, clientY, nodeId) => {
-    if (nodeId) {
-      if (!selectedNodeIds.has(nodeId) || selectedNodeIds.size !== 1) {
-        _setGraphSelection([nodeId]);
+  svg.on('contextmenu.graphmenu', (e) => {
+    const nodeEl = e.target.closest('g.graph-node');
+    const node = nodeEl?.__data__ || null;
+
+    if (node) {
+      if (!selectedNodeIds.has(node.id) || selectedNodeIds.size !== 1) {
+        _setGraphSelection([node.id]);
       }
     } else if (!selectedNodeIds.size) {
       hideGraphContextMenu();
       return;
     }
-    if (!selectedNodeIds.size) return;
-    showGraphContextMenu(clientX, clientY);
-  };
 
-  svg.on('contextmenu.graphmenu', (e) => {
-    const nodeEl = e.target.closest('g.graph-node');
-    const node = nodeEl?.__data__ || null;
-    if (!node && !selectedNodeIds.size) {
-      hideGraphContextMenu();
-      return;
-    }
+    if (!selectedNodeIds.size) return;
     e.preventDefault();
     e.stopPropagation();
-    _openCtxMenuAt(e.clientX, e.clientY, node?.id);
+    showGraphContextMenu(e.clientX, e.clientY);
   });
-
-  // Long-press → context menu on touch. d3-zoom v7 already handles pinch
-  // and two-finger pan via pointer events; this only adds the right-click
-  // equivalent. 500ms threshold matches platform convention. Cancels on
-  // movement >10px (treats as drag/pan) or release before timeout.
-  let _lpTimer = null;
-  let _lpStart = null;
-  const _lpClear = () => {
-    if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
-    _lpStart = null;
-  };
-  svg.node().addEventListener('pointerdown', (e) => {
-    if (e.pointerType !== 'touch') return; // mouse uses contextmenu event
-    const nodeEl = e.target.closest('g.graph-node');
-    const node = nodeEl?.__data__ || null;
-    _lpClear();
-    _lpStart = { x: e.clientX, y: e.clientY };
-    _lpTimer = setTimeout(() => {
-      _lpTimer = null;
-      _suppressNextGraphClick = true; // avoid clearGraphSelection on the release
-      _openCtxMenuAt(e.clientX, e.clientY, node?.id);
-    }, 500);
-  }, { passive: true });
-  svg.node().addEventListener('pointermove', (e) => {
-    if (!_lpStart) return;
-    const dx = e.clientX - _lpStart.x;
-    const dy = e.clientY - _lpStart.y;
-    if (Math.hypot(dx, dy) > 10) _lpClear();
-  }, { passive: true });
-  svg.node().addEventListener('pointerup', _lpClear, { passive: true });
-  svg.node().addEventListener('pointercancel', _lpClear, { passive: true });
   svg.on('click', () => {
     if (_suppressNextGraphClick) {
       _suppressNextGraphClick = false;

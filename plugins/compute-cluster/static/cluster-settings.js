@@ -20,7 +20,7 @@
 
   const HTML = `
     <div class="settings-note" style="margin-top:4px">SLURM cluster access over SSH (typically over a tailnet). Reachability further depends on the Tailscale plugin being installed and connected.</div>
-    <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">
+    <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px">
       <label style="font-size:.7rem">Cluster SSH username
         <input id="cl-username" type="text" autocomplete="off" style="display:block;margin-top:3px;width:100%;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
       </label>
