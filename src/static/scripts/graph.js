@@ -1147,24 +1147,71 @@ function initGraph(data) {
   _upsertNodeVisuals(nodeG);
 
   svg.on('mousedown.marquee', (e) => _beginGraphMarquee(e));
-  svg.on('contextmenu.graphmenu', (e) => {
-    const nodeEl = e.target.closest('g.graph-node');
-    const node = nodeEl?.__data__ || null;
 
+  // Right-click (desktop) and long-press (touch) both open the same
+  // context menu. Shared body extracted so the touch path doesn't
+  // drift from the mouse path.
+  function _openCtxMenuAt(targetEl, clientX, clientY) {
+    const nodeEl = targetEl?.closest?.('g.graph-node');
+    const node = nodeEl?.__data__ || null;
     if (node) {
       if (!selectedNodeIds.has(node.id) || selectedNodeIds.size !== 1) {
         _setGraphSelection([node.id]);
       }
     } else if (!selectedNodeIds.size) {
       hideGraphContextMenu();
-      return;
+      return false;
     }
+    if (!selectedNodeIds.size) return false;
+    showGraphContextMenu(clientX, clientY);
+    return true;
+  }
 
-    if (!selectedNodeIds.size) return;
-    e.preventDefault();
-    e.stopPropagation();
-    showGraphContextMenu(e.clientX, e.clientY);
+  svg.on('contextmenu.graphmenu', (e) => {
+    if (_openCtxMenuAt(e.target, e.clientX, e.clientY)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
   });
+
+  // ── Touch long-press → context menu ──
+  // d3-zoom v7 already handles pinch-zoom + two-finger pan via
+  // pointer events. The remaining touch gap is the right-click
+  // equivalent. 500ms hold without movement >10px fires the same
+  // menu at the touch point. Movement cancels (treats as drag/pan),
+  // early release cancels. Mouse events ignored — they go through
+  // the contextmenu handler above.
+  const svgNode = svg.node();
+  let _lpTimer = null;
+  let _lpStart = null; // { x, y, target }
+  const LONG_PRESS_MS = 500;
+  const LONG_PRESS_MOVE_THRESHOLD = 10;
+  const _cancelLongPress = () => {
+    if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+    _lpStart = null;
+  };
+  svgNode.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    _lpStart = { x: e.clientX, y: e.clientY, target: e.target };
+    _lpTimer = setTimeout(() => {
+      if (!_lpStart) return;
+      const fired = _openCtxMenuAt(_lpStart.target, _lpStart.x, _lpStart.y);
+      if (fired) _suppressNextGraphClick = true; // prevent the post-release click from clearing selection
+      _lpTimer = null;
+      _lpStart = null;
+    }, LONG_PRESS_MS);
+  }, { passive: true });
+  svgNode.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'touch' || !_lpStart) return;
+    const dx = e.clientX - _lpStart.x;
+    const dy = e.clientY - _lpStart.y;
+    if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_THRESHOLD) _cancelLongPress();
+  }, { passive: true });
+  svgNode.addEventListener('pointerup', (e) => {
+    if (e.pointerType !== 'touch') return;
+    _cancelLongPress();
+  }, { passive: true });
+  svgNode.addEventListener('pointercancel', () => _cancelLongPress(), { passive: true });
   svg.on('click', () => {
     if (_suppressNextGraphClick) {
       _suppressNextGraphClick = false;
