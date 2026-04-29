@@ -4369,7 +4369,6 @@ async function loadGraphThemePreference() {
 function getSettingsEls() {
   return {
     overlay: document.getElementById('settings-pane'),
-    themeSelect: document.getElementById('settings-theme'),
     statusEl: document.getElementById('settings-status'),
     saveBtn: document.getElementById('settings-save-btn'),
   };
@@ -4673,14 +4672,6 @@ function collectSettingsCustomProviders() {
   })).filter(provider => provider.name);
 }
 
-function renderSettingsThemeOptions() {
-  const { themeSelect } = getSettingsEls();
-  if (!themeSelect) return;
-  themeSelect.innerHTML = Object.entries(THEMES)
-    .map(([key, theme]) => `<option value="${key}">${theme.label}</option>`)
-    .join('');
-}
-
 function setSettingsBusy(busy, message = '') {
   const { saveBtn, statusEl } = getSettingsEls();
   if (saveBtn) saveBtn.disabled = !!busy;
@@ -4689,9 +4680,6 @@ function setSettingsBusy(busy, message = '') {
 
 function populateSettingsPanel(data) {
   if (!data) return;
-  renderSettingsThemeOptions();
-  const { themeSelect } = getSettingsEls();
-  if (themeSelect) themeSelect.value = THEMES[_currentTheme] ? _currentTheme : 'midnight';
   document.getElementById('settings-display-name').value = data.identity?.displayName || '';
   document.getElementById('settings-nicknames').value = _settingsList(data.identity?.nicknames || []);
   document.getElementById('settings-enhanced-recall').checked = !!data.memory?.enhancedRecall;
@@ -5583,7 +5571,7 @@ document.addEventListener('click', (e) => {
 });
 
 async function openSettingsPanel() {
-  const { overlay, themeSelect } = getSettingsEls();
+  const { overlay } = getSettingsEls();
   if (!overlay) {
     toast('Settings panel failed to initialize', true);
     return;
@@ -5591,8 +5579,6 @@ async function openSettingsPanel() {
   if (typeof toolsMenu !== 'undefined' && toolsMenu) toolsMenu.style.display = 'none';
   _toolsMenuOpen = false;
   closeToolsSubmenus();
-  renderSettingsThemeOptions();
-  if (themeSelect) themeSelect.value = THEMES[_currentTheme] ? _currentTheme : 'midnight';
   setSettingsBusy(true, 'Loading settings...');
 
   overlay.classList.add('settings-pane-open');
@@ -5871,8 +5857,10 @@ function _collectBudgetsPayload() {
 }
 
 async function saveSettingsPanel() {
-  const { themeSelect } = getSettingsEls();
-  const theme = themeSelect?.value || _currentTheme;
+  // Theme is owned by the header sun/moon toggle and lives on the
+  // browser-global _currentTheme — Settings just persists whatever's
+  // active so the operator's choice survives reload.
+  const theme = _currentTheme;
   // Webapp users save only personal preferences (theme + displayName) via
   // /api/preferences. They never touch /api/settings, so they can't change
   // server-side state even if they hit Save.
@@ -18545,13 +18533,10 @@ build/
         <div class="settings-tab-pane" data-tab="advanced"></div>
       </div>
       <!-- Existing sections below are re-parented into the panes at init.
-           data-target-tab on each section maps it to a tab. -->
-      <!-- Appearance section removed: theme is now controlled by the
-           sun/moon toggle button in the header. The two-theme system
-           (light + dark) doesn't need a settings UI for it. -->
-      <div class="settings-section" data-target-tab="profile" style="display:none">
-        <select id="settings-theme" style="display:none"></select>
-      </div>
+           data-target-tab on each section maps it to a tab.
+           Appearance section was removed entirely — theme is now controlled
+           by the sun/moon toggle in the header, and the save flow reads
+           the theme directly from _currentTheme. -->
 
       <div class="settings-section wide" data-target-tab="graph-memory">
         <h4>Knowledge Graph</h4>
