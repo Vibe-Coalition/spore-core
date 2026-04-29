@@ -681,6 +681,7 @@ function _collectProviderFormValues(name) {
   if (name === 'openai') return { apiKey: v('settings-provider-openai-key'), baseUrl: v('settings-provider-openai-base-url') };
   if (name === 'openrouter') return { apiKey: v('settings-provider-openrouter-key'), baseUrl: v('settings-provider-openrouter-base-url'), referer: v('settings-provider-openrouter-referer') };
   if (name === 'local') return { apiKey: v('settings-provider-local-key'), baseUrl: v('settings-provider-local-base-url') };
+  if (name === 'zai') return { apiKey: v('settings-provider-zai-key'), baseUrl: v('settings-provider-zai-base-url') };
   return {};
 }
 function _collectModelTierFormValues(tier) {
