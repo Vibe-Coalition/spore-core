@@ -585,22 +585,69 @@ async function _settingsAutoDetectModelLimits(data) {
   }
 }
 
+// Walk every dynamically-rendered provider card and collect its typed
+// values. Returns a body.providers payload of shape:
+//   { custom: [...], <name>: { <fieldKey>: <value>, ... }, ... }
+// AND stashes per-plugin slot payloads on the function so
+// _mergeProviderPluginPayload can fold them into body.plugins below.
+//
+// Empty secret fields are skipped (their stored value is preserved).
+// Empty non-secret fields are also skipped — the server's
+// assignProviderField treats blank as a no-op to prevent stale form
+// values from clobbering persisted ones (see web.js:1132 for the
+// historical regression that produced this behavior).
+let _settingsLastProviderPluginExtras = {};
+function _collectProvidersPayload() {
+  const providers = { custom: collectSettingsCustomProviders() };
+  const pluginExtras = {};
+  document.querySelectorAll('[data-provider-form]').forEach(wrap => {
+    const name = wrap.getAttribute('data-provider-form');
+    const pluginId = wrap.getAttribute('data-provider-plugin-id') || '';
+    if (!name) return;
+    // 'custom' is reserved for the user-defined custom providers array
+    // (collectSettingsCustomProviders → providers.custom = [...]). If
+    // a plugin happens to register a provider named 'custom' (the
+    // local-oai-provider does, conditionally), don't overwrite the
+    // array shape — its config is collected the legacy way via the
+    // custom-providers UI grid.
+    if (name === 'custom') return;
+    const values = {};
+    let any = false;
+    wrap.querySelectorAll('[data-provider-field]').forEach(input => {
+      const key = input.getAttribute('data-provider-field');
+      if (!key) return;
+      const isSecret = input.getAttribute('data-provider-secret') === '1';
+      const v = (input.value || '').trim();
+      if (v === '') return;
+      // Skip stored-secret placeholder if any plugin/UI ever sets it
+      if (isSecret && v === '••• stored — leave blank to keep') return;
+      values[key] = v;
+      any = true;
+    });
+    if (any) {
+      providers[name] = values;
+      if (pluginId) pluginExtras[pluginId] = { ...(pluginExtras[pluginId] || {}), ...values };
+    }
+  });
+  _settingsLastProviderPluginExtras = pluginExtras;
+  return providers;
+}
+function _mergeProviderPluginPayload(pluginPayload) {
+  const out = { ...(pluginPayload || {}) };
+  for (const [pluginId, values] of Object.entries(_settingsLastProviderPluginExtras || {})) {
+    out[pluginId] = { ...(out[pluginId] || {}), ...values };
+  }
+  // Reset for next save so a stale call doesn't double-fold.
+  _settingsLastProviderPluginExtras = {};
+  return out;
+}
+
 // Live model-list refresh — lets the operator paste an API key into a
 // provider input and watch the per-tier datalists populate without
-// having to hit Save first. Triggered on debounced 'input' for each
-// built-in provider's apiKey field. Uses the form's CURRENT values
-// (not the persisted snapshot) so unsaved keys still drive the probe.
-//
-// Built-in providers list mirrors _settingsAutoDetectModelLimits; when
-// you add a new built-in provider, also add its input ids here.
-const _SETTINGS_PROVIDER_LIVE_PROBE = [
-  // [kind, apiKeyInputId, baseUrlInputId|null]
-  ['anthropic',  'settings-provider-anthropic-key',  null],
-  ['openai',     'settings-provider-openai-key',     'settings-provider-openai-base-url'],
-  ['openrouter', 'settings-provider-openrouter-key', 'settings-provider-openrouter-base-url'],
-  ['zai',        'settings-provider-zai-key',        'settings-provider-zai-base-url'],
-];
-
+// having to hit Save first. Walks every dynamically-rendered provider
+// card (data-provider-form) and binds a debounced 'input' handler to
+// each apiKey + baseUrl field. Generic — adding a new provider plugin
+// gets the live probe automatically with no UI patching here.
 let _settingsLiveProbeTimer = null;
 function _settingsLiveProbeOneProvider(kind, apiKey, baseUrl) {
   return fetch(API + '/api/providers/list-models', {
@@ -624,14 +671,17 @@ function _settingsLiveProbeOneProvider(kind, apiKey, baseUrl) {
 }
 
 function _bindSettingsProviderLiveProbe() {
-  for (const [kind, keyId, baseId] of _SETTINGS_PROVIDER_LIVE_PROBE) {
-    const keyInp = document.getElementById(keyId);
-    if (!keyInp || keyInp.dataset.liveProbeBound === '1') continue;
-    keyInp.dataset.liveProbeBound = '1';
+  document.querySelectorAll('[data-provider-form]').forEach(wrap => {
+    const kind = wrap.getAttribute('data-provider-form');
+    if (!kind) return;
+    const apiKeyInp = wrap.querySelector('[data-provider-field="apiKey"]');
+    const baseInp   = wrap.querySelector('[data-provider-field="baseUrl"]');
+    if (!apiKeyInp || apiKeyInp.dataset.liveProbeBound === '1') return;
+    apiKeyInp.dataset.liveProbeBound = '1';
     const fire = () => {
-      const apiKey = (keyInp.value || '').trim();
+      const apiKey = (apiKeyInp.value || '').trim();
       if (!apiKey || apiKey === '***hidden***') return;
-      const baseUrl = baseId ? (document.getElementById(baseId)?.value.trim() || '') : '';
+      const baseUrl = baseInp ? (baseInp.value || '').trim() : '';
       clearTimeout(_settingsLiveProbeTimer);
       _settingsLiveProbeTimer = setTimeout(
         () => _settingsLiveProbeOneProvider(kind, apiKey, baseUrl),
@@ -640,15 +690,12 @@ function _bindSettingsProviderLiveProbe() {
         1200
       );
     };
-    keyInp.addEventListener('input', fire);
-    if (baseId) {
-      const baseInp = document.getElementById(baseId);
-      if (baseInp && baseInp.dataset.liveProbeBound !== '1') {
-        baseInp.dataset.liveProbeBound = '1';
-        baseInp.addEventListener('input', fire);
-      }
+    apiKeyInp.addEventListener('input', fire);
+    if (baseInp && baseInp.dataset.liveProbeBound !== '1') {
+      baseInp.dataset.liveProbeBound = '1';
+      baseInp.addEventListener('input', fire);
     }
-  }
+  });
 }
 
 // Hide settings sections whose owning plugin isn't installed. Sections
@@ -1238,29 +1285,7 @@ async function saveSettingsPanel() {
     },
     models,
     modelLimits,
-    providers: {
-      anthropic: {
-        apiKey: document.getElementById('settings-provider-anthropic-key').value.trim(),
-      },
-      openai: {
-        baseUrl: document.getElementById('settings-provider-openai-base-url').value.trim(),
-        apiKey: document.getElementById('settings-provider-openai-key').value.trim(),
-      },
-      openrouter: {
-        baseUrl: document.getElementById('settings-provider-openrouter-base-url').value.trim(),
-        apiKey: document.getElementById('settings-provider-openrouter-key').value.trim(),
-        referer: document.getElementById('settings-provider-openrouter-referer').value.trim(),
-      },
-      local: {
-        baseUrl: document.getElementById('settings-provider-local-base-url').value.trim(),
-        apiKey: document.getElementById('settings-provider-local-key').value.trim(),
-      },
-      zai: {
-        baseUrl: document.getElementById('settings-provider-zai-base-url')?.value.trim() || '',
-        apiKey:  document.getElementById('settings-provider-zai-key')?.value.trim() || '',
-      },
-      custom: collectSettingsCustomProviders(),
-    },
+    providers: _collectProvidersPayload(),
     browser: {
       backend: document.getElementById('settings-browser-backend').value,
     },
@@ -1272,7 +1297,7 @@ async function saveSettingsPanel() {
       searxngApiKey: document.getElementById('settings-websearch-searxng-key').value.trim(),
       braveApiKey: document.getElementById('settings-websearch-brave-key').value.trim(),
     },
-    plugins: _collectPluginSettingsPayload(),
+    plugins: _mergeProviderPluginPayload(_collectPluginSettingsPayload()),
     // Invite key: regen flag wins (mint fresh UUID server-side).
     // Otherwise send the typed value (empty string = disable).
     ...(_pendingInviteRegenerate

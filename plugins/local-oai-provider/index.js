@@ -233,6 +233,7 @@ module.exports = function register(api) {
   }
 
   api.registerSettingsPane({
+    tab: 'providers',
     title: 'Local OAI-compatible LLM',
     description: 'Connect any OpenAI-compatible chat-completion endpoint — vLLM, LM Studio, Ollama, llama.cpp, self-hosted. Use the model string `oai/<model-id>` (or `local/<model-id>`) in tier routing. Additional custom prefixes (e.g. bfl, glm) come from `customProviders` in spore.json.',
     schema: [

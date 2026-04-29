@@ -209,6 +209,7 @@ module.exports = function register(api) {
   });
 
   api.registerSettingsPane({
+    tab: 'providers',
     title: 'OpenAI',
     description: 'GPT-4o, GPT-4.1, etc. Use model strings like `openai/gpt-4o-mini` in tier routing.',
     schema: [

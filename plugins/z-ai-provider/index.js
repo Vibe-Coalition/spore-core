@@ -187,6 +187,7 @@ module.exports = function register(api) {
   });
 
   api.registerSettingsPane({
+    tab: 'providers',
     title: 'Z.ai (GLM)',
     description: "Z.ai cloud chat completions (GLM-4.6 / GLM-Z1 / charglm). Use model strings like `zai/glm-4.6` in tier routing. Reasoning-capable models (GLM-Z1 family) honor reasoning_effort; others ignore it.",
     schema: [

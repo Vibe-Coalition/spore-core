@@ -872,21 +872,35 @@ class WebGateway {
         recall: this._normalizeSettingsModelRef(this.config.recallModel),
       },
       providers: {
-        // Plugin-registered providers, dynamically. The frontend reads
-        // this list to populate the per-tier provider dropdown +
-        // labels — adding a provider plugin (with a `label` opt on
-        // registerProvider) makes it appear here automatically, so we
-        // don't keep growing the hardcoded list in core.js.
+        // Plugin-registered providers, dynamically. Frontend renders
+        // the entire Providers tab from this list — schema, values,
+        // and the per-tier dropdown choices all flow from here.
+        // `formFields` mirrors the plugin's settings pane schema (so
+        // each plugin owns its UI surface in one place); `values`
+        // carries the current persisted values (secrets masked).
+        // `pluginId` lets the save path route changes back to the
+        // plugin's slot (body.plugins[<id>]) which fires its
+        // onConfigChange to mirror values to env + host config.
         registered: (() => {
           const mgr = this.tools?._pluginManager;
           if (!mgr?.getProviders) return [];
-          return mgr.getProviders().map(p => ({
-            name: p.name,
-            label: p.label || p.name,
-            configured: !!p.configured,
-            defaultBaseUrl: p.defaultBaseUrl || null,
-            capabilities: p.capabilities || {},
-          }));
+          const panes = mgr.getSettingsPanes ? mgr.getSettingsPanes() : [];
+          const paneByPluginId = new Map(panes.map(p => [p.pluginId, p]));
+          return mgr.getProviders().map(p => {
+            const pane = paneByPluginId.get(p.pluginId) || null;
+            return {
+              name: p.name,
+              pluginId: p.pluginId,
+              label: p.label || p.name,
+              configured: !!p.configured,
+              defaultBaseUrl: p.defaultBaseUrl || null,
+              capabilities: p.capabilities || {},
+              formFields: pane?.schema || [],
+              values: pane?.values || {},
+              meta: pane?.meta || {},
+              description: pane?.description || '',
+            };
+          });
         })(),
         anthropic: {
           apiKey: this.config.anthropicApiKey || '',

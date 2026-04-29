@@ -142,6 +142,7 @@ module.exports = function register(api) {
   });
 
   api.registerSettingsPane({
+    tab: 'providers',
     title: 'OpenRouter',
     description: 'Single key, hundreds of models. Use model strings like `openrouter/anthropic/claude-haiku-4-5` in tier routing.',
     schema: [

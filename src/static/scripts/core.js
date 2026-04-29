@@ -303,6 +303,109 @@ function _settingsEscapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+// Render one card per registered provider into the Providers tab.
+// Each plugin's settings-pane schema declares its fields; we render
+// inputs accordingly. Test button + result span are uniform across
+// providers — wired through panels.js's existing data-provider-test
+// handler, which now reads form values via the data-provider-form
+// wrappers below instead of hardcoded element ids.
+//
+// Field id convention: settings-provider-<name>-<fieldKey>. Stable
+// enough for inline querySelector calls (e.g., the live-probe
+// handler in settings.js) without keeping a parallel registry.
+function _renderProviderGroups(registered) {
+  const host = document.getElementById('settings-providers-dynamic');
+  if (!host) return;
+  if (!Array.isArray(registered) || registered.length === 0) {
+    host.innerHTML = '<div class="settings-note" style="opacity:0.6">No provider plugins are loaded. Install at least one provider plugin (Plugins tab) to configure model routing.</div>';
+    return;
+  }
+  // Stable order: alphabetical by label, with the canonical 5 built-ins
+  // first if present, so the layout doesn't reshuffle when an
+  // optional provider plugin loads later.
+  const PRIMARY_ORDER = ['anthropic', 'openai', 'openrouter', 'gemini', 'local'];
+  // Filter out the 'custom' meta-provider — the legacy custom-providers
+  // grid below the dynamic block handles its UI separately, and showing
+  // both produces a confusing duplicate.
+  registered = registered.filter(p => p.name !== 'custom');
+  const sorted = [...registered].sort((a, b) => {
+    const ai = PRIMARY_ORDER.indexOf(a.name);
+    const bi = PRIMARY_ORDER.indexOf(b.name);
+    if (ai !== -1 || bi !== -1) {
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    }
+    return String(a.label || a.name).localeCompare(String(b.label || b.name));
+  });
+  host.innerHTML = sorted.map(_renderOneProviderGroup).join('');
+}
+
+function _renderOneProviderGroup(p) {
+  const fields = Array.isArray(p.formFields) ? p.formFields : [];
+  // No schema → render a stub explaining the user must configure via
+  // env (some plugins don't expose a UI).
+  if (fields.length === 0) {
+    return `
+      <div class="settings-provider-group" data-provider-form="${_settingsEscapeHtml(p.name)}">
+        <div class="settings-provider-head"><strong>${_settingsEscapeHtml(p.label || p.name)}</strong></div>
+        <div class="settings-note" style="opacity:0.6">No UI fields declared by this plugin. Configure via env vars.</div>
+      </div>`;
+  }
+  // Group apiKey + baseUrl on one row when both are present (matches
+  // the old hand-rolled layout). All other fields stack full-width.
+  const hasApiKey = fields.find(f => f.key === 'apiKey');
+  const hasBaseUrl = fields.find(f => f.key === 'baseUrl');
+  const otherFields = fields.filter(f => f.key !== 'apiKey' && f.key !== 'baseUrl');
+  const inlineRow = (hasApiKey && hasBaseUrl) ? `
+    <div class="settings-inline">
+      <div>${_renderProviderField(p, hasBaseUrl)}</div>
+      <div>${_renderProviderField(p, hasApiKey)}</div>
+    </div>` : (hasApiKey ? _renderProviderField(p, hasApiKey) : (hasBaseUrl ? _renderProviderField(p, hasBaseUrl) : ''));
+  const stacked = otherFields.map(f => _renderProviderField(p, f)).join('');
+  const desc = p.description ? `<div class="settings-note" style="opacity:0.65;margin-bottom:6px">${_settingsEscapeHtml(p.description)}</div>` : '';
+  return `
+    <div class="settings-provider-group" data-provider-form="${_settingsEscapeHtml(p.name)}" data-provider-plugin-id="${_settingsEscapeHtml(p.pluginId || '')}">
+      <div class="settings-provider-head"><strong>${_settingsEscapeHtml(p.label || p.name)}</strong></div>
+      ${desc}
+      ${inlineRow}
+      ${stacked}
+      <div class="settings-test-row">
+        <button type="button" class="settings-test-btn" data-provider-test="${_settingsEscapeHtml(p.name)}">test</button>
+        <span class="settings-test-result" data-provider-result="${_settingsEscapeHtml(p.name)}"></span>
+      </div>
+    </div>`;
+}
+
+function _renderProviderField(provider, field) {
+  const id = `settings-provider-${provider.name}-${field.key}`;
+  const isSecret = !!field.secret || field.type === 'password';
+  const value = provider.values?.[field.key];
+  // Secret fields: input stays empty; placeholder hints at "stored
+  // value preserved on save unless typed-into" via the meta.isSet
+  // signal. Mirrors _renderPluginField's behavior on the Plugins tab.
+  let placeholder = field.placeholder || '';
+  if (isSecret && provider.meta?.[field.key]?.isSet) placeholder = '••• stored — leave blank to keep';
+  const safePlaceholder = _settingsEscapeHtml(placeholder);
+  const safeLabel = _settingsEscapeHtml(field.label || field.key);
+  if (isSecret) {
+    return `<label for="${id}">${safeLabel}</label>
+      <input id="${id}" type="password" data-provider-field="${_settingsEscapeHtml(field.key)}" data-provider-secret="1" placeholder="${safePlaceholder}">`;
+  }
+  if (field.type === 'select') {
+    const opts = (field.options || []).map(o => {
+      const v = _settingsEscapeHtml(o.value);
+      const sel = String(value || '') === String(o.value) ? ' selected' : '';
+      return `<option value="${v}"${sel}>${_settingsEscapeHtml(o.label || o.value)}</option>`;
+    }).join('');
+    return `<label for="${id}">${safeLabel}</label>
+      <select id="${id}" data-provider-field="${_settingsEscapeHtml(field.key)}">${opts}</select>`;
+  }
+  const safeValue = _settingsEscapeHtml(String(value ?? ''));
+  return `<label for="${id}">${safeLabel}</label>
+    <input id="${id}" type="text" data-provider-field="${_settingsEscapeHtml(field.key)}" placeholder="${safePlaceholder}" value="${safeValue}">`;
+}
+
 function _settingsProviderLabel(name) {
   const key = String(name || '').trim().toLowerCase();
   // Runtime cache (populated from /api/settings → data.providers.registered)
@@ -734,19 +837,11 @@ function populateSettingsPanel(data) {
     }
   }
 
-  document.getElementById('settings-provider-anthropic-key').value = data.providers?.anthropic?.apiKey || '';
-  document.getElementById('settings-provider-openai-base-url').value = data.providers?.openai?.baseUrl || '';
-  document.getElementById('settings-provider-openai-key').value = data.providers?.openai?.apiKey || '';
-  document.getElementById('settings-provider-openrouter-base-url').value = data.providers?.openrouter?.baseUrl || '';
-  document.getElementById('settings-provider-openrouter-key').value = data.providers?.openrouter?.apiKey || '';
-  document.getElementById('settings-provider-openrouter-referer').value = data.providers?.openrouter?.referer || '';
-  document.getElementById('settings-provider-local-base-url').value = data.providers?.local?.baseUrl || '';
-  document.getElementById('settings-provider-local-key').value = data.providers?.local?.apiKey || '';
-  // Z.ai (GLM) — z-ai-provider plugin. Same shape as OpenRouter.
-  const _zaiBase = document.getElementById('settings-provider-zai-base-url');
-  const _zaiKey  = document.getElementById('settings-provider-zai-key');
-  if (_zaiBase) _zaiBase.value = data.providers?.zai?.baseUrl || '';
-  if (_zaiKey)  _zaiKey.value  = data.providers?.zai?.apiKey  || '';
+  // Render the Providers tab dynamically from data.providers.registered
+  // (which carries each provider plugin's settings-pane schema +
+  // current values, masked secrets, etc). One card per registered
+  // provider — no hardcoded HTML form group per vendor anymore.
+  _renderProviderGroups(_settingsRegisteredProviders);
 
   document.getElementById('settings-browser-backend').value = data.browser?.backend || 'zendriver';
 

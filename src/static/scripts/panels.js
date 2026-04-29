@@ -676,13 +676,20 @@ document.addEventListener('click', (e) => {
 
 // ── Settings: test buttons for providers + model tiers ─────────────
 function _collectProviderFormValues(name) {
-  const v = (id) => (document.getElementById(id)?.value || '').trim();
-  if (name === 'anthropic') return { apiKey: v('settings-provider-anthropic-key') };
-  if (name === 'openai') return { apiKey: v('settings-provider-openai-key'), baseUrl: v('settings-provider-openai-base-url') };
-  if (name === 'openrouter') return { apiKey: v('settings-provider-openrouter-key'), baseUrl: v('settings-provider-openrouter-base-url'), referer: v('settings-provider-openrouter-referer') };
-  if (name === 'local') return { apiKey: v('settings-provider-local-key'), baseUrl: v('settings-provider-local-base-url') };
-  if (name === 'zai') return { apiKey: v('settings-provider-zai-key'), baseUrl: v('settings-provider-zai-base-url') };
-  return {};
+  // Reads from the dynamically-rendered provider card —
+  // <div data-provider-form="<name>"> wrapping inputs marked with
+  // data-provider-field="<key>". One generic walker, no per-vendor
+  // hardcoding. Empty fields still emit (blank string) so the server
+  // can distinguish "user cleared this" from "field absent".
+  const wrap = document.querySelector(`[data-provider-form="${name}"]`);
+  if (!wrap) return {};
+  const out = {};
+  wrap.querySelectorAll('[data-provider-field]').forEach(input => {
+    const key = input.getAttribute('data-provider-field');
+    if (!key) return;
+    out[key] = (input.value || '').trim();
+  });
+  return out;
 }
 function _collectModelTierFormValues(tier) {
   const v = (id) => (document.getElementById(id)?.value || '').trim();

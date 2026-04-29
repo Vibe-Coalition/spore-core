@@ -168,6 +168,7 @@ module.exports = function register(api) {
   });
 
   api.registerSettingsPane({
+    tab: 'providers',
     title: 'Google Gemini',
     description: 'Gemini chat models (multimodal: vision, audio, video) — and the shared API key for the gemini-embedder plugin if installed. Use model strings like `gemini/gemini-2.5-flash` in tier routing.',
     schema: [

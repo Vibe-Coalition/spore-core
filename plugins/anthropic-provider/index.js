@@ -265,6 +265,7 @@ module.exports = function register(api) {
   });
 
   api.registerSettingsPane({
+    tab: 'providers',
     title: 'Anthropic (Claude)',
     description: 'Claude Opus / Sonnet / Haiku via api.anthropic.com. Use model strings like `claude-haiku-4-5` (no prefix needed) in tier routing. Supports both standard API keys and Claude.ai OAuth tokens (sk-ant-oat-…).',
     schema: [
