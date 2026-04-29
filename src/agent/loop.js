@@ -10,6 +10,7 @@
 
 const { MultiProvider, detectBackend } = require('../providers');
 const graphEvents = require('../graph/events');
+const { effortDefaults } = require('./effort');
 
 // ── Budget-scaling constants ─────────────────────────────────────────
 // All message-budget fractions are expressed against the active model's
@@ -568,8 +569,10 @@ class AgentLoop {
     //     the model's reach.
     // Operators can still pin explicit budgets via casualMessageBudget /
     // complexMessageBudget; setting either to 0 disables the floor.
-    const casualFloor  = this.config.casualMessageBudget  ?? SOFT_BUDGET_FLOOR_CASUAL;
-    const complexFloor = this.config.complexMessageBudget ?? SOFT_BUDGET_FLOOR_COMPLEX;
+    // Resolution: pinned config field → effort preset → in-source floor.
+    const eff = effortDefaults(this.config);
+    const casualFloor  = this.config.casualMessageBudget  ?? eff.casualMessageBudget  ?? SOFT_BUDGET_FLOOR_CASUAL;
+    const complexFloor = this.config.complexMessageBudget ?? eff.complexMessageBudget ?? SOFT_BUDGET_FLOOR_COMPLEX;
     const ctxScaledCasual  = Math.floor(contextWindow * CTX_SOFT_BUDGET_CASUAL);
     const ctxScaledComplex = Math.floor(contextWindow * CTX_SOFT_BUDGET_COMPLEX);
     const casualBudget  = Math.max(casualFloor,  ctxScaledCasual);
@@ -603,11 +606,11 @@ class AgentLoop {
 
     const isLull = opts.trigger === 'lull';
     const isDirect = directTriggers.includes(opts.trigger);
-    const lullMaxIter = this.config.lullMaxIterations || 4;
+    const lullMaxIter = this.config.lullMaxIterations || eff.lullMaxIterations;
     const safetyCeiling = this.config.loopDetection?.ceiling || 50;
-    const budgetPressureAt = this.config.loopDetection?.budgetPressure || 6;
+    const budgetPressureAt = this.config.loopDetection?.budgetPressure || eff.loopDetectionBudgetPressure;
     // Tiered iteration caps: chat/DM gets a tighter leash than proactive/continuation
-    const dmMaxIter = this.config.dmMaxIterations || 12;
+    const dmMaxIter = this.config.dmMaxIterations || eff.dmMaxIterations;
     const chatMaxIter = isDirect ? dmMaxIter : safetyCeiling;
     let budgetHintSent = false;
     let tokenBudgetWarned = false;
@@ -1584,7 +1587,7 @@ class AgentLoop {
       exitCode,
     });
 
-    const defaultCap = this.config.maxToolResultChars || TOOL_RESULT_DEFAULT_CAP;
+    const defaultCap = this.config.maxToolResultChars || effortDefaults(this.config).maxToolResultChars || TOOL_RESULT_DEFAULT_CAP;
     const maxResultChars = TOOL_RESULT_CAPS[toolBlock.name] ?? defaultCap;
     if (resultContent.length > maxResultChars) {
       const truncated = resultContent.length;

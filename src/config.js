@@ -154,7 +154,14 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
   // null = use the in-source default (40000). Override with spore.json
   // `totalPromptBudget: <int>` or env var SPORE_TOTAL_BUDGET=<int>.
   totalPromptBudget: null,
-  maxConcurrent: 6,
+  // Agent Effort preset — bundles message budgets, iteration caps,
+  // tool-result cap, and sub-agent fan-out into a single dial.
+  // 'balanced' (default) matches historic behavior; 'quick' tightens
+  // for chatty/cheap turns; 'deep' loosens for long research/coding
+  // sessions. See agent/effort.js for the full per-tier table.
+  // Operator-pinned fields always beat the preset; the preset only
+  // fills in fields the operator hasn't explicitly set.
+  agentEffort: 'balanced',
   maxSubagentChildren: 8,
   subagentMaxIter: 100,
   subagentTimeoutSeconds: 3600,
@@ -386,6 +393,10 @@ function loadConfigFresh() {
   if (process.env.SPORE_MAX_TOOL_RESULT_CHARS) {
     const n = parseInt(process.env.SPORE_MAX_TOOL_RESULT_CHARS, 10);
     if (Number.isFinite(n) && n > 0) config.maxToolResultChars = n;
+  }
+  if (process.env.SPORE_AGENT_EFFORT) {
+    const e = String(process.env.SPORE_AGENT_EFFORT).toLowerCase();
+    if (['quick', 'balanced', 'deep'].includes(e)) config.agentEffort = e;
   }
   if (process.env.SPORE_LEARNING_MODE) config.learningMode = process.env.SPORE_LEARNING_MODE;
   if (process.env.SPORE_MAINTAINER_IDLE_ONLY) config.maintainerIdleOnly = process.env.SPORE_MAINTAINER_IDLE_ONLY === 'true';

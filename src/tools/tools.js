@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { embedNodeAsync } = require('../graph');
 const graphEvents = require('../graph/events');
+const { effortDefaults } = require('../agent/effort');
 const SkillsManager = require('./skills');
 const { parseInstallCommand, vetPackages, RISK_LEVEL } = require('./package-vet');
 const { spawn } = require('child_process');
@@ -2621,7 +2622,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
 
     // Concurrency: limit active subagents
-    const maxChildren = this.config.maxSubagentChildren || 5;
+    // Resolution: pinned config field → effort preset → static fallback (8 = config.js default).
+    const _eff = effortDefaults(this.config);
+    const maxChildren = this.config.maxSubagentChildren || _eff.maxSubagentChildren || 8;
     if (!this._activeSubagents) this._activeSubagents = 0;
     if (this._activeSubagents >= maxChildren) {
       return { error: `Max concurrent subagents reached (${maxChildren}). Wait for existing ones to finish.` };
@@ -2659,7 +2662,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     });
 
     const subModel = model || this.config.subagentModel || this.config.normalModel || this.config.model;
-    const maxTimeoutSec = Math.min(timeoutSeconds || this.config.subagentTimeoutSeconds || 600, 1800);
+    const maxTimeoutSec = Math.min(timeoutSeconds || this.config.subagentTimeoutSeconds || _eff.subagentTimeoutSeconds || 900, 1800);
     const abortTimer = setTimeout(() => abortCtrl.abort(), maxTimeoutSec * 1000);
     abortTimer.unref?.();
 
@@ -2753,7 +2756,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         let messages = [{ role: 'user', content: taskContent }];
         let totalUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
         let finalText = '';
-        const maxIter = Math.min(input.maxIterations || this.config.subagentMaxIter || 100, 200);
+        const maxIter = Math.min(input.maxIterations || this.config.subagentMaxIter || effortDefaults(this.config).subagentMaxIter || 60, 200);
         const budgetPressureAt = Math.floor(maxIter * 0.8);
 
         // Progress reporting: send the subagent's natural summary to the channel periodically
@@ -2845,7 +2848,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             return 'max';
           };
           const subEffort = _budgetToEffort(subThinkingBudget);
-          const baseMaxTokens = this.config.subagentMaxTokens || this._modelMaxOutputTokens(subModel);
+          const baseMaxTokens = this.config.subagentMaxTokens || effortDefaults(this.config).subagentMaxTokens || this._modelMaxOutputTokens(subModel);
           // Reserve headroom for thinking tokens when the operator wants
           // a real budget. Non-thinking models silently no-op the
           // applyReasoningEffort below so the extra max_tokens is harmless.

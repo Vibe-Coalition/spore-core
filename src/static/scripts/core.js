@@ -756,6 +756,10 @@ function populateSettingsPanel(data) {
   // value matches the default; defaults shown next to the label so
   // the user can see what they'd be overriding.
   _populateBudgetInputs(data.budgets);
+  // Agent Effort — 3-button picker (quick / balanced / deep) at top of
+  // the Agent tab. Populated FIRST so the budget placeholders below
+  // reflect the active tier's defaults.
+  _populateAgentEffortButtons(data.agent?.effort);
   // Agent context budgets — 4 absolute knobs in the Agent tab (casual /
   // complex soft budgets, per-insert compaction trigger, tool-result
   // truncation cap). Empty = use auto-scaled default.

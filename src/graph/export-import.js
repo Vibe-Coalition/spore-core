@@ -76,7 +76,6 @@ const PORTABLE_SETTINGS_PLAIN = [
   'intermediateTextThrottleSeconds',
   'dmMaxIterations',
   'tokenBudgetPressure',
-  'maxConcurrent',
   'maxSubagentChildren',
   'subagentMaxIter',
   'subagentTimeoutSeconds',

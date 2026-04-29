@@ -98,6 +98,18 @@
   @media (max-width: 720px) {
     .settings-tab-pane.active { grid-template-columns: 1fr; }
   }
+  /* Agent Effort 3-button picker (Agent tab) */
+  .settings-effort-btn {
+    flex: 1; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text); font-family: var(--font-body); font-size: .78rem;
+    cursor: pointer; transition: background 0.15s, border-color 0.15s;
+  }
+  .settings-effort-btn:hover { border-color: var(--border-active); }
+  .settings-effort-btn.active {
+    background: rgba(var(--hl-rgb),.07); border-color: var(--accent);
+    color: var(--accent);
+  }
   /* Shared primitives (used inside tab panes) */
   .settings-card {
     background: rgba(var(--hl-rgb),.025); border: 1px solid var(--border);

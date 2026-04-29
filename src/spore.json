@@ -52,7 +52,6 @@
       "dmPolicy": "open"
     }
   },
-  "maxConcurrent": 6,
   "maxSubagentChildren": 8,
   "dmMaxIterations": 75,
   "subagentMaxIter": 100,

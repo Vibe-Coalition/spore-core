@@ -897,6 +897,75 @@ function _bindResetGraphButton() {
   updateBtn();
 }
 
+// Agent Effort — 3-button picker (quick / balanced / deep). The selected
+// tier is stored in a data attribute on the buttons container so save can
+// read it; clicking a button updates the active class + redraws the
+// budget input placeholders to reflect that tier's defaults.
+let _settingsEffortPresets = null;
+function _populateAgentEffortButtons(effort) {
+  const wrap = document.getElementById('settings-effort-buttons');
+  if (!wrap) return;
+  const value = (effort && effort.value) || 'balanced';
+  wrap.dataset.value = value;
+  _settingsEffortPresets = effort?.presets || null;
+  wrap.querySelectorAll('.settings-effort-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.effort === value);
+  });
+  if (!wrap.dataset.bound) {
+    wrap.dataset.bound = '1';
+    wrap.addEventListener('click', (e) => {
+      const btn = e.target.closest('.settings-effort-btn');
+      if (!btn) return;
+      const tier = btn.dataset.effort;
+      if (!tier) return;
+      wrap.dataset.value = tier;
+      wrap.querySelectorAll('.settings-effort-btn').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
+      _refreshAgentEffortSummary();
+      _refreshAgentBudgetPlaceholders();
+    });
+  }
+  _refreshAgentEffortSummary();
+}
+function _refreshAgentEffortSummary() {
+  const wrap = document.getElementById('settings-effort-buttons');
+  const note = document.getElementById('settings-effort-summary');
+  if (!wrap || !note || !_settingsEffortPresets) return;
+  const tier = wrap.dataset.value || 'balanced';
+  const p = _settingsEffortPresets[tier];
+  if (!p) { note.textContent = ''; return; }
+  note.textContent =
+    `Casual ${p.casualMessageBudget.toLocaleString()} / Complex ${p.complexMessageBudget.toLocaleString()} tokens · ` +
+    `${p.dmMaxIterations} chat iters · ${p.maxSubagentChildren} concurrent sub-agents (${p.subagentMaxIter} iters / ${Math.round(p.subagentTimeoutSeconds/60)}m each, ${p.subagentMaxTokens.toLocaleString()} max-tokens)`;
+}
+// Re-render budget input placeholders when the effort tier changes so the
+// "auto (X)" text reflects the newly-selected tier's defaults instead of
+// the server's snapshot. Pinned values (the input's actual value) stay.
+function _refreshAgentBudgetPlaceholders() {
+  const wrap = document.getElementById('settings-effort-buttons');
+  if (!wrap || !_settingsEffortPresets) return;
+  const tier = wrap.dataset.value || 'balanced';
+  const p = _settingsEffortPresets[tier];
+  if (!p) return;
+  const map = [
+    ['settings-budget-casual',           p.casualMessageBudget],
+    ['settings-budget-complex',          p.complexMessageBudget],
+    ['settings-budget-tool-result-cap',  p.maxToolResultChars],
+  ];
+  for (const [id, val] of map) {
+    const input = document.getElementById(id);
+    const note = document.getElementById(`${id}-default`);
+    if (input) input.placeholder = `auto (${val.toLocaleString()})`;
+    if (note) note.textContent = `Default: ${val.toLocaleString()}. Leave blank to use the auto-scaled value.`;
+  }
+}
+function _collectAgentEffortPayload() {
+  const wrap = document.getElementById('settings-effort-buttons');
+  if (!wrap) return null;
+  return wrap.dataset.value || 'balanced';
+}
+
 // Agent context budgets — 4 absolute knobs in the Agent tab. Server
 // returns `data.agent.budgets = { casualMessageBudget, complexMessageBudget,
 // compactTokenThreshold, maxToolResultChars, defaults: {...} }`. A null
@@ -1124,7 +1193,7 @@ async function saveSettingsPanel() {
     },
     publicUrl: document.getElementById('settings-runtime-public-url-input')?.value.trim() || '',
     budgets: _collectBudgetsPayload(),
-    agent: { budgets: _collectAgentBudgetsPayload() },
+    agent: { effort: _collectAgentEffortPayload(), budgets: _collectAgentBudgetsPayload() },
     webSearch: {
       searxngUrl: document.getElementById('settings-websearch-searxng-url').value.trim(),
       searxngApiKey: document.getElementById('settings-websearch-searxng-key').value.trim(),

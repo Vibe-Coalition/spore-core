@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const graphEvents = require('../graph/events');
+const { EFFORT_PRESETS, EFFORT_TIERS, DEFAULT_EFFORT, resolveEffortTier, effortDefaults } = require('../agent/effort');
 
 /** Pick the newer of two file paths (by mtime). Skips null/missing paths. */
 function _newerFile(a, b) {
@@ -897,24 +898,34 @@ class WebGateway {
       inviteKey: this.config.inviteKey || '',
       inviteKeySet: !!this.config.inviteKey,
       modelLimits: this.config.modelLimits || {},
-      agent: {
-        // Operator-overridable absolute knobs the agent loop reads.
-        // Each value is `null` when the operator hasn't customized it
-        // (the loop falls back to its auto-scaled default). Defaults
-        // mirror the floors in agent/loop.js + agent/sessions.js.
-        budgets: {
-          casualMessageBudget:    Number.isFinite(this.config.casualMessageBudget)   ? this.config.casualMessageBudget   : null,
-          complexMessageBudget:   Number.isFinite(this.config.complexMessageBudget)  ? this.config.complexMessageBudget  : null,
-          compactTokenThreshold:  Number.isFinite(this.config.compactTokenThreshold) ? this.config.compactTokenThreshold : null,
-          maxToolResultChars:     Number.isFinite(this.config.maxToolResultChars)    ? this.config.maxToolResultChars    : null,
-          defaults: {
-            casualMessageBudget:   30000,   // SOFT_BUDGET_FLOOR_CASUAL  (loop.js)
-            complexMessageBudget:  80000,   // SOFT_BUDGET_FLOOR_COMPLEX (loop.js)
-            compactTokenThreshold: 120000,  // config.js default; sessions.js scales above this against contextWindow
-            maxToolResultChars:    30000,   // TOOL_RESULT_DEFAULT_CAP   (loop.js)
+      agent: (() => {
+        // Agent Effort preset — one dial that bundles message budgets,
+        // iteration caps, tool-result cap, and sub-agent fan-out. The
+        // budgets.defaults block reflects the ACTIVE preset's values so
+        // the UI placeholder text shows the user what each input will
+        // resolve to if they leave it blank.
+        const tier = resolveEffortTier(this.config);
+        const eff = EFFORT_PRESETS[tier] || EFFORT_PRESETS[DEFAULT_EFFORT];
+        return {
+          effort: {
+            value: tier,
+            tiers: EFFORT_TIERS,
+            presets: EFFORT_PRESETS, // expose so the UI can preview a tier before saving
           },
-        },
-      },
+          budgets: {
+            casualMessageBudget:    Number.isFinite(this.config.casualMessageBudget)   ? this.config.casualMessageBudget   : null,
+            complexMessageBudget:   Number.isFinite(this.config.complexMessageBudget)  ? this.config.complexMessageBudget  : null,
+            compactTokenThreshold:  Number.isFinite(this.config.compactTokenThreshold) ? this.config.compactTokenThreshold : null,
+            maxToolResultChars:     Number.isFinite(this.config.maxToolResultChars)    ? this.config.maxToolResultChars    : null,
+            defaults: {
+              casualMessageBudget:   eff.casualMessageBudget,
+              complexMessageBudget:  eff.complexMessageBudget,
+              compactTokenThreshold: 120000, // hardCeiling override; not preset-controlled
+              maxToolResultChars:    eff.maxToolResultChars,
+            },
+          },
+        };
+      })(),
       budgets: (() => {
         // System-prompt section budgets (graph/context.js GraphContext).
         // Surface the current effective values + class defaults so the UI
@@ -1325,6 +1336,19 @@ class WebGateway {
       }
     }
 
+    // Agent Effort preset — single dial that bundles ten knobs (see
+    // agent/effort.js). 'balanced' = no-op (matches historic defaults).
+    // Operator-pinned individual fields still override the preset.
+    if (body.agent && typeof body.agent === 'object'
+        && Object.prototype.hasOwnProperty.call(body.agent, 'effort')) {
+      const raw = String(body.agent.effort || '').toLowerCase();
+      if (EFFORT_TIERS.includes(raw)) {
+        nextConfig.agentEffort = raw;
+        envUpdates.SPORE_AGENT_EFFORT = raw;
+        runtimePatch.agentEffort = raw;
+      }
+    }
+
     // Agent context budgets — absolute integer knobs the agent loop +
     // SessionManager read directly off this.config. Each field accepts
     // a positive integer (override) or `null` (clear → auto-scaled
@@ -1505,6 +1529,9 @@ class WebGateway {
       const v = runtimePatch[key];
       if (v == null) delete this.config[key];
       else this.config[key] = v;
+    }
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'agentEffort')) {
+      this.config.agentEffort = runtimePatch.agentEffort;
     }
     this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
     // _isOAuth is set by anthropic-provider's _detectOAuth (runs on
