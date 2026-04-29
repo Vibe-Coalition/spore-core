@@ -1019,6 +1019,37 @@ build/
       </div>
 
       <div class="settings-section" data-target-tab="agent">
+        <h4>Context budgets</h4>
+        <div class="settings-note">Override the agent's memory budgets. Leave blank to use the auto-scaled default (which grows with the active model's context window).</div>
+        <div class="settings-inline">
+          <div>
+            <label for="settings-budget-casual">Casual chat budget (tokens)</label>
+            <input id="settings-budget-casual" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-casual-default" style="opacity:0.65"></div>
+          </div>
+          <div>
+            <label for="settings-budget-complex">Coding/research budget (tokens)</label>
+            <input id="settings-budget-complex" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-complex-default" style="opacity:0.65"></div>
+          </div>
+        </div>
+        <div class="settings-note" style="margin-top:6px">When the conversation crosses these limits the agent compacts older turns into a summary. Higher = more memory but more API spend; lower = more aggressive forgetting.</div>
+        <div class="settings-inline" style="margin-top:10px">
+          <div>
+            <label for="settings-budget-compact-threshold">Background compaction trigger (tokens)</label>
+            <input id="settings-budget-compact-threshold" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-compact-threshold-default" style="opacity:0.65"></div>
+          </div>
+          <div>
+            <label for="settings-budget-tool-result-cap">Tool result cap (characters)</label>
+            <input id="settings-budget-tool-result-cap" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-tool-result-cap-default" style="opacity:0.65"></div>
+          </div>
+        </div>
+        <div class="settings-note" style="margin-top:6px">The trigger runs compaction in the background between turns once the on-disk session grows past this size. The tool-result cap is the default truncation; per-tool overrides (e.g. read_file 120k, exec 30k) still apply.</div>
+      </div>
+
+      <div class="settings-section" data-target-tab="agent">
         <h4>Proactive</h4>
         <div class="settings-check">
           <input id="settings-proactive-enabled" type="checkbox">

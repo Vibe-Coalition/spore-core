@@ -897,6 +897,24 @@ class WebGateway {
       inviteKey: this.config.inviteKey || '',
       inviteKeySet: !!this.config.inviteKey,
       modelLimits: this.config.modelLimits || {},
+      agent: {
+        // Operator-overridable absolute knobs the agent loop reads.
+        // Each value is `null` when the operator hasn't customized it
+        // (the loop falls back to its auto-scaled default). Defaults
+        // mirror the floors in agent/loop.js + agent/sessions.js.
+        budgets: {
+          casualMessageBudget:    Number.isFinite(this.config.casualMessageBudget)   ? this.config.casualMessageBudget   : null,
+          complexMessageBudget:   Number.isFinite(this.config.complexMessageBudget)  ? this.config.complexMessageBudget  : null,
+          compactTokenThreshold:  Number.isFinite(this.config.compactTokenThreshold) ? this.config.compactTokenThreshold : null,
+          maxToolResultChars:     Number.isFinite(this.config.maxToolResultChars)    ? this.config.maxToolResultChars    : null,
+          defaults: {
+            casualMessageBudget:   30000,   // SOFT_BUDGET_FLOOR_CASUAL  (loop.js)
+            complexMessageBudget:  80000,   // SOFT_BUDGET_FLOOR_COMPLEX (loop.js)
+            compactTokenThreshold: 120000,  // config.js default; sessions.js scales above this against contextWindow
+            maxToolResultChars:    30000,   // TOOL_RESULT_DEFAULT_CAP   (loop.js)
+          },
+        },
+      },
       budgets: (() => {
         // System-prompt section budgets (graph/context.js GraphContext).
         // Surface the current effective values + class defaults so the UI
@@ -1307,6 +1325,38 @@ class WebGateway {
       }
     }
 
+    // Agent context budgets — absolute integer knobs the agent loop +
+    // SessionManager read directly off this.config. Each field accepts
+    // a positive integer (override) or `null` (clear → auto-scaled
+    // default kicks back in). Keys mirror config.js field names.
+    if (body.agent && typeof body.agent === 'object' && body.agent.budgets && typeof body.agent.budgets === 'object') {
+      const budgetFields = [
+        ['casualMessageBudget',   'SPORE_CASUAL_MESSAGE_BUDGET'],
+        ['complexMessageBudget',  'SPORE_COMPLEX_MESSAGE_BUDGET'],
+        ['compactTokenThreshold', 'SPORE_COMPACT_THRESHOLD'],
+        ['maxToolResultChars',    'SPORE_MAX_TOOL_RESULT_CHARS'],
+      ];
+      for (const [key, envKey] of budgetFields) {
+        if (!Object.prototype.hasOwnProperty.call(body.agent.budgets, key)) continue;
+        const raw = body.agent.budgets[key];
+        if (raw === null || raw === '' || raw === undefined) {
+          // Explicit clear → drop from spore.json + env so the next
+          // boot picks up the auto-scaled default. Live config goes to
+          // null too, which the loop treats as "use floor/scaling."
+          delete nextConfig[key];
+          envUpdates[envKey] = null;
+          runtimePatch[key] = null;
+          continue;
+        }
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n <= 0) continue;
+        const floored = Math.floor(n);
+        nextConfig[key] = floored;
+        envUpdates[envKey] = String(floored);
+        runtimePatch[key] = floored;
+      }
+    }
+
     if (body.webSearch && typeof body.webSearch === 'object') {
       if (Object.prototype.hasOwnProperty.call(body.webSearch, 'searxngUrl')) {
         const u = String(body.webSearch.searxngUrl || '').trim();
@@ -1444,6 +1494,29 @@ class WebGateway {
       const G = this.graph?.constructor;
       if (this.graph && G) {
         this.graph._totalBudget = runtimePatch.totalPromptBudget || G.TOTAL_BUDGET;
+      }
+    }
+    // Agent context budget overrides — apply to live config so the
+    // next agent turn (loop.js) and the next session-insert
+    // (sessions.js) see the new values without a restart.
+    let _sessionsCompactMemoNeedsBust = false;
+    for (const key of ['casualMessageBudget', 'complexMessageBudget', 'compactTokenThreshold', 'maxToolResultChars']) {
+      if (!Object.prototype.hasOwnProperty.call(runtimePatch, key)) continue;
+      const v = runtimePatch[key];
+      if (v == null) {
+        delete this.config[key];
+      } else {
+        this.config[key] = v;
+      }
+      if (key === 'compactTokenThreshold') _sessionsCompactMemoNeedsBust = true;
+    }
+    if (_sessionsCompactMemoNeedsBust) {
+      // SessionManager memoizes the threshold once on first insert.
+      // Clear the cached value so the next addMessage recomputes
+      // against the freshly-saved override (or scaling fallback).
+      const sessions = this.tools?._sessions || this.tools?._agent?.sessions;
+      if (sessions && '_compactTokenThreshold' in sessions) {
+        sessions._compactTokenThreshold = null;
       }
     }
     this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;

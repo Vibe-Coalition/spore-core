@@ -897,6 +897,67 @@ function _bindResetGraphButton() {
   updateBtn();
 }
 
+// Agent context budgets — 4 absolute knobs in the Agent tab. Server
+// returns `data.agent.budgets = { casualMessageBudget, complexMessageBudget,
+// compactTokenThreshold, maxToolResultChars, defaults: {...} }`. A null
+// field means "no override saved" and the input renders empty with the
+// default shown as placeholder + a sub-label.
+function _populateAgentBudgetsInputs(agent) {
+  const budgets = agent?.budgets;
+  if (!budgets) return;
+  const defaults = budgets.defaults || {};
+  const fields = [
+    ['casualMessageBudget',   'settings-budget-casual'],
+    ['complexMessageBudget',  'settings-budget-complex'],
+    ['compactTokenThreshold', 'settings-budget-compact-threshold'],
+    ['maxToolResultChars',    'settings-budget-tool-result-cap'],
+  ];
+  for (const [key, inputId] of fields) {
+    const input = document.getElementById(inputId);
+    const noteEl = document.getElementById(`${inputId}-default`);
+    if (!input) continue;
+    const cur = budgets[key];
+    const def = defaults[key];
+    input.value = (cur != null && cur !== def) ? String(cur) : '';
+    if (def != null) {
+      input.placeholder = `auto (${def.toLocaleString()})`;
+      if (noteEl) noteEl.textContent = `Default: ${def.toLocaleString()}. Leave blank to use the auto-scaled value.`;
+    }
+  }
+}
+
+// Inverse of _populateAgentBudgetsInputs. Empty input = "no override"
+// (omitted from payload entirely so the server's clear path runs and
+// the auto-scaled default kicks back in). Non-empty = positive integer
+// override sent to the server, which validates + persists it.
+function _collectAgentBudgetsPayload() {
+  const fields = [
+    ['casualMessageBudget',   'settings-budget-casual'],
+    ['complexMessageBudget',  'settings-budget-complex'],
+    ['compactTokenThreshold', 'settings-budget-compact-threshold'],
+    ['maxToolResultChars',    'settings-budget-tool-result-cap'],
+  ];
+  const out = {};
+  for (const [key, inputId] of fields) {
+    const input = document.getElementById(inputId);
+    if (!input) continue;
+    const raw = (input.value || '').trim();
+    if (!raw) {
+      // Send explicit null so the server clears the override; the loop
+      // falls back to its auto-scaled floor on the very next turn.
+      out[key] = null;
+      continue;
+    }
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      out[key] = null;
+      continue;
+    }
+    out[key] = n;
+  }
+  return out;
+}
+
 function _populateBudgetInputs(budgets) {
   if (!budgets) return;
   const sectionDefaults = budgets.sectionDefaults || {};
@@ -1063,6 +1124,7 @@ async function saveSettingsPanel() {
     },
     publicUrl: document.getElementById('settings-runtime-public-url-input')?.value.trim() || '',
     budgets: _collectBudgetsPayload(),
+    agent: { budgets: _collectAgentBudgetsPayload() },
     webSearch: {
       searxngUrl: document.getElementById('settings-websearch-searxng-url').value.trim(),
       searxngApiKey: document.getElementById('settings-websearch-searxng-key').value.trim(),

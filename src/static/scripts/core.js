@@ -748,6 +748,10 @@ function populateSettingsPanel(data) {
   // value matches the default; defaults shown next to the label so
   // the user can see what they'd be overriding.
   _populateBudgetInputs(data.budgets);
+  // Agent context budgets — 4 absolute knobs in the Agent tab (casual /
+  // complex soft budgets, per-insert compaction trigger, tool-result
+  // truncation cap). Empty = use auto-scaled default.
+  _populateAgentBudgetsInputs(data.agent);
 
   updateErBadge(!!data.memory?.enhancedRecall);
   _applyRoleGatingToSettings();

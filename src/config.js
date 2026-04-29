@@ -372,6 +372,22 @@ function loadConfigFresh() {
   // Context & learning settings
   if (process.env.SPORE_CONTEXT_WINDOW) config.contextWindow = parseInt(process.env.SPORE_CONTEXT_WINDOW, 10);
   if (process.env.SPORE_COMPACT_THRESHOLD) config.compactTokenThreshold = parseInt(process.env.SPORE_COMPACT_THRESHOLD, 10);
+  // Agent context budget overrides — written by the Agent tab's
+  // "Context budgets" panel via /api/settings, also honored if set
+  // directly in .env. Each must be a positive integer; anything else
+  // falls through to the loop's auto-scaled default.
+  if (process.env.SPORE_CASUAL_MESSAGE_BUDGET) {
+    const n = parseInt(process.env.SPORE_CASUAL_MESSAGE_BUDGET, 10);
+    if (Number.isFinite(n) && n > 0) config.casualMessageBudget = n;
+  }
+  if (process.env.SPORE_COMPLEX_MESSAGE_BUDGET) {
+    const n = parseInt(process.env.SPORE_COMPLEX_MESSAGE_BUDGET, 10);
+    if (Number.isFinite(n) && n > 0) config.complexMessageBudget = n;
+  }
+  if (process.env.SPORE_MAX_TOOL_RESULT_CHARS) {
+    const n = parseInt(process.env.SPORE_MAX_TOOL_RESULT_CHARS, 10);
+    if (Number.isFinite(n) && n > 0) config.maxToolResultChars = n;
+  }
   if (process.env.SPORE_COMPACT_KEEP_TAIL) config.compactKeepTail = parseInt(process.env.SPORE_COMPACT_KEEP_TAIL, 10);
   if (process.env.SPORE_LEARNING_MODE) config.learningMode = process.env.SPORE_LEARNING_MODE;
   if (process.env.SPORE_MAINTAINER_IDLE_ONLY) config.maintainerIdleOnly = process.env.SPORE_MAINTAINER_IDLE_ONLY === 'true';
