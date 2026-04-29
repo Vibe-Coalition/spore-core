@@ -510,12 +510,19 @@ class AgentLoop {
     messages = this._sanitizeMessages(messages);
 
     // 4.5. Token-aware compaction: summarize old messages instead of dropping them.
-    // Per-model overrides win when set. Otherwise the context defaults to a
-    // safe 200k ceiling and we compact at 85% of whatever the effective ctx is.
-    const _activeForLimits = isCasualChat
-      ? (this.config.casualModel || this.config.normalModel || this.config.plannerModel)
-      : (this.config.normalModel || this.config.plannerModel);
-    const _modelLimit = this._lookupModelLimit(_activeForLimits);
+    // We pick the active model FIRST so the budget tracks the model that will
+    // actually run inference. Without this, a BUILDING turn (which routes to
+    // plannerModel) would compact against normalModel's contextWindow and
+    // throw away history the planner could happily hold. Mirrors the routing
+    // logic at the start of the inference loop below.
+    const isBuildingTurn = opts.projectContext?.mode === 'plan'
+      && /^\s*\[BUILD_PLAN\]/.test(typeof opts.content === 'string' ? opts.content : '');
+    const activeModel = isBuildingTurn
+      ? (this.config.plannerModel || this.config.normalModel)
+      : isCasualChat
+        ? (this.config.casualModel || this.config.normalModel || this.config.plannerModel)
+        : (this.config.normalModel || this.config.plannerModel);
+    const _modelLimit = this._lookupModelLimit(activeModel);
     const contextWindow = (_modelLimit?.contextWindow && Number(_modelLimit.contextWindow) > 0)
       ? Number(_modelLimit.contextWindow)
       : DEFAULT_CONTEXT_WINDOW;
@@ -528,6 +535,9 @@ class AgentLoop {
         ? configuredCeiling
         : Math.floor(contextWindow * CTX_HARD_CEILING_FALLBACK)
     );
+    if (!_modelLimit?.contextWindow) {
+      this.log.debug(`[budget] No modelLimits entry for ${activeModel || '(no model)'}; falling back to ${contextWindow.toLocaleString()}-token default. Set per-model context in Settings → Providers to scale budgets correctly.`);
+    }
     const systemTokens = this._estimateTokens(systemPrompt);
     let msgTokens = messages.reduce((sum, m) => sum + this._estimateTokens(
       typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
@@ -612,19 +622,12 @@ class AgentLoop {
     // No-op when all tiers point to the same model (single-provider
     // deployments); kicks in automatically the moment plannerModel
     // diverges from normalModel.
-    const isBuildingTurn = opts.projectContext?.mode === 'plan'
-      && /^\s*\[BUILD_PLAN\]/.test(typeof opts.content === 'string' ? opts.content : '');
-
-    let chatTools = null;
-    let activeModel;
+    // activeModel + isBuildingTurn are computed earlier alongside the
+    // budget calc so the same model drives both. Just log routing here.
     if (isBuildingTurn) {
-      activeModel = this.config.plannerModel || this.config.normalModel;
       this.log.info(`[routing] BUILDING turn → planner (${activeModel})`);
-    } else if (isCasualChat) {
-      activeModel = this.config.casualModel || this.config.normalModel;
-    } else {
-      activeModel = this.config.normalModel || this.config.plannerModel;
     }
+    let chatTools = null;
 
     const abortSignal = opts._abortSignal;
 
@@ -651,8 +654,12 @@ class AgentLoop {
         break;
       }
 
-      // Progressive context pressure warnings tied to compaction threshold
-      const compactionThreshold = hardCeiling;
+      // Progressive context pressure warnings tied to the actual
+      // compaction trigger — whichever fires first, softBudget or
+      // hardCeiling. Without this, warnings fire at 70/90% of
+      // hardCeiling but pre-turn compaction can fire earlier on
+      // softBudget, so "compaction imminent" would lie.
+      const compactionThreshold = Math.min(softBudget, hardCeiling);
       const cautionAt = Math.floor(compactionThreshold * CTX_PRESSURE_CAUTION);
       const urgentAt  = Math.floor(compactionThreshold * CTX_PRESSURE_URGENT);
       const currentTokens = systemTokens + msgTokens;

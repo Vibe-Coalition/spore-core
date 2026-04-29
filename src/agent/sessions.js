@@ -244,9 +244,12 @@ class SessionManager {
 
     graphEvents.emit('message:added', { sessionKey: key, role, content: contentStr, timestamp: new Date().toISOString() });
 
-    // PERF: Enforce maxSessionMessages on every insert — trim oldest immediately
-    // This prevents unbounded session growth between compaction cycles
-    const maxMessages = this.config.maxSessionMessages || 50;
+    // PERF: Enforce maxSessionMessages on every insert — trim oldest immediately.
+    // This prevents unbounded session growth between compaction cycles. The
+    // fallback matches config.js's declared default (200); a partial config
+    // missing the field shouldn't silently quarter the cap and start dropping
+    // messages without summarization.
+    const maxMessages = this.config.maxSessionMessages || 200;
     const count = this.getMessageCount(key);
     if (count > maxMessages) {
       const excess = count - maxMessages;
