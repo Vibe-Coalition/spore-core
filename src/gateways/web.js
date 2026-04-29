@@ -4822,11 +4822,18 @@ class WebGateway {
         }
       }
 
-      // Graph events only for web panel clients, not Acorn
-      const onGraphEvent = isCliClient ? null : (evt) => {
+      // Graph events: web panel gets the full firehose (node/edge/tool
+      // mutations) so the dock event log + viz can react in real time.
+      // CLI clients (acorn) get the read-path events only — recall:*
+      // and similar low-volume per-turn events — so the TUI activity
+      // panel can show recall activity without being flooded by every
+      // graph mutation the agent makes.
+      const CLI_FORWARD_OPS = new Set(['recall:start', 'recall:decompose', 'recall:empty', 'recall:fail']);
+      const onGraphEvent = (evt) => {
+        if (isCliClient && !CLI_FORWARD_OPS.has(String(evt?.op || ''))) return;
         try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
       };
-      if (onGraphEvent) graphEvents.on('change', onGraphEvent);
+      graphEvents.on('change', onGraphEvent);
 
       ws.on('message', async (raw) => {
         let msg;
@@ -5723,7 +5730,7 @@ class WebGateway {
         }
 
         this._removeClientFromAllSessions(ws);
-        if (onGraphEvent) graphEvents.off('change', onGraphEvent);
+        graphEvents.off('change', onGraphEvent);
         if (ws._terminals) {
           for (const [, sess] of ws._terminals) {
             if (sess.pty) { try { sess.pty.kill(); } catch (e) { this.log.warn('[web] sess.pty.kill failed: ' + e.message); } }
