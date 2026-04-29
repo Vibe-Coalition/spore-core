@@ -325,6 +325,14 @@ const _TIER_PROMPTS = {
     user: 'Conversation:\nUser: I bought a red Tesla Model 3 last Tuesday at the Palo Alto showroom for $52k.\n\nReturn JSON of form {"entities":[{"id":"...","type":"...","label":"..."}]} with at least one entity.',
     expectJson: v => Array.isArray(v?.entities) && v.entities.length >= 1,
   },
+  // Recall tier — drives graph/retrieval.js _llmDecomposeQuery + reranker.
+  // Smoke test mirrors the actual decompose prompt: ask it to break a
+  // question into sub-queries, expect JSON with a non-empty subQueries array.
+  recall: {
+    system: 'You decompose user questions into knowledge-graph search queries.',
+    user: 'Decompose this question into 2-4 search queries for a memory graph. Return ONLY JSON of form {"subQueries":["q1","q2",...]}.\n\nQuestion: "What did Alice say about the dolphin trip last summer?"',
+    expectJson: v => Array.isArray(v?.subQueries) && v.subQueries.length >= 1,
+  },
 };
 
 async function _probeModelTier(tier, body, appConfig) {
