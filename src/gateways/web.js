@@ -872,6 +872,22 @@ class WebGateway {
         recall: this._normalizeSettingsModelRef(this.config.recallModel),
       },
       providers: {
+        // Plugin-registered providers, dynamically. The frontend reads
+        // this list to populate the per-tier provider dropdown +
+        // labels — adding a provider plugin (with a `label` opt on
+        // registerProvider) makes it appear here automatically, so we
+        // don't keep growing the hardcoded list in core.js.
+        registered: (() => {
+          const mgr = this.tools?._pluginManager;
+          if (!mgr?.getProviders) return [];
+          return mgr.getProviders().map(p => ({
+            name: p.name,
+            label: p.label || p.name,
+            configured: !!p.configured,
+            defaultBaseUrl: p.defaultBaseUrl || null,
+            capabilities: p.capabilities || {},
+          }));
+        })(),
         anthropic: {
           apiKey: this.config.anthropicApiKey || '',
           apiKeySet: !!this.config.anthropicApiKey,

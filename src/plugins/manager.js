@@ -818,6 +818,7 @@ class PluginManager {
           probe: p.probe || null,
           wrapSystemPrompt: p.wrapSystemPrompt || null,
           defaultBaseUrl: p.defaultBaseUrl,
+          label: p.label || p.name,
           configured,
         });
       }

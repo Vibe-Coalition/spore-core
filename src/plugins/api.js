@@ -576,6 +576,10 @@ class PluginAPI {
       probe,
       wrapSystemPrompt,
       defaultBaseUrl: opts.defaultBaseUrl || null,
+      // UI metadata read by the Settings → Providers tab. `label` is
+      // the human-readable name in the per-tier dropdown + provider
+      // group header. Defaults to the registered name.
+      label: typeof opts.label === 'string' ? opts.label : name,
     });
     this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);
   }

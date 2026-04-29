@@ -122,6 +122,7 @@ module.exports = function register(api) {
     return new GeminiClient({ apiKey, timeoutMs: config.apiTimeoutMs || 120000 });
   }, {
     prefixes: ['gemini'],
+    label: 'Gemini',
     capabilities: { tools: true, vision: true, audio: true, video: true },
     isConfigured: (config) => {
       const slot = config?.plugins?.['gemini-provider'] || {};

@@ -61,6 +61,7 @@ module.exports = function register(api) {
     });
   }, {
     prefixes: ['openrouter'],
+    label: 'OpenRouter',
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['openrouter-provider'] || {};

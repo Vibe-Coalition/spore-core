@@ -115,6 +115,7 @@ module.exports = function register(api) {
   if (!cfg.customProviders?.oai) localPrefixes.push('oai');
   api.registerProvider('local', (config) => buildLocalClient(config), {
     prefixes: localPrefixes,
+    label: 'Local / OAI-Compat',
     capabilities: { tools: true, vision: false, audio: false, video: false },
     isConfigured: (config) => !!(config.localModelBaseUrl || process.env.LOCAL_MODEL_BASE_URL),
     defaultBaseUrl: 'http://localhost:11434/v1',

@@ -123,6 +123,7 @@ module.exports = function register(api) {
     });
   }, {
     prefixes: ['openai'],
+    label: 'OpenAI',
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['openai-provider'] || {};

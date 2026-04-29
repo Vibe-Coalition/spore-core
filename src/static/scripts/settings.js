@@ -554,15 +554,14 @@ async function _settingsAutoDetectModelLimits(data) {
       }
     }).catch(() => {}));
   }
-  // Built-in providers (only if they have a key set). New entries
-  // here automatically pick up auto-probe on panel open AND on key
-  // input via the change handler bound below.
-  const builtins = [
-    ['anthropic', data.providers?.anthropic],
-    ['openai', data.providers?.openai],
-    ['openrouter', data.providers?.openrouter],
-    ['zai', data.providers?.zai],
-  ];
+  // Plugin-registered providers — read from data.providers.registered
+  // (populated by web.js _getSettingsState from the plugin manager).
+  // Each entry's per-provider config block is at data.providers[name],
+  // so we don't need a separate hardcoded list.
+  const registered = Array.isArray(data.providers?.registered) ? data.providers.registered : [];
+  const builtins = registered
+    .map(p => [p.name, data.providers?.[p.name]])
+    .filter(([, cfg]) => cfg && typeof cfg === 'object');
   for (const [kind, cfg] of builtins) {
     if (!cfg?.apiKeySet && !cfg?.apiKey) continue;
     tasks.push(fetch(API + '/api/providers/list-models', {

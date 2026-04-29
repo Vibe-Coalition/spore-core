@@ -273,7 +273,19 @@ const SETTINGS_MODEL_FIELDS = [
   ['audioVlm', 'Audio VLM'],
 ];
 
-const SETTINGS_PROVIDER_LABELS = {
+// Runtime cache populated by populateSettingsPanel from
+// data.providers.registered. Each entry is what the plugin manager
+// returned for a provider plugin's registerProvider call (name,
+// label, configured, defaultBaseUrl). Drives both the per-tier
+// provider dropdown choice list AND the human-readable label shown
+// alongside the value. Adding a new provider plugin (with a `label`
+// opt) makes it appear here automatically — no UI patching needed.
+let _settingsRegisteredProviders = [];
+
+// Built-in fallback used only when the panel hasn't loaded yet (e.g.
+// the wizard which builds its own dropdowns before /api/settings
+// responds). The runtime cache replaces this once data arrives.
+const SETTINGS_PROVIDER_FALLBACK_LABELS = {
   anthropic: 'anthropic / claude',
   openai: 'openai',
   openrouter: 'openrouter',
@@ -293,7 +305,12 @@ function _settingsEscapeHtml(value) {
 
 function _settingsProviderLabel(name) {
   const key = String(name || '').trim().toLowerCase();
-  return SETTINGS_PROVIDER_LABELS[key] || key;
+  // Runtime cache (populated from /api/settings → data.providers.registered)
+  // wins. Fallback table covers the bootstrap window before the panel
+  // first loads. Last resort: the bare provider name.
+  const reg = _settingsRegisteredProviders.find(p => p.name === key);
+  if (reg?.label) return String(reg.label).toLowerCase();
+  return SETTINGS_PROVIDER_FALLBACK_LABELS[key] || key;
 }
 
 function _settingsProviderChoices() {
@@ -301,7 +318,12 @@ function _settingsProviderChoices() {
     .map(input => String(input.value || '').trim().toLowerCase())
     .filter(Boolean)
     .filter((name, index, arr) => arr.indexOf(name) === index);
-  const builtins = ['anthropic', 'openai', 'openrouter', 'local', 'gemini', 'zai'];
+  // Plugin-registered providers come from the runtime cache. When the
+  // cache is empty (panel not yet loaded), fall back to the built-in
+  // table so the wizard / first-paint dropdowns aren't blank.
+  const builtins = _settingsRegisteredProviders.length
+    ? _settingsRegisteredProviders.map(p => p.name)
+    : Object.keys(SETTINGS_PROVIDER_FALLBACK_LABELS);
   return builtins.concat(customNames.filter(name => !builtins.includes(name)).sort());
 }
 
@@ -601,6 +623,12 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-edge-voice').value = data.voice?.edgeVoice || 'en-US-AriaNeural';
   document.getElementById('settings-tts-model').value = data.voice?.ttsModel || '';
 
+  // Refresh the registered-providers cache BEFORE the per-tier
+  // dropdowns render so the choice list + labels match what the
+  // plugin manager actually has registered right now.
+  _settingsRegisteredProviders = Array.isArray(data.providers?.registered)
+    ? data.providers.registered
+    : [];
   renderSettingsCustomProviders(data.providers?.custom || []);
   renderSettingsModelProviderOptions();
   for (const [key] of SETTINGS_MODEL_FIELDS) {

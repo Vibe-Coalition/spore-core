@@ -87,6 +87,7 @@ module.exports = function register(api) {
     });
   }, {
     prefixes: [Z_AI_PREFIX],
+    label: 'Z.ai (GLM)',
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['z-ai-provider'] || {};

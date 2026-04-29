@@ -186,6 +186,7 @@ module.exports = function register(api) {
     });
   }, {
     prefixes: ['claude'],
+    label: 'Anthropic / Claude',
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['anthropic-provider'] || {};
