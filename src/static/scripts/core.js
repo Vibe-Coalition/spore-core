@@ -279,6 +279,7 @@ const SETTINGS_PROVIDER_LABELS = {
   openrouter: 'openrouter',
   local: 'local / oai-compat',
   gemini: 'gemini',
+  zai: 'z.ai (glm)',
 };
 
 function _settingsEscapeHtml(value) {
@@ -300,7 +301,7 @@ function _settingsProviderChoices() {
     .map(input => String(input.value || '').trim().toLowerCase())
     .filter(Boolean)
     .filter((name, index, arr) => arr.indexOf(name) === index);
-  const builtins = ['anthropic', 'openai', 'openrouter', 'local', 'gemini'];
+  const builtins = ['anthropic', 'openai', 'openrouter', 'local', 'gemini', 'zai'];
   return builtins.concat(customNames.filter(name => !builtins.includes(name)).sort());
 }
 
