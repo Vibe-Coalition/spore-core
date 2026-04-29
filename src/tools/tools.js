@@ -2826,10 +2826,30 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               : systemPrompt + `\n\n--- NOTE: You have used ${i + 1}/${maxIter} iterations. Prioritize writing output files and producing results. If you have remaining work, focus on the most important items first. ---`)
             : systemPrompt;
 
-          const supportsThinking = /sonnet|opus/i.test(subModel) && !/3-5|3\.5/i.test(subModel);
-          const thinkingBudget = supportsThinking ? (this.config.subagentThinkingBudget || 32000) : 0;
+          // Subagent thinking is gated by config.subagentThinkingBudget;
+          // map the numeric budget to a categorical effort so the plugin
+          // dispatch picks the right wire shape for the active model
+          // (adaptive for claude-opus-4-6/4-7, budget_tokens for the
+          // rest, no-op for non-thinking models). Without going through
+          // the dispatch the request would hit Anthropic's adaptive-only
+          // models with the legacy { type:'enabled', budget_tokens }
+          // shape and the API rejects with `thinking.type.enabled is
+          // not supported for this model`.
+          const subThinkingBudget = this.config.subagentThinkingBudget || 32000;
+          const _budgetToEffort = (budget) => {
+            if (!budget || budget < 1) return 'off';
+            if (budget <= 1024)  return 'minimal';
+            if (budget <= 2048)  return 'low';
+            if (budget <= 10000) return 'medium';
+            if (budget <= 24000) return 'high';
+            return 'max';
+          };
+          const subEffort = _budgetToEffort(subThinkingBudget);
           const baseMaxTokens = this.config.subagentMaxTokens || this._modelMaxOutputTokens(subModel);
-          const subMaxTokens = thinkingBudget > 0 ? Math.max(baseMaxTokens, thinkingBudget + 16000) : baseMaxTokens;
+          // Reserve headroom for thinking tokens when the operator wants
+          // a real budget. Non-thinking models silently no-op the
+          // applyReasoningEffort below so the extra max_tokens is harmless.
+          const subMaxTokens = subEffort !== 'off' ? Math.max(baseMaxTokens, subThinkingBudget + 16000) : baseMaxTokens;
 
           if (messages.length >= 2) {
             for (const m of messages) {
@@ -2856,14 +2876,21 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             }
           }
 
-          const requestOpts = {
+          let requestOpts = {
             model: subModel,
             max_tokens: subMaxTokens,
             system: systemWithBudget,
             messages,
             ...(subTools.length > 0 ? { tools: subTools } : {}),
-            ...(thinkingBudget > 0 ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
           };
+          // Plugin-dispatched thinking config — anthropic-provider picks
+          // adaptive vs budget shape per model; non-thinking models
+          // (haiku-3, GPT-3.5, etc.) silently no-op via the in-tree
+          // generic OAI fallback in core. Same path used by _callLLM.
+          const { AgentLoop } = require('../agent/loop');
+          if (subEffort !== 'off') {
+            requestOpts = AgentLoop.applyReasoningEffort(requestOpts, subModel, subEffort);
+          }
 
           // Stream the response so we can broadcast deltas to the panel
           this.broadcast({ type: 'subagent:iter', taskId, iteration: i + 1, maxIter, model: subModel });
