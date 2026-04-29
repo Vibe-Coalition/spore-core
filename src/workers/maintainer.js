@@ -31,10 +31,10 @@ const DECAY_DAYS = {
 };
 
 class Maintainer {
-  constructor(config, log, anthropicClient, db) {
+  constructor(config, log, llmClient, db) {
     this.config = config;
     this.log = log;
-    this.client = anthropicClient;
+    this.client = llmClient;
     this.db = db;
     this.model = config.learnerModel || config.casualModel || config.model;
     this._running = false;

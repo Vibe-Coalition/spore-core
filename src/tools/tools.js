@@ -65,12 +65,12 @@ const TOOLS_EXCLUDED_FROM_CLI = new Set([
 ]);
 
 class ToolSystem {
-  constructor(config, logger, discordClient, graphContext, anthropicClient) {
+  constructor(config, logger, discordClient, graphContext, llmClient) {
     this.config = config;
     this.log = logger;
     this.discord = discordClient;
     this.graph = graphContext;
-    this.anthropicClient = anthropicClient;
+    this.llmClient = llmClient;
     this.learner = null;
     this.platformManager = null;
     this.skills = new SkillsManager(logger, config.sharedSkillsDir);
@@ -2069,7 +2069,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         this.config,
       );
 
-      const response = await this.anthropicClient.messages.create({
+      const response = await this.llmClient.messages.create({
         model: this.config.learnerModel || this.config.casualModel || this.config.model,
         max_tokens: 1500,
         system,
@@ -2571,7 +2571,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   async _delegateTask(input) {
     const { task, context, model, timeoutSeconds, tools: enableTools = true, persona } = input;
-    if (!this.anthropicClient) return { error: 'Anthropic client not available' };
+    if (!this.llmClient) return { error: 'LLM client not available' };
 
     // Persona registry. Each persona overrides the sub-agent's system
     // prompt + tool subset to keep the sub-agent focused. The default
@@ -2884,7 +2884,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                   _currentToolName = '';
                   const _subStreamStart = Date.now();
                   const perCallTimeout = AbortSignal.timeout(180_000);
-                  const stream = this.anthropicClient.messages.stream(requestOpts, { signal: perCallTimeout });
+                  const stream = this.llmClient.messages.stream(requestOpts, { signal: perCallTimeout });
 
                   // Heartbeat during long subagent API calls — broadcast to panel for live progress
                   const subHeartbeat = setInterval(() => {
@@ -4454,7 +4454,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   async _analyzeMediaTool(kind, input = {}) {
-    if (!this.anthropicClient) return { error: 'LLM client not available' };
+    if (!this.llmClient) return { error: 'LLM client not available' };
 
     const configuredModel = kind === 'image'
       ? this.config.imageVlmModel
@@ -4496,7 +4496,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     this.log.info(`[analyze_${kind}] requested=${input.path || '<latest>'} resolved=${safe.path} via=${resolvedInput.source} model=${configuredModel}`);
 
     try {
-      const response = await this.anthropicClient.messages.create({
+      const response = await this.llmClient.messages.create({
         model: configuredModel,
         max_tokens: maxTokens,
         system: `You are a specialized ${kind} analysis model assisting another agent. Analyze the provided ${kind} and answer the request directly. Be concrete and concise. Do not mention tool names, providers, or that you are a separate model.`,

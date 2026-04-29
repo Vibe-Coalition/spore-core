@@ -359,7 +359,7 @@ function sessionEndHandler(api, ws, msg) {
     const sessions = sessionsLib;
     sessions.finalizeSessionNode(learner, msg.sessionId, { endedAt: msg.endedAt });
     log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
-    const llmClient = ctx?.tools?.anthropicClient;
+    const llmClient = ctx?.tools?.llmClient;
     if (llmClient) {
       sessions.summarizeSessionNode(learner, llmClient, config, msg.sessionId, log)
         .then(() => sessions.distillSession(learner, llmClient, config, msg.sessionId, log))
@@ -1568,7 +1568,7 @@ module.exports = function register(api) {
     if (!learner) return;
     try {
       const sessions = sessionsLib;
-      const llmClient = ctx?.tools?.anthropicClient;
+      const llmClient = ctx?.tools?.llmClient;
       for (const sid of sessionIds) {
         try {
           sessions.finalizeSessionNode(learner, sid, { endedAt: new Date().toISOString() });

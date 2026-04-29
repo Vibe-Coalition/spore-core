@@ -178,10 +178,10 @@ const MAX_ATTR_LENGTH = 600;
 const MIN_IMPORTANCE = 5;
 
 class Learner {
-  constructor(config, logger, anthropicClient) {
+  constructor(config, logger, llmClient) {
     this.config = config;
     this.log = logger;
-    this.client = anthropicClient;
+    this.client = llmClient;
     this.db = null;
     this._sharedDbs = {};
     this._sharedProjects = [];

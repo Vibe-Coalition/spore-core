@@ -307,17 +307,17 @@ async function boot() {
   // OAuth token detection now lives in plugins/anthropic-provider —
   // it sets config._isOAuth at register time and on every config
   // change. Core no longer string-matches against vendor token shapes.
-  const anthropicClient = new MultiProvider(config);
+  const llmClient = new MultiProvider(config);
   log.info(`Provider ready — main model backend: ${require('./providers').detectBackend(config.model)}`);
 
-  const learner = new Learner(config, log, anthropicClient);
+  const learner = new Learner(config, log, llmClient);
   if (!learner.init()) log.warn('Learner failed to init — learning disabled.');
 
-  const maintainer = new Maintainer(config, log, anthropicClient, learner.db);
+  const maintainer = new Maintainer(config, log, llmClient, learner.db);
   maintainer.ensureSchema();
   log.info('Maintainer initialized (gaps, reflections, stale-check, sparse-connect)');
 
-  const janitor = new Janitor(config, log, anthropicClient, learner.db);
+  const janitor = new Janitor(config, log, llmClient, learner.db);
   janitor.ensureSchema();
   log.info(`Janitor initialized (mode=${config.janitorMode || 'moderate'}, interval=${config.janitorIntervalMinutes || 360}m)`);
 
@@ -330,7 +330,7 @@ async function boot() {
     process.exit(1);
   }
 
-  const tools = new ToolSystem(config, log, null, graph, anthropicClient);
+  const tools = new ToolSystem(config, log, null, graph, llmClient);
   tools.learner = learner;
   tools._maintainer = maintainer;
   tools._janitor = janitor;

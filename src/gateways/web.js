@@ -1452,7 +1452,7 @@ class WebGateway {
     // shape directly.
     if (voiceTouched) this._voicePipeline = null;
     if (providerTouched || modelTouched) {
-      this.tools?.anthropicClient?.clearCache?.();
+      this.tools?.llmClient?.clearCache?.();
       // (Re)initialize the agent loop. On a fresh install the loop boots with
       // no model and `client` is never set; once the operator saves a real
       // provider+model via the wizard or settings pane, we need to wire it up
@@ -3403,7 +3403,7 @@ class WebGateway {
             graph: this.graph,
             learner: this.tools.learner,
             maintainer: this.tools._maintainer || null,
-            llmClient: this.tools.anthropicClient,
+            llmClient: this.tools.llmClient,
             log: this.log,
             broadcast: this.broadcast.bind(this),
             learnerModel: learnerModel || undefined,
@@ -6439,7 +6439,7 @@ class WebGateway {
         // so the next chat uses the new provider/model instead of the old one.
         if (providerTouched || modelTouched) {
           try {
-            this.tools?.anthropicClient?.clearCache?.();
+            this.tools?.llmClient?.clearCache?.();
             const agent = this.tools?._agent;
             if (agent) {
               agent.client = null;

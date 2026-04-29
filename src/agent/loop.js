@@ -172,7 +172,7 @@ class AgentLoop {
 
   /**
    * Inject a user message into an active session's loop.
-   * The message will be picked up before the next _callClaude() iteration.
+   * The message will be picked up before the next _callLLM() iteration.
    * Returns false if the session isn't running or is already aborting.
    */
   interject(sessionKey, content, newOpts) {
@@ -303,7 +303,7 @@ class AgentLoop {
     // Build system prompt using async path (hybrid search + Enhanced Recall).
     // `let` (not `const`) so a mid-loop mode toggle via interjection can
     // rebuild it — see _injectPendingInterjections.
-    const llmClient = this.tools?.anthropicClient || null;
+    const llmClient = this.tools?.llmClient || null;
     let systemPrompt = await this.graph.buildSystemPromptAsync({
       ...dynamicOpts,
       promptMode,
@@ -600,7 +600,7 @@ class AgentLoop {
         const iterStart = Date.now();
         this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
 
-        const response = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta, onToolUse: opts.onToolUse, onStatus: opts.onStatus, tools: chatTools, model: activeModel, abortSignal });
+        const response = await this._callLLM(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta, onToolUse: opts.onToolUse, onStatus: opts.onStatus, tools: chatTools, model: activeModel, abortSignal });
 
         const iterMs = Date.now() - iterStart;
 
@@ -779,7 +779,7 @@ class AgentLoop {
           role: 'user',
           content: '[SYSTEM: Your tool calls were blocked because you appeared to be stuck in a loop. Summarize what you have accomplished so far and respond to the user. Do not call any more tools.]',
         });
-        const finalResponse = await this._callClaude(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta });
+        const finalResponse = await this._callLLM(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta });
         if (finalResponse.usage) {
           totalUsage.input_tokens += finalResponse.usage.input_tokens;
           totalUsage.output_tokens += finalResponse.usage.output_tokens;
@@ -1873,7 +1873,7 @@ class AgentLoop {
   /**
    * Call the Claude API
    */
-  async _callClaude(systemPrompt, messages, opts = {}) {
+  async _callLLM(systemPrompt, messages, opts = {}) {
     const staticPart = opts.staticPrompt || null;
     const dynamicPart = opts.dynamicContext || null;
     let system;
