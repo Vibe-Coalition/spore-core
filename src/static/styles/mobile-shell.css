@@ -23,16 +23,29 @@
    sees it under our mobile chrome.
 */
 
-/* ── Body reset ── */
+/* ── Body reset + font override ──
+   The carved CSS sets `font-family: var(--font-body)` explicitly on
+   most descendants (.chat-msg, #chat-input, #m-title, etc.). To make
+   the mobile shell feel native we redefine --font-body itself for the
+   mobile-shell scope so all those rules pick up the system font stack
+   automatically. --font-mono is overridden too so #btn-mic et al.
+   don't fall back to a console font. */
 body.mobile-shell {
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
+  --font-mono: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  /* Slight bg/surface adjustment to sharpen bubble contrast in light
+     theme — assistant bubble was nearly indistinguishable from bg. */
+  --m-bubble-asst-bg: color-mix(in srgb, var(--text) 6%, transparent);
+  --m-bubble-asst-border: color-mix(in srgb, var(--text) 12%, transparent);
+
   margin: 0; padding: 0;
   width: 100vw;
   height: 100vh; height: 100dvh;
   overflow: hidden;
   display: block !important;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
+  font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
@@ -151,16 +164,18 @@ body.mobile-shell .chat-msg {
   /* override desktop's full-bleed treatment */
   position: relative;
   max-width: 78%;
-  padding: 9px 13px;
-  border-radius: 18px;
-  font-size: 0.95rem;
-  line-height: 1.4;
+  padding: 9px 13px !important;
+  border-radius: 18px !important;
+  font-size: 0.95rem !important;
+  line-height: 1.4 !important;
   word-wrap: break-word;
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.05);
   margin: 0 !important;
   width: auto !important;
+  display: block;
 }
 /* User bubble — right-aligned, accent background, asymmetric corner */
 body.mobile-shell .chat-msg.user {
@@ -170,10 +185,13 @@ body.mobile-shell .chat-msg.user {
   border-bottom-right-radius: 4px;
 }
 body.mobile-shell .chat-msg.user a { color: var(--bg); text-decoration: underline; }
-/* Assistant bubble — left-aligned, surface, asymmetric on the left */
+/* Assistant bubble — left-aligned, tinted (theme-aware) so it stays
+   visible on both dark and light themes (raw --surface was nearly
+   invisible against --bg in light). */
 body.mobile-shell .chat-msg.assistant {
-  background: var(--surface);
+  background: var(--m-bubble-asst-bg);
   color: var(--text);
+  border-color: var(--m-bubble-asst-border);
   border-bottom-left-radius: 4px;
 }
 /* System messages — centered, dim, no bubble */
@@ -188,9 +206,13 @@ body.mobile-shell .chat-msg.system {
   margin: 8px auto !important;
 }
 
+/* Inset the avatar slightly under the bubble so the row's vertical
+   rhythm feels native. */
+body.mobile-shell .chat-row { align-items: flex-end; }
+
 /* Markdown content inside bubbles */
-body.mobile-shell .chat-msg p { margin: 0 0 6px; }
-body.mobile-shell .chat-msg p:last-child { margin: 0; }
+body.mobile-shell .chat-msg p { margin: 0 0 6px !important; }
+body.mobile-shell .chat-msg p:last-child { margin: 0 !important; }
 body.mobile-shell .chat-msg pre {
   background: rgba(0, 0, 0, 0.18);
   border-radius: 10px;
@@ -253,48 +275,84 @@ body.mobile-shell #m-composer #chat-attachments {
   margin-bottom: 4px;
 }
 body.mobile-shell #m-composer #chat-text-row {
-  display: flex; align-items: flex-end; gap: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  padding: 4px 4px 4px 8px;
+  display: flex !important;
+  align-items: flex-end !important;
+  gap: 6px !important;
+  background: var(--m-bubble-asst-bg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 22px !important;
+  padding: 4px 4px 4px 8px !important;
+  box-shadow: none !important;
+}
+body.mobile-shell #m-composer #chat-text-row:focus-within {
+  border-color: var(--accent) !important;
 }
 body.mobile-shell #m-composer #chat-input {
-  flex: 1 1 auto;
-  min-height: 36px; max-height: 120px;
-  padding: 8px 6px;
-  font-size: 16px; /* iOS won't auto-zoom inputs ≥16px */
-  border-radius: 0;
+  flex: 1 1 auto !important;
+  min-height: 36px !important; max-height: 120px !important;
+  padding: 8px 6px !important;
+  font-size: 16px !important; /* iOS won't auto-zoom inputs ≥16px */
+  border-radius: 0 !important;
   border: none !important;
   background: transparent !important;
-  resize: none;
-  font-family: inherit;
-  color: var(--text);
-  outline: none;
-  line-height: 1.35;
+  resize: none !important;
+  font-family: var(--font-body) !important;
+  color: var(--text) !important;
+  outline: none !important;
+  line-height: 1.4 !important;
+  width: auto !important;
 }
+body.mobile-shell #m-composer #chat-input::placeholder {
+  color: var(--text-dim);
+}
+/* Round composer buttons — desktop sets padding/font that fights ours
+   even at higher specificity, so use !important to be unambiguous.
+   Text content is hidden (font-size 0); icons drawn via ::before. */
 body.mobile-shell #m-composer #btn-attach,
 body.mobile-shell #m-composer #btn-mic,
 body.mobile-shell #m-composer #chat-send,
 body.mobile-shell #m-composer #chat-stop {
   flex: 0 0 auto;
-  width: 38px; height: 38px;
-  border-radius: 50%;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 18px;
-  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px !important;
+  height: 38px !important;
+  min-width: 38px !important;
+  min-height: 38px !important;
+  border-radius: 50% !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: transparent !important;
+  color: var(--text-dim) !important;
+  font-size: 0 !important;
+  font-family: var(--font-body) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
+body.mobile-shell #m-composer button::before {
+  font-size: 18px;
+  line-height: 1;
+}
+body.mobile-shell #m-composer #btn-attach::before { content: '＋'; }
+body.mobile-shell #m-composer #btn-mic::before { content: '🎙'; font-size: 16px; }
+body.mobile-shell #m-composer #chat-send::before { content: '➤'; font-size: 17px; }
+body.mobile-shell #m-composer #chat-stop::before { content: '■'; font-size: 14px; }
 body.mobile-shell #m-composer #btn-attach:active,
-body.mobile-shell #m-composer #btn-mic:active { background: var(--element); color: var(--text); }
-body.mobile-shell #m-composer #chat-send:not(:disabled) {
-  background: var(--accent);
-  color: var(--bg);
+body.mobile-shell #m-composer #btn-mic:active {
+  background: var(--element) !important;
+  color: var(--text) !important;
 }
-body.mobile-shell #m-composer #chat-send:disabled {
-  opacity: 0.35;
+body.mobile-shell #m-composer #chat-send:not(:disabled) {
+  background: var(--accent) !important;
+  color: var(--bg) !important;
+}
+body.mobile-shell #m-composer #chat-send:disabled { opacity: 0.35; }
+/* Mic recording state — keep the existing red recording feedback. */
+body.mobile-shell #m-composer #btn-mic.recording {
+  background: #ff4444 !important;
+  color: #fff !important;
 }
 
 /* ────────────────────────────────────────────────────────────────────
