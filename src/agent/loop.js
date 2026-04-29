@@ -280,8 +280,29 @@ class AgentLoop {
     const hasTaskWords = /\b(file|code|write|read|edit|exec|run|build|deploy|install|script|create|generate|save|delete|fix|update|refactor|search|find|look\s?up|query|research|analyze|summarize|compare|explain|describe|list|show|add|remove|change|make|brand|ensure|set\s?up|configure|modify|replace|move|copy|send|fetch|download|upload|check|test|debug|implement|design|render|compile|parse|convert|merge|split|connect|disconnect|publish|schedule|cancel|approve|reject|assign|review|tone|adjust|tweak|polish|clean|improve|optimize|finish|complete|continue|proceed|resume|redo|undo|revert|restart|stop|pause|wrap\s?up|serve|host|share|put|post|drop|deliver|attach|play|record|stream|open|close|start|enable|disable|turn\s?on|turn\s?off)\b/i.test(msgText);
     const hasStatusWords = /\b(status|progress|going|doing|happening|working\s+on|how.*going|how.*coming|update\s+on|where.*at|eta|done\s+yet|finished|ready)\b/i.test(msgText);
     const hasActiveTasks = this.tools?._delegatedTasks && [...this.tools._delegatedTasks.values()].some(t => t.status === 'running');
+    // Stickiness: once a session has accumulated substantive coding work
+    // (any prior tool_use in the conversation, or projectContext present),
+    // a short follow-up like "do both" or "ok try that" is a CONTINUATION
+    // — not a casual greeting. Without this, a 7-char direct-trigger
+    // message with no task-words flipped isCasualChat=true and dropped
+    // softBudget from 80k → 30k mid-session, triggering compaction on a
+    // session the user thought was deep in a coding flow.
+    let sessionHasToolUse = false;
+    try {
+      const recent = this.sessions?.getHistory?.(sessionKey, 30) || [];
+      sessionHasToolUse = recent.some(m => {
+        if (m.role !== 'assistant') return false;
+        let c = m.content;
+        if (typeof c === 'string') {
+          try { c = JSON.parse(c); } catch { return false; }
+        }
+        return Array.isArray(c) && c.some(b => b?.type === 'tool_use');
+      });
+    } catch { /* best-effort; if we can't tell, fall through */ }
+    const sessionIsSubstantive = sessionHasToolUse || !!opts.projectContext;
     const isCasualChat = directTriggers.includes(opts.trigger) && msgText.length < 200
-      && !hasTaskWords && !(hasStatusWords && hasActiveTasks);
+      && !hasTaskWords && !(hasStatusWords && hasActiveTasks)
+      && !sessionIsSubstantive;
     const promptMode = isCasualChat ? 'chat' : 'full';
 
     // beforeMessage lifecycle hook — plugins can inject per-turn data
