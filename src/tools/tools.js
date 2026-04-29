@@ -5982,11 +5982,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const sessionKey = this._ctxSessionKey();
     if (!sessionKey) return { error: 'No active session' };
     const ctx = this._ctx();
-    // Picker UI is web-only. On Acorn CLI or other platforms, ask in prose
-    // instead — the tool result tells the agent to restate the question.
-    if (ctx.platform && ctx.platform !== 'web') {
+    // Both web and acorn-cli have the picker modal wired:
+    //   - web:        gateway broadcasts ask_user frames to the panel
+    //   - acorn-cli:  internal/app/update.go listens for ask_user WS
+    //                 frames, openStructuredQuestion shows the modal,
+    //                 finishQuestions sends ask_user_answer back.
+    // The platform gate that used to refuse cli was a stale relic from
+    // before the CLI gained the modal handler. Discord/Telegram and any
+    // OTHER non-modal-capable platform still get the prose fallback.
+    const ALLOWED_PLATFORMS = new Set(['web', 'cli']);
+    if (ctx.platform && !ALLOWED_PLATFORMS.has(ctx.platform)) {
       return {
-        error: 'ask_user is only available in web sessions. Ask the question in your reply text and wait for the user\'s free-form answer.',
+        error: `ask_user is not available on ${ctx.platform} (no modal UI). Ask the question in your reply text and wait for the user's free-form answer.`,
         platform: ctx.platform,
       };
     }
