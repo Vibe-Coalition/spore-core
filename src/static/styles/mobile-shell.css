@@ -135,15 +135,32 @@ body.mobile-shell #m-chat-stream #chat-messages {
        <div class="chat-msg user|assistant">text</div>
      </div>
    (system messages are bare `.chat-msg.system` with no row wrapper) */
+/* Rows span the full stream width so bubbles can right/left-align via
+   flex-direction. Desktop sets align-self:flex-end / flex-start which
+   collapses each row to its bubble's content width — overriden here. */
 body.mobile-shell .chat-row {
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  margin: 4px 0;
-  max-width: 100%;
+  display: flex !important;
+  align-items: flex-end !important;
+  gap: 6px !important;
+  margin: 4px 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  align-self: stretch !important;
 }
-body.mobile-shell .chat-row.user { flex-direction: row-reverse; }
-body.mobile-shell .chat-row.assistant { flex-direction: row; }
+body.mobile-shell .chat-row.user {
+  flex-direction: row-reverse !important;
+  justify-content: flex-start !important;  /* with row-reverse, this is the right side */
+}
+body.mobile-shell .chat-row.assistant {
+  flex-direction: row !important;
+  justify-content: flex-start !important;
+}
+/* The bubble itself — cancel desktop's align-self overrides; flex-direction
+   on the row already places it correctly. */
+body.mobile-shell .chat-msg.user,
+body.mobile-shell .chat-msg.assistant {
+  align-self: auto !important;
+}
 
 body.mobile-shell .chat-avatar {
   flex: 0 0 auto;
