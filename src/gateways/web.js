@@ -439,7 +439,7 @@ async function _probeModelTier(tier, body, appConfig) {
       reasoningOnly,
       error: matched ? undefined : (
         reasoningOnly
-          ? 'model returned only reasoning (no final answer) — likely cut off by max_tokens. Bump max_tokens or pick a non-reasoning model for the casual tier.'
+          ? `model returned only reasoning (no final answer) — likely cut off by max_tokens. Bump max_tokens or pick a non-reasoning model for the ${tier} tier.`
           : (text ? 'response did not match expected format' : 'model returned empty response')
       ),
     };
