@@ -2,22 +2,21 @@
    only happens on mobile-viewer.html. graph-viewer.html never loads
    this file, so desktop is untouched.
 
-   Approach: hide everything desktop-specific, position the new mobile
-   chrome (#m-header at top, #m-tab-bar at bottom) as fixed overlays,
-   and stretch the chat panel / canvas to fill the gap. The mobile
-   shell uses the SAME element IDs as desktop where possible
-   (#chat-panel, #chat-messages, #chat-input, #chat-send, #canvas,
-   #graph-svg) so the carved JS modules just work — chat.js streams
-   to #chat-messages, voice.js wires the existing #btn-mic and
-   #btn-attach buttons, graph.js renders into #graph-svg.
+   M1 mistake: hid too much. M2 unhides #controls, #view-mode-bar, and
+   .floating-pane-head — those carry the graph-mode pills, theme
+   toggle, settings close button, etc. Mobile shell now repositions
+   them to fit the new chrome instead of suppressing them.
 
-   Tab switching is class-driven on <body>: .m-view-chat, .m-view-graph,
-   .m-view-settings. mobile-shell.js toggles these on tab clicks. CSS
-   below shows/hides #chat-panel and #canvas based on which class is
-   active. */
+   Layout:
+     #m-header        fixed top, 56px (☰ title 🌙)
+     #m-drawer        slide-in from left, 80vw wide, off-screen by default
+     #m-tab-bar       fixed bottom, 60px + safe-area (chat/graph/settings)
+     #app             between header + tab bar; chat-panel OR canvas inside
+     #right-panel     bottom sheet — slides up when a node is selected
+     #settings-pane   full-screen sheet when settings tab is active
+*/
 
-/* Reset the desktop body — full viewport, no flex, no scroll. The chat
-   panel handles its own scrolling via #chat-messages. */
+/* ── Body reset ── */
 body.mobile-shell {
   margin: 0; padding: 0;
   width: 100vw;
@@ -31,20 +30,25 @@ body.mobile-shell {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* ── Hide every desktop chrome element ──
-   These all live in the body but mobile shell doesn't show them. They
-   stay in the DOM as null-safe stubs for the JS modules. */
-body.mobile-shell #desktop-dock,
+/* ── Hide desktop chrome that has no mobile equivalent ──
+   #util-bar       chat top bar (mobile header replaces)
+   #desktop-dock   bottom-of-canvas mode buttons (tab bar replaces)
+   #mobile-nav     existing 768px tab switcher (our tab bar replaces)
+   #legacy-stubs   already display:none on desktop
+   #terminal-pane  no terminal on mobile
+   #event-feed     legacy fade-out feed
+   #search         dock-floating node search bar
+   Note: #controls, #view-mode-bar, #canvas-tabs, .floating-pane-head
+   STAY VISIBLE — they carry graph mode/theme controls and modal close
+   buttons. They're restyled below for mobile. */
 body.mobile-shell #util-bar,
-body.mobile-shell #right-panel,
-body.mobile-shell #terminal-pane,
+body.mobile-shell #desktop-dock,
 body.mobile-shell #mobile-nav,
 body.mobile-shell #legacy-stubs,
-body.mobile-shell #controls,
+body.mobile-shell #terminal-pane,
 body.mobile-shell #event-feed,
 body.mobile-shell #search,
 body.mobile-shell #ssh-modal-overlay,
-body.mobile-shell #graph-modal-overlay,
 body.mobile-shell .collapse-tab,
 body.mobile-shell .resize-handle,
 body.mobile-shell .resize-handle-right,
@@ -53,12 +57,12 @@ body.mobile-shell #chat-header {
   display: none !important;
 }
 
-/* ── #app — root container, fills viewport between header and tab bar */
+/* ── #app — fills viewport between header and tab bar ── */
 body.mobile-shell #app {
   position: fixed;
-  top: 56px;        /* below #m-header */
+  top: 56px;
   left: 0; right: 0;
-  bottom: calc(60px + env(safe-area-inset-bottom));  /* above #m-tab-bar */
+  bottom: calc(60px + env(safe-area-inset-bottom));
   display: block !important;
   flex-direction: unset !important;
   width: auto;
@@ -86,13 +90,11 @@ body.mobile-shell.m-view-chat #chat-panel,
 body.mobile-shell:not(.m-view-graph):not(.m-view-settings) #chat-panel {
   display: flex;
 }
-
 body.mobile-shell #chat-messages {
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   padding: 12px 12px 4px;
   -webkit-overflow-scrolling: touch;
 }
-
 body.mobile-shell #chat-input-area {
   flex-shrink: 0;
   padding: 8px 10px;
@@ -146,14 +148,79 @@ body.mobile-shell #canvas {
   display: none;
   z-index: 1;
 }
-body.mobile-shell.m-view-graph #canvas {
-  display: flex;
-  flex-direction: column;
-}
+body.mobile-shell.m-view-graph #canvas { display: flex; flex-direction: column; }
 body.mobile-shell #graph-svg {
   flex: 1 1 auto;
   width: 100%;
   height: 100%;
+  touch-action: none; /* let d3-zoom handle pinch/pan */
+}
+
+/* Canvas tabs (Graph / Code) — slim at top of canvas */
+body.mobile-shell #canvas-tabs {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+/* View-mode bar — graph / list / typemap / theme toggle pills.
+   Horizontal scroll when too wide. */
+body.mobile-shell #view-mode-bar {
+  position: static !important;
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  white-space: nowrap;
+}
+body.mobile-shell #view-mode-bar button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: .75rem;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+body.mobile-shell #view-mode-bar button.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+/* Hide the in-canvas theme toggle — we have one in the header. */
+body.mobile-shell #view-mode-bar #theme-toggle,
+body.mobile-shell #view-mode-bar .vm-divider { display: none !important; }
+body.mobile-shell #view-mode-bar .vm-pill { display: none !important; }
+
+/* Graph controls bar (#controls) — compact horizontal toolbar at bottom
+   of canvas, above the tab bar. Hides desktop-only buttons that mobile
+   accesses elsewhere. */
+body.mobile-shell #controls {
+  position: static !important;
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  white-space: nowrap;
+}
+body.mobile-shell #controls > * {
+  flex: 0 0 auto;
+  min-height: 36px;
+  font-size: .75rem;
+}
+/* Buttons that don't make sense on mobile — files/logs/chat toggles
+   (we have tabs), tools-menu wrap (drawer covers it). */
+body.mobile-shell #btn-toggle-sidebar,
+body.mobile-shell #btn-open-logs,
+body.mobile-shell #btn-toggle-chat,
+body.mobile-shell #tools-menu-wrap {
+  display: none !important;
 }
 
 /* ── Mobile header (fixed top) ── */
@@ -214,16 +281,151 @@ body.mobile-shell #graph-svg {
 #m-tab-bar .m-tab-icon { font-size: 20px; line-height: 1; }
 #m-tab-bar .m-tab-label { font-size: 0.62rem; letter-spacing: 0.05em; }
 
+/* ── Slide-out drawer ── */
+#m-drawer {
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  width: 80vw; max-width: 320px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  transform: translateX(-100%);
+  transition: transform 0.22s ease;
+  z-index: 110;
+  display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+body.m-drawer-open #m-drawer { transform: translateX(0); }
+#m-drawer-scrim {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease;
+  z-index: 105;
+}
+body.m-drawer-open #m-drawer-scrim {
+  opacity: 1;
+  pointer-events: auto;
+}
+#m-drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+#m-drawer-title { font-size: 1rem; font-weight: 500; color: var(--text-bright); }
+#m-drawer-close {
+  width: 36px; height: 36px;
+  background: transparent; border: none;
+  font-size: 22px; color: var(--text);
+  cursor: pointer; border-radius: 8px;
+}
+#m-drawer-body { flex: 1; overflow-y: auto; padding: 8px 0; }
+.m-drawer-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px;
+  width: 100%;
+  border: none; background: transparent;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: .9rem;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  min-height: 48px;
+}
+.m-drawer-row:active { background: var(--element); }
+.m-drawer-icon { font-size: 18px; flex: 0 0 24px; text-align: center; }
+.m-drawer-label { flex: 1; }
+
+/* ── Right panel as bottom sheet (node viewer) ──
+   When the user taps a node, graph.js → right-panel.js openRightPanel()
+   removes .closed from #right-panel and adds .window-open / .active to
+   the relevant pane. On mobile we show this as a slide-up sheet
+   covering the lower 60% of the viewport, above the tab bar. */
+body.mobile-shell #right-panel {
+  position: fixed !important;
+  inset: auto 0 calc(60px + env(safe-area-inset-bottom)) 0 !important;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  height: 60vh !important;
+  max-height: 60vh !important;
+  background: var(--surface) !important;
+  border: none !important;
+  border-top: 1px solid var(--border) !important;
+  border-top-left-radius: 14px;
+  border-top-right-radius: 14px;
+  box-shadow: 0 -4px 20px rgba(0,0,0,0.25) !important;
+  z-index: 80;
+  transform: translateY(100%);
+  transition: transform 0.22s ease;
+  display: flex !important;
+  flex-direction: column !important;
+}
+body.mobile-shell #right-panel:not(.closed) {
+  transform: translateY(0);
+}
+/* Tab bar at the top of the sheet */
+body.mobile-shell #rp-tabs {
+  flex-shrink: 0;
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+body.mobile-shell #rp-tabs .rp-tab {
+  flex: 1 0 auto;
+  min-height: 44px;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: .78rem;
+  cursor: pointer;
+}
+body.mobile-shell #rp-tabs .rp-tab.active {
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+/* Pane panels — fill the rest of the sheet, scroll internally */
+body.mobile-shell .rp-pane {
+  position: static !important;
+  inset: auto !important;
+  width: 100% !important;
+  height: auto !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  display: none !important;
+  overflow-y: auto;
+}
+body.mobile-shell .rp-pane.active { display: flex !important; flex-direction: column; }
+/* Hide the desktop floating-pane-head (drag handle + close X) on the sheet —
+   user can swipe down or tap the same tab-bar tab to close. We add a small
+   drag affordance below. */
+body.mobile-shell #right-panel > .floating-pane-head { display: none; }
+body.mobile-shell #right-panel::before {
+  content: '';
+  display: block;
+  width: 36px; height: 4px;
+  margin: 8px auto 4px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0.4;
+}
+
 /* ── Settings sheet ──
-   Settings reuses the desktop #settings-pane modal, but on mobile we
-   show it as a full-screen sheet whenever .m-view-settings is active.
-   When the user taps the settings tab, mobile-shell.js calls
-   openSettingsPanel() which adds .open to #settings-pane. */
+   Settings reuses the desktop #settings-pane modal. When the settings
+   tab is active OR openSettingsPanel() has been called, show as
+   full-screen sheet between header and tab bar. */
 body.mobile-shell.m-view-settings #settings-pane,
 body.mobile-shell #settings-pane.open {
   display: flex !important;
   position: fixed !important;
-  inset: 56px 0 60px 0 !important;
+  inset: 56px 0 calc(60px + env(safe-area-inset-bottom)) 0 !important;
   width: 100% !important;
   height: auto !important;
   max-width: none !important;
@@ -232,17 +434,38 @@ body.mobile-shell #settings-pane.open {
   z-index: 50;
 }
 body.mobile-shell #settings-pane .floating-pane-head {
-  display: none; /* Mobile header replaces it */
+  /* Show the close button row — was hidden in M1, broke "tap settings,
+     can't escape" flow. */
+  display: flex !important;
+  flex-shrink: 0;
 }
 
-/* ── Onboarding wizard — let it fill the screen on mobile too ── */
+/* Settings tabs — horizontal scroll on narrow screens */
+body.mobile-shell #settings-pane .settings-tabs,
+body.mobile-shell #settings-pane #settings-tabs {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  white-space: nowrap;
+  flex-wrap: nowrap !important;
+}
+
+/* ── Modals (graph-modal-overlay) — render full-bleed on phone ── */
+body.mobile-shell #graph-modal-overlay {
+  /* Already display:none by default; only when .open. Override sizing
+     so the modal isn't a tiny center box on phone. */
+}
+body.mobile-shell #graph-modal {
+  width: 92vw !important;
+  max-width: 480px;
+}
+
+/* ── Onboarding wizard — full screen on mobile ── */
 body.mobile-shell #onboarding-overlay { z-index: 200; }
 body.mobile-shell #onboarding-box {
   width: 100vw; height: 100vh; height: 100dvh;
   border-radius: 0;
 }
 
-/* ── Hide subagent container + agent activity initially. They auto-show
-   when active via .show class added by chat.js. */
+/* ── Activity / subagent hint area ── */
 body.mobile-shell #agent-activity { padding: 6px 14px; }
 body.mobile-shell #subagent-container { max-height: 100px; overflow: hidden; }
