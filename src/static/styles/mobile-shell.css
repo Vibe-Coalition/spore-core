@@ -1,0 +1,248 @@
+/* mobile-shell.css — applies ONLY when body.mobile-shell is set, which
+   only happens on mobile-viewer.html. graph-viewer.html never loads
+   this file, so desktop is untouched.
+
+   Approach: hide everything desktop-specific, position the new mobile
+   chrome (#m-header at top, #m-tab-bar at bottom) as fixed overlays,
+   and stretch the chat panel / canvas to fill the gap. The mobile
+   shell uses the SAME element IDs as desktop where possible
+   (#chat-panel, #chat-messages, #chat-input, #chat-send, #canvas,
+   #graph-svg) so the carved JS modules just work — chat.js streams
+   to #chat-messages, voice.js wires the existing #btn-mic and
+   #btn-attach buttons, graph.js renders into #graph-svg.
+
+   Tab switching is class-driven on <body>: .m-view-chat, .m-view-graph,
+   .m-view-settings. mobile-shell.js toggles these on tab clicks. CSS
+   below shows/hides #chat-panel and #canvas based on which class is
+   active. */
+
+/* Reset the desktop body — full viewport, no flex, no scroll. The chat
+   panel handles its own scrolling via #chat-messages. */
+body.mobile-shell {
+  margin: 0; padding: 0;
+  width: 100vw;
+  height: 100vh; height: 100dvh;
+  overflow: hidden;
+  display: block !important;
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Hide every desktop chrome element ──
+   These all live in the body but mobile shell doesn't show them. They
+   stay in the DOM as null-safe stubs for the JS modules. */
+body.mobile-shell #desktop-dock,
+body.mobile-shell #util-bar,
+body.mobile-shell #right-panel,
+body.mobile-shell #terminal-pane,
+body.mobile-shell #mobile-nav,
+body.mobile-shell #legacy-stubs,
+body.mobile-shell #controls,
+body.mobile-shell #event-feed,
+body.mobile-shell #search,
+body.mobile-shell #ssh-modal-overlay,
+body.mobile-shell #graph-modal-overlay,
+body.mobile-shell .collapse-tab,
+body.mobile-shell .resize-handle,
+body.mobile-shell .resize-handle-right,
+body.mobile-shell #chat-resize-handle,
+body.mobile-shell #chat-header {
+  display: none !important;
+}
+
+/* ── #app — root container, fills viewport between header and tab bar */
+body.mobile-shell #app {
+  position: fixed;
+  top: 56px;        /* below #m-header */
+  left: 0; right: 0;
+  bottom: calc(60px + env(safe-area-inset-bottom));  /* above #m-tab-bar */
+  display: block !important;
+  flex-direction: unset !important;
+  width: auto;
+  height: auto;
+  overflow: hidden;
+}
+
+/* ── Chat panel = mobile chat view ── */
+body.mobile-shell #chat-panel {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  height: auto !important;
+  max-height: none !important;
+  border: none !important;
+  background: var(--bg) !important;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 1;
+}
+body.mobile-shell.m-view-chat #chat-panel,
+body.mobile-shell:not(.m-view-graph):not(.m-view-settings) #chat-panel {
+  display: flex;
+}
+
+body.mobile-shell #chat-messages {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: 12px 12px 4px;
+  -webkit-overflow-scrolling: touch;
+}
+
+body.mobile-shell #chat-input-area {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+body.mobile-shell #chat-text-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+body.mobile-shell #chat-input {
+  flex: 1 1 auto;
+  min-height: 40px; max-height: 120px;
+  padding: 10px 12px;
+  font-size: 16px; /* iOS won't auto-zoom inputs ≥16px */
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  resize: none;
+  font-family: var(--font-body);
+  color: var(--text);
+}
+body.mobile-shell #chat-input:focus { outline: 2px solid var(--accent2); outline-offset: -1px; }
+body.mobile-shell #btn-attach,
+body.mobile-shell #btn-mic,
+body.mobile-shell #chat-send,
+body.mobile-shell #chat-stop {
+  flex: 0 0 auto;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+body.mobile-shell #chat-send:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg);
+}
+body.mobile-shell #chat-send:disabled { opacity: 0.4; }
+
+/* ── Canvas = mobile graph view ── */
+body.mobile-shell #canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  display: none;
+  z-index: 1;
+}
+body.mobile-shell.m-view-graph #canvas {
+  display: flex;
+  flex-direction: column;
+}
+body.mobile-shell #graph-svg {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Mobile header (fixed top) ── */
+#m-header {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: 56px;
+  padding: 0 4px;
+  padding-top: env(safe-area-inset-top);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  z-index: 100;
+}
+#m-header h1 {
+  flex: 1;
+  text-align: center;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-bright);
+}
+#m-header button {
+  width: 44px; height: 44px;
+  border: none; background: transparent;
+  font-size: 20px; color: var(--text);
+  cursor: pointer;
+  border-radius: 8px;
+}
+#m-header button:active { background: var(--element); }
+
+/* ── Mobile tab bar (fixed bottom) ── */
+#m-tab-bar {
+  position: fixed; left: 0; right: 0;
+  bottom: 0;
+  height: 60px;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  z-index: 100;
+}
+#m-tab-bar button {
+  flex: 1;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 2px;
+  border: none; background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-body);
+  font-size: 0.65rem;
+  cursor: pointer;
+  padding: 6px 0;
+  transition: color 0.15s ease;
+}
+#m-tab-bar button.active { color: var(--accent); }
+#m-tab-bar button:active { background: var(--element); }
+#m-tab-bar .m-tab-icon { font-size: 20px; line-height: 1; }
+#m-tab-bar .m-tab-label { font-size: 0.62rem; letter-spacing: 0.05em; }
+
+/* ── Settings sheet ──
+   Settings reuses the desktop #settings-pane modal, but on mobile we
+   show it as a full-screen sheet whenever .m-view-settings is active.
+   When the user taps the settings tab, mobile-shell.js calls
+   openSettingsPanel() which adds .open to #settings-pane. */
+body.mobile-shell.m-view-settings #settings-pane,
+body.mobile-shell #settings-pane.open {
+  display: flex !important;
+  position: fixed !important;
+  inset: 56px 0 60px 0 !important;
+  width: 100% !important;
+  height: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  border-radius: 0 !important;
+  z-index: 50;
+}
+body.mobile-shell #settings-pane .floating-pane-head {
+  display: none; /* Mobile header replaces it */
+}
+
+/* ── Onboarding wizard — let it fill the screen on mobile too ── */
+body.mobile-shell #onboarding-overlay { z-index: 200; }
+body.mobile-shell #onboarding-box {
+  width: 100vw; height: 100vh; height: 100dvh;
+  border-radius: 0;
+}
+
+/* ── Hide subagent container + agent activity initially. They auto-show
+   when active via .show class added by chat.js. */
+body.mobile-shell #agent-activity { padding: 6px 14px; }
+body.mobile-shell #subagent-container { max-height: 100px; overflow: hidden; }

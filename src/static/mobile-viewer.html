@@ -1,0 +1,1432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPORE</title>
+<script src="brand.js"></script>
+<link rel="stylesheet" href="styles/base.css?v=20260429b">
+<link rel="stylesheet" href="styles/onboarding.css?v=20260429b">
+<link rel="stylesheet" href="styles/layout.css?v=20260429b">
+<link rel="stylesheet" href="styles/panes.css?v=20260429b">
+<link rel="stylesheet" href="styles/settings.css?v=20260429b">
+<link rel="stylesheet" href="styles/chat.css?v=20260429b">
+<link rel="stylesheet" href="styles/graph.css?v=20260429b">
+<link rel="stylesheet" href="styles/misc.css?v=20260429b">
+<link rel="stylesheet" href="styles/mobile.css?v=20260429b">
+<!-- mobile-shell.css overrides everything above when body.mobile-shell.
+     Loaded ONLY by mobile-viewer.html; desktop never sees it. -->
+<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429a">
+</head>
+<body class="mobile-shell">
+<!-- Mobile chrome — sits above the desktop body content. CSS hides the
+     desktop chrome (util-bar, right-panel, dock, terminal, etc.) and
+     styles #chat-panel and #canvas to fill the gap between header and
+     tab bar. The element IDs the JS modules expect all still exist. -->
+<header id="m-header" role="banner">
+  <button id="m-menu-btn" type="button" aria-label="Menu">☰</button>
+  <h1 id="m-title">SPORE</h1>
+  <button id="m-settings-btn" type="button" aria-label="Settings">⚙</button>
+</header>
+<nav id="m-tab-bar" role="navigation">
+  <button data-m-view="chat" class="active" type="button">
+    <span class="m-tab-icon">💬</span><span class="m-tab-label">Chat</span>
+  </button>
+  <button data-m-view="graph" type="button">
+    <span class="m-tab-icon">📊</span><span class="m-tab-label">Graph</span>
+  </button>
+  <button data-m-view="settings" type="button">
+    <span class="m-tab-icon">⚙</span><span class="m-tab-label">Settings</span>
+  </button>
+</nav>
+<!-- Onboarding Wizard Overlay -->
+<div id="onboarding-overlay" class="hidden">
+  <div id="onboarding-box">
+    <div id="onboarding-head">
+      <div id="ob-brand-row" style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span id="ob-brand-mark" style="display:inline-flex;align-items:center;width:28px;height:28px;color:var(--text)"></span>
+        <h2 id="ob-title" style="margin:0">Welcome to SPORE</h2>
+      </div>
+      <div class="ob-sub" id="ob-subtitle">Let's get your agent set up.</div>
+      <div id="onboarding-dots"></div>
+    </div>
+    <div id="onboarding-body">
+      <section class="ob-step active" data-step="1">
+        <div class="ob-welcome">
+          <div id="ob-hero-mark" style="display:flex;align-items:center;justify-content:center;flex:0 0 180px"></div>
+          <div class="ob-welcome-text">
+            <h3>Meet SPORE</h3>
+            <p>An AI agent with a <strong>persistent knowledge graph</strong> as its identity — not static prompts, not stateless chat. Every conversation adds nodes, edges, and reflections. Over time, it forms a self.</p>
+            <p>This setup takes a minute. You'll pick a look, create an account, and connect at least one model provider.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="ob-step" data-step="2">
+        <h3>Pick a theme</h3>
+        <div class="ob-desc">Set the look. You can change this any time in Settings.</div>
+        <div id="ob-theme-grid"></div>
+      </section>
+
+      <section class="ob-step" data-step="3">
+        <h3>Introduce yourself</h3>
+        <div class="ob-desc">How should the agent refer to you and be referred to?</div>
+        <label for="ob-display-name">Agent display name</label>
+        <input type="text" id="ob-display-name" placeholder="SPORE">
+        <label for="ob-nicknames">Nicknames (comma-separated)</label>
+        <input type="text" id="ob-nicknames" placeholder="Ani, The One">
+        <div class="ob-note">The agent will answer to any of these.</div>
+        <div class="ob-error" id="ob-identity-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="4">
+        <h3>Create your account</h3>
+        <div class="ob-desc">Secure the instance with a username + password. You'll sign in with this next time.</div>
+        <label for="ob-username">Username</label>
+        <input type="text" id="ob-username" autocomplete="username">
+        <label for="ob-password">Password (min 8 chars)</label>
+        <input type="password" id="ob-password" autocomplete="new-password">
+        <label for="ob-password2">Confirm password</label>
+        <input type="password" id="ob-password2" autocomplete="new-password">
+        <div class="ob-error" id="ob-account-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="pp">
+        <h3>Choose your providers</h3>
+        <div class="ob-desc">Pick which model providers this agent should use. Only providers you enabled in the Plugins step show up here. You'll fill in keys + test them in the next step.</div>
+        <div id="ob-pp-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:8px"></div>
+        <div class="ob-error" id="ob-pp-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="5">
+        <h3>Configure your providers</h3>
+        <div class="ob-desc">Fill in API keys, populate model lists, and run the test on each. At least one provider must pass the test before you can finish.</div>
+        <div id="ob-providers-state" style="display:flex;flex-direction:column;gap:10px;margin-top:8px"></div>
+        <div class="ob-error" id="ob-provider-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="6">
+        <h3>Route model tiers</h3>
+        <div class="ob-desc">Pick a provider + model for each tier. Planner is required; others can mirror it.</div>
+        <div id="ob-tier-rows"></div>
+        <div class="ob-error" id="ob-models-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="7">
+        <h3>Vision &amp; audio models (optional)</h3>
+        <div class="ob-desc">Specialist tiers for image / video / audio understanding. Skip to use the planner tier for everything.</div>
+        <div id="ob-vlm-rows"></div>
+      </section>
+
+      <section class="ob-step" data-step="p">
+        <h3>Pick plugins</h3>
+        <div class="ob-desc">SPORE ships these as optional plugins. Toggle each on or off — recommended ones are preselected. You can change this later in Settings → Plugins.</div>
+        <div id="ob-plugin-list" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+        <div class="ob-error" id="ob-plugin-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="8">
+        <h3>Voice &amp; web search (optional)</h3>
+        <div class="ob-desc">Turn on voice I/O and pick a web search provider. All optional.</div>
+        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin-top:4px">
+          <input type="checkbox" id="ob-voice-enabled" style="width:auto"> Enable voice
+        </label>
+        <div id="ob-voice-fields" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:8px">
+          <label for="ob-voice-stt">Speech-to-text provider</label>
+          <select id="ob-voice-stt">
+            <option value="deepgram">Deepgram</option>
+            <option value="openai">OpenAI (Whisper)</option>
+          </select>
+          <label for="ob-voice-tts">Text-to-speech provider</label>
+          <select id="ob-voice-tts">
+            <option value="">None</option>
+            <option value="elevenlabs">ElevenLabs</option>
+            <option value="openai">OpenAI</option>
+            <option value="edge">Microsoft Edge</option>
+          </select>
+          <div class="ob-note">Voice providers use the API keys you entered in step 4.</div>
+        </div>
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <label for="ob-searxng-url">SearXNG URL (primary web search)</label>
+          <input type="text" id="ob-searxng-url" placeholder="http://searxng:8080">
+          <label for="ob-searxng-key">SearXNG API key (only if your instance requires one)</label>
+          <input type="password" id="ob-searxng-key" placeholder="optional Bearer token">
+          <label for="ob-brave-key">Brave API key (fallback)</label>
+          <input type="password" id="ob-brave-key" placeholder="BSAa...">
+          <div class="ob-models-row" style="margin-top:10px">
+            <button type="button" class="ob-test-btn" id="ob-websearch-test">test web search</button>
+            <span class="ob-test-result" id="ob-websearch-result"></span>
+          </div>
+          <div class="ob-note">SearXNG is tried first. Brave is used when SearXNG is unset or empty.</div>
+        </div>
+      </section>
+
+      <!-- User-mode wizard steps (data-step="u…") -->
+      <section class="ob-step" data-step="u3">
+        <h3>What should the agent call you?</h3>
+        <div class="ob-desc">A short name or nickname. Defaults to your username.</div>
+        <label for="ob-user-displayname">Display name</label>
+        <input type="text" id="ob-user-displayname" placeholder="">
+        <div class="ob-error" id="ob-user-profile-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="u4">
+        <h3>You're all set 🎉</h3>
+        <div class="ob-desc">Your account is ready. Click Continue to start chatting with the agent and exploring the graph.</div>
+        <div class="ob-error" id="ob-user-finish-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="9">
+        <h3>Browser backend</h3>
+        <div class="ob-desc">Which browser engine should tools use by default?</div>
+        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin:12px 0 4px">
+          <input type="radio" name="ob-browser" value="zendriver" checked style="width:auto"> <strong>Zendriver</strong> — lightweight, recommended
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin:4px 0">
+          <input type="radio" name="ob-browser" value="playwright" style="width:auto"> <strong>Playwright</strong> — fuller automation API
+        </label>
+        <div class="ob-desc" style="margin-top:16px">You're all set. Click Finish to save and start using your agent.</div>
+        <div class="ob-error" id="ob-finish-error"></div>
+      </section>
+    </div>
+    <div id="onboarding-foot">
+      <div class="left"><button type="button" class="ob-btn" id="ob-back" disabled>Back</button></div>
+      <div class="right">
+        <button type="button" class="ob-btn" id="ob-skip" style="display:none">Skip</button>
+        <button type="button" class="ob-btn primary" id="ob-next">Next</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <!-- Mobile Navigation -->
+  <div id="mobile-nav">
+    <button class="active" data-view="chat">Chat</button>
+    <button data-view="graph">Graph</button>
+    <button data-view="panel">Panel</button>
+  </div>
+  <!-- Chat Panel -->
+  <div id="chat-panel" class="mobile-active">
+    <div id="chat-resize-handle" title="Drag to resize"></div>
+    <div id="chat-header">
+      <button type="button" id="chat-collapse" title="Collapse chat sidebar" aria-label="Collapse chat sidebar">&#10094;</button>
+      <button class="panel-collapse-btn" id="btn-toggle-graph-chat" title="Toggle graph" style="display:none">graph</button>
+      <span class="ch-spacer"></span>
+      <button type="button" id="btn-clear-chat" title="Clear chat history" aria-label="Clear chat history">&#9003;</button>
+      <span id="ws-status" class="disconnected" title="Disconnected" aria-label="Connection status"></span>
+    </div>
+    <div id="util-bar">
+      <button id="ub-open-node" title="Toggle node window">node</button>
+      <button id="ub-toggle-sidebar" title="Toggle files window">files</button>
+      <button id="ub-open-logs" title="Toggle logs window">logs</button>
+      <button id="ub-toggle-graph" title="Toggle graph">graph</button>
+      <span id="ub-spacer" style="flex:1"></span>
+      <button id="ub-focus" title="Focus chat — hide everything else">focus</button>
+    </div>
+    <div id="chat-messages">
+      <div class="chat-msg system" id="chat-welcome"></div>
+    </div>
+    <div id="subagent-container"></div>
+    <div id="agent-activity"><span class="activity-dot"></span><span id="activity-text">thinking...</span></div>
+    <div id="chat-input-area">
+      <div id="chat-attachments"></div>
+      <div id="chat-text-row">
+        <button id="btn-attach" type="button" title="Attach file" aria-label="Attach file">&#128206;</button>
+        <textarea id="chat-input" rows="1" placeholder="Talk to the agent…"></textarea>
+        <button id="btn-mic" title="Record voice message" aria-label="Record voice message">mic</button>
+        <button id="chat-send" disabled>send</button>
+        <button id="chat-stop" style="display:none" title="Stop generating">stop</button>
+      </div>
+      <input type="file" id="file-input" multiple accept="image/*,video/*,audio/*">
+    </div>
+    <!-- Hidden stubs for removed UI controls; the underlying JS still updates these. -->
+    <div id="legacy-stubs" aria-hidden="true" style="display:none">
+      <button id="plan-mode-toggle" type="button" class="chat-plan-toggle" onclick="_togglePlanMode()">Plan: off</button>
+      <button id="btn-terminal-header" type="button">terminal</button>
+      <button id="btn-voice-call" type="button">call</button>
+      <div id="voice-indicator"><div class="voice-bars"><span></span><span></span><span></span><span></span></div><span id="voice-status-text">listening...</span></div>
+      <span id="whisper-status"></span>
+    </div>
+  </div>
+
+  <div id="desktop-dock" aria-label="Desktop launcher">
+    <div id="event-log" role="button" tabindex="0" aria-expanded="false" title="Click to expand event log">
+      <div id="event-log-stack"></div>
+      <div id="event-log-panel" aria-hidden="true">
+        <div id="event-log-head">
+          <span>Event log</span>
+          <button id="event-log-clear" type="button" title="Clear log">clear</button>
+          <button id="event-log-close" type="button" title="Collapse">×</button>
+        </div>
+        <div id="event-log-list"></div>
+      </div>
+    </div>
+    <div id="desktop-dock-row">
+      <button class="desktop-dock-btn" id="dock-chat" title="Toggle chat sidebar">
+        <span class="dock-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="13" height="13" style="display:block"><path d="M2.5 4.5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H7l-3 2.5v-2.5h-.5a1 1 0 0 1-1-1z"/></svg></span>
+        <span class="dock-tooltip">Chat</span>
+      </button>
+      <button class="desktop-dock-btn" id="dock-node" title="Toggle node window">
+        <span class="dock-icon">◎</span>
+        <span class="dock-tooltip">Node</span>
+      </button>
+      <button class="desktop-dock-btn" id="dock-files" title="Toggle files window">
+        <span class="dock-icon">▤</span>
+        <span class="dock-tooltip">Files</span>
+      </button>
+      <button class="desktop-dock-btn" id="dock-logs" title="Toggle logs window">
+        <span class="dock-icon">≣</span>
+        <span class="dock-tooltip">Logs</span>
+      </button>
+      <button class="desktop-dock-btn dock-terminal" id="dock-terminal" title="Toggle terminal window">
+        <span class="dock-icon">&gt;_</span>
+        <span class="dock-tooltip">Terminal</span>
+      </button>
+      <button class="desktop-dock-btn dock-settings" id="dock-settings" title="Open settings">
+        <span class="dock-icon">&#9881;</span>
+        <span class="dock-tooltip">Settings</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Collapse tabs (shown when panels are collapsed) -->
+  <div class="collapse-tab" id="tab-right-panel" title="Show sidebar">&#9664; Sidebar</div>
+  <div class="collapse-tab" id="tab-canvas" title="Show graph">Graph</div>
+  <div class="collapse-tab" id="tab-chat" title="Show chat">Chat &#9654;</div>
+
+  <!-- Left resize handle (between graph and chat) -->
+  <div class="resize-handle" id="resize-left"></div>
+
+  <!-- Graph Canvas -->
+  <div id="canvas" class="view-graph">
+    <div id="canvas-tabs">
+      <div class="canvas-tab active" data-ct="graph"><span class="ct-icon">&#9675;</span> Graph</div>
+      <div class="canvas-tab" data-ct="code"><span class="ct-icon">{ }</span> Code <span class="canvas-tab-close" data-ct-close="code">&times;</span></div>
+    </div>
+    <div id="view-mode-bar">
+      <div class="vm-pill" aria-hidden="true"></div>
+      <button data-vm="graph" class="active">graph</button>
+      <button data-vm="list">list</button>
+      <button data-vm="typemap">type map</button>
+      <button data-vm="work">people &amp; projects</button>
+      <span class="vm-divider" aria-hidden="true"></span>
+      <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">☀</button>
+    </div>
+    <svg id="graph-svg"></svg>
+
+
+    <!-- List view -->
+    <div id="view-list">
+      <div id="view-list-aside">
+        <div id="view-list-search"><input type="text" id="vl-search" placeholder="search nodes or types…"></div>
+        <div id="view-list-tree"></div>
+      </div>
+      <div id="view-list-detail">
+        <div id="vld-empty">Select a node to inspect</div>
+        <div class="vld-card" id="vld-card"></div>
+      </div>
+    </div>
+
+    <!-- Type Map view -->
+    <div id="view-typemap">
+      <div id="view-typemap-search">
+        <input type="text" id="tm-search" placeholder="search nodes…" autocomplete="off">
+        <button type="button" id="view-typemap-search-clear" title="Clear">&times;</button>
+      </div>
+      <svg id="view-typemap-svg"></svg>
+    </div>
+
+    <!-- People & projects view (card dashboard) -->
+    <div id="view-work">
+      <div id="view-work-toolbar">
+        <input type="text" id="vw-search" placeholder="search people or projects…" autocomplete="off">
+        <span id="vw-count"></span>
+      </div>
+      <div id="view-work-body">
+        <section class="vw-section">
+          <h3 class="vw-section-title">People <span class="vw-section-count" id="vw-people-count"></span></h3>
+          <div class="vw-grid" id="vw-people-grid"></div>
+        </section>
+        <section class="vw-section">
+          <h3 class="vw-section-title">Projects <span class="vw-section-count" id="vw-projects-count"></span></h3>
+          <div class="vw-grid" id="vw-projects-grid"></div>
+        </section>
+      </div>
+    </div>
+    <!-- Code Viewer (docked in canvas or floating) -->
+    <div id="code-viewer" class="cv-docked">
+      <div id="code-viewer-header">
+        <span id="code-viewer-icon">{ }</span>
+        <span id="code-viewer-path"></span>
+        <span id="code-viewer-badge" class="cv-badge"></span>
+        <select id="code-viewer-mode" title="Code viewer behavior">
+          <option value="auto">Auto</option>
+          <option value="on-request">On request</option>
+          <option value="off">Off</option>
+        </select>
+        <button class="cv-dock-btn" id="cv-dock-btn" title="Dock back into graph pane">&#8689; dock</button>
+        <button id="code-viewer-close" title="Close code viewer">&times;</button>
+      </div>
+      <div id="code-viewer-tabs"></div>
+      <div id="code-viewer-toolbar">
+        <button class="cv-btn cv-btn-edit" id="code-viewer-edit-btn" title="Edit this file">Edit</button>
+        <button class="cv-btn cv-btn-save" id="code-viewer-save-btn" title="Save changes" style="display:none">Save</button>
+        <button class="cv-btn cv-btn-discard" id="code-viewer-discard-btn" title="Discard changes" style="display:none">Discard</button>
+        <span class="cv-save-status" id="code-viewer-save-status"></span>
+      </div>
+      <div id="code-viewer-content">
+        <div class="cv-line-numbers"></div>
+        <pre><code id="code-viewer-code"></code></pre>
+      </div>
+      <div id="code-viewer-editor">
+        <div id="code-viewer-ace"></div>
+      </div>
+      <div id="code-viewer-status"><span id="code-viewer-lang"></span><span id="code-viewer-info"></span></div>
+      <div id="code-viewer-resize"></div>
+    </div>
+    <div id="controls">
+      <button id="btn-open-node" title="Toggle node window">node</button>
+      <button id="btn-toggle-sidebar" title="Toggle files window">files</button>
+      <button id="btn-open-logs" title="Toggle logs window">logs</button>
+      <button id="btn-toggle-chat" title="Toggle chat panel">chat</button>
+      <select id="filter-type" title="Filter by type">
+        <option value="">all types</option>
+      </select>
+      <button id="btn-center" title="Reset zoom">center</button>
+      <button id="btn-new-node" class="btn-new" title="Create new node">+ node</button>
+      <div id="search"><input type="text" placeholder="search nodes..." id="search-input"></div>
+      <div style="position:relative;display:inline-block" id="tools-menu-wrap">
+        <button id="btn-tools-menu" title="Tools &amp; settings">menu</button>
+        <div id="tools-menu" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px;z-index:999;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+          <div class="tools-menu-item" id="tmi-settings" title="Configure this agent">Settings</div>
+          <div class="tools-menu-item" id="tmi-graphs" title="Switch knowledge graph">Graphs</div>
+          <div class="tools-menu-item" id="tmi-longmemeval" title="Run LongMemEval benchmark">LongMemEval</div>
+          <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+          <div class="tools-menu-item" id="tmi-enhanced-recall" title="LLM-powered query decomposition for better memory retrieval" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer">
+            <span>Enhanced Recall</span>
+            <span id="er-badge" style="font-size:.6rem;padding:1px 6px;border-radius:4px;font-family:var(--font-body);font-weight:600">OFF</span>
+          </div>
+        </div>
+        <div id="graph-picker" class="picker-dropdown"></div>
+      </div>
+    </div>
+    <div id="stats"></div>
+    <!-- LongMemEval floating HUD -->
+    <div id="lme-hud">
+      <div class="lme-panel" id="lme-panel">
+        <div id="lme-config">
+          <div class="lme-title-row"><span class="lme-title">LongMemEval</span><button class="lme-x" onclick="lmeClose()">&times;</button></div>
+          <div class="lme-row"><label>Variant</label><select class="lme-select" id="lme-variant"><option value="oracle" selected>Oracle (~15 MB)</option><option value="s">Small (~277 MB)</option><option value="m">Medium (~2.7 GB)</option></select></div>
+          <div class="lme-row"><label>Max Q</label><input type="number" class="lme-input" id="lme-max-q" value="500" min="1" max="500" style="width:70px"><span style="font-size:.6rem;color:var(--text-dim)">/500 (stratified across types)</span></div>
+          <div class="lme-row" style="flex-wrap:wrap;gap:4px"><label style="width:100%">Question Types</label>
+            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="temporal-reasoning" checked> Temporal</label>
+            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="multi-session" checked> Multi-session</label>
+            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="knowledge-update" checked> Knowledge Update</label>
+            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-user" checked> Single User</label>
+            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-assistant" checked> Single Asst</label>
+            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-preference" checked> Preferences</label>
+          </div>
+          <div class="lme-row"><label>Learner</label><select class="lme-select" id="lme-learner-model"><option value="claude-haiku-4-5" selected>Haiku 4.5 ($1/$5)</option><option value="claude-sonnet-4-6">Sonnet 4.6 ($3/$15)</option></select></div>
+          <div class="lme-row"><label>Answering</label><select class="lme-select" id="lme-answer-model"><option value="claude-haiku-4-5">Haiku 4.5 ($1/$5)</option><option value="claude-sonnet-4-6" selected>Sonnet 4.6 ($3/$15)</option><option value="claude-opus-4-6">Opus 4.6 ($15/$75)</option></select></div>
+          <div class="lme-row"><label><input type="checkbox" id="lme-eval-only"> Eval only (skip ingestion)</label></div>
+          <div class="lme-row"><label><input type="checkbox" id="lme-force-reeval"> Fresh eval (ignore cached answers)</label></div>
+          <div class="lme-row" id="lme-er-status" style="font-size:.65rem;color:var(--text-dim)"></div>
+          <div class="lme-cost" id="lme-cost-est">~$3-5 &bull; ~30-45 min (oracle)</div>
+          <div class="lme-row" style="margin-top:4px"><button class="lme-btn lme-btn-go" onclick="lmeStart()">Start</button></div>
+        </div>
+        <div id="lme-progress" style="display:none">
+          <div class="lme-title-row">
+            <span class="lme-phase" id="lme-phase-label">STARTING</span>
+            <div style="display:flex;align-items:center;gap:2px">
+              <span class="lme-elapsed" id="lme-elapsed">00:00</span>
+              <button class="lme-expand-toggle" onclick="lmeToggleExpand()" title="Expand/collapse details">&#9660;</button>
+              <button class="lme-x" onclick="lmeClose()" title="Close">&times;</button>
+            </div>
+          </div>
+          <div class="lme-bar"><div class="lme-bar-fill" id="lme-bar" style="width:0%"></div></div>
+          <div class="lme-pct" id="lme-pct-label">0 / 0</div>
+          <div class="lme-stats">
+            <div class="lme-st"><div class="lme-st-v" id="lme-st-sessions">0</div><div class="lme-st-l">Sessions</div></div>
+            <div class="lme-st"><div class="lme-st-v" id="lme-st-nodes">0</div><div class="lme-st-l">Nodes</div></div>
+            <div class="lme-st"><div class="lme-st-v" id="lme-st-questions">0</div><div class="lme-st-l">Answered</div></div>
+            <div class="lme-st"><div class="lme-st-v" id="lme-st-accuracy">--</div><div class="lme-st-l">Accuracy</div></div>
+          </div>
+          <div id="lme-expanded-stats">
+            <table class="lme-cat-table" id="lme-cat-table">
+              <thead><tr><th>Category</th><th>Pass</th><th style="text-align:right">Acc</th></tr></thead>
+              <tbody id="lme-cat-tbody"></tbody>
+            </table>
+            <div class="lme-eff-row">
+              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-latency">--</div><div class="lme-eff-l">Avg ms/q</div></div>
+              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-input">--</div><div class="lme-eff-l">Input tok</div></div>
+              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-output">--</div><div class="lme-eff-l">Output tok</div></div>
+              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-cost">--</div><div class="lme-eff-l">Est. cost</div></div>
+            </div>
+          </div>
+          <div class="lme-log" id="lme-log"></div>
+          <div style="margin-top:6px"><button class="lme-btn lme-btn-stop" onclick="lmeCancel()">Cancel</button></div>
+        </div>
+        <div id="lme-results" style="display:none"></div>
+      </div>
+    </div>
+    <!-- Type Map drilldown window -->
+    <div id="tm-window">
+      <div id="tm-window-head" class="floating-pane-head">
+        <span class="floating-pane-title" id="tm-window-title">Type</span>
+        <span id="tm-window-count">0 nodes</span>
+        <div class="floating-pane-actions">
+          <button class="floating-pane-btn" type="button" data-window-action="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg></button>
+          <button class="floating-pane-btn" type="button" id="tm-window-close-btn" title="Close" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div id="tm-window-body">
+        <svg id="tm-window-svg"></svg>
+        <div id="tm-window-empty" style="display:none">no nodes</div>
+      </div>
+    </div>
+
+    <!-- Terminal Pane -->
+    <div id="terminal-pane">
+      <div id="terminal-window-head" class="floating-pane-head">
+        <span class="floating-pane-title">Terminal</span>
+        <span id="terminal-window-status">local shell</span>
+        <div class="floating-pane-actions">
+          <button class="floating-pane-btn" type="button" data-window-action="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg></button>
+          <button class="floating-pane-btn" type="button" data-window-action="close" title="Close" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div id="terminal-resize-handle"></div>
+      <div id="terminal-tab-bar">
+        <div id="term-tabs-container"></div>
+        <div id="term-tab-actions">
+          <select id="terminal-host-select" title="Connection target"><option value="local">local</option></select>
+          <button id="btn-term-add" title="New terminal">+</button>
+          <select id="term-layout-select" title="Layout">
+            <option value="1">single</option>
+            <option value="2col">2 col</option>
+            <option value="3col">3 col</option>
+            <option value="2row">2 row</option>
+            <option value="3row">3 row</option>
+            <option value="2x2">2×2</option>
+            <option value="1l2r">1+2</option>
+          </select>
+          <button id="btn-terminal-hosts" title="Manage SSH hosts">hosts</button>
+          <button id="btn-terminal-close" class="danger" title="Close all terminals">&times;</button>
+        </div>
+      </div>
+      <div id="terminal-panes"></div>
+    </div>
+    <!-- SSH Host Management Modal -->
+    <div id="ssh-modal-overlay">
+      <div id="ssh-modal">
+        <h3>SSH Hosts</h3>
+        <!-- Keystore lock/unlock banner -->
+        <div id="ssh-keystore-banner">
+          <div id="ssh-keystore-locked" style="display:none">
+            <div style="color:#e74c3c;font-size:0.7rem;margin-bottom:8px">🔒 Keystore locked — enter a passphrase to encrypt/decrypt SSH keys</div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <input id="ssh-keystore-pass" type="password" placeholder="Keystore passphrase (min 8 chars)" style="flex:1"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('btn-keystore-unlock').click()}">
+              <button id="btn-keystore-unlock" class="primary" style="white-space:nowrap;padding:6px 12px;font-size:0.65rem;background:#fafafa;color:#0a0a0a;border:none;border-radius:4px;cursor:pointer">Unlock</button>
+            </div>
+            <div style="color:var(--text-dim);font-size:0.6rem;margin-top:4px">This passphrase is held in memory only — never stored. You'll need it again after restart.</div>
+          </div>
+          <div id="ssh-keystore-unlocked" style="display:none">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <span style="color:#4caf50;font-size:0.7rem">🔓 Keystore unlocked <span id="ssh-keystore-source" style="color:var(--text-dim)"></span></span>
+              <button id="btn-keystore-lock" style="font-size:0.6rem;padding:2px 8px;background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer">Lock</button>
+            </div>
+          </div>
+        </div>
+        <div id="ssh-host-list" class="ssh-host-list"></div>
+        <div id="ssh-host-form">
+          <h3 id="ssh-form-title" style="margin-top:16px">Add Host</h3>
+          <label>Name</label><input id="ssh-name" placeholder="my-server">
+          <label>Hostname</label><input id="ssh-hostname" placeholder="192.168.1.100">
+          <div style="display:flex;gap:8px"><div style="flex:1"><label>Port</label><input id="ssh-port" placeholder="22" type="number"></div><div style="flex:2"><label>Username</label><input id="ssh-username" placeholder="root"></div></div>
+          <label>Auth: Private Key (paste PEM)</label><textarea id="ssh-key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+          <label>Or Password</label><input id="ssh-password" type="password" placeholder="(leave blank if using key)">
+          <div class="modal-actions">
+            <button id="btn-ssh-cancel" onclick="document.getElementById('ssh-modal-overlay').classList.remove('active')">Cancel</button>
+            <button id="btn-ssh-test">Test</button>
+            <button id="btn-ssh-save" class="primary">Save</button>
+          </div>
+          <div id="ssh-status" style="margin-top:8px;font-size:0.65rem;color:var(--text-dim)"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right resize handle -->
+  <div class="resize-handle-right" id="resize-right"></div>
+
+  <!-- Unified Right Panel -->
+  <div id="right-panel">
+    <div id="rp-tabs">
+      <button class="rp-tab" data-pane="node-pane" id="rp-tab-node" title="Shift+click to pin multiple">Node</button>
+      <button class="rp-tab" data-pane="files-pane" id="rp-tab-files" title="Shift+click to pin multiple">Files</button>
+      <button class="rp-tab" data-pane="logs-pane" id="rp-tab-logs" title="Shift+click to pin multiple">Logs</button>
+      <button class="rp-tab" data-pane="skills-pane" id="rp-tab-skills" title="Shift+click to pin multiple">Skills</button>
+      <button class="panel-collapse-btn" id="btn-toggle-graph-rp" title="Toggle graph" style="display:none">graph</button>
+      <button class="panel-collapse-btn" id="rp-collapse" title="Collapse sidebar">&#9664;</button>
+    </div>
+
+    <!-- Node pane -->
+    <div class="rp-pane" id="node-pane">
+      <div class="floating-pane-head">
+        <span class="floating-pane-title">Node</span>
+        <div class="floating-pane-actions">
+          <button class="floating-pane-btn" type="button" data-window-action="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg></button>
+          <button class="floating-pane-btn" type="button" data-window-action="close" title="Close" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div class="floating-pane-body">
+        <div id="node-empty">Select a node on the graph</div>
+        <div id="panel-header" style="display:none">
+          <div id="panel-title"><h2>—</h2><div class="node-type">—</div></div>
+        </div>
+        <div id="panel-body"></div>
+      </div>
+    </div>
+
+    <!-- Files pane -->
+    <div class="rp-pane" id="files-pane">
+      <div class="floating-pane-head">
+        <span class="floating-pane-title">Files</span>
+        <div class="floating-pane-actions">
+          <button class="floating-pane-btn" type="button" data-window-action="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg></button>
+          <button class="floating-pane-btn" type="button" data-window-action="close" title="Close" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div class="floating-pane-body">
+        <div id="fp-header">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <select id="fp-source" title="Browse source" class="fp-source-select"><option value="local">local</option></select>
+            <button class="fp-btn" id="fp-btn-upload" title="Upload files">&#8679; Upload</button>
+            <button class="fp-btn" id="fp-btn-mkdir" title="New folder">+ Folder</button>
+            <button class="fp-mount-btn" id="lm-mount-btn" title="Mount a local folder from your computer">&#128193; Mount Folder</button>
+          </div>
+          <div class="lm-sync-indicator" id="lm-sync-indicator">
+            <span class="lm-sync-dot"></span>
+            <span id="lm-sync-label">idle</span>
+            <button class="lm-unmount-btn" id="lm-unmount-btn" title="Unmount">&times;</button>
+          </div>
+        </div>
+        <div class="lm-banner" id="lm-banner">
+          <span>&#9888; Sync is active — keep this tab open. Files at <code id="lm-banner-path"></code></span>
+          <button class="lm-banner-dismiss" onclick="document.getElementById('lm-banner').classList.remove('active')">&times;</button>
+        </div>
+        <div class="lm-progress" id="lm-progress">
+          <span id="lm-progress-text">Syncing...</span>
+          <div class="lm-progress-bar"><div class="lm-progress-fill" id="lm-progress-fill" style="width:0%"></div></div>
+        </div>
+        <div id="fp-breadcrumb"><span class="fp-crumb" data-path="">workspace</span></div>
+        <div id="fp-body">
+          <div id="fp-list"></div>
+          <div id="fp-dropzone">Drop files here or click Upload</div>
+        </div>
+        <div id="fp-viewer">
+          <div id="fp-viewer-header">
+            <button class="fp-btn" id="fp-viewer-back">&larr; Back</button>
+            <span id="fp-viewer-name"></span>
+            <button class="fp-btn" id="fp-viewer-edit" title="Edit file">&#9998; Edit</button>
+            <button class="fp-btn" id="fp-viewer-save" title="Save file" style="display:none;border-color:var(--accent);color:var(--accent)">&#10003; Save</button>
+            <button class="fp-btn" id="fp-viewer-cancel" title="Cancel editing" style="display:none">Cancel</button>
+            <button class="fp-btn" id="fp-viewer-download" title="Download">&#8681; Download</button>
+          </div>
+          <div id="fp-viewer-content"></div>
+          <div id="fp-edit-wrap">
+            <pre id="fp-edit-highlight"><code id="fp-edit-highlight-code"></code></pre>
+            <textarea id="fp-editor" spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Logs pane -->
+    <div class="rp-pane" id="logs-pane">
+      <div class="floating-pane-head">
+        <span class="floating-pane-title">Logs</span>
+        <div class="floating-pane-actions">
+          <button class="floating-pane-btn" type="button" data-window-action="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg></button>
+          <button class="floating-pane-btn" type="button" data-window-action="close" title="Close" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div class="floating-pane-body">
+        <div id="logs-toolbar">
+          <button class="fp-btn" id="logs-refresh" title="Refresh logs">&#8635; Refresh</button>
+          <button class="fp-btn" id="logs-auto" title="Auto-refresh">Auto</button>
+        </div>
+        <div id="logs-content">[click Refresh to load logs]</div>
+      </div>
+    </div>
+
+    <!-- Skills pane -->
+    <div class="rp-pane" id="skills-pane">
+      <div class="floating-pane-head">
+        <span class="floating-pane-title">Skills</span>
+        <div class="floating-pane-actions">
+          <button class="floating-pane-btn" type="button" data-window-action="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg></button>
+          <button class="floating-pane-btn" type="button" data-window-action="close" title="Close" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div class="floating-pane-body">
+        <div id="sk-toolbar">
+          <input type="text" id="sk-search" placeholder="Search skills..." style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.78rem;font-family:var(--font-body);outline:none">
+          <button class="fp-btn" id="sk-refresh" title="Refresh">&#8635;</button>
+          <button class="fp-btn" id="sk-new" title="New skill">+ New</button>
+        </div>
+        <div id="sk-list"></div>
+        <div id="sk-viewer" style="display:none">
+          <div id="sk-viewer-header">
+            <button class="fp-btn" id="sk-back">&larr; Back</button>
+            <span id="sk-viewer-title" style="flex:1;font-weight:600;font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+            <button class="fp-btn" id="sk-edit-btn" title="Edit">&#9998; Edit</button>
+            <button class="fp-btn" id="sk-delete-btn" title="Delete" style="color:var(--accent)">&#10005;</button>
+          </div>
+          <div id="sk-viewer-meta" style="padding:4px 12px;font-size:.68rem;color:var(--text-dim);display:flex;gap:8px;flex-wrap:wrap"></div>
+          <div id="sk-viewer-content" style="flex:1;overflow:auto;padding:12px;font-size:.82rem;line-height:1.6"></div>
+        </div>
+        <div id="sk-editor" style="display:none">
+          <div id="sk-editor-header">
+            <button class="fp-btn" id="sk-editor-cancel">&larr; Cancel</button>
+            <span style="flex:1;font-weight:600;font-size:.82rem" id="sk-editor-title">New Skill</span>
+            <button class="fp-btn" id="sk-editor-save" style="border-color:var(--accent);color:var(--accent)">&#10003; Save</button>
+          </div>
+          <div id="sk-editor-fields" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;overflow:auto;flex:1">
+            <label style="font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">Slug (URL-safe ID)
+              <input type="text" id="sk-field-slug" style="width:100%;margin-top:3px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.78rem;font-family:var(--font-body);outline:none" placeholder="e.g. replicate-image-gen">
+            </label>
+            <label style="font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">Title
+              <input type="text" id="sk-field-title" style="width:100%;margin-top:3px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.78rem;font-family:var(--font-body);outline:none" placeholder="Human-readable title">
+            </label>
+            <label style="font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">Tags (comma-separated)
+              <input type="text" id="sk-field-tags" style="width:100%;margin-top:3px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.78rem;font-family:var(--font-body);outline:none" placeholder="api, image-generation, replicate">
+            </label>
+            <label style="font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">Summary
+              <input type="text" id="sk-field-summary" style="width:100%;margin-top:3px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.78rem;font-family:var(--font-body);outline:none" placeholder="One-line description">
+            </label>
+            <label style="font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;flex:1;display:flex;flex-direction:column">Content (markdown)
+              <textarea id="sk-field-content" style="flex:1;min-height:200px;margin-top:3px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.78rem;font-family:var(--font-body);outline:none;resize:none;line-height:1.5" placeholder="Write the skill content in markdown..."></textarea>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<div class="toast" id="toast"></div>
+<div class="graph-context-menu" id="graph-context-menu">
+  <button type="button" data-action="research-selected-nodes">research selected nodes</button>
+  <button type="button" class="danger" data-action="delete-selected-nodes">delete selected nodes</button>
+  <button type="button" data-action="clear-selection">clear selection</button>
+</div>
+
+<div id="graph-drop-menu" role="menu">
+  <div class="gdm-title">drop <code data-drop-source>—</code> onto <code data-drop-target>—</code></div>
+  <button type="button" data-drop-action="merge">Merge into one node</button>
+  <div class="gdm-hint">Agent decides which survives, folds aspects/edges, then deletes the other.</div>
+  <button type="button" data-drop-action="link">Link with an edge</button>
+  <button type="button" data-drop-action="child">Move under as child</button>
+  <button type="button" class="gdm-danger" data-drop-action="cancel">Cancel</button>
+</div>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-javascript.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-typescript.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-jsx.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-tsx.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-css.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-markup.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-go.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-rust.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-java.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-cpp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-sql.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-ruby.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-docker.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-toml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-markdown.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/line-numbers/prism-line-numbers.min.css">
+<script src="https://cdn.jsdelivr.net/npm/ace-builds@1.36.5/src-min-noconflict/ace.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<!-- Foundation (loaded first) -->
+<script defer src="scripts/bootstrap.js?v=20260429b"></script>
+<script defer src="scripts/core.js?v=20260429b"></script>
+<script defer src="scripts/auth.js?v=20260429b"></script>
+<script defer src="scripts/tools-menu.js?v=20260429b"></script>
+
+<!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
+     can find the original at top-level evaluation time. -->
+<script defer src="scripts/settings.js?v=20260429b"></script>
+
+<!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
+<script defer src="scripts/effects.js?v=20260429b"></script>
+
+<!-- Alternate views: list + type map -->
+<script defer src="scripts/extras.js?v=20260429b"></script>
+
+<!-- Feature modules — wire DOM events, no top-level cross-script deps -->
+<script defer src="scripts/terminal.js?v=20260429b"></script>
+<script defer src="scripts/longmemeval.js?v=20260429b"></script>
+<script defer src="scripts/shared-skills.js?v=20260429b"></script>
+<script defer src="scripts/graph-picker.js?v=20260429b"></script>
+<script defer src="scripts/files.js?v=20260429b"></script>
+<script defer src="scripts/right-panel.js?v=20260429b"></script>
+<script defer src="scripts/voice.js?v=20260429b"></script>
+<script defer src="scripts/onboarding.js?v=20260429b"></script>
+<script defer src="scripts/graph.js?v=20260429c"></script>
+<script defer src="scripts/chat.js?v=20260429b"></script>
+<script defer src="scripts/panels.js?v=20260429b"></script>
+
+<!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
+<script defer src="scripts/boot.js?v=20260429b"></script>
+
+<!-- Mobile tab-bar wiring. Runs after every module has loaded so the
+     desktop functions it calls (openSettingsPanel, etc.) are in scope. -->
+<script defer src="scripts/mobile-shell.js?v=20260429a"></script>
+
+<!-- New Graph Modal -->
+<div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">
+  <div id="graph-modal">
+    <h3>New Knowledge Graph</h3>
+    <label for="gm-name">Name</label>
+    <input type="text" id="gm-name" placeholder="e.g. Research, Personal, Work..." onkeydown="if(event.key==='Enter'){event.preventDefault();createNewGraph()}">
+    <label for="gm-desc">Description (optional)</label>
+    <textarea id="gm-desc" placeholder="What is this graph for?"></textarea>
+    <div class="gm-buttons">
+      <button onclick="closeNewGraphModal()">Cancel</button>
+      <button class="gm-create" onclick="createNewGraph()">Create &amp; Seed</button>
+    </div>
+  </div>
+</div>
+
+<!-- Local Mount Settings Modal -->
+<div id="lm-settings-overlay" onclick="if(event.target===this)lmCloseSettings()">
+  <div id="lm-settings">
+    <h3>Mount Local Folder</h3>
+    <label for="lm-access">Access Mode</label>
+    <select id="lm-access">
+      <option value="rw">Read / Write (bidirectional sync)</option>
+      <option value="ro">Read Only (push to spore only)</option>
+    </select>
+    <label for="lm-ignore">Ignore Patterns (one per line)</label>
+    <textarea id="lm-ignore">node_modules/
+.git/
+__pycache__/
+.DS_Store
+*.pyc
+.env
+dist/
+build/
+.next/</textarea>
+    <div class="lm-check-row">
+      <input type="checkbox" id="lm-skip-binary" checked>
+      <label for="lm-skip-binary" style="margin:0">Skip binary files (images, videos, archives)</label>
+    </div>
+    <div class="lm-check-row">
+      <input type="checkbox" id="lm-clean-unmount">
+      <label for="lm-clean-unmount" style="margin:0">Delete server copy on unmount</label>
+    </div>
+    <div class="lm-settings-btns">
+      <button onclick="lmCloseSettings()">Cancel</button>
+      <button class="primary" onclick="lmConfirmMount()">Mount</button>
+    </div>
+  </div>
+</div>
+
+<div id="settings-pane" aria-label="Settings">
+  <div class="floating-pane-head" id="settings-pane-head">
+    <span class="floating-pane-title">Settings</span>
+    <div class="floating-pane-actions">
+      <button class="floating-pane-btn" type="button" data-window-action="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg></button>
+      <button class="floating-pane-btn" type="button" id="settings-pane-close-btn" title="Close" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button>
+    </div>
+  </div>
+  <div class="floating-pane-body">
+    <div class="settings-body">
+      <div class="settings-tabs" id="settings-tabs"></div>
+      <div class="settings-panes" id="settings-panes">
+        <div class="settings-tab-pane" data-tab="profile"></div>
+        <div class="settings-tab-pane" data-tab="providers"></div>
+        <div class="settings-tab-pane" data-tab="agent"></div>
+        <div class="settings-tab-pane" data-tab="graph-memory"></div>
+        <div class="settings-tab-pane" data-tab="backups"></div>
+        <div class="settings-tab-pane" data-tab="cluster"></div>
+        <div class="settings-tab-pane" data-tab="tools"></div>
+        <div class="settings-tab-pane" data-tab="plugins"></div>
+        <div class="settings-tab-pane" data-tab="users"></div>
+        <div class="settings-tab-pane" data-tab="advanced"></div>
+      </div>
+      <!-- Existing sections below are re-parented into the panes at init.
+           data-target-tab on each section maps it to a tab.
+           Appearance section was removed entirely — theme is now controlled
+           by the sun/moon toggle in the header, and the save flow reads
+           the theme directly from _currentTheme. -->
+
+      <div class="settings-section wide" data-target-tab="graph-memory">
+        <h4>Knowledge Graph</h4>
+        <div id="settings-graphs-list" class="settings-graphs-list"></div>
+        <button class="settings-btn-secondary" id="settings-new-graph">+ New graph</button>
+        <div class="settings-note">Switch the active knowledge graph for this agent. Each graph has its own nodes, edges, and memory.</div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="tools">
+        <h4>Benchmarks</h4>
+        <button class="settings-btn-secondary" id="settings-launch-lme">Run LongMemEval benchmark</button>
+        <div class="settings-note">Launches the LongMemEval HUD. Requires Enhanced Recall for best results.</div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="plugins">
+        <h4>Plugins</h4>
+        <div id="settings-plugins-state" class="settings-note" style="opacity:.85"></div>
+        <div id="settings-plugins-dirs" class="settings-note" style="opacity:.55;margin-top:4px"></div>
+        <div id="settings-plugins-manager" style="margin-top:10px"></div>
+        <div id="settings-plugins-clone-row" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+          <h5 style="margin:0 0 6px 0">Add plugin from Git</h5>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="text" id="settings-plugins-clone-repo" placeholder="https://github.com/owner/spore-plugin-foo.git" style="flex:1;min-width:280px;font-family:var(--font-body)" />
+            <input type="text" id="settings-plugins-clone-name" placeholder="dir name (optional)" style="width:160px;font-family:var(--font-body)" />
+            <button class="settings-btn-secondary" id="settings-plugins-clone-btn" type="button">Clone</button>
+          </div>
+          <div class="settings-note" style="opacity:.6;margin-top:4px">
+            Shallow-clones into the user plugins dir. After clone, the plugin appears in the list above as "available" — click Install to load it.
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="plugins">
+        <h4>Plugin settings</h4>
+        <div id="settings-plugins-panes"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="graph-memory">
+        <h4>Maintenance &amp; Janitor</h4>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="settings-btn-secondary" id="settings-maintainer-run">Run maintenance cycle</button>
+          <span id="settings-maintainer-status" style="font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);opacity:.75"></span>
+        </div>
+        <div class="settings-note">Forces an immediate maintainer cycle (bypasses the 15-min interval gate). Triggers gap detection/filling, reflections, stale check, sparse-node connection, dedup, reasoning, and embedding passes.</div>
+
+        <div style="margin-top:18px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="settings-btn-secondary" id="settings-janitor-run">Run janitor now</button>
+          <span id="settings-janitor-status" style="font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);opacity:.75"></span>
+        </div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+          <label for="settings-janitor-mode" style="font-size:.72rem">Aggressiveness</label>
+          <select id="settings-janitor-mode" style="background:var(--bg-2);color:var(--text);border:1px solid var(--border);padding:4px 6px;border-radius:4px;font-size:.72rem">
+            <option value="conservative">conservative</option>
+            <option value="moderate" selected>moderate</option>
+            <option value="aggressive">aggressive</option>
+          </select>
+        </div>
+        <div class="settings-note">The LLM janitor evaluates temp nodes before they expire, prunes stale/low-signal attributes, and (outside conservative mode) can remove one-off permanent nodes. Everything goes to the recycling bin first.</div>
+
+        <div style="margin-top:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div style="font-size:.78rem;font-weight:600">Recycling bin <span id="settings-janitor-bin-count" style="color:var(--text-dim);font-weight:400"></span></div>
+            <button class="settings-btn-secondary" id="settings-janitor-empty-bin" style="font-size:.68rem;padding:3px 8px">Empty bin</button>
+          </div>
+          <div id="settings-janitor-bin-list" style="margin-top:8px;max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg-2)">
+            <div style="padding:12px;color:var(--text-dim);font-size:.68rem">(not loaded yet — open this panel or press Run janitor)</div>
+          </div>
+        </div>
+
+      </div>
+
+
+      <div class="settings-section wide" data-target-tab="graph-memory">
+        <h4>Export / import</h4>
+          <div class="settings-note" style="margin-top:4px">Export this deployment's knowledge graph, general settings, and (optionally) provider configuration to carry to another Spore. Reference + agent self nodes are excluded from the graph; edges re-wire on import. Import takes a pre-import backup first.</div>
+
+          <div class="settings-hint" style="margin-top:10px">What to include in the export:</div>
+          <div class="settings-export-options">
+            <label class="settings-check-row"><input type="checkbox" id="settings-export-graph" checked><span>Knowledge graph</span></label>
+            <label class="settings-check-row"><input type="checkbox" id="settings-export-settings" checked><span>General settings</span></label>
+            <label class="settings-check-row"><input type="checkbox" id="settings-export-providers"><span>Providers <span class="settings-hint-inline">(URL + auth; keys redacted unless below is checked)</span></span></label>
+            <label class="settings-check-row" id="settings-export-secrets-wrap"><input type="checkbox" id="settings-export-secrets"><span>Include API keys <span class="settings-danger-inline">⚠ sensitive</span></span></label>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="settings-btn-secondary" id="settings-graph-export" style="font-size:.68rem;padding:3px 8px">Export</button>
+            <button class="settings-btn-secondary" id="settings-graph-import" style="font-size:.68rem;padding:3px 8px">Import…</button>
+            <input type="file" id="settings-graph-import-file" accept=".json,application/json" style="display:none">
+          </div>
+          <div id="settings-graph-port-status" style="margin-top:6px;font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);white-space:pre-wrap"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="backups">
+        <h4>Graph backups</h4>
+          <div class="settings-note" style="margin-top:4px">Periodic snapshots of the full graph DB via <code>VACUUM INTO</code>. Rolling retention; oldest snapshot is rotated out when the cap is hit.</div>
+          <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:380px">
+            <label style="font-size:.7rem">Interval (minutes)
+              <input id="settings-backup-interval" type="number" min="1" step="1" value="60" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+            </label>
+            <label style="font-size:.7rem">Retention
+              <input id="settings-backup-retention" type="number" min="1" step="1" value="20" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+            </label>
+          </div>
+          <div style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap">
+            <label style="font-size:.68rem;display:flex;align-items:center;gap:4px">
+              <input id="settings-backup-enabled" type="checkbox" checked> Enabled
+            </label>
+            <label style="font-size:.68rem;display:flex;align-items:center;gap:4px">
+              <input id="settings-backup-on-change-only" type="checkbox" checked> Skip unchanged
+            </label>
+            <button class="settings-btn-secondary" id="settings-backup-run" style="font-size:.68rem;padding:3px 8px">Snapshot now</button>
+          </div>
+          <div id="settings-backup-status" style="margin-top:6px;font-family:var(--font-body);font-size:.62rem;color:var(--text-dim)"></div>
+          <div style="margin-top:10px">
+            <div style="font-size:.7rem;color:var(--text-dim)">Available snapshots</div>
+            <div id="settings-backup-list" style="margin-top:4px;max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg-2)">
+              <div style="padding:10px;color:var(--text-dim);font-size:.66rem">(open this panel to load list)</div>
+            </div>
+          </div>
+      </div>
+
+      <div class="settings-section" data-target-tab="agent">
+        <h4>Identity</h4>
+        <label for="settings-display-name">Display Name</label>
+        <input id="settings-display-name" type="text" placeholder="SPORE">
+        <label for="settings-nicknames">Nicknames</label>
+        <input id="settings-nicknames" type="text" placeholder="comma,separated,names">
+        <div class="settings-note" id="settings-identity-note"></div>
+      </div>
+
+      <!-- Email settings extracted to plugins/email/ — see Plugins tab. -->
+
+<div class="settings-section wide" id="settings-users-section" data-target-tab="users">
+        <h4>Users</h4>
+        <div class="settings-note">Manage who can access this instance. Changes take effect immediately and active sessions are dropped.</div>
+        <div id="settings-users-list" class="settings-users-list"></div>
+        <div class="settings-note" id="settings-users-status"></div>
+      </div>
+
+      <div class="settings-section" id="settings-profile-section" data-target-tab="profile">
+        <h4>Your Profile</h4>
+        <label for="settings-profile-displayname">What should the agent call you?</label>
+        <input id="settings-profile-displayname" type="text" placeholder="">
+        <div class="settings-note" id="settings-profile-username-note"></div>
+        <h4 style="margin-top:18px">Change password</h4>
+        <label for="settings-profile-pw-current">Current password</label>
+        <input id="settings-profile-pw-current" type="password" autocomplete="current-password">
+        <label for="settings-profile-pw-new">New password (min 8 chars)</label>
+        <input id="settings-profile-pw-new" type="password" autocomplete="new-password">
+        <div class="settings-test-row">
+          <button type="button" class="settings-test-btn" id="settings-profile-pw-save">change password</button>
+          <span class="settings-test-result" id="settings-profile-pw-result"></span>
+        </div>
+        <h4 style="margin-top:18px">Sign out</h4>
+        <div class="settings-note">Ends your session on this device. You'll be sent back to the login screen.</div>
+        <div class="settings-test-row">
+          <button type="button" class="settings-test-btn" id="settings-profile-logout">log out</button>
+          <span class="settings-test-result" id="settings-profile-logout-result"></span>
+        </div>
+      </div>
+
+      <div class="settings-section" data-target-tab="agent">
+        <h4>Memory</h4>
+        <div class="settings-check">
+          <input id="settings-enhanced-recall" type="checkbox">
+          <label for="settings-enhanced-recall" style="margin:0">Enable Enhanced Recall</label>
+        </div>
+        <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session retrieval.</div>
+      </div>
+
+      <div class="settings-section" data-target-tab="agent">
+        <h4>Context budgets</h4>
+        <div class="settings-note">Override the agent's memory budgets. Leave blank to use the auto-scaled default (which grows with the active model's context window).</div>
+        <div class="settings-inline">
+          <div>
+            <label for="settings-budget-casual">Casual chat budget (tokens)</label>
+            <input id="settings-budget-casual" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-casual-default" style="opacity:0.65"></div>
+          </div>
+          <div>
+            <label for="settings-budget-complex">Coding/research budget (tokens)</label>
+            <input id="settings-budget-complex" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-complex-default" style="opacity:0.65"></div>
+          </div>
+        </div>
+        <div class="settings-note" style="margin-top:6px">When the conversation crosses these limits the agent compacts older turns into a summary. Higher = more memory but more API spend; lower = more aggressive forgetting.</div>
+        <div class="settings-inline" style="margin-top:10px">
+          <div>
+            <label for="settings-budget-compact-threshold">Background compaction trigger (tokens)</label>
+            <input id="settings-budget-compact-threshold" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-compact-threshold-default" style="opacity:0.65"></div>
+          </div>
+          <div>
+            <label for="settings-budget-tool-result-cap">Tool result cap (characters)</label>
+            <input id="settings-budget-tool-result-cap" type="number" min="1000" step="1000" placeholder="auto">
+            <div class="settings-note" id="settings-budget-tool-result-cap-default" style="opacity:0.65"></div>
+          </div>
+        </div>
+        <div class="settings-note" style="margin-top:6px">The trigger runs compaction in the background between turns once the on-disk session grows past this size. The tool-result cap is the default truncation; per-tool overrides (e.g. read_file 120k, exec 30k) still apply.</div>
+      </div>
+
+      <div class="settings-section" data-target-tab="agent">
+        <h4>Proactive</h4>
+        <div class="settings-check">
+          <input id="settings-proactive-enabled" type="checkbox">
+          <label for="settings-proactive-enabled" style="margin:0">Allow proactive messages</label>
+        </div>
+        <div class="settings-inline">
+          <div>
+            <label for="settings-proactive-cooldown">Cooldown Minutes</label>
+            <input id="settings-proactive-cooldown" type="number" min="1" step="1">
+          </div>
+          <div>
+            <label for="settings-proactive-max-day">Max Per Day</label>
+            <input id="settings-proactive-max-day" type="number" min="1" step="1">
+          </div>
+        </div>
+        <label for="settings-proactive-channels">Preferred Channels</label>
+        <input id="settings-proactive-channels" type="text" placeholder="comma,separated,channel ids">
+        <div class="settings-note" id="settings-proactive-note"></div>
+      </div>
+
+      <div class="settings-section" data-target-tab="agent">
+        <h4>Voice</h4>
+        <div class="settings-check">
+          <input id="settings-voice-enabled" type="checkbox">
+          <label for="settings-voice-enabled" style="margin:0">Enable voice pipeline</label>
+        </div>
+        <div class="settings-inline">
+          <div>
+            <label for="settings-stt-provider">STT Provider</label>
+            <select id="settings-stt-provider">
+              <!-- Options populated dynamically from data.voice.providers
+                   (plugin-registered + legacy-env fallback) — see
+                   populateSettingsPanel below. -->
+            </select>
+          </div>
+          <div>
+            <label for="settings-tts-provider">TTS Provider</label>
+            <select id="settings-tts-provider">
+              <option value="">Auto</option>
+              <option value="edge">Edge</option>
+              <option value="elevenlabs">ElevenLabs</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </div>
+        </div>
+        <div class="settings-inline">
+          <div>
+            <label for="settings-tts-voice">TTS Voice</label>
+            <input id="settings-tts-voice" type="text" placeholder="alloy / voice id">
+          </div>
+          <div>
+            <label for="settings-edge-voice">Edge Voice</label>
+            <input id="settings-edge-voice" type="text" placeholder="en-US-AriaNeural">
+          </div>
+        </div>
+        <label for="settings-tts-model">TTS Model</label>
+        <input id="settings-tts-model" type="text" placeholder="tts-1 / eleven_turbo_v2_5">
+        <div class="settings-note" id="settings-voice-note"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="advanced">
+        <h4>Runtime</h4>
+        <label for="settings-runtime-public-url-input">Public URL</label>
+        <input id="settings-runtime-public-url-input" type="text" placeholder="https://spore.example.com (or https://host.tld/path)">
+        <div class="settings-note">Set this so the agent knows its own external address for generating links (web_serve, graph viewer, etc.). No trailing slash.</div>
+        <div class="settings-kv" style="margin-top:10px"><span>Agent ID</span><code id="settings-runtime-agent-id"></code></div>
+        <div class="settings-kv"><span>Web Port</span><code id="settings-runtime-web-port"></code></div>
+        <div class="settings-kv"><span>Workspace</span><code id="settings-runtime-workspace"></code></div>
+        <div class="settings-kv"><span>Data Dir</span><code id="settings-runtime-data-dir"></code></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="providers">
+        <h4>Model Routing</h4>
+        <div class="settings-model-grid">
+          <div class="settings-model-row">
+            <div class="settings-model-name">Casual</div>
+            <div>
+              <label for="settings-model-casual-provider">Provider</label>
+              <select id="settings-model-casual-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-casual-name">Model</label>
+              <input id="settings-model-casual-name" type="text" placeholder="claude-sonnet-4-6 or gpt-5.4">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="casual">test</button><span class="settings-test-result" data-model-result="casual"></span></div></div>
+          <div class="settings-model-row">
+            <div class="settings-model-name">Normal</div>
+            <div>
+              <label for="settings-model-normal-provider">Provider</label>
+              <select id="settings-model-normal-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-normal-name">Model</label>
+              <input id="settings-model-normal-name" type="text" placeholder="claude-sonnet-4-6 or gpt-5.4">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="normal">test</button><span class="settings-test-result" data-model-result="normal"></span></div></div>
+          <div class="settings-model-row">
+            <div class="settings-model-name">Planner</div>
+            <div>
+              <label for="settings-model-planner-provider">Provider</label>
+              <select id="settings-model-planner-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-planner-name">Model</label>
+              <input id="settings-model-planner-name" type="text" placeholder="claude-opus-4-6 or gpt-5.4">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="planner">test</button><span class="settings-test-result" data-model-result="planner"></span></div></div>
+          <div class="settings-model-row">
+            <div class="settings-model-name">Subagent</div>
+            <div>
+              <label for="settings-model-subagent-provider">Provider</label>
+              <select id="settings-model-subagent-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-subagent-name">Model</label>
+              <input id="settings-model-subagent-name" type="text" placeholder="claude-sonnet-4-6 or qwen">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="subagent">test</button><span class="settings-test-result" data-model-result="subagent"></span></div></div>
+          <div class="settings-model-row">
+            <div class="settings-model-name">Learner</div>
+            <div>
+              <label for="settings-model-learner-provider">Provider</label>
+              <select id="settings-model-learner-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-learner-name">Model</label>
+              <input id="settings-model-learner-name" type="text" placeholder="qwen or claude-haiku">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="learner">test</button><span class="settings-test-result" data-model-result="learner"></span></div></div>
+          <div class="settings-model-row">
+            <div class="settings-model-name">Image VLM</div>
+            <div>
+              <label for="settings-model-imageVlm-provider">Provider</label>
+              <select id="settings-model-imageVlm-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-imageVlm-name">Model</label>
+              <input id="settings-model-imageVlm-name" type="text" placeholder="vision model id">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="imageVlm">test</button><span class="settings-test-result" data-model-result="imageVlm"></span></div></div>
+          <div class="settings-model-row">
+            <div class="settings-model-name">Video VLM</div>
+            <div>
+              <label for="settings-model-videoVlm-provider">Provider</label>
+              <select id="settings-model-videoVlm-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-videoVlm-name">Model</label>
+              <input id="settings-model-videoVlm-name" type="text" placeholder="video-capable model id">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="videoVlm">test</button><span class="settings-test-result" data-model-result="videoVlm"></span></div></div>
+          <div class="settings-model-row">
+            <div class="settings-model-name">Audio VLM</div>
+            <div>
+              <label for="settings-model-audioVlm-provider">Provider</label>
+              <select id="settings-model-audioVlm-provider"></select>
+            </div>
+            <div>
+              <label for="settings-model-audioVlm-name">Model</label>
+              <input id="settings-model-audioVlm-name" type="text" placeholder="audio-capable model id">
+            </div>
+          <div class="settings-model-test"><button type="button" class="settings-test-btn" data-model-test="audioVlm">test</button><span class="settings-test-result" data-model-result="audioVlm"></span></div></div>
+        </div>
+        <div class="settings-note" id="settings-routing-note"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="providers">
+        <h4>Providers</h4>
+        <div class="settings-provider-block">
+          <div class="settings-provider-group">
+            <div class="settings-provider-head"><strong>Anthropic / Claude</strong></div>
+            <label for="settings-provider-anthropic-key">API Key</label>
+            <input id="settings-provider-anthropic-key" type="password" placeholder="sk-ant-...">
+            <div class="settings-test-row">
+              <button type="button" class="settings-test-btn" data-provider-test="anthropic">test</button>
+              <span class="settings-test-result" data-provider-result="anthropic"></span>
+            </div>
+          </div>
+
+          <div class="settings-provider-group">
+            <div class="settings-provider-head"><strong>OpenAI</strong></div>
+            <div class="settings-inline">
+              <div>
+                <label for="settings-provider-openai-base-url">Base URL</label>
+                <input id="settings-provider-openai-base-url" type="text" placeholder="https://api.openai.com/v1">
+              </div>
+              <div>
+                <label for="settings-provider-openai-key">API Key</label>
+                <input id="settings-provider-openai-key" type="password" placeholder="sk-...">
+              </div>
+            </div>
+            <div class="settings-test-row">
+              <button type="button" class="settings-test-btn" data-provider-test="openai">test</button>
+              <span class="settings-test-result" data-provider-result="openai"></span>
+            </div>
+          </div>
+
+          <div class="settings-provider-group">
+            <div class="settings-provider-head"><strong>OpenRouter</strong></div>
+            <div class="settings-inline">
+              <div>
+                <label for="settings-provider-openrouter-base-url">Base URL</label>
+                <input id="settings-provider-openrouter-base-url" type="text" placeholder="https://openrouter.ai/api/v1">
+              </div>
+              <div>
+                <label for="settings-provider-openrouter-key">API Key</label>
+                <input id="settings-provider-openrouter-key" type="password" placeholder="sk-or-v1-...">
+              </div>
+            </div>
+            <label for="settings-provider-openrouter-referer">Referer</label>
+            <input id="settings-provider-openrouter-referer" type="text" placeholder="https://your-app.example">
+            <div class="settings-test-row">
+              <button type="button" class="settings-test-btn" data-provider-test="openrouter">test</button>
+              <span class="settings-test-result" data-provider-result="openrouter"></span>
+            </div>
+          </div>
+
+          <div class="settings-provider-group">
+            <div class="settings-provider-head"><strong>Local / OAI-Compatible</strong></div>
+            <div class="settings-inline">
+              <div>
+                <label for="settings-provider-local-base-url">Base URL</label>
+                <input id="settings-provider-local-base-url" type="text" placeholder="http://localhost:11434/v1">
+              </div>
+              <div>
+                <label for="settings-provider-local-key">API Key</label>
+                <input id="settings-provider-local-key" type="password" placeholder="local">
+              </div>
+            </div>
+            <div class="settings-test-row">
+              <button type="button" class="settings-test-btn" data-provider-test="local">test</button>
+              <span class="settings-test-result" data-provider-result="local"></span>
+            </div>
+          </div>
+
+
+          <div class="settings-provider-group">
+            <div class="settings-provider-head">
+              <strong>Custom OAI-Compatible Providers</strong>
+              <button type="button" class="settings-ghost-btn" onclick="addSettingsCustomProvider()">Add Provider</button>
+            </div>
+            <div id="settings-custom-providers"></div>
+          </div>
+        </div>
+        <div class="settings-note" id="settings-provider-note"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="advanced">
+        <h4>Invite Key</h4>
+        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via acorn-cli. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
+        <label for="settings-invite-key">Invite key</label>
+        <div style="display:flex; gap:6px; align-items:stretch; margin-top:4px">
+          <input id="settings-invite-key" type="password" placeholder="empty = self-register + acorn-cli disabled" autocomplete="off" style="flex:1; min-width:0">
+          <button type="button" class="settings-test-btn" id="settings-invite-key-show" title="Show / hide">show</button>
+          <button type="button" class="settings-test-btn" id="settings-invite-key-copy" title="Copy to clipboard">copy</button>
+          <button type="button" class="settings-test-btn" id="settings-invite-key-regen" title="Generate a new key (existing webapp guests + acorn-cli users will need the new one)">regen</button>
+        </div>
+        <div class="settings-note" id="settings-invite-key-note"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="advanced">
+        <h4>System Prompt Budgets</h4>
+        <div class="settings-note">Token caps applied when assembling the agent's system prompt. Sections that exceed their cap are silently truncated from the END — leave defaults unless the plan-mode verification logs report missing markers (<code>docker logs ... | grep '[plan-mode]'</code>). Changes apply on the next turn — no restart needed.</div>
+
+        <label for="settings-budget-runtime">Runtime section <span class="settings-budget-default" id="settings-budget-runtime-default" style="opacity:0.6;font-weight:normal"></span></label>
+        <input id="settings-budget-runtime" type="number" min="100" step="100" placeholder="leave blank to use default">
+        <div class="settings-note">Carries project context, sandbox rules, plan-mode block (PHASE 1-5 + QUESTIONS protocol + tooling-question list + RULES). Bump this when you've added prompt content and the agent stops following late-block instructions.</div>
+
+        <label for="settings-budget-total" style="margin-top:14px">Total prompt budget <span class="settings-budget-default" id="settings-budget-total-default" style="opacity:0.6;font-weight:normal"></span></label>
+        <input id="settings-budget-total" type="number" min="1000" step="1000" placeholder="leave blank to use default">
+        <div class="settings-note">Hard cap on total system prompt size in tokens. The DROP_ORDER list (gaps → anti → selfknowledge → plugin → feed → tooling → runtime → reflections → derived → episodes) trims sections from least-important first when the total exceeds this.</div>
+
+        <details style="margin-top:14px">
+          <summary style="cursor:pointer;font-weight:500">Per-section budgets (advanced — 18 sections)</summary>
+          <div id="settings-budget-sections-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px"></div>
+          <div class="settings-note">Override individual sections — leave any field blank to use the default. Unknown keys and non-positive values are silently ignored at boot.</div>
+        </details>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="advanced">
+        <h4 style="color:var(--danger,#ff5566)">Reset Graph</h4>
+        <div class="settings-note">
+          <strong>Destructive.</strong> Wipes <em>everything</em> in this agent's graph DB — every node, aspect, attribute, edge, episode, gap, reflection — and re-applies the seeded reference nodes from <code>/app/reference-nodes.sql</code> + every <code>migrate-ref-*.sql</code>. Use this when you want to start the agent's memory from scratch (dev testing, changed your mind about training, suspected corruption, etc.). The DB file is backed up to <code>&lt;path&gt;.pre-reset.&lt;ts&gt;</code> before the wipe so the action is recoverable.
+        </div>
+        <div class="settings-note" style="margin-top:8px">Type <code>RESET</code> in the box below to enable the button. Effect is immediate, no restart needed — the live graph handle is mutated in place.</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <input id="settings-reset-confirm" type="text" placeholder="type RESET to confirm" style="flex:1" autocomplete="off">
+          <button type="button" id="settings-reset-btn" disabled style="background:var(--danger,#ff5566);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:not-allowed;opacity:0.5">Reset graph</button>
+        </div>
+        <div class="settings-note" id="settings-reset-result" style="margin-top:8px;display:none"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="tools">
+        <h4>Browser</h4>
+        <label for="settings-browser-backend">Default Browser Backend</label>
+        <select id="settings-browser-backend">
+          <option value="zendriver">Zendriver</option>
+          <option value="playwright">Playwright</option>
+        </select>
+        <div class="settings-note" id="settings-browser-note"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="tools">
+        <h4>Web Search</h4>
+        <div class="settings-provider-block">
+          <div class="settings-provider-group">
+            <div class="settings-provider-head"><strong>SearXNG (primary)</strong></div>
+            <label for="settings-websearch-searxng-url">Base URL</label>
+            <input id="settings-websearch-searxng-url" type="text" placeholder="http://searxng:8080">
+            <label for="settings-websearch-searxng-key" style="margin-top:8px">API Key (optional)</label>
+            <input id="settings-websearch-searxng-key" type="password" placeholder="optional Bearer token">
+            <div class="settings-note" style="margin-top:6px">Self-hosted metasearch. Tried first; leave empty to disable.</div>
+          </div>
+          <div class="settings-provider-group">
+            <div class="settings-provider-head"><strong>Brave (fallback)</strong></div>
+            <label for="settings-websearch-brave-key">API Key</label>
+            <input id="settings-websearch-brave-key" type="password" placeholder="BSAa...">
+            <div class="settings-note" style="margin-top:6px">Used when SearXNG is unset or returns no results.</div>
+          </div>
+        </div>
+        <div class="settings-test-row">
+          <button type="button" class="settings-test-btn" data-websearch-test="1">test search</button>
+          <span class="settings-test-result" data-websearch-result="1"></span>
+        </div>
+      </div>
+    </div>
+    <div class="settings-actions">
+      <div id="settings-status"></div>
+      <div class="settings-btns">
+        <button onclick="closeSettingsPanel()">Cancel</button>
+        <button class="primary" id="settings-save-btn" onclick="saveSettingsPanel()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Pending badge for on-request mode (stays outside canvas) -->
+<div id="cv-pending-badge" onclick="_cvShowFromBadge()" title="Click to open code viewer"></div>
+
+<!-- Browser Live Preview -->
+<div id="browser-preview">
+  <div id="browser-preview-header">
+    <span id="browser-preview-title">Browser Preview</span>
+    <span id="browser-preview-url"></span>
+    <button id="browser-preview-close" title="Hide preview">&times;</button>
+  </div>
+  <img id="browser-preview-img" alt="Browser preview" style="flex:1;min-height:0;object-fit:contain">
+  <div id="browser-preview-status">waiting for frames...</div>
+  <div id="browser-preview-resize"></div>
+</div>
+
+</body>
+</html>

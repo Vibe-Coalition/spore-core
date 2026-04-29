@@ -1497,27 +1497,14 @@ class WebGateway {
       }
     }
     // Agent context budget overrides — apply to live config so the
-    // next agent turn (loop.js) and the next session-insert
-    // (sessions.js) see the new values without a restart.
-    let _sessionsCompactMemoNeedsBust = false;
+    // next agent turn (loop.js) sees the new values without a restart.
+    // SessionManager is dumb storage now; loop.js reads these on every
+    // turn so no memo to bust.
     for (const key of ['casualMessageBudget', 'complexMessageBudget', 'compactTokenThreshold', 'maxToolResultChars']) {
       if (!Object.prototype.hasOwnProperty.call(runtimePatch, key)) continue;
       const v = runtimePatch[key];
-      if (v == null) {
-        delete this.config[key];
-      } else {
-        this.config[key] = v;
-      }
-      if (key === 'compactTokenThreshold') _sessionsCompactMemoNeedsBust = true;
-    }
-    if (_sessionsCompactMemoNeedsBust) {
-      // SessionManager memoizes the threshold once on first insert.
-      // Clear the cached value so the next addMessage recomputes
-      // against the freshly-saved override (or scaling fallback).
-      const sessions = this.tools?._sessions || this.tools?._agent?.sessions;
-      if (sessions && '_compactTokenThreshold' in sessions) {
-        sessions._compactTokenThreshold = null;
-      }
+      if (v == null) delete this.config[key];
+      else this.config[key] = v;
     }
     this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
     // _isOAuth is set by anthropic-provider's _detectOAuth (runs on
@@ -3262,11 +3249,16 @@ class WebGateway {
       }
 
       // /graph — serve without auth (HTML has its own login form)
-      if (urlPath === '/graph' || urlPath === '/graph/') {
+      // /mobile — same, but serves mobile-viewer.html (mobile-first chrome,
+      //           same JS modules, distinct route so desktop is untouched).
+      if (urlPath === '/graph' || urlPath === '/graph/' ||
+          urlPath === '/mobile' || urlPath === '/mobile/') {
         try {
-          const localViewer = path.join(__dirname, '..', 'static', 'graph-viewer.html');
+          const isMobile = urlPath === '/mobile' || urlPath === '/mobile/';
+          const filename = isMobile ? 'mobile-viewer.html' : 'graph-viewer.html';
+          const localViewer = path.join(__dirname, '..', 'static', filename);
           const sharedStaticDir = process.env.SPORE_SHARED_STATIC || '/app/shared-static';
-          const sharedViewer = path.join(sharedStaticDir, 'graph-viewer.html');
+          const sharedViewer = path.join(sharedStaticDir, filename);
           const viewerPath = _newerFile(sharedViewer, localViewer);
           let html = fs.readFileSync(viewerPath, 'utf8');
           const brandPath = path.join(__dirname, '..', 'static', 'brand.js');
@@ -3281,7 +3273,7 @@ class WebGateway {
           html = html.replace(/<\/head>/, obFlag + '</head>');
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' });
           res.end(html);
-        } catch { res.writeHead(500); res.end('Graph viewer not found.'); }
+        } catch { res.writeHead(500); res.end('Viewer not found.'); }
         return;
       }
 
