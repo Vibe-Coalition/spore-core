@@ -566,7 +566,7 @@ function applyRetrievalMixin(GraphContext) {
     });
 
     const response = await _withTimeout(llmClient.messages.create({
-      model: this.config?.learnerModel || this.config?.casualModel || this.config?.model,
+      model: this.config?.recallModel || this.config?.learnerModel || this.config?.casualModel || this.config?.model,
       max_tokens: 120,
       temperature: 0,
       messages: [{
@@ -593,7 +593,7 @@ function applyRetrievalMixin(GraphContext) {
 
   proto._llmDecomposeQuery = async function _llmDecomposeQuery(llmClient, query) {
     const response = await _withTimeout(llmClient.messages.create({
-      model: this.config?.learnerModel || this.config?.casualModel || this.config?.model,
+      model: this.config?.recallModel || this.config?.learnerModel || this.config?.casualModel || this.config?.model,
       max_tokens: 250,
       temperature: 0,
       messages: [{

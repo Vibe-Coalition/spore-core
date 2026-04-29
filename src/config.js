@@ -28,6 +28,12 @@ const DEFAULTS = {
   imageVlmModel: null,
   videoVlmModel: null,
   audioVlmModel: null,
+  // Dedicated model for the LLM-assisted recall query decomposition
+  // (graph/retrieval.js _llmDecomposeQuery). When unset, falls back
+  // through learnerModel → casualModel → main model. Pick a fast,
+  // cheap model here — decomposition is one ~250-token call per
+  // recall search, fires only when enhancedRecall is on.
+  recallModel: null,
   model: null, // DEPRECATED — backward compat; resolved to plannerModel at load time
   agentId: 'spore',
   /** Optional YYYY-MM-DD — authoritative "born" date for prompt tenure math (overrides graph node created). */
@@ -317,6 +323,7 @@ function loadConfigFresh() {
   if (process.env.SPORE_IMAGE_VLM_MODEL) config.imageVlmModel = process.env.SPORE_IMAGE_VLM_MODEL;
   if (process.env.SPORE_VIDEO_VLM_MODEL) config.videoVlmModel = process.env.SPORE_VIDEO_VLM_MODEL;
   if (process.env.SPORE_AUDIO_VLM_MODEL) config.audioVlmModel = process.env.SPORE_AUDIO_VLM_MODEL;
+  if (process.env.SPORE_RECALL_MODEL) config.recallModel = process.env.SPORE_RECALL_MODEL;
   if (process.env.SPORE_SUBAGENT_MAX_TOKENS) config.subagentMaxTokens = parseInt(process.env.SPORE_SUBAGENT_MAX_TOKENS, 10);
   if (process.env.SPORE_OPENAI_REASONING_EFFORT) config.openaiReasoningEffort = process.env.SPORE_OPENAI_REASONING_EFFORT;
   if (process.env.SPORE_HEARTBEAT_MINUTES) config.heartbeatIntervalMinutes = parseInt(process.env.SPORE_HEARTBEAT_MINUTES, 10);

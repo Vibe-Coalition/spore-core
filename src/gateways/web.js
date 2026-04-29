@@ -861,6 +861,7 @@ class WebGateway {
         imageVlm: this._normalizeSettingsModelRef(this.config.imageVlmModel),
         videoVlm: this._normalizeSettingsModelRef(this.config.videoVlmModel),
         audioVlm: this._normalizeSettingsModelRef(this.config.audioVlmModel),
+        recall: this._normalizeSettingsModelRef(this.config.recallModel),
       },
       providers: {
         anthropic: {
@@ -1137,6 +1138,7 @@ class WebGateway {
         ['imageVlm', 'imageVlmModel', 'SPORE_IMAGE_VLM_MODEL'],
         ['videoVlm', 'videoVlmModel', 'SPORE_VIDEO_VLM_MODEL'],
         ['audioVlm', 'audioVlmModel', 'SPORE_AUDIO_VLM_MODEL'],
+        ['recall', 'recallModel', 'SPORE_RECALL_MODEL'],
       ];
       for (const [bodyKey, configKey, envKey] of modelFields) {
         if (!Object.prototype.hasOwnProperty.call(body.models, bodyKey)) continue;
@@ -1485,6 +1487,7 @@ class WebGateway {
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'imageVlmModel')) this.config.imageVlmModel = runtimePatch.imageVlmModel;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'videoVlmModel')) this.config.videoVlmModel = runtimePatch.videoVlmModel;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'audioVlmModel')) this.config.audioVlmModel = runtimePatch.audioVlmModel;
+    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'recallModel')) this.config.recallModel = runtimePatch.recallModel;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'anthropicApiKey')) this.config.anthropicApiKey = runtimePatch.anthropicApiKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openaiApiKey')) this.config.openaiApiKey = runtimePatch.openaiApiKey;
     if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openaiBaseUrl')) this.config.openaiBaseUrl = runtimePatch.openaiBaseUrl;
@@ -6534,7 +6537,7 @@ class WebGateway {
             }
             Object.assign(this.config, plan.configPatches);
             // If any model tier changed, the agent loop needs to rewire.
-            for (const k of ['casualModel', 'normalModel', 'plannerModel', 'subagentModel', 'learnerModel', 'imageVlmModel', 'videoVlmModel', 'audioVlmModel']) {
+            for (const k of ['casualModel', 'normalModel', 'plannerModel', 'subagentModel', 'learnerModel', 'recallModel', 'imageVlmModel', 'videoVlmModel', 'audioVlmModel']) {
               if (plan.configPatches[k] != null) { modelTouched = true; break; }
             }
           } catch (e) {

@@ -267,6 +267,7 @@ const SETTINGS_MODEL_FIELDS = [
   ['planner', 'Planner'],
   ['subagent', 'Subagent'],
   ['learner', 'Learner'],
+  ['recall', 'Recall'],
   ['imageVlm', 'Image VLM'],
   ['videoVlm', 'Video VLM'],
   ['audioVlm', 'Audio VLM'],
