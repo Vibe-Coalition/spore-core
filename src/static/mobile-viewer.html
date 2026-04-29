@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="styles/mobile.css?v=20260429c">
 <!-- mobile-shell.css overrides everything above when body.mobile-shell.
      Loaded ONLY by mobile-viewer.html; desktop never sees it. -->
-<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429b">
+<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429c">
 </head>
 <body class="mobile-shell">
 <!-- Mobile chrome — sits above the desktop body content. CSS hides the
@@ -64,6 +64,39 @@
     <span class="m-tab-icon">⚙</span><span class="m-tab-label">Settings</span>
   </button>
 </nav>
+
+<!-- Mobile views container — sits between header and tab bar. Only one
+     view is visible at a time, controlled by body.m-view-* class. -->
+<main id="m-views" role="main">
+  <!-- Chat: native-feeling bubbles + composer. mobile-shell.js moves
+       the desktop #chat-messages and #chat-input-area into this view's
+       slots at boot, so chat.js (which writes to #chat-messages) keeps
+       working without modification but the user sees the mobile shell. -->
+  <section id="m-chat-view" class="m-view" aria-label="Chat">
+    <div id="m-chat-stream"><!-- #chat-messages moved here on boot --></div>
+    <div id="m-composer"><!-- #chat-input-area moved here on boot --></div>
+  </section>
+
+  <!-- Graph: placeholder until N2 ships the mobile-native list view. -->
+  <section id="m-graph-view" class="m-view" aria-label="Graph">
+    <div class="m-placeholder">
+      <div class="m-placeholder-emoji">📊</div>
+      <h2>Graph view is being built</h2>
+      <p>The mobile-native graph (tappable node list, search, filters, detail sheet) lands in N2. The desktop d3 canvas works on touch but isn't a fit for phone — opening it here would just be cramped.</p>
+      <a href="../graph" class="m-cta-link">Open graph in desktop view</a>
+    </div>
+  </section>
+
+  <!-- Settings: placeholder until N3 ships the drilldown. -->
+  <section id="m-settings-view" class="m-view" aria-label="Settings">
+    <div class="m-placeholder">
+      <div class="m-placeholder-emoji">⚙</div>
+      <h2>Settings is being built</h2>
+      <p>Mobile-native settings (profile, models, plugins, voice, theme) as a drilldown lands in N3. The desktop modal isn't usable on phone — opening it here would just be the cramped desktop modal.</p>
+      <a href="../graph" class="m-cta-link">Open settings in desktop view</a>
+    </div>
+  </section>
+</main>
 <!-- Onboarding Wizard Overlay -->
 <div id="onboarding-overlay" class="hidden">
   <div id="onboarding-box">
@@ -822,7 +855,7 @@
 
 <!-- Mobile tab-bar wiring. Runs after every module has loaded so the
      desktop functions it calls (openSettingsPanel, etc.) are in scope. -->
-<script defer src="scripts/mobile-shell.js?v=20260429c"></script>
+<script defer src="scripts/mobile-shell.js?v=20260429d"></script>
 
 <!-- New Graph Modal -->
 <div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">
