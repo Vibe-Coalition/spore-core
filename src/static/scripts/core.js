@@ -15,7 +15,7 @@ const VB = window.BRAND || {};
   s('chat-header-text', VB.chatHeaderText || 'GRAPH VIEWER');
   s('chat-welcome', `Send a message to speak with this ${VB.agent || 'agent'}. Graph updates appear in real time.`);
 })();
-const API = window.location.pathname.replace(/\/graph\/?$/, '');
+const API = window.location.pathname.replace(/\/(graph|mobile)\/?$/, '');
 
 // ── Theme Definitions ──
 //

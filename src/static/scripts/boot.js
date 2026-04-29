@@ -9,7 +9,7 @@
   if (window.__ONBOARDING__?.needed) { startOnboarding(); return; }
   const auth = await checkAuthState();
   if (!auth.ok) {
-    const base = (window.location.pathname || '/').replace(/\/(graph|index\.html|login)?\/?$/, '');
+    const base = (window.location.pathname || '/').replace(/\/(graph|mobile|index\.html|login)?\/?$/, '');
     window.location.replace((base || '') + '/login');
     return;
   }

@@ -11,7 +11,7 @@
 // list; on next page load no <script> is created.
 (function loadPluginFrontendAssets() {
   try {
-    fetch((window.location.pathname.replace(/\/graph\/?$/, '') || '') + '/api/plugins/frontend-assets')
+    fetch((window.location.pathname.replace(/\/(graph|mobile)\/?$/, '') || '') + '/api/plugins/frontend-assets')
       .then(r => r.ok ? r.json() : { assets: [] })
       .then(({ assets }) => {
         for (const a of (assets || [])) {
