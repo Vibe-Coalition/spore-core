@@ -34,6 +34,45 @@ const SOFT_BUDGET_FLOOR_COMPLEX   = 80000;
 // Default contextWindow when the active model has no modelLimits entry
 // AND no global config.contextWindow override.
 const DEFAULT_CONTEXT_WINDOW      = 200000;
+// Headroom reserved below hardCeiling for the next model response when
+// computing a compaction target. Without this, compaction would size
+// messages exactly to the ceiling and leave no room for output.
+const RESPONSE_HEADROOM_TOKENS    = 2000;
+// Extra buffer subtracted from targetTokens when picking how many tail
+// messages survive Phase 2 of compaction — guards against borderline
+// arithmetic where the next-message tokens push us just over.
+const COMPACT_TAIL_HEADROOM_TOKENS = 500;
+// Model output-token sizing:
+//   FALLBACK = used when modelLimits[model].maxTokens is missing/zero
+//              AND when matching against config.maxTokens to detect "operator
+//              hasn't customized this" (config.maxTokens === FALLBACK ⇒ use
+//              the model-family heuristic).
+//   CEILING  = absolute hard cap on output tokens regardless of vendor
+//              claims; no current model exceeds 128K output in practice.
+const MODEL_OUTPUT_TOKEN_FALLBACK = 8192;
+const MODEL_OUTPUT_TOKEN_CEILING  = 128000;
+// Tool result truncation caps (chars, NOT tokens — applied before
+// JSON-encoding into the tool_result block). Per-tool overrides live
+// in TOOL_RESULT_CAPS; everything else falls back to TOOL_RESULT_DEFAULT_CAP.
+const TOOL_RESULT_DEFAULT_CAP = 30000;
+const TOOL_RESULT_CAPS = {
+  read_file:    120000,
+  web_fetch:     30000,
+  exec:          30000,
+  message_read:  15000,
+  graph_query:   15000,
+};
+// Compaction message-window shape:
+//   PROTECT_HEAD_COUNT — head messages always kept verbatim (system intro,
+//                        first user/assistant exchange).
+//   PROTECT_TAIL_MAX   — upper bound on tail messages preserved verbatim;
+//                        actual count is min(this, messages.length - 2).
+//   HEAD_EXTEND_MAX    — max additional head pairs to absorb when an
+//                        unfinished tool_use/tool_result chain straddles
+//                        the head/middle boundary.
+const PROTECT_HEAD_COUNT = 2;
+const PROTECT_TAIL_MAX   = 4;
+const HEAD_EXTEND_MAX    = 6;
 
 class AgentLoop {
   constructor(config, logger, graphContext, sessionManager, toolSystem, learner) {
@@ -520,12 +559,12 @@ class AgentLoop {
     const softBudget = isCasualChat ? casualBudget : complexBudget;
 
     if (msgTokens > softBudget) {
-      const targetMsgTokens = Math.min(softBudget, hardCeiling - systemTokens - 2000);
+      const targetMsgTokens = Math.min(softBudget, hardCeiling - systemTokens - RESPONSE_HEADROOM_TOKENS);
       messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus);
       messages = this._sanitizeMessages(messages);
       this.log.info(`[compaction] ${isCasualChat ? 'casual' : 'complex'} ${msgTokens} → ~${targetMsgTokens} msg tokens`);
     } else if (systemTokens + msgTokens > hardCeiling) {
-      const targetMsgTokens = hardCeiling - systemTokens - 2000;
+      const targetMsgTokens = hardCeiling - systemTokens - RESPONSE_HEADROOM_TOKENS;
       messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus);
       messages = this._sanitizeMessages(messages);
       this.log.info(`[compaction] hard-ceiling ${msgTokens} → ~${targetMsgTokens} msg tokens`);
@@ -790,7 +829,7 @@ class AgentLoop {
             if (lastToolResults) msgTokens += this._estimateTokens(typeof lastToolResults.content === 'string' ? lastToolResults.content : JSON.stringify(lastToolResults.content));
           }
           if (systemTokens + msgTokens > hardCeiling) {
-            const target = hardCeiling - systemTokens - 2000;
+            const target = hardCeiling - systemTokens - RESPONSE_HEADROOM_TOKENS;
             messages = this._trimMessagesToTokenBudget(messages, target);
             messages = this._sanitizeMessages(messages);
             msgTokens = target;
@@ -1530,9 +1569,8 @@ class AgentLoop {
       exitCode,
     });
 
-    const defaultCap = this.config.maxToolResultChars || 30000;
-    const toolCaps = { read_file: 120000, web_fetch: 30000, exec: 30000, message_read: 15000, graph_query: 15000 };
-    const maxResultChars = toolCaps[toolBlock.name] ?? defaultCap;
+    const defaultCap = this.config.maxToolResultChars || TOOL_RESULT_DEFAULT_CAP;
+    const maxResultChars = TOOL_RESULT_CAPS[toolBlock.name] ?? defaultCap;
     if (resultContent.length > maxResultChars) {
       const truncated = resultContent.length;
       resultContent = resultContent.substring(0, maxResultChars)
@@ -1639,7 +1677,7 @@ class AgentLoop {
   // ── Model-aware output token limits ─────────────────────────────────
 
   _modelMaxOutputTokens(model) {
-    if (!model) return 8192;
+    if (!model) return MODEL_OUTPUT_TOKEN_FALLBACK;
     // Plugin-populated source of truth: each provider plugin's listModels
     // returns maxOutput per-model and the wizard / settings save persists
     // it into config.modelLimits[model].maxTokens (see _enrichModelLimits
@@ -1648,8 +1686,8 @@ class AgentLoop {
     // sonnet-4-x → 64K, haiku-4-5 → 8K, gpt-4.1 → 32K, etc.) without
     // hardcoded vendor patterns here.
     const lim = this._lookupModelLimit(model);
-    if (lim?.maxTokens > 0) return Math.min(lim.maxTokens, 128000);
-    return 8192; // generic fallback for models not yet probed
+    if (lim?.maxTokens > 0) return Math.min(lim.maxTokens, MODEL_OUTPUT_TOKEN_CEILING);
+    return MODEL_OUTPUT_TOKEN_FALLBACK; // generic fallback for models not yet probed
   }
 
   // Resolve a model ref against config.modelLimits with a few key forms so
@@ -2011,13 +2049,13 @@ class AgentLoop {
       || { ...baseRequest, model: this.client?.resolveModel?.(baseRequest) || requestedModel };
     const model = resolvedRequest.model || requestedModel;
     // Precedence: per-model override (modelLimits[<ref>].maxTokens) → global
-    // config.maxTokens (if operator changed it from the 8192 default) → model
-    // family heuristic.
+    // config.maxTokens (if operator changed it from the MODEL_OUTPUT_TOKEN_FALLBACK
+    // default) → model family heuristic.
     const _modelLim = this._lookupModelLimit(model);
     const _perModelMax = Number(_modelLim?.maxTokens) || 0;
     const maxTokens = _perModelMax > 0
       ? _perModelMax
-      : (this.config.maxTokens !== 8192 ? this.config.maxTokens : this._modelMaxOutputTokens(model));
+      : (this.config.maxTokens !== MODEL_OUTPUT_TOKEN_FALLBACK ? this.config.maxTokens : this._modelMaxOutputTokens(model));
     let requestOpts = {
       max_tokens: maxTokens,
       ...resolvedRequest,
@@ -2517,18 +2555,17 @@ class AgentLoop {
     }
 
     // ── Phase 2: Determine boundaries ──
-    let tailProtect = Math.min(4, messages.length - 2);
+    let tailProtect = Math.min(PROTECT_TAIL_MAX, messages.length - 2);
     if (tailProtect < 1) tailProtect = 1;
     const tail = messages.slice(messages.length - tailProtect);
     const tailTokens = tail.reduce((s, m) => s + _tokOf(m), 0);
 
-    let protect = 2;
+    let protect = PROTECT_HEAD_COUNT;
     let head = messages.slice(0, protect);
     let middle = messages.slice(protect, messages.length - tailProtect);
 
-    const maxHeadExtend = 6;
     let extended = 0;
-    while (extended < maxHeadExtend && head.length > 0 && middle.length > 0 && _msgHasToolUse(head[head.length - 1]) && _msgHasToolResult(middle[0])) {
+    while (extended < HEAD_EXTEND_MAX && head.length > 0 && middle.length > 0 && _msgHasToolUse(head[head.length - 1]) && _msgHasToolResult(middle[0])) {
       head.push(middle.shift());
       extended++;
       if (middle.length > 0 && _msgHasToolUse(middle[0])) {
@@ -2549,7 +2586,7 @@ class AgentLoop {
     let keepFromIdx = middle.length;
     for (let i = middle.length - 1; i >= 0; i--) {
       const tok = _tokOf(middle[i]);
-      if (total + tok > targetTokens - 500) break;
+      if (total + tok > targetTokens - COMPACT_TAIL_HEADROOM_TOKENS) break;
       total += tok;
       keepFromIdx = i;
     }
@@ -2711,7 +2748,7 @@ class AgentLoop {
   _trimMessagesToTokenBudget(messages, targetTokens) {
     if (messages.length <= 4) return messages;
 
-    const protect = 2;
+    const protect = PROTECT_HEAD_COUNT;
     const head = messages.slice(0, protect);
     const tail = messages.slice(protect);
 
