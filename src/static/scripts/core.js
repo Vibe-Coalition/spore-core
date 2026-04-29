@@ -1,10 +1,12 @@
-// app.js — main inline application (was lines 790-14261 of the
-// pre-split graph-viewer.html monolith, ~13,470 lines).
+// core.js — foundation for every other module. Loaded right after bootstrap.js.
 //
-// This is the catch-all extraction — preserves execution order and
-// every top-level binding so existing cross-references keep working.
-// Future commits split this into focused modules (chat.js, graph.js,
-// onboarding.js, settings.js, etc.) — see /root/.claude/plans/.
+// Holds: brand IIFE + API constant, theme definitions (THEMES, applyGraphTheme,
+// normalizeThemeName), settings populator helpers (populateSettingsPanel and
+// the _settings* family), and the graph type system (TYPE_COLORS, FAM,
+// TYPE_FAMILY, getFamily/getFamilyKey, TYPE_VISUALS, graphData, simulation).
+//
+// Originated as the catch-all 13,470-line app.js Phase-2 extraction; carved
+// down to ~850 lines through Phase 5 + Phase 6.
 
 const VB = window.BRAND || {};
 (function initViewerBrand() {
@@ -754,147 +756,6 @@ function populateSettingsPanel(data) {
   _populatePluginsTab(data.plugins || { enabled: false, hotReload: false, panes: [], dockItems: [], installed: [] });
 }
 
-// ── Tools menu ──
-const toolsMenuBtn = document.getElementById('btn-tools-menu');
-const toolsMenu = document.getElementById('tools-menu');
-let _toolsMenuOpen = false;
-
-function closeToolsSubmenus() {
-  if (_graphPickerOpen) { _graphPickerOpen = false; graphPickerEl?.classList.remove('open'); }
-}
-
-toolsMenuBtn?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  _toolsMenuOpen = !_toolsMenuOpen;
-  toolsMenu.style.display = _toolsMenuOpen ? 'block' : 'none';
-  if (!_toolsMenuOpen) closeToolsSubmenus();
-});
-
-document.addEventListener('click', e => {
-  const wrap = document.getElementById('tools-menu-wrap');
-  if (wrap && !wrap.contains(e.target)) {
-    _toolsMenuOpen = false;
-    toolsMenu.style.display = 'none';
-    closeToolsSubmenus();
-  }
-});
-
-document.getElementById('theme-toggle')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  toggleTheme();
-});
-
-document.getElementById('tmi-settings')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  openSettingsPanel();
-});
-
-document.getElementById('tmi-graphs')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  toolsMenu.style.display = 'none';
-  _toolsMenuOpen = false;
-  _graphPickerOpen = !_graphPickerOpen;
-  if (_graphPickerOpen) { loadGraphsList(); graphPickerEl?.classList.add('open'); }
-  else { graphPickerEl?.classList.remove('open'); }
-});
-
-document.getElementById('tmi-longmemeval')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  toolsMenu.style.display = 'none';
-  _toolsMenuOpen = false;
-  lmeOpen();
-});
-
-// Enhanced Recall toggle
-let _erEnabled = false;
-const erBadge = document.getElementById('er-badge');
-function updateErBadge(on) {
-  _erEnabled = on;
-  if (!erBadge) return;
-  erBadge.textContent = on ? 'ON' : 'OFF';
-  erBadge.style.background = on ? 'var(--accent2)' : 'var(--border)';
-  erBadge.style.color = on ? 'var(--bg)' : 'var(--text-dim)';
-}
-fetch(API + '/api/enhanced-recall', { headers: authHeaders() }).then(r => r.json()).then(d => {
-  updateErBadge(!!d.enhancedRecall);
-}).catch(() => {});
-document.getElementById('tmi-enhanced-recall')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  const newState = !_erEnabled;
-  updateErBadge(newState);
-  fetch(API + '/api/enhanced-recall', {
-    method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled: newState }),
-  }).then(r => r.json()).then(d => {
-    toast(d.enhancedRecall ? 'Enhanced Recall ON — LLM search active' : 'Enhanced Recall OFF');
-  }).catch(() => { updateErBadge(!newState); toast('Failed to update', true); });
-});
-
-// ── Auth check & login ──
-let _authenticated = false;
-let _userRole = null;
-
-let _currentUserName = 'Operator';
-async function checkAuthState() {
-  try {
-    const r = await fetch(API + '/api/auth/check');
-    const data = await r.json();
-    if (data.role) _userRole = data.role;
-    if (data.username) _currentUserName = data.username;
-    const authed = (data.authenticated && (data.role === 'admin' || data.role === 'creator' || data.role === 'webapp'))
-      || (!data.needsAuth && !data.hasWebappUsers);
-    if (authed && !data.role && !data.needsAuth) _userRole = 'admin';
-    return { ok: authed, wizardNeeded: !!data.wizardNeeded };
-  } catch {}
-  return { ok: false, wizardNeeded: false };
-}
-
-function showApp() {
-  _authenticated = true;
-  document.getElementById('app').classList.remove('hidden');
-  loadGraphThemePreference();
-  if (_userRole !== 'admin') {
-    document.getElementById('tmi-longmemeval')?.remove();
-    document.getElementById('lme-hud')?.remove();
-  }
-  // Webapp users get a stripped dock — no files / logs / terminal access.
-  _applyDockRoleGate();
-  // Pull the user's chosen displayName so the agent can address them properly.
-  _loadCurrentUserProfile();
-  if (typeof initApp === 'function') initApp();
-  // Mode-selector pill needs a re-measure now that the canvas is visible.
-  // Use a double rAF so layout settles before measuring.
-  if (typeof window._updateViewModePill === 'function') {
-    requestAnimationFrame(() => requestAnimationFrame(window._updateViewModePill));
-  }
-}
-
-function _applyDockRoleGate() {
-  const isCreator = _userRole === 'creator' || _userRole === 'admin';
-  // Webapp users only need: chat, node (graph), settings.
-  const hide = isCreator ? [] : ['dock-files', 'dock-logs', 'dock-terminal', 'rp-tab-files', 'rp-tab-logs'];
-  for (const id of hide) {
-    const el = document.getElementById(id);
-    if (el) el.style.display = 'none';
-  }
-}
-
-let _currentUserDisplayName = '';
-async function _loadCurrentUserProfile() {
-  try {
-    const r = await fetch(API + '/api/preferences', { headers: authHeaders() });
-    const d = await r.json();
-    if (d?.displayName) _currentUserDisplayName = d.displayName;
-    if (d?.username && !_currentUserName) _currentUserName = d.username;
-  } catch {}
-}
-
-// Login lives at /login.html — the SPA just redirects there when unauthenticated.
-
-
-// Hardcoded fallback palette (Petri dark — warm earth). Used when the CSS
-// `--node-*` var isn't defined for a given type, or before theme application.
-// `getColor()` prefers the CSS var so theme switches retint the graph live.
 const TYPE_COLORS = {
   self: '#7aa583', person: '#b48dc4', channel: '#c4a574',
   concept: '#e08a4e', rule: '#7aa3c4', project: '#9ec49e',
@@ -994,32 +855,4 @@ const TYPE_VISUALS = {
 
 let graphData = { nodes: [], edges: [] };
 let simulation, svg, gLinks, gNodes, zoom;
-
-// ── Boot (called after login) ──
-let _appBooted = false;
-function initApp() {
-  if (_appBooted) return;
-  _appBooted = true;
-  fetchGraph().then(data => initGraph(data)).catch(e => {
-    document.getElementById('stats').textContent = 'Failed to load graph: ' + e.message;
-  });
-  connectWs();
-  loadAgentIdentity();
-  restorePanelState();
-  const rpState = _panelState();
-  if (_usesFloatingWindows()) {
-    if (activeRpTabs.has('files-pane')) fpLoadDir(fpCurrentPath || '');
-    if (activeRpTabs.has('logs-pane')) loadLogs();
-    if (activeRpTabs.has('skills-pane')) skLoadList();
-    if (window.__restoreTerminalOnBoot && !window.isTerminalOpen?.()) {
-      window.__restoreTerminalOnBoot = false;
-      window.toggleTerminal?.();
-    }
-  } else if (rpState['right-panel'] !== false) {
-    openRightPanel('files-pane', false);
-  }
-  syncRpButtons();
-  if (typeof _syncUtilBar === 'function') _syncUtilBar();
-}
-
 
