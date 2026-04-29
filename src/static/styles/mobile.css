@@ -1,7 +1,71 @@
 /* mobile.css — phone/tablet overrides. Loaded LAST so its @media rules
    layer over component-specific styles.
 
-   Empty during the split refactor. Future mobile work lands HERE only — see
-   /root/.claude/plans/elegant-frolicking-wilkes.md (Phase 4: mobile pass).
+   Strategy: keep the structural breakpoint (768px tab-switching) in
+   layout.css, layer device-capability overrides here. Each block is
+   independent — flip one off and the rest still apply.
 */
 
+/* ── Phase A.1 — Touch tap-target floor ──
+   Apple HIG / Material both want 44px / 48dp minimum. Apply only when
+   the pointer is coarse (touch); desktop with mouse keeps its tighter
+   chrome. Use `min-height` not `height` so existing layouts don't
+   forcibly resize. */
+@media (pointer: coarse) {
+  /* Buttons across the app — wizard, settings, dock, panels. */
+  button:not(.ob-theme-tile):not(.term-tab):not(.tab-close):not(.fp-actions button) {
+    min-height: 44px;
+  }
+  /* Form inputs that the user types into one-handed. Selects/checkboxes
+     keep their native browser sizing — UA already gives those a touch
+     target on coarse-pointer devices. */
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  input[type="url"],
+  input[type="number"],
+  textarea {
+    min-height: 44px;
+  }
+  /* Mobile-nav buttons already get the floor from the rule above; the
+     header dock buttons (#btn-tools-menu, #theme-toggle, etc.) too. */
+}
+
+/* ── Phase A.2 — Hide hover-only affordances on touch ──
+   `hover: none` matches devices that physically can't hover (most
+   touch). These elements are visual-only on hover; touch users can't
+   trigger them, so they just take up space or confuse. */
+@media (hover: none) {
+  /* Dock tooltip — desktop reveals the label on hover; touch can't.
+     The button itself has aria-label / title fallbacks. */
+  .dock-tooltip { display: none !important; }
+  /* File-browser per-row actions — desktop fades them in on row hover.
+     Touch users need them visible by default. */
+  .fp-entry .fp-actions { opacity: 1 !important; }
+  /* Collapse chevrons — desktop reveals on panel hover. Show at low
+     opacity so they're discoverable but don't dominate. */
+  .collapse-chevron { opacity: 0.45 !important; }
+}
+
+/* ── Phase A.3 — Plugin pane overflow guard ──
+   Plugin frontend assets sometimes ship hardcoded widths (max-width:
+   520px, fixed columns, etc.) that blow out narrow viewports. Cap the
+   pane host so any such width gets a horizontal scrollbar instead of
+   pushing the whole layout. Always-on, not breakpoint-gated — the host
+   constraint is fine on desktop too. */
+#rp-pane-plugins,
+[data-plugin-pane] {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ── Phase A.4 — Mobile nav respects iPhone home-indicator safe area ──
+   Layered on top of layout.css's @media (max-width:768px) #mobile-nav
+   rule. The chat-input area already uses env() for the same reason;
+   mobile-nav sits at the bottom on canvas/right-panel tabs and needs
+   the same treatment. */
+@media (max-width: 768px) {
+  #mobile-nav {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
