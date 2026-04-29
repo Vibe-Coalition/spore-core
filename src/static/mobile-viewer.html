@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="styles/mobile.css?v=20260429c">
 <!-- mobile-shell.css overrides everything above when body.mobile-shell.
      Loaded ONLY by mobile-viewer.html; desktop never sees it. -->
-<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429j">
+<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429k">
 </head>
 <body class="mobile-shell">
 <!-- Mobile chrome — sits above the desktop body content. CSS hides the
@@ -58,13 +58,45 @@
     <div id="m-composer"><!-- #chat-input-area moved here on boot --></div>
   </section>
 
-  <!-- Graph: real d3 canvas. mobile-shell.js moves the desktop #canvas
-       (which holds #graph-svg + the d3 force simulation populated by
-       graph.js) into this section's slot at boot, so the live graph
-       renders here. d3-zoom v7 handles touch pan/pinch natively;
-       long-press fires the context menu (graph.js Phase C). -->
+  <!-- Graph view (top → bottom):
+         #m-g-topbar       create button + search + view-mode pills
+         #m-g-canvas-slot  the live d3 canvas (#canvas moved in here)
+         #m-g-detail       bottom sheet with the node editor — collapsed
+                           until a node is tapped, then auto-slides up. -->
   <section id="m-graph-view" class="m-view" aria-label="Graph">
-    <!-- #canvas moved here on boot -->
+    <div id="m-g-topbar">
+      <div id="m-g-toprow">
+        <div id="m-g-create-wrap">
+          <button id="m-g-create-btn" type="button" aria-label="Create" aria-haspopup="menu" aria-expanded="false">+</button>
+          <div id="m-g-create-menu" role="menu" aria-hidden="true">
+            <!-- Items injected by mobile-shell.js based on the active view mode. -->
+          </div>
+        </div>
+        <input id="m-g-search-input" type="search" placeholder="search…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </div>
+      <div id="m-g-mode-row" role="tablist" aria-label="Graph mode">
+        <!-- The desktop #view-mode-bar buttons (graph / list / typemap /
+             people & projects) are moved in here on boot. -->
+      </div>
+    </div>
+
+    <div id="m-g-canvas-slot">
+      <!-- #canvas moved here on boot -->
+    </div>
+
+    <aside id="m-g-detail" class="collapsed" aria-label="Node detail">
+      <div id="m-g-detail-handle" role="button" aria-label="Toggle detail panel">
+        <div id="m-g-detail-grip" aria-hidden="true"></div>
+        <div id="m-g-detail-summary">
+          <span id="m-g-detail-summary-label">tap a node to see details</span>
+        </div>
+        <button id="m-g-detail-close" type="button" aria-label="Close detail" hidden>×</button>
+      </div>
+      <div id="m-g-detail-body">
+        <!-- #panel-body (the node editor populated by graph.js when a
+             node is selected) is moved here on boot. -->
+      </div>
+    </aside>
   </section>
 
   <!-- Settings: placeholder until N3 ships the drilldown. -->
@@ -835,7 +867,7 @@
 
 <!-- Mobile tab-bar wiring. Runs after every module has loaded so the
      desktop functions it calls (openSettingsPanel, etc.) are in scope. -->
-<script defer src="scripts/mobile-shell.js?v=20260429g"></script>
+<script defer src="scripts/mobile-shell.js?v=20260429h"></script>
 
 <!-- New Graph Modal -->
 <div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">

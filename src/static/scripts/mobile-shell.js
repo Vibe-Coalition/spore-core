@@ -105,36 +105,160 @@
   }
 
   // ── Mobile graph view ──
-  // Move the desktop #canvas (which holds #graph-svg + the d3 force
-  // simulation populated by graph.js) into #m-graph-view so the live
-  // node graph renders here. d3-zoom v7 handles touch pan/pinch
-  // natively; long-press fires the same context menu as desktop
-  // right-click (graph.js Phase C handler).
-  const mGraphView = document.getElementById('m-graph-view');
+  initMobileGraphView();
+})();
+
+function initMobileGraphView() {
+  // Move desktop pieces into the mobile graph layout.
+  const canvasSlot = document.getElementById('m-g-canvas-slot');
   const desktopCanvas = document.getElementById('canvas');
-  if (mGraphView && desktopCanvas) {
-    mGraphView.appendChild(desktopCanvas);
+  if (canvasSlot && desktopCanvas) canvasSlot.appendChild(desktopCanvas);
+
+  const detailBody = document.getElementById('m-g-detail-body');
+  const panelBody = document.getElementById('panel-body');
+  if (detailBody && panelBody) detailBody.appendChild(panelBody);
+
+  // Move the desktop view-mode-bar buttons into our mode-row so the
+  // existing extras.js click handlers (data-vm) still fire — same
+  // event bindings, new chrome.
+  const modeRow = document.getElementById('m-g-mode-row');
+  const desktopVmBar = document.getElementById('view-mode-bar');
+  if (modeRow && desktopVmBar) {
+    desktopVmBar.querySelectorAll('button[data-vm]').forEach(b => modeRow.appendChild(b));
   }
 
-  // The d3 simulation sizes itself on init using the canvas's
-  // bounding box, which is 0 while #m-graph-view is display:none.
-  // When the user activates the graph tab for the first time we need
-  // to nudge d3 to re-measure and re-fit.
+  // d3 measured itself when #m-graph-view was display:none → its box
+  // was zero. On first graph-tab activation, fire window.resize so
+  // graph.js refits via its tick handler.
   let firstGraphActivation = true;
-  const origSetView = window._mShellSetView;
-  // setView is closed over at the top of this IIFE — wrap by
-  // overriding on the body class observer instead.
   const bodyObserver = new MutationObserver(() => {
     if (document.body.classList.contains('m-view-graph') && firstGraphActivation) {
       firstGraphActivation = false;
-      // Defer to next frame so the layout has the new visible box.
-      requestAnimationFrame(() => {
-        // Trigger d3 to refit. graph.js sizes via getBoundingClientRect
-        // inside its tick handler; firing a window resize forces it
-        // to recompute on next tick.
-        window.dispatchEvent(new Event('resize'));
-      });
+      requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
     }
   });
   bodyObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-})();
+
+  // ── Create-button submenu ──
+  // Items vary by active view-mode. Currently only the 'graph' mode
+  // has actionable creators (new node) — others get a soft message.
+  const createBtn = document.getElementById('m-g-create-btn');
+  const createMenu = document.getElementById('m-g-create-menu');
+  function activeMode() {
+    const active = document.querySelector('#m-g-mode-row button.active');
+    return active?.dataset.vm || 'graph';
+  }
+  function buildCreateMenu() {
+    if (!createMenu) return;
+    const mode = activeMode();
+    const items = [];
+    if (mode === 'graph' || mode === 'list') {
+      items.push({ label: '+ node', action: () => window.showNewNodeModal?.() });
+    }
+    if (mode === 'work') {
+      items.push({ label: '+ person', action: () => window.showNewNodeModal?.('person') });
+      items.push({ label: '+ project', action: () => window.showNewNodeModal?.('project') });
+    }
+    if (mode === 'typemap') {
+      items.push({ label: '+ node', action: () => window.showNewNodeModal?.() });
+    }
+    createMenu.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'm-g-create-item';
+      empty.style.opacity = '0.6';
+      empty.textContent = 'no actions in this mode';
+      createMenu.appendChild(empty);
+      return;
+    }
+    for (const it of items) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'm-g-create-item';
+      b.textContent = it.label;
+      b.addEventListener('click', () => { closeCreateMenu(); try { it.action(); } catch {} });
+      createMenu.appendChild(b);
+    }
+  }
+  function openCreateMenu() {
+    buildCreateMenu();
+    createMenu?.classList.add('open');
+    createBtn?.setAttribute('aria-expanded', 'true');
+  }
+  function closeCreateMenu() {
+    createMenu?.classList.remove('open');
+    createBtn?.setAttribute('aria-expanded', 'false');
+  }
+  createBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (createMenu?.classList.contains('open')) closeCreateMenu();
+    else openCreateMenu();
+  });
+  document.addEventListener('click', (e) => {
+    if (!createMenu?.contains(e.target) && e.target !== createBtn) closeCreateMenu();
+  });
+  // Rebuild items whenever the mode changes (handles desktop's
+  // delegate-toggle on data-vm buttons).
+  if (modeRow) {
+    new MutationObserver(buildCreateMenu).observe(modeRow, { attributes: true, attributeFilter: ['class'], subtree: true });
+  }
+
+  // ── Search input ──
+  // Wire to the desktop's #search-input (inside #search) so the
+  // existing graph.js search highlighting + filter logic fires.
+  const mSearchEl = document.getElementById('m-g-search-input');
+  const desktopSearchEl = document.getElementById('search-input');
+  if (mSearchEl) {
+    mSearchEl.addEventListener('input', () => {
+      if (!desktopSearchEl) return;
+      desktopSearchEl.value = mSearchEl.value;
+      desktopSearchEl.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  // ── Bottom detail panel ──
+  const detail = document.getElementById('m-g-detail');
+  const detailHandle = document.getElementById('m-g-detail-handle');
+  const detailClose = document.getElementById('m-g-detail-close');
+  const summaryLabel = document.getElementById('m-g-detail-summary-label');
+
+  function setDetail(open) {
+    if (!detail) return;
+    detail.classList.toggle('open', !!open);
+    detail.classList.toggle('collapsed', !open);
+    if (detailClose) detailClose.hidden = !open;
+  }
+  setDetail(false);
+
+  detailHandle?.addEventListener('click', (e) => {
+    if (e.target === detailClose) return;
+    setDetail(detail.classList.contains('collapsed'));
+  });
+  detailClose?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setDetail(false);
+    // Clear desktop selection so the editor body empties out.
+    if (typeof window.clearGraphSelection === 'function') window.clearGraphSelection();
+  });
+
+  // Auto-open when a node gets selected. graph.js mutates
+  // #panel-body whenever selectNode runs; observing it lets us hook
+  // selection without modifying graph.js.
+  if (panelBody && detail) {
+    const mo = new MutationObserver(() => {
+      const hasNode = !!panelBody.firstElementChild;
+      // Pull a label out of the editor markup if present.
+      if (hasNode) {
+        const labelInput = panelBody.querySelector('#edit-label, [data-edit-label], input[name="label"]');
+        const idText = panelBody.querySelector('#edit-id')?.value || '';
+        const lbl = (labelInput && (labelInput.value || labelInput.textContent)) || idText || 'node';
+        if (summaryLabel) summaryLabel.textContent = lbl;
+        setDetail(true);
+      } else {
+        if (summaryLabel) summaryLabel.textContent = 'tap a node to see details';
+        setDetail(false);
+      }
+    });
+    mo.observe(panelBody, { childList: true, subtree: false });
+  }
+}

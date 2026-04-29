@@ -57,13 +57,138 @@ body.mobile-shell #util-bar-floating,
 body.mobile-shell #toast {
   display: none !important;
 }
-/* #canvas (the desktop d3 host) is moved into #m-graph-view by
-   mobile-shell.js. Hide it everywhere else; show it inside the graph
-   view stretched to fill. */
-body.mobile-shell #canvas {
+body.mobile-shell #canvas { display: none !important; }
+body.mobile-shell #settings-pane,
+body.mobile-shell #settings-pane.open {
   display: none !important;
 }
-body.mobile-shell #m-graph-view #canvas {
+
+/* ── Graph view layout ──
+   Three rows in #m-graph-view:
+     #m-g-topbar       create button + search + mode pills
+     #m-g-canvas-slot  fills middle (the d3 canvas moves in here)
+     #m-g-detail       bottom sheet, collapsed until a node is tapped */
+body.mobile-shell #m-graph-view {
+  flex-direction: column !important;
+  background: var(--bg);
+}
+
+/* Top toolbar (two rows) */
+#m-g-topbar {
+  flex-shrink: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#m-g-toprow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#m-g-create-wrap { position: relative; flex: 0 0 auto; }
+#m-g-create-btn {
+  width: 38px; height: 38px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 22px; line-height: 1;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#m-g-create-btn:active { background: var(--element); }
+#m-g-create-btn[aria-expanded="true"] {
+  background: var(--text-bright);
+  color: var(--bg);
+  border-color: var(--text-bright);
+}
+#m-g-create-menu {
+  position: absolute; top: calc(100% + 6px); left: 0;
+  min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  padding: 4px;
+  z-index: 30;
+  display: none;
+}
+#m-g-create-menu.open { display: block; }
+.m-g-create-item {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: 0.84rem;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.m-g-create-item:active { background: var(--element); }
+#m-g-search-input {
+  flex: 1 1 auto;
+  height: 38px;
+  padding: 8px 14px;
+  font-size: 16px;
+  font-family: var(--font-body);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+  -webkit-appearance: none; appearance: none;
+  min-width: 0;
+}
+#m-g-search-input:focus {
+  border-color: var(--border-active);
+  box-shadow: 0 0 0 1px var(--border-active);
+}
+
+/* Mode pills row — desktop's #view-mode-bar buttons moved in here. */
+#m-g-mode-row {
+  display: flex; gap: 4px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+#m-g-mode-row::-webkit-scrollbar { display: none; }
+body.mobile-shell #m-g-mode-row button {
+  flex: 0 0 auto !important;
+  min-height: 32px !important;
+  padding: 6px 12px !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.62rem !important;
+  letter-spacing: 0.1em !important;
+  text-transform: lowercase !important;
+  border-radius: 16px !important;
+  border: 1px solid var(--border) !important;
+  background: var(--surface) !important;
+  color: var(--text-dim) !important;
+  cursor: pointer;
+  white-space: nowrap;
+}
+body.mobile-shell #m-g-mode-row button.active {
+  background: var(--text-bright) !important;
+  color: var(--bg) !important;
+  border-color: var(--text-bright) !important;
+}
+
+/* Canvas slot — fills the gap between top bar and detail panel. */
+#m-g-canvas-slot {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+}
+body.mobile-shell #m-g-canvas-slot #canvas {
   display: flex !important;
   position: absolute !important;
   inset: 0 !important;
@@ -73,67 +198,97 @@ body.mobile-shell #m-graph-view #canvas {
   background: var(--bg) !important;
   border: none !important;
 }
-/* Graph SVG fills the canvas. */
-body.mobile-shell #m-graph-view #graph-svg {
+body.mobile-shell #m-g-canvas-slot #graph-svg {
   flex: 1 1 auto !important;
   width: 100% !important;
   height: 100% !important;
-  touch-action: none; /* let d3-zoom own pinch/pan */
+  touch-action: none;
 }
-/* Hide desktop chrome that lives inside #canvas:
-     #canvas-tabs       graph/code tabs (no code editor on mobile)
-     #view-mode-bar     graph / list / typemap pills (mobile = graph only)
-     #event-feed        floating event feed (no room on phone)
-     #view-list, #view-typemap, #view-work — alt views
-     #event-log         token log floating overlay
-   Keep #controls visible — restyled below as a slim mobile bottom bar. */
-body.mobile-shell #m-graph-view #canvas-tabs,
-body.mobile-shell #m-graph-view #view-mode-bar,
-body.mobile-shell #m-graph-view #event-feed,
-body.mobile-shell #m-graph-view #view-list,
-body.mobile-shell #m-graph-view #view-typemap,
-body.mobile-shell #m-graph-view #view-work,
-body.mobile-shell #m-graph-view #event-log,
-body.mobile-shell #m-graph-view #event-log-toggle,
-body.mobile-shell #m-graph-view #code-viewer {
+/* Hide in-canvas desktop chrome — replaced by mobile chrome above. */
+body.mobile-shell #m-g-canvas-slot #canvas-tabs,
+body.mobile-shell #m-g-canvas-slot #view-mode-bar,
+body.mobile-shell #m-g-canvas-slot #event-feed,
+body.mobile-shell #m-g-canvas-slot #event-log,
+body.mobile-shell #m-g-canvas-slot #event-log-toggle,
+body.mobile-shell #m-g-canvas-slot #code-viewer,
+body.mobile-shell #m-g-canvas-slot #controls,
+body.mobile-shell #m-g-canvas-slot #search {
   display: none !important;
 }
-/* Mobile graph controls strip — sits at the bottom of #canvas, above
-   the tab bar. Horizontal scroll, slim chips. */
-body.mobile-shell #m-graph-view #controls {
-  position: absolute !important;
-  left: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  top: auto !important;
+
+/* ── Bottom detail panel ──
+     .collapsed: 52px handle row only
+     .open:      55vh; #panel-body content visible */
+#m-g-detail {
+  position: relative;
   flex-shrink: 0;
-  display: flex !important;
-  gap: 6px;
-  padding: 6px 8px;
-  background: linear-gradient(to top, var(--bg) 60%, transparent);
-  border: none !important;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  white-space: nowrap;
-  z-index: 5;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: height 0.22s ease;
+  will-change: height;
 }
-body.mobile-shell #m-graph-view #controls > * {
+#m-g-detail.collapsed { height: 52px; }
+#m-g-detail.open { height: 55vh; max-height: 55vh; }
+#m-g-detail-handle {
+  flex-shrink: 0;
+  height: 52px;
+  display: flex; flex-direction: column;
+  align-items: stretch; justify-content: center;
+  padding: 4px 12px 6px;
+  cursor: pointer;
+  position: relative;
+}
+#m-g-detail-handle:active { background: var(--element); }
+#m-g-detail-grip {
+  width: 36px; height: 4px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0.4;
+  margin: 0 auto 2px;
   flex: 0 0 auto;
-  min-height: 36px;
-  font-size: 0.7rem;
 }
-/* Buttons that don't make sense on mobile. */
-body.mobile-shell #m-graph-view #btn-toggle-sidebar,
-body.mobile-shell #m-graph-view #btn-open-logs,
-body.mobile-shell #m-graph-view #btn-toggle-chat,
-body.mobile-shell #m-graph-view #btn-open-node,
-body.mobile-shell #m-graph-view #tools-menu-wrap,
-body.mobile-shell #m-graph-view #search {
-  display: none !important;
+#m-g-detail-summary {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-body.mobile-shell #settings-pane,
-body.mobile-shell #settings-pane.open {
-  display: none !important;
+#m-g-detail-summary-label {
+  flex: 1 1 auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#m-g-detail.collapsed #m-g-detail-summary-label {
+  color: var(--text-dim);
+  font-style: italic;
+}
+#m-g-detail-close {
+  flex: 0 0 auto;
+  width: 28px; height: 28px;
+  border: none; background: transparent;
+  font-size: 20px; line-height: 1;
+  color: var(--text-dim);
+  cursor: pointer; border-radius: 6px;
+}
+#m-g-detail-close:active { background: var(--element); }
+#m-g-detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 12px 14px;
+}
+#m-g-detail.collapsed #m-g-detail-body { display: none; }
+body.mobile-shell #m-g-detail-body #panel-body {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  box-shadow: none !important;
 }
 
 /* ── Mobile views container ── */
