@@ -1,5 +1,5 @@
 // Project node persistence — caches per-(user, cwd) project metadata
-// in the SPORE graph so subsequent acorn sessions for the same project
+// in the SPORE graph so subsequent Spore Code sessions for the same project
 // can skip re-injecting the full file tree / ACORN.md / etc. and
 // instead reference the cached node by id.
 //
@@ -54,7 +54,7 @@ function upsertProject(learner, userId, pc) {
     const desc = pc.projectType
       ? `${pc.projectType} project at ${pc.cwd}`
       : `Project at ${pc.cwd}`;
-    // graphcorn: when a project node is freshly created INSIDE an acorn
+    // graphcorn: when a project node is freshly created INSIDE a Spore Code
     // session, mark it temp + tag with sessionId so distillation can
     // promote it. Returning users hit the !existing=false branch and
     // their already-permanent project node stays untouched.
@@ -130,10 +130,13 @@ function upsertProject(learner, userId, pc) {
   }
   if (manifestAttrs.length) replaceAttrs('manifest', manifestAttrs, 6);
 
-  // conventions: ACORN.md. Stable unless user edits the file. Replace
-  // wholesale — cheaper than diffing.
-  if (pc.acornMd) {
-    replaceAttrs('conventions', [pc.acornMd], 7);
+  // conventions: SPORE.md (or legacy ACORN.md). Stable unless user
+  // edits the file. Replace wholesale — cheaper than diffing.
+  // Dual-read sporeMd ?? acornMd for one release: post-rebrand binaries
+  // send sporeMd, pre-rebrand send acornMd.
+  const projectMarkdown = pc.sporeMd || pc.acornMd;
+  if (projectMarkdown) {
+    replaceAttrs('conventions', [projectMarkdown], 7);
   }
 
   // tree: one attribute per path. Skip on cached hits to keep writes
@@ -217,7 +220,7 @@ function noteProjectInteraction(learner, userId, cwd, summary) {
 // upsertProjectCodeGraph writes a summary of the structural code index
 // (clusters, tech stack, entry points, hot paths, stats) onto the
 // project node's `code_graph` aspect. Authoritative symbol/CALLS data
-// stays in the client-side .acorn/index.db; this is the cheap,
+// stays in the client-side .spore-code/index.db; this is the cheap,
 // agent-facing summary that survives across sessions and shows up in
 // the SPORE graph viewer.
 //

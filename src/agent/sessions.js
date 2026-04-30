@@ -589,7 +589,7 @@ class SessionManager {
 
     // Idle timeout: clear group channel sessions idle longer than threshold.
     //
-    // EXCLUDES channel:cli:* — those are acorn-cli sessions, bounded by
+    // EXCLUDES channel:cli:* — those are Spore Code sessions, bounded by
     // the CLI's own lifetime and a stable WS connection. The user
     // stepping away from a coding session for 60+ minutes is normal
     // (lunch, meeting, sleep); wiping their conversation under them

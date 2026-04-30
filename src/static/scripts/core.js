@@ -853,8 +853,8 @@ function populateSettingsPanel(data) {
     if (showBtn) showBtn.textContent = 'show';
     const inviteNote = document.getElementById('settings-invite-key-note');
     if (inviteNote) inviteNote.textContent = data.inviteKeySet
-      ? 'Self-registration + acorn-cli auth are enabled.'
-      : 'No invite key set — self-registration + acorn-cli auth are disabled.';
+      ? 'Self-registration + Spore Code auth are enabled.'
+      : 'No invite key set — self-registration + Spore Code auth are disabled.';
   }
 
   document.getElementById('settings-websearch-searxng-url').value = data.webSearch?.searxngUrl || '';

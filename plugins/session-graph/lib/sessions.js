@@ -1,6 +1,6 @@
 // graphcorn — session node persistence.
 //
-// Each acorn launch creates one `session-<sessionId>` node here at WS
+// Each Spore Code launch creates one `session-<sessionId>` node here at WS
 // connect time (BEFORE the first chat:submit). Companion concept to
 // `projects.js`'s per-(user, cwd) project node:
 //   project node = "this codebase, across all sessions"
@@ -17,7 +17,7 @@
 //     id          = `session-${sessionId}`
 //     label       = `Session ${tail}` where tail is the timestamp suffix
 //     type        = 'session'
-//     description = `acorn session by ${userName} in ${cwd} (started ${startedAt})`
+//     description = `Spore Code session by ${userName} in ${cwd} (started ${startedAt})`
 //     importance  = 6 — high enough to survive janitor pruning, lower
 //                       than the project node so recall ranks the
 //                       project ahead of any single session.
@@ -37,7 +37,7 @@ const projects = require('./projects');
 // distillation work live. Without this, summarize/distill runs silently
 // from the viewer's POV; a fresh node appears only after manual refresh.
 // Lives in core; container layout is /app/graph/events.js so the
-// relative path from /app/plugins/acorn-cli/lib/ is three up + graph/.
+// relative path from /app/plugins/spore-code/lib/ is three up + graph/.
 const graphEvents = require('../../../graph/events');
 
 // Shared helper — uses the same streaming pattern as maintainer.js
@@ -100,7 +100,7 @@ function upsertSessionNode(learner, opts = {}) {
   if (cwd) {
     const projRes = projects.upsertProject(learner, userId || 'anon', {
       cwd, project: opts.project, gitBranch: opts.gitBranch, gitHash: opts.gitHash,
-      projectType: opts.projectType, acornMd: opts.acornMd, tree: opts.tree,
+      projectType: opts.projectType, sporeMd: opts.sporeMd, acornMd: opts.acornMd, tree: opts.tree,
       tools: opts.tools, os: opts.os, arch: opts.arch,
       sessionId,
     });
@@ -114,7 +114,7 @@ function upsertSessionNode(learner, opts = {}) {
     const tail = String(sessionId).split('-').pop() || sessionId;
     const label = 'Session ' + tail;
     const description =
-      'acorn session' +
+      'Spore Code session' +
       (userName ? ' by ' + userName : '') +
       (cwd ? ' in ' + cwd : '') +
       (startedAt ? ' (started ' + startedAt + ')' : '');
@@ -277,9 +277,9 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     const startedAt = startedRow?.content?.replace(/^started_at:\s*/, '').trim() || null;
     const endedAt = endedRow?.content?.replace(/^ended_at:\s*/, '').trim() || new Date().toISOString();
 
-    // Episode session_id for acorn sessions is the shared channel name
-    // like `acorn:<user>`, not the per-launch sessionId. We pick the
-    // user name from the session description ("acorn session by <user>
+    // Episode session_id for Spore Code sessions is the shared channel name
+    // like `cli:<user>`, not the per-launch sessionId. We pick the
+    // user name from the session description ("Spore Code session by <user>
     // in <cwd>"), fall back to matching any episode row whose
     // observed_at falls in the session window.
     const userName = (node.label && node.description) ? null : null;
@@ -311,7 +311,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
   }
 
   const prompt = [
-    'You are summarizing an acorn coding session for graph-side persistence.',
+    'You are summarizing a Spore Code coding session for graph-side persistence.',
     'The summary will be stored on the session node as a `summary` aspect — future agents on this project will retrieve it via graph_query and use it to remember what happened.',
     '',
     `Session: ${node.label} (${id})`,
@@ -378,7 +378,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
 
 // distillSession — Phase 8 (extends Phase 7).
 //
-// Background: every node born inside an acorn session is now stamped
+// Background: every node born inside a Spore Code session is now stamped
 // extra.ttl='temp' + extra.sessionId. That covers note_discovery, the
 // learner, and graph_update calls made by the agent. Without this
 // distillation step they'd auto-clean in 48h via the existing janitor —
@@ -501,7 +501,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     const recentRounds = roundRows.reverse().map(r => '  ' + r.content).join('\n');
 
     const promptText = [
-      'You are distilling an acorn coding session into permanent graph knowledge. Your job is to keep the SIGNAL and drop the NOISE.',
+      'You are distilling a Spore Code coding session into permanent graph knowledge. Your job is to keep the SIGNAL and drop the NOISE.',
       '',
       `Session: ${id}`,
       'Session summary:',
@@ -520,7 +520,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '  CREATE_NODES: external tools/libraries/frameworks/services the project uses. Think `npm`, `expo`, `qrcode-terminal`, `react-native`, `docker`, `postgres`, `vite`, `tailwind`, `pnpm`, `pytest`. Keep descriptions factual and small; put session-specific quirks on a `gotchas` aspect.',
       '  DO NOT create nodes for the agent\'s own built-in tools — those are always available, so nodes for them are graph noise. Skip: exec, sleep, read_file, write_file, edit_file, glob, grep, graph_query, graph_update, graph_delete, note_discovery, web_search, web_fetch, ask_user, message_send, delegate_task, schedule_wakeup, save_tool, browser_*, terminal_*, ssh_*, email_*, voice_*, notify_user. These are SPORE tools the agent already has, not things learned during the session.',
       '  APPEND_NOTES: version-specific gotchas, "X is deprecated, use Y", configuration tips discovered by trial-and-error.',
-      '  SCRATCH HELPERS: If the agent wrote any files under `.acorn/scratch/` during the session (check the `files` field on each round), emit an `appendNotes` onto the PROJECT node\'s `scratch_helpers` aspect with one entry per file: `<path> — <one-line purpose>`. Example: `.acorn/scratch/get-lan-ip.js — prints LAN IP, skipping VPN adapters`. This is how future sessions find existing helpers without `glob`-ing the directory every turn.',
+      '  SCRATCH HELPERS: If the agent wrote any files under `.spore-code/scratch/` during the session (check the `files` field on each round), emit an `appendNotes` onto the PROJECT node\'s `scratch_helpers` aspect with one entry per file: `<path> — <one-line purpose>`. Example: `.spore-code/scratch/get-lan-ip.js — prints LAN IP, skipping VPN adapters`. This is how future sessions find existing helpers without `glob`-ing the directory every turn.',
       '  DROP: error log dumps, intermediate debug captures, half-formed thoughts, generic concepts already well-covered in the graph.',
       '',
       'Temporary nodes from this session:',

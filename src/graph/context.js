@@ -19,7 +19,7 @@ const graphEvents = require('./events');
 const { classifyQueryType, QUERY_TYPE_PARAMS } = require('./retrieval');
 
 // `_looksLikeCodingTurn` + the recall-skip heuristic moved to
-// plugins/acorn-cli/. The plugin registers a `shouldSkipRecall`
+// plugins/spore-code/. The plugin registers a `shouldSkipRecall`
 // lifecycle hook that buildSystemPromptAsync calls before kicking off
 // the (expensive) Enhanced Recall pipeline. Core is acorn-blind here.
 
@@ -95,7 +95,7 @@ class GraphContext {
     derived: 800,
     gaps: 300,
     // plugin section carries both Project Context and Plan Mode for the
-    // acorn-cli plugin. Plan Mode alone is ~2500 tokens (PHASES 1-6 +
+    // spore-code plugin. Plan Mode alone is ~2500 tokens (PHASES 1-6 +
     // QUESTIONS protocol + tooling-question list + RULES + execution
     // checklist), Project Context can be 2000-3000 tokens (cwd, tree,
     // tools list, ACORN.md, project_memory_summary). Combined ~5000.

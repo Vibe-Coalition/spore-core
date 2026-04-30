@@ -273,7 +273,7 @@ class AgentLoop {
    * The main agent loop — handles multi-turn tool use
    */
   async _runLoop(sessionKey, opts) {
-    // Store per-session tool context so concurrent sessions (e.g. Acorn + main chat)
+    // Store per-session tool context so concurrent sessions (e.g. Spore Code + main chat)
     // don't corrupt each other. Tools read from _sessionContexts[sessionKey] when available.
     if (!this.tools._sessionContexts) this.tools._sessionContexts = new Map();
     this.tools._sessionContexts.set(sessionKey, {
@@ -299,7 +299,7 @@ class AgentLoop {
     this.tools._currentSessionToken = opts.sessionToken || null;
     // Capture so delegate_task can stash it onto the _delegatedTasks
     // entry; when the subagent finishes, _deliverTaskResult re-feeds
-    // it into processMessage so the wake-up turn has the same acorn
+    // it into processMessage so the wake-up turn has the same Spore Code
     // project context (cwd, tools, tree) the agent saw at delegation.
     this.tools._currentProjectContext = opts.projectContext || null;
     this.tools._abortSignal = opts._abortSignal || null;
@@ -328,7 +328,7 @@ class AgentLoop {
       messageId: opts.messageId,
       webappStatus: this.tools?.gateway?.getWebappStatus?.() || null,
       clientCwd: opts.clientCwd || null,
-      // Structured project metadata from acorn (cwd, git, tree, ACORN.md,
+      // Structured project metadata from Spore Code (cwd, git, tree, SPORE.md,
       // tools, mode). Routed into the system prompt by prompt-sections.js,
       // never into messages[]. Replaces the old "glue GatherContext onto
       // message content" path. See plan/spore-context.
@@ -370,7 +370,7 @@ class AgentLoop {
     const promptMode = isCasualChat ? 'chat' : 'full';
 
     // beforeMessage lifecycle hook — plugins can inject per-turn data
-    // into dynamicOpts before the prompt builds. Acorn uses this to
+    // into dynamicOpts before the prompt builds. Spore Code uses this to
     // upsert the per-(user, cwd) project node and surface
     // cachedProject* flags so its own Project Context prompt section
     // can reference the cached node id. Returns null if no plugin
@@ -623,7 +623,7 @@ class AgentLoop {
     // Full toolset is always provided (stripping tools causes denial of capabilities).
     // Escalation happens on tool_use: casual→normal on first tools, normal→planner on next.
     //
-    // Special case: the BUILDING turn of the acorn multi-turn plan flow
+    // Special case: the BUILDING turn of the Spore Code multi-turn plan flow
     // synthesizes a structured plan from a prior RESEARCH_DONE block.
     // It typically does no tool calls (which means the delegate_task
     // escalation never fires) but it's THE highest-leverage turn —
@@ -928,7 +928,7 @@ class AgentLoop {
     // Post-loop fire-and-forget hooks (extracted to keep _runLoop slim)
     this._kickOffLearnerExtraction(opts, finalText, toolLog);
     // _captureFailureFix + _recordRoundCheckpoint + _noteProjectActivity
-    // moved to plugins/acorn-cli/ — they now run via the afterTurn
+    // moved to plugins/spore-code/ — they now run via the afterTurn
     // lifecycle hook fired inside _firePluginAfterTurn below.
     this._firePluginAfterTurn(opts, finalText, toolLog);
 
@@ -959,10 +959,10 @@ class AgentLoop {
   }
 
   // ── Post-loop graphcorn helpers ────────────────────────────────────
-  // _captureFailureFix + _recordRoundCheckpoint moved to plugins/acorn-cli/
+  // _captureFailureFix + _recordRoundCheckpoint moved to plugins/spore-code/
   // (phase 2.3e). The plugin registers an afterTurn lifecycle hook that
   // re-implements both behaviors using the wide opts/toolLog passed by
-  // _firePluginAfterTurn — see plugins/acorn-cli/index.js.
+  // _firePluginAfterTurn — see plugins/spore-code/index.js.
 
 
   /**
@@ -977,7 +977,7 @@ class AgentLoop {
       userName: opts.userName,
       channelName: opts.channelName,
       toolCalls: toolLog.length > 0 ? toolLog : undefined,
-      // graphcorn: pass the sessionId (= opts.channelId for acorn —
+      // graphcorn: pass the sessionId (= opts.channelId for Spore Code —
       // see web.js:4719 where agentOpts.channelId is set to the WS
       // sessionId). The learner uses this to link every newly-
       // created entity to the session-<id> node via a
@@ -1016,7 +1016,7 @@ class AgentLoop {
    * Fire `beforeMessage` plugin lifecycle hooks at the top of _runLoop,
    * BEFORE the system prompt is built. Each handler receives `{ opts }`
    * and may return an object with fields to merge into dynamicOpts
-   * (e.g. acorn-cli returns `{ cachedProjectNodeId, cachedProjectStale,
+   * (e.g. spore-code returns `{ cachedProjectNodeId, cachedProjectStale,
    * cachedProjectIsNew }` after upserting the project node). Synchronous
    * — handlers that need IO must keep work cheap. Returns the merged
    * patch (or null if no handler ran).
@@ -1555,7 +1555,7 @@ class AgentLoop {
     const toolExecMs = Date.now() - toolExecStart;
 
     // Plugin middleware: afterToolExec — handlers can mutate the graph as a
-    // side-effect (e.g. acorn plugin tags new nodes after graph_update). The
+    // side-effect (e.g. spore-code plugin tags new nodes after graph_update). The
     // wide ctx mirrors what executePluginTool passes so middleware doesn't
     // need to reach into the tools host for session metadata.
     if (this._pluginManager) {
@@ -1573,9 +1573,9 @@ class AgentLoop {
 
     // Normalize the failure signal across tool result shapes:
     //   • Local-tool error path returns { error: '...' } → succeeded=false.
-    //   • Acorn-CLI shell.go returns { output, exitCode: N } with no error key
+    //   • Spore Code shell.go returns { output, exitCode: N } with no error key
     //     even for non-zero exits — succeeded would be true. Surface exitCode
-    //     so plugin middleware (e.g. acorn-cli failure_fix) can detect those.
+    //     so plugin middleware (e.g. spore-code failure_fix) can detect those.
     const exitCode = (result && typeof result === 'object')
       ? (result.exitCode ?? result.exit_code ?? null)
       : null;

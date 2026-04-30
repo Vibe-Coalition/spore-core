@@ -12,7 +12,7 @@
 //   • Reference-node SQL (5 ref-acorn-* migrations + graphcorn-discovery)
 //   • /api/acorn/auth + /api/acorn/sessions HTTP routes — the Go-binary
 //     wire-protocol contract (registerPathAlias rewrites /api/acorn/*
-//     to /api/plugins/acorn-cli/*).
+//     to /api/plugins/spore-code/*).
 //   • WS handlers: session:start / session:end (Go-binary wire frames).
 //   • Project Context + Plan Mode prompt sections (acorn-specific UX:
 //     PHASE 1-6 plan mode, QUESTIONS marker, ACORN.md handling).
@@ -371,7 +371,7 @@ function sessionEndHandler(api, ws, msg) {
 }
 
 // saveProjectScriptFromFileHandler — receives an auto-saved helper
-// script the CLI flagged via path-pattern match (.acorn/scratch/*,
+// script the CLI flagged via path-pattern match (.spore-code/scratch/*,
 // gen_*.py, *_helper.*, etc.) and persists it to the graph via
 // scripts.upsertScriptNode. Lets the agent stop remembering
 // save_project_script — the CLI fires this deterministically every
@@ -497,7 +497,7 @@ function buildProjectContextSection(api, opts) {
   const cached = opts.cachedProjectNodeId && !opts.cachedProjectStale && !opts.cachedProjectIsNew;
   const parts = [];
   parts.push(`## Project Context — ${pc.project || 'project'}`);
-  parts.push(`**You have direct shell + filesystem access on the user's machine via your tools (exec, read_file, write_file, edit_file, grep, glob).** When the user asks about local state — "is the dev server up", "what's in this file", "why is X slow", "did the build finish", "what does ls show", "is port N open" — RUN THE TOOLS and answer with the actual result. Do NOT respond as if you're a remote chatbot ("I can't see your machine, here's how you could check"). For acorn sessions you are effectively a coding agent on the user's box; behave like one.`);
+  parts.push(`**You have direct shell + filesystem access on the user's machine via your tools (exec, read_file, write_file, edit_file, grep, glob).** When the user asks about local state — "is the dev server up", "what's in this file", "why is X slow", "did the build finish", "what does ls show", "is port N open" — RUN THE TOOLS and answer with the actual result. Do NOT respond as if you're a remote chatbot ("I can't see your machine, here's how you could check"). For Spore Code sessions you are effectively a coding agent on the user's box; behave like one.`);
   if (pc.cwd) parts.push(`- CWD: ${pc.cwd}`);
   if (pc.os || pc.arch) parts.push(`- Platform: ${pc.os || '?'}/${pc.arch || '?'}`);
   if (pc.projectType) parts.push(`- Project type: ${pc.projectType}`);
@@ -531,17 +531,22 @@ function buildProjectContextSection(api, opts) {
     }
   }
   if (cached) {
-    parts.push(`- Project memory: graph node \`${opts.cachedProjectNodeId}\` (cached — gitHash unchanged since last session). Use \`graph_query({ query: "...", nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve file tree, ACORN.md, prior decisions, and recent activity from past sessions.`);
+    parts.push(`- Project memory: graph node \`${opts.cachedProjectNodeId}\` (cached — gitHash unchanged since last session). Use \`graph_query({ query: "...", nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve file tree, SPORE.md, prior decisions, and recent activity from past sessions.`);
   } else {
     if (pc.tree && pc.tree.length) {
       const shown = pc.tree.slice(0, 80);
       parts.push(`- Project tree (${pc.tree.length} entries${pc.tree.length > shown.length ? `, showing first ${shown.length}` : ''}):`);
       for (const path of shown) parts.push(`    ${path}`);
     }
-    if (pc.acornMd) {
+    // Dual-read sporeMd ?? acornMd: post-rebrand binaries send sporeMd
+    // (project file SPORE.md). Pre-rebrand acorn binaries send acornMd
+    // (ACORN.md). Accept both for one release; remove the acornMd
+    // fallback in v1.1+.
+    const projectMarkdown = pc.sporeMd || pc.acornMd;
+    if (projectMarkdown) {
       parts.push('');
-      parts.push('### ACORN.md (project instructions from the user)');
-      parts.push(pc.acornMd);
+      parts.push('### SPORE.md (project instructions from the user)');
+      parts.push(projectMarkdown);
     }
     if (opts.cachedProjectNodeId) {
       parts.push('');
@@ -613,7 +618,7 @@ function buildProjectContextSection(api, opts) {
     if (savedScripts.length > 0) {
       parts.push('');
       parts.push('### Saved helper scripts (re-use before re-deriving)');
-      parts.push('Each line: `name (lang) — description`. Fetch the body via `get_project_script({name})`. The CLI will rehydrate the file under `.acorn/scratch/<name>.<ext>` so you can `exec` it directly.');
+      parts.push('Each line: `name (lang) — description`. Fetch the body via `get_project_script({name})`. The CLI will rehydrate the file under `.spore-code/scratch/<name>.<ext>` so you can `exec` it directly.');
       const shown = savedScripts.slice(0, 30);
       for (const s of shown) {
         const tagBits = (s.tags && s.tags.length) ? ` [${s.tags.join(',')}]` : '';
@@ -639,7 +644,7 @@ function buildProjectContextSection(api, opts) {
     // ~70% of cli turns. See buildPlanModeSection.
 
     // Helper-script save nudge — applies whenever the agent has
-    // generated a helper file in `.acorn/scratch/` or in the
+    // generated a helper file in `.spore-code/scratch/` or in the
     // project root with no obvious caller. This appears every turn
     // in execute mode, since that's where helper scripts get
     // written. Cheap pattern-match nudge; the agent decides
@@ -656,14 +661,14 @@ function buildProjectContextSection(api, opts) {
 
   // Helper-script convention. Bodies live in dedicated `script:` graph
   // nodes (see save_project_script / list_project_scripts /
-  // get_project_script tools); .acorn/scratch/ is the on-disk
+  // get_project_script tools); .spore-code/scratch/ is the on-disk
   // execution cache that the CLI rehydrates on demand. The legacy
   // `scratch_helpers` aspect is the path-only index from the prior
   // design; `migrateScratchHelpers` copies its contents into
   // scripts_index on first read.
-  parts.push('**Helper scripts (LAN IP detection, QR generation, log parsers, build wrappers, etc.):** the GRAPH is the source of truth. Save with `save_project_script({name, description, language, body, tags?})` — the body is stored on a dedicated `script:<projectId>:<name>` node and a one-line summary lands on the project\'s `scripts_index` aspect, so future sessions on this project (or a fresh laptop) can recover the script. Discover existing helpers with `list_project_scripts({tag?, language?})` (cheap; index-only, no bodies). Fetch a body with `get_project_script({name})` — the CLI rehydrates `.acorn/scratch/<name>.<ext>` if missing so you can `exec` it directly. After running, call `record_script_outcome({name, ok})` so reliable helpers float to the top and dead ones get pruned. Save body refusals: the regex guard rejects bodies matching common credential shapes (`sk-…`, `ghp_…`, AWS keys, password=…); pass `force:true` to override after verifying it\'s a false positive.');
+  parts.push('**Helper scripts (LAN IP detection, QR generation, log parsers, build wrappers, etc.):** the GRAPH is the source of truth. Save with `save_project_script({name, description, language, body, tags?})` — the body is stored on a dedicated `script:<projectId>:<name>` node and a one-line summary lands on the project\'s `scripts_index` aspect, so future sessions on this project (or a fresh laptop) can recover the script. Discover existing helpers with `list_project_scripts({tag?, language?})` (cheap; index-only, no bodies). Fetch a body with `get_project_script({name})` — the CLI rehydrates `.spore-code/scratch/<name>.<ext>` if missing so you can `exec` it directly. After running, call `record_script_outcome({name, ok})` so reliable helpers float to the top and dead ones get pruned. Save body refusals: the regex guard rejects bodies matching common credential shapes (`sk-…`, `ghp_…`, AWS keys, password=…); pass `force:true` to override after verifying it\'s a false positive.');
   parts.push('**Project listing — use the right tool, NEVER `exec find` / `exec ls -laR`**: The Project Tree above (and the cached node, when present) already shows the project structure with build/dependency/cache dirs filtered. If you need MORE detail, use `glob` (auto-skips noise dirs, capped at 500 paths, fast) or `read_file` on a specific path — NOT `exec find` / `exec ls -R` / `exec tree`. Walking a node_modules-heavy project with exec regularly hits the 3-minute tool timeout AND dumps thousands of irrelevant lines. Specifically `exec ls -laR` on a Node project = guaranteed timeout.');
-  parts.push('**Output filtering**: When listing files / describing a project / showing exec output, NEVER include build/dependency/cache directory contents in your reply — even if the tool returned them. Suppress: .git, node_modules, .venv / venv, __pycache__, dist, build, target, .next, .cache, .acorn, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode/, *.egg-info, coverage, .nyc_output, .DS_Store. If a tool returned a wall of these, FILTER before pasting. The user does not want to see node_modules in chat.');
+  parts.push('**Output filtering**: When listing files / describing a project / showing exec output, NEVER include build/dependency/cache directory contents in your reply — even if the tool returned them. Suppress: .git, node_modules, .venv / venv, __pycache__, dist, build, target, .next, .cache, .spore-code, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode/, *.egg-info, coverage, .nyc_output, .DS_Store. If a tool returned a wall of these, FILTER before pasting. The user does not want to see node_modules in chat.');
   // Plan-mode-only research / lookup / gotcha-loading rules now live
   // in buildPlanModeSection (PHASE 3 area). They were wasted in
   // execute mode — the agent isn't researching during execution, it's
@@ -727,7 +732,7 @@ function buildPlanModeSection(api, opts) {
 // real work starts.
 function buildPlanRouterSection(api, opts) {
   const parts = [];
-  parts.push('## Plan Mode — ROUTER (acorn CLI)');
+  parts.push('## Plan Mode — ROUTER (Spore Code)');
   parts.push('[MODE: Plan only — ROUTER turn. This is the FIRST turn of a 3-stage plan workflow:');
   parts.push('  1. ROUTER (this turn) — decide whether to interview the user or skip straight to research.');
   parts.push('  2. RESEARCH+CODE (next turn) — pronged: external research + codebase pre-identification.');
@@ -782,7 +787,7 @@ function buildPlanRouterSection(api, opts) {
 // CLI auto-fires [BUILD_PLAN].
 function buildPlanRouter2Section(api, opts) {
   const parts = [];
-  parts.push('## Plan Mode — ROUTER 2 / post-research review (acorn CLI)');
+  parts.push('## Plan Mode — ROUTER 2 / post-research review (Spore Code)');
   parts.push('[MODE: Plan only — POST-RESEARCH ROUTER turn. The previous assistant turn in this conversation contains a RESEARCH_DONE: yaml block. Read it carefully — your only job this turn is to decide whether the research SURFACED any new questions worth asking the user before the plan is built.');
   parts.push('');
   parts.push('Stage status: ROUTER1 ✓ → RESEARCH+CODE ✓ → ROUTER2 (this turn) → BUILDING (next).');
@@ -828,7 +833,7 @@ function buildPlanRouter2Section(api, opts) {
 function buildPlanResearchSection(api, opts) {
   const pc = opts.projectContext;
   const parts = [];
-  parts.push('## Plan Mode — RESEARCH phase (acorn CLI)');
+  parts.push('## Plan Mode — RESEARCH phase (Spore Code)');
   parts.push('[MODE: Plan only — RESEARCH turn. You are gathering the inputs for a plan, NOT writing the plan yet. The user will see your output and a follow-up BUILDING turn will produce the actual plan from your findings. Run the two prongs below IN PARALLEL within this single turn, then emit RESEARCH_DONE: as the LAST thing.');
   parts.push('');
   parts.push('PHASE 0 — ENVIRONMENT AUDIT (free, takes no tool calls):');
@@ -934,7 +939,7 @@ function buildPlanResearchSection(api, opts) {
 // gathering anything new — just shaping the plan around the cached findings.
 function buildPlanBuildingSection(api, opts) {
   const parts = [];
-  parts.push('## Plan Mode — BUILDING phase (acorn CLI)');
+  parts.push('## Plan Mode — BUILDING phase (Spore Code)');
   parts.push('[MODE: Plan only — BUILDING turn. The user has approved the research and is now waiting for the actual plan. The previous assistant message in this conversation contains a RESEARCH_DONE: yaml block — that is your INPUT for this turn. Use its `external.recommended_approach`, `code_targets.files_to_create`, `code_targets.files_to_modify`, and `surrounding_context` directly when shaping the steps below. Do NOT redo research — if a target is missing from RESEARCH_DONE, that\'s a gap to flag in your risk section, not something to go hunt for now.');
   parts.push('');
   parts.push('OUTPUT — the plan, in this exact structure:');
@@ -990,7 +995,7 @@ function buildPlanModeSection_LEGACY(api, opts) {
   if (opts.platform !== 'cli' || !opts.projectContext || opts.projectContext.mode !== 'plan') return null;
   const pc = opts.projectContext;
   const parts = [];
-  parts.push('## Plan Mode (acorn CLI)');
+  parts.push('## Plan Mode (Spore Code)');
   parts.push('[MODE: Plan only. You are in planning mode. Follow these phases in order:');
   parts.push('');
   parts.push('PHASE 1 — ENVIRONMENT AUDIT:');
@@ -1109,7 +1114,7 @@ function buildPlanModeSection_LEGACY(api, opts) {
   parts.push('  - `bun test src/foo.test.ts` should exit 0, 3 tests passing');
   parts.push('  - `curl -s http://localhost:3000/api/health` should return `{"ok":true}`');
   parts.push('  - `read_file config.ts` — `port` should be `8081`, not `8080`');
-  parts.push('  - `ls .acorn/scratch/` — `gen-qr.js` should be present');
+  parts.push('  - `ls .spore-code/scratch/` — `gen-qr.js` should be present');
   parts.push('Pick checks that use existing project tooling (tests, curl, read_file) and have an unambiguous pass signal. Avoid "it should feel better" or "make sure it looks right" — those are not verifications. If the project has no test runner and no live endpoint, fall back to targeted `read_file` / `exec --version` checks that prove the expected state.');
   parts.push('');
   if (pc.hasCodeIndex) {
@@ -1142,7 +1147,7 @@ function buildPlanModeSection_LEGACY(api, opts) {
 function buildExecuteModeSection(api, opts) {
   if (opts.platform !== 'cli' || !opts.projectContext || opts.projectContext.mode !== 'execute') return null;
   const parts = [];
-  parts.push('## Execute Mode (acorn CLI)');
+  parts.push('## Execute Mode (Spore Code)');
   parts.push('You are executing a plan that the user already approved. Your FIRST set of tool calls MUST be `task_create` — one per plan step AND one per verification check from the plan\'s `## Verification` section. Use short `subject` strings (5–10 words) copied from each plan step\'s header.');
   parts.push('');
   parts.push('Execution order — group steps by their plan-mode `[parallel: <group-name>]` marker:');
@@ -1170,12 +1175,17 @@ module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
     uninstall: './sql/uninstall.sql',
-    schemaVersion: 1,
+    // v3 = rebrand migration. install.sql Phase 0 renames legacy
+    // ref-acorn-* rows to ref-spore-code-* and retags extracted_with
+    // 'acorn-cli' → 'spore-code'. v3 also corrects the node's label
+    // (the v2 INSERT OR IGNORE inherited the legacy "Acorn Client
+    // Context" label; v3 UPDATEs it to "Spore Code Client Context").
+    schemaVersion: 3,
   });
 
   // HTTP routes — auth issues a CLI-typed Bearer token; sessions
   // returns the user's prior chat sessions. Surfaced under
-  // /api/plugins/acorn-cli/* and aliased from /api/acorn/* via core's
+  // /api/plugins/spore-code/* and aliased from /api/acorn/* via core's
   // pre-route rewrite (src/gateways/web.js).
   //
   // /auth is the auth boundary itself — it MUST be public so unauthenticated
@@ -1185,16 +1195,22 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/auth',     { public: true, handler: (req, res) => handleAuth(api, req, res) });
   api.registerWebRoute('GET',  '/sessions', { public: true, handler: (req, res) => handleSessions(api, req, res) });
 
-  // Public-URL alias: existing acorn-cli Go binaries hardcode
-  // /api/acorn/auth and /api/acorn/sessions in their wire protocol.
+  // Public-URL aliases. Two are registered:
+  //   /api/spore-code/* → /api/plugins/spore-code/*  (canonical, post-rebrand)
+  //   /api/acorn/*      → /api/plugins/spore-code/*  (legacy — kept forever
+  //                       because deployed acorn-cli v0.x binaries hardcode
+  //                       /api/acorn/auth in their wire protocol).
   // Core's request handler walks all plugins' aliases at request time,
-  // applies CORS for cross-origin clients, and rewrites
-  // /api/acorn/<rest> → /api/plugins/acorn-cli/<rest>. When the plugin
-  // is uninstalled the alias disappears with the rest of the plugin
-  // and `/api/acorn/*` 404s like any other unknown path.
+  // applies CORS for cross-origin clients, and rewrites the full path.
+  // When the plugin is uninstalled both aliases disappear with the rest
+  // of the plugin and the routes 404 like any other unknown path.
+  api.registerPathAlias('spore-code', {
+    cors: true,
+    notFoundCode: 'SPORE_CODE_ROUTE_NOT_FOUND',
+  });
   api.registerPathAlias('acorn', {
     cors: true,
-    notFoundCode: 'ACORN_ROUTE_NOT_FOUND',
+    notFoundCode: 'SPORE_CODE_ROUTE_NOT_FOUND',
   });
 
   // The `note_discovery` tool is now owned by the session-graph plugin
@@ -1207,7 +1223,7 @@ module.exports = function register(api) {
   // ── codeindex tools (client-routed) ─────────────────────────────────
   //
   // The acorn Go CLI (v0.4.0+) ships a per-project SQLite code graph at
-  // <cwd>/.acorn/index.db built from tree-sitter-style parsing of Go,
+  // <cwd>/.spore-code/index.db built from tree-sitter-style parsing of Go,
   // TypeScript, JavaScript, and Python source. These six tools let the
   // agent query that index instead of falling back to grep+read_file —
   // a search_symbols result is ~50x cheaper in tokens than the
@@ -1228,7 +1244,7 @@ module.exports = function register(api) {
   api.registerTool('index_codebase', {
     namespaced: false,
     description:
-      'Build (or refresh) the per-project code graph at <cwd>/.acorn/index.db. ' +
+      'Build (or refresh) the per-project code graph at <cwd>/.spore-code/index.db. ' +
       'Walks the cwd, parses Go/TS/JS/Python source, extracts symbols + CALLS edges + imports. ' +
       'Idempotent: per-file mtime-skip on subsequent runs. Returns counts (files, symbols, calls, took_ms) and a by-language breakdown. ' +
       'Usually triggered manually by the user via /index — only call this from the agent if a search_symbols query came back surprisingly empty and you suspect the index is stale.',
@@ -1586,5 +1602,5 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/acorn alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
+  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/spore-code + /api/acorn (legacy) aliases + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
 };

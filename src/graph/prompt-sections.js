@@ -364,7 +364,7 @@ function applyPromptSectionsMixin(GraphContext) {
         if (text && typeof text === 'string') {
           // If the renderFn returned text that already starts with a markdown
           // `## ` heading, treat it as self-titled and skip the auto-prefix.
-          // Lets plugins like acorn-cli emit a richer heading
+          // Lets plugins like spore-code emit a richer heading
           // (e.g. `## Project Context — myproject`) without double-titling.
           if (text.trimStart().startsWith('## ')) {
             parts.push(text);
@@ -1097,7 +1097,7 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push('');
     }
 
-    // Project Context + Plan Mode + log lines moved to plugins/acorn-cli/
+    // Project Context + Plan Mode + log lines moved to plugins/spore-code/
     // (phase 2.3f). Plugin registers them via api.registerPromptSection,
     // gated on opts.platform === 'cli' inside the renderFn. They are appended
     // after the static prompt by _buildPluginPromptSections.

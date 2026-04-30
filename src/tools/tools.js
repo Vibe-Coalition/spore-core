@@ -205,7 +205,7 @@ class ToolSystem {
   /**
    * Get tool definitions for the Anthropic API.
    *
-   * When the active session is acorn-cli (platform='cli'), the catalog is
+   * When the active session is Spore Code (platform='cli'), the catalog is
    * filtered through TOOLS_EXCLUDED_FROM_CLI so the model only sees tools
    * it can actually use on the user's machine + via SPORE. Significantly
    * shrinks the prompt and stops the agent from reaching for things like
@@ -417,7 +417,7 @@ class ToolSystem {
           required: ['nodeId', 'label', 'type'],
         },
       },
-      // note_discovery moved to plugins/acorn-cli/ in phase 2.3c-2.
+      // note_discovery moved to plugins/spore-code/ in phase 2.3c-2.
       {
         name: 'graph_delete',
         description: 'Delete a node, aspect, attribute, or edge from the knowledge graph. The deletion is reflected in real-time on the graph viewer.',
@@ -1217,9 +1217,9 @@ Set wait:false when you've submitted a long background job and just want to retu
     return await _execContext.run(resolvedCtx || {}, async () => {
       const sessionKey = resolvedCtx?.sessionKey || null;
       const platform = resolvedCtx?.platform;
-      // Plan-mode gate only applies to web sessions. Acorn CLI has its own
+      // Plan-mode gate only applies to web sessions. Spore Code has its own
       // PLAN_READY/plan:decided prose-based plan-approval flow (see
-      // acorn-cli/acorn/handlers/plan.py + plan_approval.py). Routing acorn's
+      // spore-code internal plan handlers + plan_approval). Routing Spore Code's
       // tool calls through the queue would break that flow by swallowing the
       // tool calls the agent would otherwise execute under acorn's plan mode.
       if (sessionKey && MUTATING_TOOLS.has(normalizedName) && platform !== 'cli') {
@@ -1275,7 +1275,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           return await this._queryAboutTool(input);
         case 'graph_update':
           return this._graphUpdateTool(input);
-        // note_discovery → falls through to plugin dispatch (acorn-cli).
+        // note_discovery → falls through to plugin dispatch (spore-code).
         case 'graph_delete':
           return this._graphDeleteTool(input);
         case 'delegate_task':
@@ -2175,7 +2175,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return 16384;
   }
 
-  // _noteDiscoveryTool moved to plugins/acorn-cli/index.js (phase 2.3c-2).
+  // _noteDiscoveryTool moved to plugins/spore-code/index.js (phase 2.3c-2).
 
   _graphUpdateTool(input) {
     const { nodeId, label, type, description, aspects, edges, project, temp } = input;
@@ -2223,7 +2223,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // Plugin lifecycle hook `isNodeManaged` lets a plugin claim
           // ownership of a node so core skips manual ttl mutations on
           // it. Plugins return true when the node is part of their
-          // own lifecycle (e.g. acorn-cli's session-anchor nodes,
+          // own lifecycle (e.g. spore-code's session-anchor nodes,
           // where session-end distillation owns ttl). Description
           // updates above still go through; only the ttl/temp flag
           // is gated.
@@ -2253,7 +2253,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       } else {
         // New node — set temp flag if the agent asked for it explicitly.
         // Acorn-specific defaults (born temp + tied to sessionId for
-        // distillation later) are applied by the acorn-cli plugin's
+        // distillation later) are applied by the spore-code plugin's
         // afterToolExec middleware, which sees `created: true` in the
         // result and updates the row's `extra` column post-insert. Core
         // is acorn-blind here.
@@ -3273,7 +3273,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const { channelId, platform, userId: taskUserId } = taskEntry;
       if (!channelId) return;
 
-      // Web panel AND acorn CLI both deliver via the same WebSocket
+      // Web panel AND Spore Code both deliver via the same WebSocket
       // gateway — channelId = sessionId (per-(user,cwd) for acorn,
       // "web:control-panel" for web), broadcast frames go to all
       // connected clients (acorn filters by its active sessionId).
@@ -4052,7 +4052,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   // ── Search tools (server-side fallback for non-CLI sessions) ──────
   // For acorn sessions, the CLI claims grep+glob locally and runs them
-  // in Go (see acorn-cli/go/internal/tools/search.go). These handlers
+  // in Go (see spore-code/internal/tools/search.go). These handlers
   // are the server-side path used when there's no CLI or the CLI is
   // disconnected. Mirrors the Go implementation's caps and noise-dir
   // skip list for predictable cross-session behavior.
@@ -5747,7 +5747,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     } catch (e) {
       return { error: `Failed to create: ${e.message}` };
     }
-    // Broadcast so clients (acorn CLI in particular) can render a
+    // Broadcast so clients (Spore Code in particular) can render a
     // live task-list side panel. sessionKey lets old/unscoped clients
     // filter — the acorn CLI listens for task:* frames and only
     // renders rows tagged with its own session.
@@ -5985,9 +5985,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const sessionKey = this._ctxSessionKey();
     if (!sessionKey) return { error: 'No active session' };
     const ctx = this._ctx();
-    // Both web and acorn-cli have the picker modal wired:
+    // Both web and Spore Code have the picker modal wired:
     //   - web:        gateway broadcasts ask_user frames to the panel
-    //   - acorn-cli:  internal/app/update.go listens for ask_user WS
+    //   - spore-code:  internal/app/update.go listens for ask_user WS
     //                 frames, openStructuredQuestion shows the modal,
     //                 finishQuestions sends ask_user_answer back.
     // The platform gate that used to refuse cli was a stale relic from

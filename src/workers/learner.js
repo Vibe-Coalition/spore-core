@@ -400,7 +400,7 @@ class Learner {
     }
 
     // Hoisted so the finally below can hand newNodeIds + opts.sessionId
-    // to the afterLearn hook (acorn-cli plugin uses these to add
+    // to the afterLearn hook (spore-code plugin uses these to add
     // discovered_in edges from each new node to the session node).
     let lastWrote = null;
     let lastSessionIdOpt = null;
@@ -1102,7 +1102,7 @@ The JSON schema for updates becomes:
           // (worth keeping long-term), promote it by clearing the ttl marker.
           // Plugin lifecycle hook `isNodeManaged` lets a plugin claim
           // ownership of a node so the learner skips the promotion
-          // (e.g. acorn-cli's session-anchor nodes are governed by
+          // (e.g. spore-code's session-anchor nodes are governed by
           // session-end distillation — promoting them mid-session would
           // make them escape distill's candidate sweep).
           if (ent.ephemeral === false) {
@@ -1127,7 +1127,7 @@ The JSON schema for updates becomes:
         } else {
           // New node — only set the temp flag if the extractor marked
           // the entity ephemeral. Plugin-driven defaults (e.g.
-          // acorn-cli's "born temp tied to sessionId so session-end
+          // spore-code's "born temp tied to sessionId so session-end
           // distillation can pick winners") are applied post-hoc by
           // the plugin's afterLearn worker hook, which receives
           // `newNodeIds` and tags them via UPDATE nodes SET extra=...
@@ -1403,7 +1403,7 @@ The JSON schema for updates becomes:
         }
       }
 
-      // graphcorn discovered_in edges moved to plugins/acorn-cli/ in
+      // graphcorn discovered_in edges moved to plugins/spore-code/ in
       // phase 2.3g. The plugin's afterLearn worker hook receives the
       // newly-created node ids + opts.sessionId and creates the edges.
 
@@ -1468,7 +1468,7 @@ The JSON schema for updates becomes:
     }
 
     // Surface the set of newly-created node ids so callers (e.g. the
-    // afterLearn worker hook → acorn-cli plugin) can attach
+    // afterLearn worker hook → spore-code plugin) can attach
     // session-anchoring edges without having to walk the graph.
     wrote.newNodeIds = [...newNodeIds];
     return wrote;

@@ -3,8 +3,8 @@
 -- the node insert uses INSERT OR IGNORE, and each aspect/attribute is
 -- guarded by WHERE NOT EXISTS so duplicates can't accumulate.
 --
--- Also adds one cross-reference attribute to ref-acorn-context.client_routing
--- so acorn agents see "use web_search for current info" alongside the local-
+-- Also adds one cross-reference attribute to ref-spore-code-context.client_routing
+-- so Spore Code agents see "use web_search for current info" alongside the local-
 -- routing guidance.
 
 -- ── Node + aspects ────────────────────────────────────────────────────
@@ -124,11 +124,11 @@ WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-web-search' AND asp.name = 'backend' AND a.content LIKE 'Primary backend: SearXNG%');
 
--- ── Cross-reference on ref-acorn-context.client_routing ──────────────
+-- ── Cross-reference on ref-spore-code-context.client_routing ──────────────
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
-SELECT (SELECT id FROM aspects WHERE node_id = 'ref-acorn-context' AND name = 'client_routing'),
+SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
        'For things you CAN''T learn from the user''s machine — current library versions, framework docs, error messages you''ve never seen, "is X deprecated", recent breaking changes — use `web_search` (then `web_fetch` the best 1-3 results). Don''t guess from training data; the web is more current. See ref-web-search for caps + workflow patterns.', 9, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
-  WHERE asp.node_id = 'ref-acorn-context' AND asp.name = 'client_routing' AND a.content LIKE 'For things you CAN%t learn from the user%s machine%');
+  WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'For things you CAN%t learn from the user%s machine%');

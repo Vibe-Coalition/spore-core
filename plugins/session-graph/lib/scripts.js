@@ -155,7 +155,7 @@ function ensureScriptNode(db, scriptId, label, sessionId) {
     db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(scriptId);
     return false;
   }
-  // New script node — born `temp` if inside an acorn session so
+  // New script node — born `temp` if inside a Spore Code session so
   // distillation can promote winners. Outside a session, permanent.
   const extraJson = sessionId
     ? JSON.stringify({ ttl: 'temp', sessionId, tempCreated: new Date().toISOString() })
@@ -208,7 +208,7 @@ function ensureEdge(db, source, target, type) {
 //
 // Inputs:
 //   projectId        canonical project node id (from projectNodeId(userId, cwd))
-//   sessionId        optional acorn session id; when set the new node is
+//   sessionId        optional Spore Code session id; when set the new node is
 //                    born `temp` and tagged with the sessionId
 //   name             unique script name within the project
 //   description      one-line agent-facing summary
@@ -240,7 +240,7 @@ function upsertScriptNode(learner, opts) {
   }
 
   const db = learner.db;
-  // Verify the project node exists — fail loudly otherwise. The acorn
+  // Verify the project node exists — fail loudly otherwise. The Spore Code
   // session:start handler must have run first; we do not auto-create.
   const projRow = db.prepare('SELECT id FROM nodes WHERE id = ?').get(projectId);
   if (!projRow) {
@@ -303,7 +303,7 @@ function upsertScriptNode(learner, opts) {
     isNew,
     // The CLI uses materializePath as the on-disk cache location; the
     // server isn't authoritative here, just suggesting the convention.
-    materializePath: `.acorn/scratch/${entry.name}${extensionForLanguage(language)}`,
+    materializePath: `.spore-code/scratch/${entry.name}${extensionForLanguage(language)}`,
   };
 }
 
@@ -375,7 +375,7 @@ function getScriptNode(learner, projectId, name) {
     body,
     meta,
     stats: aspects.stats || [],
-    materializePath: `.acorn/scratch/${name}${extensionForLanguage(meta.language || '')}`,
+    materializePath: `.spore-code/scratch/${name}${extensionForLanguage(meta.language || '')}`,
   };
 }
 
@@ -437,13 +437,13 @@ function migrateScratchHelpers(learner, projectId) {
   let skipped = 0;
   const existing = new Set(listScriptsIndex(learner, projectId).map(e => e.name));
   for (const r of rows) {
-    // Format: "<path> — <purpose>"  e.g. ".acorn/scratch/foo.js — does X"
+    // Format: "<path> — <purpose>"  e.g. ".spore-code/scratch/foo.js — does X"
     const m = /^\s*(\S+)\s+[—-]\s+(.+)$/.exec(r.content);
     if (!m) {
       skipped++;
       continue;
     }
-    const path = m[1].replace(/^\.acorn\/scratch\//, '');
+    const path = m[1].replace(/^\.spore-code\/scratch\//, '');
     const name = path.replace(/\.[^.]+$/, '');
     const language = (path.match(/\.([^.]+)$/) || [, ''])[1];
     if (existing.has(name)) {
@@ -498,7 +498,7 @@ function extensionForLanguage(lang) {
 //
 // Returns { ok, pruned: [name, ...], scanned: N }.
 //
-// Called opportunistically from the acorn-cli plugin's afterLearn
+// Called opportunistically from the spore-code plugin's afterLearn
 // hook (gated to once per 24h per project so it doesn't re-scan on
 // every turn). Also exposed as a future agent-callable / operator
 // tool if we want to surface it.

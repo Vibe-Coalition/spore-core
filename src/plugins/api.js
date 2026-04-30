@@ -299,7 +299,7 @@ class PluginAPI {
    *
    * Routes are auth-gated by default (any signed-in user). Pass
    * `{ public: true }` for routes that ARE the auth boundary (e.g. an
-   * acorn-cli `/auth` endpoint that issues Bearer tokens). Public routes
+   * spore-code `/auth` endpoint that issues Bearer tokens). Public routes
    * MUST do their own validation before handing out credentials.
    *
    * @param {string} method   — 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
@@ -355,7 +355,7 @@ class PluginAPI {
    * plugin's web routes.
    *
    * Use this for plugins that have a legacy or external wire-protocol
-   * URL contract — e.g. acorn-cli's Go binaries hardcode `/api/acorn/auth`,
+   * URL contract — e.g. Spore Code's Go binaries hardcode `/api/acorn/auth`,
    * so the plugin registers `acorn` as an alias prefix and core does
    * the rewrite on its behalf. When the plugin is uninstalled, the
    * alias disappears and `/api/<prefix>/*` simply 404s like any other

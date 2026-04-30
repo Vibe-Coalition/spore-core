@@ -1260,13 +1260,13 @@ build/
 
       <div class="settings-section wide" data-target-tab="advanced">
         <h4>Invite Key</h4>
-        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via acorn-cli. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
+        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via Spore Code. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
         <label for="settings-invite-key">Invite key</label>
         <div style="display:flex; gap:6px; align-items:stretch; margin-top:4px">
-          <input id="settings-invite-key" type="password" placeholder="empty = self-register + acorn-cli disabled" autocomplete="off" style="flex:1; min-width:0">
+          <input id="settings-invite-key" type="password" placeholder="empty = self-register + Spore Code disabled" autocomplete="off" style="flex:1; min-width:0">
           <button type="button" class="settings-test-btn" id="settings-invite-key-show" title="Show / hide">show</button>
           <button type="button" class="settings-test-btn" id="settings-invite-key-copy" title="Copy to clipboard">copy</button>
-          <button type="button" class="settings-test-btn" id="settings-invite-key-regen" title="Generate a new key (existing webapp guests + acorn-cli users will need the new one)">regen</button>
+          <button type="button" class="settings-test-btn" id="settings-invite-key-regen" title="Generate a new key (existing webapp guests + Spore Code users will need the new one)">regen</button>
         </div>
         <div class="settings-note" id="settings-invite-key-note"></div>
       </div>

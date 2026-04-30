@@ -28,10 +28,10 @@ WHERE NOT EXISTS (
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-search-tools' AND name = 'when_to_use'),
-       'For acorn (CLI) sessions both tools execute on the user''s machine via the CLI; for web/telegram/etc. they run server-side over /workspace', 7, 'seed', 'seed'
+       'For Spore Code (CLI) sessions both tools execute on the user''s machine via the CLI; for web/telegram/etc. they run server-side over /workspace', 7, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
-  WHERE asp.node_id = 'ref-search-tools' AND asp.name = 'when_to_use' AND a.content LIKE 'For acorn (CLI) sessions%');
+  WHERE asp.node_id = 'ref-search-tools' AND asp.name = 'when_to_use' AND a.content LIKE 'For Spore Code (CLI) sessions%');
 
 -- Aspect: caps_and_filters
 INSERT INTO aspects (node_id, name, weight, extracted_with)

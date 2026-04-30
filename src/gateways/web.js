@@ -80,7 +80,7 @@ function _buildThemeInlineStyle(dataDir) {
 }
 
 // Constant-time invite-key compare. Used by both self-register and
-// the acorn-cli /auth handler (the plugin reads config.inviteKey from
+// the spore-code /auth handler (the plugin reads config.inviteKey from
 // the host and calls this).
 function _inviteKeyMatches(typed, stored) {
   if (!typed || !stored) return false;
@@ -627,7 +627,7 @@ class WebGateway {
     // their nodes/aspects come back. The plugin_installs row was
     // wiped above, so the manager's run-once gate sees a fresh slate
     // and re-applies install.sql for every plugin that registered
-    // reference nodes (acorn-cli, future ones). Runs OUTSIDE the
+    // reference nodes (spore-code, future ones). Runs OUTSIDE the
     // wipe transaction so each plugin's install can manage its own
     // BEGIN/COMMIT and a single failing plugin doesn't roll back
     // the rest of the reset.
@@ -943,7 +943,7 @@ class WebGateway {
         braveApiKeySet: !!this.config.braveApiKey,
       },
       // Single host-level invite key — gates webapp self-register +
-      // acorn-cli /auth. Empty means both are disabled. Surfaced as a
+      // spore-code /auth. Empty means both are disabled. Surfaced as a
       // password field with a Regenerate button in the Advanced tab.
       inviteKey: this.config.inviteKey || '',
       inviteKeySet: !!this.config.inviteKey,
@@ -2971,7 +2971,7 @@ class WebGateway {
         const providers = mgr.getProviders?.() || [];
         const providerByPluginId = new Map();
         for (const pr of providers) providerByPluginId.set(pr.pluginId, pr);
-        const RECOMMENDED_ON = new Set(['session-graph', 'acorn-cli', 'embedder-gemma', 'whisper']);
+        const RECOMMENDED_ON = new Set(['session-graph', 'spore-code', 'embedder-gemma', 'whisper']);
         const enriched = available.map(p => {
           const pr = providerByPluginId.get(p.id);
           return {
@@ -3088,8 +3088,9 @@ class WebGateway {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
         }
-        // Accept teamKey (current login UI), inviteKey (direct field
-        // name), or acornKey (legacy clients).
+        // Accept inviteKey (direct field name, current login UI),
+        // teamKey (older login UI), or acornKey (pre-rebrand legacy
+        // clients — kept for back-compat with deployed Spore Code).
         const typedKey = String(parsed.inviteKey || parsed.teamKey || parsed.acornKey || '').trim();
         if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -3456,8 +3457,8 @@ class WebGateway {
         return;
       }
 
-      // ── Plugin path aliases (e.g. acorn-cli registers /api/acorn/* →
-      // /api/plugins/acorn-cli/*) ──
+      // ── Plugin path aliases (e.g. spore-code registers /api/acorn/* →
+      // /api/plugins/spore-code/*) ──
       // Plugins call api.registerPathAlias('<prefix>', { cors, notFoundCode })
       // to claim a top-level URL space. Useful for legacy / external
       // wire-protocol clients that hardcode a particular URL contract.
@@ -3933,7 +3934,7 @@ class WebGateway {
       // so plugins can't shadow them. Default auth model is "any signed-in user"
       // (matches graph endpoints), but plugins can opt out via
       // registerWebRoute(method, path, { public: true, handler }) for routes
-      // that ARE the auth boundary (e.g. acorn-cli /auth issues Bearer tokens).
+      // that ARE the auth boundary (e.g. spore-code /auth issues Bearer tokens).
       if (urlPath.startsWith('/api/plugins/') && !urlPath.startsWith('/api/plugins/list') && !urlPath.startsWith('/api/plugins/install') && !urlPath.startsWith('/api/plugins/uninstall')) {
         const mgr = this.tools?._pluginManager;
         const resolved = mgr?.resolveWebRoute?.(req.method, urlPath);
@@ -5266,7 +5267,7 @@ class WebGateway {
           }
           this.log.info(`[ws] chat from user=${ws._user || '(anon)'} role=${ws._role || '(none)'} displayName=${(msg.userName || '').slice(0, 40)} sessionId=${sessionId}`);
 
-          // Store the client's working directory (sent by Acorn CLI)
+          // Store the client's working directory (sent by Spore Code)
           if (msg.cwd && isCli) ws._cwd = msg.cwd;
 
           // Register this client for the session.

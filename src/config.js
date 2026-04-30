@@ -435,7 +435,7 @@ function loadConfigFresh() {
   // SPORE invite key — single host-level secret used for two things:
   //   1. Webapp self-register gate (anyone with the key can create a
   //      webapp user account).
-  //   2. acorn-cli /auth gate (Go binaries pass the key to obtain a
+  //   2. Spore Code /auth gate (Go binaries pass the key to obtain a
   //      Bearer token).
   // Reads SPORE_INVITE_KEY first, falls back to legacy SPORE_ACORN_KEY
   // for backward compat. Plugins read `config.inviteKey` from the host

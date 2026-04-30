@@ -234,7 +234,7 @@ function migrateReferenceNodes(db, log) {
   }
 
   // Acorn-context (5 ref bundles incl. graphcorn-discovery) extracted to
-  // plugins/acorn-cli/ in phase 2.3a. Source SQL files stay on disk as
+  // plugins/spore-code/ in phase 2.3a. Source SQL files stay on disk as
   // audit / restore until verified across all SPORE instances.
 
 // Web search & fetch reference node — gives the agent a per-tool

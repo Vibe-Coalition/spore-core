@@ -596,7 +596,7 @@ class PluginManager {
   /**
    * Get all middleware hooks of a given type. Walks every loaded plugin —
    * not just plugins of kind 'middleware' — because middleware can be
-   * registered alongside any primary kind (e.g. the acorn-cli 'tool'
+   * registered alongside any primary kind (e.g. the spore-code 'tool'
    * plugin registers an afterToolExec middleware).
    */
   getMiddleware(hook) {
@@ -681,9 +681,9 @@ class PluginManager {
   /**
    * Resolve a bare WS frame type (e.g. 'session:start') to the FIRST
    * plugin that registered a handler for it. Used by core's protocol-
-   * contract aliases — the Go acorn-cli sends bare `session:start` and
+   * contract aliases — the Go spore binary sends bare `session:start` and
    * core finds the plugin that owns it without core needing to know
-   * which plugin id (acorn-cli, future-cli, etc.) provides the handler.
+   * which plugin id (spore-code, future-cli, etc.) provides the handler.
    * Returns { pluginId, handler } or null.
    */
   resolveBareWsHandler(frameType) {
@@ -952,7 +952,7 @@ class PluginManager {
    * Fire a worker hook event (e.g. afterLearn, beforeLearn). Walks every
    * loaded plugin instead of only kind='worker-hook' plugins — same
    * rationale as getMiddleware/getLifecycleHooks: worker hooks can be
-   * registered alongside any primary kind (e.g. acorn-cli is kind 'tool'
+   * registered alongside any primary kind (e.g. spore-code is kind 'tool'
    * but registers an afterLearn handler).
    */
   async fireWorkerHook(event, data) {

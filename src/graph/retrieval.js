@@ -1150,7 +1150,7 @@ Rules:
     // node, its has_session edges, and full transcripts of past
     // cat-breeds plan turns — leaking the wrong codebase into the
     // current session's prompt. The current project's content is
-    // already in the prompt via the acorn-cli plugin's Project Context
+    // already in the prompt via the spore-code plugin's Project Context
     // section; we don't need to compete with it via cross-project FTS.
     const projScope = this._computeProjectScope(opts);
     if (projScope) {
