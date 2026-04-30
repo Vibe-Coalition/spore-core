@@ -1,0 +1,28 @@
+# Build context = repo root. Everything below is excluded so the build
+# daemon only receives src/ + plugins/ + a few small top-level files.
+
+.git
+node_modules
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+
+# Per-instance runtime data — the largest tree in the repo (~5GB).
+animas/
+
+# Hand-snapshot .bak.* files left behind by prior plans.
+*.bak
+*.bak.*
+
+# Top-level Unraid + setup scripts (not needed inside the image).
+install.sh
+setup-traefik.sh
+setup-manager.sh
+configure-anima.sh
+new-agent.sh
+brand.sh
+README.md
+CONTRIBUTING.md
+FOR_AGENTS.md

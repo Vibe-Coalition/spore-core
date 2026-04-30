@@ -69,7 +69,7 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-compute-cluster' AND name='workflow_sbatch') AND content LIKE 'Submit: `remote_exec%');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-compute-cluster' AND name='workflow_sbatch'),
-         'Follow logs live from SPORE: `remote_exec { host:"cluster-login", tmux_session:"tail-<jobid>", command:"tail -f /home/$USER/logs/<jobid>.out" }`. The `tail -f` stays alive inside tmux; call remote_tail later to see the latest lines. Kill when done: remote_tmux_kill.',
+         'Follow logs live from Spore Core: `remote_exec { host:"cluster-login", tmux_session:"tail-<jobid>", command:"tail -f /home/$USER/logs/<jobid>.out" }`. The `tail -f` stays alive inside tmux; call remote_tail later to see the latest lines. Kill when done: remote_tmux_kill.',
          9, 'seed', 'seed'
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-compute-cluster' AND name='workflow_sbatch')
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-compute-cluster' AND name='workflow_sbatch') AND content LIKE 'Follow logs live%');

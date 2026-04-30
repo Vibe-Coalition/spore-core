@@ -192,8 +192,10 @@ module.exports = function register(api) {
     description: "Z.ai cloud chat completions (GLM-4.6 / GLM-Z1 / charglm). Use model strings like `zai/glm-4.6` in tier routing. Reasoning-capable models (GLM-Z1 family) honor reasoning_effort; others ignore it.",
     schema: [
       { key: 'apiKey', label: 'ZAI_API_KEY', type: 'password', secret: true,
+        envFallback: 'ZAI_API_KEY',
         help: 'Z.ai API key — get one at z.ai → Account → API Keys.' },
       { key: 'baseUrl', label: 'Base URL (optional)', type: 'text',
+        envFallback: 'ZAI_BASE_URL',
         help: `Default ${Z_AI_DEFAULT_BASE}. Override for self-hosted Bigmodel proxies.` },
     ],
   });

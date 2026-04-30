@@ -18,7 +18,7 @@ INSERT INTO aspects (node_id, name, weight, extracted_with)
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='overview'),
-         'Tailscale is a mesh WireGuard VPN. Joining the tailnet gives this container private routing to every other member — compute nodes, operator workstations, other Spore agents.',
+         'Tailscale is a mesh WireGuard VPN. Joining the tailnet gives this container private routing to every other member — compute nodes, operator workstations, other Spore Core agents.',
          9, 'seed', 'seed'
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-tailscale' AND name='overview')
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='overview') AND content LIKE 'Tailscale is a mesh WireGuard VPN%');

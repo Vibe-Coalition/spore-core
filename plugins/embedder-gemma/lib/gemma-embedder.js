@@ -53,7 +53,7 @@ async function _getPipeline(dtype, cacheDir, log) {
   } catch (e) {
     throw new Error(
       '@huggingface/transformers not installed. Run `npm install @huggingface/transformers` ' +
-      'in the SPORE app dir (~530 MB including onnxruntime-node) and restart, then re-enable this plugin.'
+      'in the Spore Core app dir (~530 MB including onnxruntime-node) and restart, then re-enable this plugin.'
     );
   }
 

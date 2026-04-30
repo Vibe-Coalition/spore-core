@@ -954,7 +954,7 @@ function _bindInviteKeyButtons() {
     toast(ok ? 'Invite key copied' : 'Copy failed — select manually', !ok);
   });
   document.getElementById('settings-invite-key-regen')?.addEventListener('click', async () => {
-    if (!confirm('Regenerate the SPORE invite key? Existing webapp guests + Spore Code users will lose access until they get the new key.')) return;
+    if (!confirm('Regenerate the Spore Core invite key? Existing webapp guests + Spore Code users will lose access until they get the new key.')) return;
     _pendingInviteRegenerate = true;
     if (input) input.value = '';
     const note = document.getElementById('settings-invite-key-note');

@@ -181,7 +181,7 @@ module.exports = function register(api) {
     const apiKey = process.env.ANTHROPIC_API_KEY || config.anthropicApiKey || slot.apiKey || '';
     return createAnthropicClient({
       apiKey,
-      displayName: config.displayName || 'SPORE',
+      displayName: config.displayName || 'Spore Core',
       apiTimeoutMs: config.apiTimeoutMs || 120000,
     });
   }, {
@@ -270,6 +270,7 @@ module.exports = function register(api) {
     description: 'Claude Opus / Sonnet / Haiku via api.anthropic.com. Use model strings like `claude-haiku-4-5` (no prefix needed) in tier routing. Supports both standard API keys and Claude.ai OAuth tokens (sk-ant-oat-…).',
     schema: [
       { key: 'apiKey', label: 'ANTHROPIC_API_KEY', type: 'password', secret: true,
+        envFallback: 'ANTHROPIC_API_KEY',
         help: 'Standard sk-ant-api03-… key OR Claude.ai OAuth token (sk-ant-oat-…) from Pro / Max plans.' },
     ],
   });

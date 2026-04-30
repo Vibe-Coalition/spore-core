@@ -1,16 +1,16 @@
-# Builds the shared anima:latest base image from src/.
-# Individual agents live in animas/<name>/docker-compose.yml
+# Builds the shared spore:latest base image from this repo.
+# Build context is the repo root so plugins/ (top-level) gets bundled
+# alongside src/. See src/Dockerfile for the layer breakdown.
 #
 # Build:   docker compose build
-# Or:      docker build -t anima:latest src/
-#
-# Then create an agent:
-#   ./new-agent.sh
+# Or:      docker build -t spore:latest -f src/Dockerfile .
 
 services:
-  anima-build:
-    build: ./src
-    image: anima:latest
+  spore-build:
+    build:
+      context: .
+      dockerfile: src/Dockerfile
+    image: spore:latest
     profiles:
       - build
-    command: echo "Image built as anima:latest"
+    command: echo "Image built as spore:latest"

@@ -91,7 +91,7 @@ WHERE NOT EXISTS (
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
-       'If the CLI disconnects mid-tool, the call falls back to the SPORE container — which means it would run against /workspace, NOT the user''s project. Watch for tool errors that mention container paths instead of project paths and pause to reconnect.', 7, 'seed', 'seed'
+       'If the CLI disconnects mid-tool, the call falls back to the Spore Core container — which means it would run against /workspace, NOT the user''s project. Watch for tool errors that mention container paths instead of project paths and pause to reconnect.', 7, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'If the CLI disconnects%');

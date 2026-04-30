@@ -789,7 +789,7 @@ class DiscordGateway {
     
     await message.reply([
       '```',
-      `SPORE v0.1.0`,
+      `Spore Core v0.1.0`,
       `Model: ${this.config.model}`,
       `Agent: ${this.config.agentId || 'spore'}`,
       `Graph: ${nodeCount} nodes`,

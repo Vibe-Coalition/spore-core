@@ -289,7 +289,7 @@ function lmeRenderResults(scores, elapsed, stats) {
 
   const refs = [
     { name: 'Hindsight (TEMPR)', pct: 91.4, color: '#e08a4e' },
-    { name: 'SPORE (this run)', pct: pctNum, color: '#7aa583' },
+    { name: 'Spore Core (this run)', pct: pctNum, color: '#7aa583' },
     { name: 'GPT-4o baseline', pct: 39.2, color: '#8a8676' },
     { name: 'Llama-3 70B', pct: 24.8, color: '#8a8676' },
   ].sort((a, b) => b.pct - a.pct);

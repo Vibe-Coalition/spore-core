@@ -9,13 +9,13 @@
 // follows the text color of the surrounding header; amber #c8762c is
 // the brand accent and stays literal.
 window.BRAND = {
-  name: 'Spore',
+  name: 'Spore Core',
   tagline: 'Memory that grows with you',
   agent: 'agent',
   agents: 'agents',
-  Agent: 'SPORE',
-  company: 'SPORE',
-  chatLogo: '<svg height="20" viewBox="-1 -1 2 2" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;display:block;overflow:visible" aria-label="SPORE"><g stroke="currentColor" stroke-width="0.04" stroke-linecap="round"><line x1="0" y1="0" x2="0" y2="-0.62"/><line x1="0" y1="0" x2="0.5369" y2="-0.31"/><line x1="0" y1="0" x2="0.5369" y2="0.31"/><line x1="0" y1="0" x2="0" y2="0.62"/><line x1="0" y1="0" x2="-0.5369" y2="0.31"/><line x1="0" y1="0" x2="-0.5369" y2="-0.31"/></g><g fill="#c8762c"><circle cx="0" cy="-0.62" r="0.16"/><circle cx="0.5369" cy="-0.31" r="0.16"/><circle cx="0.5369" cy="0.31" r="0.16"/><circle cx="0" cy="0.62" r="0.16"/><circle cx="-0.5369" cy="0.31" r="0.16"/><circle cx="-0.5369" cy="-0.31" r="0.16"/></g><circle cx="0" cy="0" r="0.18" fill="currentColor"/></svg>',
+  Agent: 'Spore Core',
+  company: 'Spore Core',
+  chatLogo: '<svg height="20" viewBox="-1 -1 2 2" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;display:block;overflow:visible" aria-label="Spore Core"><g stroke="currentColor" stroke-width="0.04" stroke-linecap="round"><line x1="0" y1="0" x2="0" y2="-0.62"/><line x1="0" y1="0" x2="0.5369" y2="-0.31"/><line x1="0" y1="0" x2="0.5369" y2="0.31"/><line x1="0" y1="0" x2="0" y2="0.62"/><line x1="0" y1="0" x2="-0.5369" y2="0.31"/><line x1="0" y1="0" x2="-0.5369" y2="-0.31"/></g><g fill="#c8762c"><circle cx="0" cy="-0.62" r="0.16"/><circle cx="0.5369" cy="-0.31" r="0.16"/><circle cx="0.5369" cy="0.31" r="0.16"/><circle cx="0" cy="0.62" r="0.16"/><circle cx="-0.5369" cy="0.31" r="0.16"/><circle cx="-0.5369" cy="-0.31" r="0.16"/></g><circle cx="0" cy="0" r="0.18" fill="currentColor"/></svg>',
   // Header text next to logo
-  chatHeaderText: 'SPORE',
+  chatHeaderText: 'Spore Core',
 };

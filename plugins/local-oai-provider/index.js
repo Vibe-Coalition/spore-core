@@ -238,10 +238,13 @@ module.exports = function register(api) {
     description: 'Connect any OpenAI-compatible chat-completion endpoint — vLLM, LM Studio, Ollama, llama.cpp, self-hosted. Use the model string `oai/<model-id>` (or `local/<model-id>`) in tier routing. Additional custom prefixes (e.g. bfl, glm) come from `customProviders` in spore.json.',
     schema: [
       { key: 'baseUrl', label: 'Base URL', type: 'text', placeholder: 'http://localhost:11434/v1',
+        envFallback: 'LOCAL_MODEL_BASE_URL',
         help: 'Mirrored to LOCAL_MODEL_BASE_URL.' },
       { key: 'apiKey', label: 'API Key (optional)', type: 'password', secret: true,
+        envFallback: 'LOCAL_MODEL_API_KEY',
         help: 'Most local servers don\'t require auth. Set if your endpoint expects a token.' },
       { key: 'authHeader', label: 'Auth header', type: 'select', default: 'bearer',
+        envFallback: 'LOCAL_MODEL_AUTH_HEADER',
         options: [
           { value: 'bearer',     label: 'Authorization (Bearer)' },
           { value: 'x-api-key',  label: 'x-api-key' },

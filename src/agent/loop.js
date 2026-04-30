@@ -518,7 +518,9 @@ class AgentLoop {
     // logic at the start of the inference loop below.
     const isBuildingTurn = opts.projectContext?.mode === 'plan'
       && /^\s*\[BUILD_PLAN\]/.test(typeof opts.content === 'string' ? opts.content : '');
-    const activeModel = isBuildingTurn
+    // `let` because _maybeEscalateModel below reassigns it when a tool call
+    // forces a tier bump (e.g. casual → planner mid-loop).
+    let activeModel = isBuildingTurn
       ? (this.config.plannerModel || this.config.normalModel)
       : isCasualChat
         ? (this.config.casualModel || this.config.normalModel || this.config.plannerModel)
@@ -1081,6 +1083,7 @@ class AgentLoop {
     }
 
     this.log.error(`Agent loop error (iteration ${iterations}):`, e.message);
+    if (e.stack) this.log.error('  stack:', e.stack);
     if (e.error) this.log.error('API error detail:', JSON.stringify(e.error));
 
     // 400 with mismatched tool_use/tool_result pairs — try to recover by

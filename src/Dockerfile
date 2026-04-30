@@ -63,7 +63,8 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 WORKDIR /app
 
 ## ── Node dependencies (cached unless package.json changes) ────────
-COPY package.json ./
+# Build context is the repo root; src/ lives next to the top-level plugins/.
+COPY src/package.json ./
 RUN npm install --production && npm cache clean --force
 
 ## ── Pre-install Chromium for Playwright browser tool ──────────────
@@ -71,21 +72,26 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN npx playwright-core install chromium
 
 ## ── Application code (changes frequently — fast layer) ────────────
-COPY index.js app.js config.js test.js ./
-COPY spore.json ./
-COPY seed-graph.sql ./
-COPY graph/ ./graph/
-COPY agent/ ./agent/
-COPY workers/ ./workers/
-COPY gateways/ ./gateways/
-COPY providers/ ./providers/
-COPY tools/ ./tools-default/
-COPY voice/ ./voice/
-COPY static/ ./static/
+COPY src/index.js src/app.js src/config.js src/test.js ./
+COPY src/spore.json ./
+COPY src/seed-graph.sql ./
+COPY src/graph/ ./graph/
+COPY src/agent/ ./agent/
+COPY src/workers/ ./workers/
+COPY src/gateways/ ./gateways/
+COPY src/providers/ ./providers/
+COPY src/tools/ ./tools-default/
+COPY src/voice/ ./voice/
+COPY src/static/ ./static/
+# Plugin manager core (api.js, manager.js, openclaw-adapter.js, index.js).
+COPY src/plugins/ ./plugins/
+# Bundled plugin packages live at the repo root (../plugins/ relative to src/).
+# Layered on top of the manager files; manager.loadAll() filters to subdirs
+# with manifests, so the .js files at the top level are ignored.
 COPY plugins/ ./plugins/
-COPY lib/ ./lib/
-COPY reference-nodes.sql ./
-COPY migrate-ref-email.sql ./
+COPY src/lib/ ./lib/
+COPY src/reference-nodes.sql ./
+COPY src/migrate-ref-email.sql ./
 
 RUN groupadd -g 2000 spore && useradd -r -u 2000 -g 2000 spore \
     && mkdir -p /data /workspace /app/tools \
@@ -93,9 +99,9 @@ RUN groupadd -g 2000 spore && useradd -r -u 2000 -g 2000 spore \
     && echo 'spore ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg, /usr/sbin/cron, /usr/bin/tailscale' > /etc/sudoers.d/spore-apt \
     && chmod 0440 /etc/sudoers.d/spore-apt
 
-COPY entrypoint.sh ./entrypoint.sh
-COPY cron-wrapper.sh /usr/local/bin/cron
-COPY crontab-wrapper.sh /usr/local/bin/crontab
+COPY src/entrypoint.sh ./entrypoint.sh
+COPY src/cron-wrapper.sh /usr/local/bin/cron
+COPY src/crontab-wrapper.sh /usr/local/bin/crontab
 RUN chmod +x ./entrypoint.sh
 RUN chmod +x /usr/local/bin/cron
 RUN chmod +x /usr/local/bin/crontab

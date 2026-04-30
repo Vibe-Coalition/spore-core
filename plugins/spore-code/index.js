@@ -129,17 +129,11 @@ async function handleSessions(api, req, res) {
     return;
   }
 
-  // Bearer token validation. Accepts BOTH:
-  //   - CLI Bearer tokens issued by /api/spore-code/auth (type='cli')
-  //   - Webapp session sids issued by /api/auth/login (type='webapp'|'creator'|'admin')
-  // Both live in the same Map (web.js: `const _sessions = this._webSessions`),
-  // so the Bearer header is just the lookup key. This lets the Spore Go
-  // mobile app authenticate once via webapp creds and still see the
-  // user's CLI sessions in the same list.
+  // Bearer token validation
   const authHeader = req.headers['authorization'] || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   const session = token ? webSessions.get(token) : null;
-  if (!session || !session.user) {
+  if (!session || session.type !== 'cli') {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid or missing token' }));
     return;

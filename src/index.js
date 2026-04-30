@@ -10,6 +10,6 @@
 const { boot } = require('./app');
 
 boot().catch(e => {
-  console.error('SPORE boot failed:', e);
+  console.error('Spore Core boot failed:', e);
   process.exit(1);
 });

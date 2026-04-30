@@ -173,6 +173,7 @@ module.exports = function register(api) {
     description: 'Gemini chat models (multimodal: vision, audio, video) — and the shared API key for the gemini-embedder plugin if installed. Use model strings like `gemini/gemini-2.5-flash` in tier routing.',
     schema: [
       { key: 'apiKey', label: 'GEMINI_API_KEY', type: 'password', secret: true,
+        envFallback: 'GEMINI_API_KEY',
         help: 'Google AI Studio key. Free tier is plenty for embedding workloads. Used by both this plugin and gemini-embedder if installed — no need to enter it twice.' },
     ],
   });

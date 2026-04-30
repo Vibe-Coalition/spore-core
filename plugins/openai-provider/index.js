@@ -214,8 +214,10 @@ module.exports = function register(api) {
     description: 'GPT-4o, GPT-4.1, etc. Use model strings like `openai/gpt-4o-mini` in tier routing.',
     schema: [
       { key: 'apiKey', label: 'OPENAI_API_KEY', type: 'password', secret: true,
+        envFallback: 'OPENAI_API_KEY',
         help: 'Standard OpenAI API key (sk-…). Also used by the whisper plugin\'s server-side STT fallback.' },
       { key: 'baseUrl', label: 'Base URL (optional)', type: 'text',
+        envFallback: 'OPENAI_BASE_URL',
         help: 'Default https://api.openai.com/v1. Override for proxy / Azure-routed deployments.' },
     ],
   });

@@ -1049,7 +1049,7 @@ Set wait:false when you've submitted a long background job and just want to retu
     return [
       {
         name: 'skill_lookup',
-        description: `Search or read from the shared SPORE skills library. Skills are reusable knowledge contributed by any agent. Current skills: ${skillList}. Use action "list" to browse, "search" to filter, "read" to get full content.`,
+        description: `Search or read from the shared Spore Core skills library. Skills are reusable knowledge contributed by any agent. Current skills: ${skillList}. Use action "list" to browse, "search" to filter, "read" to get full content.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -1063,7 +1063,7 @@ Set wait:false when you've submitted a long background job and just want to retu
       },
       {
         name: 'skill_update',
-        description: 'Create or update a skill in the shared SPORE skills library. Use this to share knowledge you\'ve figured out (API patterns, workflows, solutions) so other agents don\'t have to rediscover it. Write clear, actionable content — include code examples, exact parameters, and gotchas.',
+        description: 'Create or update a skill in the shared Spore Core skills library. Use this to share knowledge you\'ve figured out (API patterns, workflows, solutions) so other agents don\'t have to rediscover it. Write clear, actionable content — include code examples, exact parameters, and gotchas.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1680,7 +1680,7 @@ Set wait:false when you've submitted a long background job and just want to retu
     const { message, source, urgent } = input;
     if (!message) return { error: 'message is required' };
 
-    const agentName = this.config.displayName || this.config.agentId || 'SPORE';
+    const agentName = this.config.displayName || this.config.agentId || 'Spore Core';
     const prefix = source ? `[${source}] ` : '';
     const fullMessage = `${prefix}${message}`;
     const delivered = [];
@@ -2134,9 +2134,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   _normalizeNodeId(raw) {
     if (raw == null) return '';
-    // Exact-match passthrough — acorn session nodes, discovery nodes,
+    // Exact-match passthrough — Spore Code session nodes, discovery nodes,
     // and some event/service nodes legitimately use `:`, `@`, `_`, `.`
-    // in their IDs (e.g. `session-cli:yam@acorn-companion-...`,
+    // in their IDs (e.g. `session-cli:yam@spore-go-...`,
     // `qr_script_execution`, `expo.dev`). The legacy strict normalizer
     // stripped all of those away, making such IDs unreachable from
     // any tool that calls _normalizeNodeId. If the raw string already
@@ -3523,13 +3523,36 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       || normalizedType.includes('application/xhtml')
       || normalizedType.includes('application/xml')
       || normalizedType.includes('text/xml');
-    const text = isHtmlLike ? this._extractTextFromHtml(raw) : raw;
+    if (!isHtmlLike) {
+      return { content: raw.substring(0, maxLength), type: 'text', url, bytesRaw, transport };
+    }
+
+    const htmlText = this._extractTextFromHtml(raw);
+    // Try state-blob recovery for SPAs that ship the article inline as
+    // JSON (Next.js, Nuxt, Apollo). For Next.js sites like react.dev
+    // this is the difference between getting SVG soup back and getting
+    // the actual article markdown.
+    const blobText = this._extractFromStateBlob(raw);
+    // Prefer the blob when it's meaningfully bigger than the HTML
+    // extractor's output — that signals the static HTML was a chrome
+    // shell and the article lives in the JSON. Use the title from the
+    // HTML extractor (it's still in the static <title>) so the agent
+    // sees the page name regardless of which path won.
+    let chosen = htmlText;
+    let extractedFrom = 'html';
+    if (blobText && blobText.length > htmlText.length * 1.5) {
+      const titleLine = htmlText.match(/^# .*\n/)?.[0] || '';
+      chosen = titleLine ? titleLine + '\n' + blobText : blobText;
+      extractedFrom = 'state-blob';
+    }
+
     return {
-      content: text.substring(0, maxLength),
+      content: chosen.substring(0, maxLength),
       type: 'text',
       url,
       bytesRaw,
       transport,
+      extractedFrom,
     };
   }
 
@@ -3659,6 +3682,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       return { error: `Invalid URL: ${url}` };
     }
 
+    // Primary: @teng-lin/agent-fetch — runs Mozilla Readability + text-density
+    // (CETD) + JSON-LD + __NEXT_DATA__ + RSC (Next.js App Router) + WordPress
+    // REST + CSS-selector strategies in parallel, picks the best result.
+    // Plus its own Chrome TLS fingerprinting via httpcloak. Replaces the
+    // older curl_cffi + hand-rolled extractor path for non-credential
+    // requests; that path is kept as a defensive fallback below.
+    const agentResult = await this._agentFetch({ url, maxLength, method, body: reqBody, headers: extraHeaders });
+    if (agentResult && !agentResult.transportError) return agentResult;
+    if (agentResult?.transportError) {
+      this.log.warn(`[web_fetch] agent-fetch unavailable: ${agentResult.transportError} — falling back to curl_cffi`);
+    }
+
     const curlResult = await this._curlCffiFetch({
       url,
       maxLength,
@@ -3684,6 +3719,74 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     this.log.warn('[web_fetch] curl_cffi returned no usable payload, falling back to Node fetch');
     return this._nodeWebFetchTool(input, _redirectDepth);
+  }
+
+  // Lazy-load agent-fetch (ESM-only, can't `require()` from CJS). Cache the
+  // module after first successful import; cache the failure too so we don't
+  // re-pay the import cost when the dep isn't installed.
+  async _loadAgentFetch() {
+    if (this._agentFetchModule !== undefined) return this._agentFetchModule;
+    try {
+      this._agentFetchModule = await import('@teng-lin/agent-fetch');
+    } catch (e) {
+      this.log.warn(`[web_fetch] @teng-lin/agent-fetch import failed: ${e.message}`);
+      this._agentFetchModule = null;
+    }
+    return this._agentFetchModule;
+  }
+
+  // Map agent-fetch's FetchResult onto our existing tool return shape.
+  // Returns:
+  //   - successful result   → { content, type, url, bytesRaw, transport, extractedFrom, ... }
+  //   - import/runtime fail → { transportError } so caller falls back
+  //   - graceful failure    → { error } so the agent sees the diagnostic
+  async _agentFetch({ url, maxLength = 8000, method, body, headers }) {
+    // Tool dispatch only accepts GET/POST/etc through agent-fetch's HEAD-less
+    // pipeline. For non-GET requests, fall back to curl/node which support
+    // arbitrary methods + bodies cleanly.
+    if (method && String(method).toUpperCase() !== 'GET') {
+      return { transportError: `non-GET method "${method}" — using fallback transport` };
+    }
+
+    const mod = await this._loadAgentFetch();
+    if (!mod?.httpFetch) return { transportError: 'agent-fetch not installed' };
+
+    let result;
+    try {
+      result = await mod.httpFetch(url, {
+        timeout: 20000,
+        cookies: undefined,
+        // Pass any extra headers through — httpcloak will merge them onto
+        // the impersonated browser headers.
+        ...(headers ? { headers } : {}),
+      });
+    } catch (e) {
+      return { transportError: `agent-fetch threw: ${e.message}` };
+    }
+
+    if (!result?.success) {
+      const code = result?.error || 'unknown';
+      const status = result?.statusCode;
+      const detail = result?.errorDetails?.type || result?.hint || '';
+      return { error: `Fetch failed: ${code}${status ? ` (HTTP ${status})` : ''}${detail ? ` — ${detail}` : ''}` };
+    }
+
+    // Prefer markdown (preserves headings, links, code), fall back to
+    // textContent (plain prose), then to content (HTML — only if both
+    // text variants are empty, which shouldn't happen but be safe).
+    const body0 = result.markdown || result.textContent || result.content || '';
+    const titlePrefix = result.title ? `# ${result.title}\n\n` : '';
+    const fullText = titlePrefix + body0;
+    const bytesRaw = result.rawHtml ? Buffer.byteLength(result.rawHtml, 'utf8') : (body0.length);
+
+    return {
+      content: fullText.substring(0, maxLength),
+      type: 'text',
+      url: result.url || url,
+      bytesRaw,
+      transport: 'agent-fetch',
+      extractedFrom: result.extractionMethod || 'agent-fetch',
+    };
   }
 
   async _nodeWebFetchTool(input, _redirectDepth = 0) {
@@ -3865,32 +3968,130 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   _extractTextFromHtml(html) {
     let text = html;
-    text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-    text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-    text = text.replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '');
-    text = text.replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '');
-    text = text.replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '');
 
+    // Pull <title> from the raw HTML before stripping anything else.
     const titleMatch = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : '';
 
+    // Strip whole tag+body blocks that never carry article content. Done
+    // before article-root detection so a <main> wrapping chrome (sidebars,
+    // comment forms, related-articles rails) yields cleaner text.
+    const dropBlocks = [
+      'script', 'style', 'svg', 'noscript', 'template',
+      'picture', 'iframe', 'object', 'embed',
+      'nav', 'footer', 'header', 'aside', 'form',
+    ];
+    for (const tag of dropBlocks) {
+      text = text.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'), '');
+      // Stray self-closing variants that didn't have a paired close tag.
+      text = text.replace(new RegExp(`<${tag}\\b[^>]*\\/?>`, 'gi'), '');
+    }
+
+    // Prefer <article> or <main> as content root when present and
+    // meaningful — slices out doc shell (search bars, login chrome,
+    // sidebar trees) before extraction. Falls through to full body
+    // otherwise.
+    const articleMatch = text.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)
+      || text.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+    if (articleMatch && articleMatch[1].length > 200) {
+      text = articleMatch[1];
+    }
+
+    // Convert structural tags into whitespace markers BEFORE the
+    // tag-strip pass so paragraph breaks survive.
     text = text.replace(/<br\s*\/?>/gi, '\n');
     text = text.replace(/<\/p>/gi, '\n\n');
     text = text.replace(/<\/div>/gi, '\n');
     text = text.replace(/<\/h[1-6]>/gi, '\n\n');
-    text = text.replace(/<li[^>]*>/gi, '- ');
+    text = text.replace(/<li\b[^>]*>/gi, '- ');
     text = text.replace(/<[^>]+>/g, '');
-    text = text.replace(/&nbsp;/g, ' ');
-    text = text.replace(/&amp;/g, '&');
-    text = text.replace(/&lt;/g, '<');
-    text = text.replace(/&gt;/g, '>');
-    text = text.replace(/&quot;/g, '"');
-    text = text.replace(/&#39;/g, "'");
+
+    // Named entities — small whitelist; numeric refs handled below.
+    const namedEntities = {
+      '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>',
+      '&quot;': '"', '&apos;': "'", '&#39;': "'", '&#x27;': "'",
+      '&hellip;': '…', '&mdash;': '—', '&ndash;': '–',
+    };
+    for (const [k, v] of Object.entries(namedEntities)) {
+      text = text.replace(new RegExp(k, 'g'), v);
+    }
+    text = text.replace(/&#(\d+);/g, (_, n) => {
+      try { return String.fromCodePoint(parseInt(n, 10)); } catch { return ''; }
+    });
+    text = text.replace(/&#x([\da-f]+);/gi, (_, n) => {
+      try { return String.fromCodePoint(parseInt(n, 16)); } catch { return ''; }
+    });
+
     text = text.replace(/\n{3,}/g, '\n\n');
     text = text.replace(/[ \t]+/g, ' ');
     text = text.trim();
 
     return title ? `# ${title}\n\n${text}` : text;
+  }
+
+  // Recover article content from SPA state blobs that frameworks ship
+  // inline in the static HTML — Next.js (`__NEXT_DATA__`), Nuxt 3
+  // (`__NUXT_DATA__`), Apollo (`__APOLLO_STATE__`), and similar. Most
+  // doc sites that look "JS-rendered" actually have the full page text
+  // in one of these blobs already; we just have to walk the JSON.
+  //
+  // Strategy: find a known script id, parse the JSON, walk it deeply,
+  // collect every string value with newlines (a strong signal of prose
+  // content vs. metadata), dedupe, and join. Returns null if nothing
+  // useful surfaces.
+  _extractFromStateBlob(html) {
+    const scriptIds = [
+      '__NEXT_DATA__',         // Next.js (react.dev, Vercel docs)
+      '__NUXT_DATA__',         // Nuxt 3
+      '__APOLLO_STATE__',      // Apollo Client
+      '__INITIAL_STATE__',     // Vue / Vuex SSR
+      '__INITIAL_PROPS__',     // misc SSR
+      '__REDUX_STATE__',       // Redux SSR
+    ];
+    let json = null;
+    for (const id of scriptIds) {
+      const re = new RegExp(`<script\\b[^>]*\\bid=["']?${id}["']?[^>]*>([\\s\\S]*?)<\\/script>`, 'i');
+      const m = html.match(re);
+      if (m && m[1]) {
+        try {
+          json = JSON.parse(m[1].trim());
+          break;
+        } catch { /* keep trying other ids */ }
+      }
+    }
+    if (!json) return null;
+
+    // Walk the JSON depth-first; collect string values that look like
+    // prose. Heuristic: contains a newline OR is long-ish and contains
+    // a sentence-ending punctuation. Skip URLs, hashes, and short
+    // metadata strings (titles, slugs, author names).
+    const collected = new Set();
+    const walk = (v, depth) => {
+      if (depth > 12) return;
+      if (typeof v === 'string') {
+        const s = v.trim();
+        if (s.length < 60) return;
+        if (/^https?:\/\//.test(s)) return;
+        if (/^[A-Fa-f0-9]{32,}$/.test(s)) return; // hash
+        const looksLikeProse = s.includes('\n')
+          || /[.!?]\s+[A-Z]/.test(s)
+          || s.length > 200;
+        if (looksLikeProse) collected.add(s);
+        return;
+      }
+      if (Array.isArray(v)) {
+        for (const item of v) walk(item, depth + 1);
+        return;
+      }
+      if (v && typeof v === 'object') {
+        for (const val of Object.values(v)) walk(val, depth + 1);
+      }
+    };
+    try { walk(json, 0); } catch { /* JSON.parse'd it; walk shouldn't throw, but be safe */ }
+
+    if (collected.size === 0) return null;
+    // Sort by length descending — bigger blocks usually = the article body.
+    return [...collected].sort((a, b) => b.length - a.length).join('\n\n');
   }
 
   // ── File I/O ─────────────────────────────────────────────────────────

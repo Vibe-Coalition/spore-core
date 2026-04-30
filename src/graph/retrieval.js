@@ -130,13 +130,13 @@ function applyRetrievalMixin(GraphContext) {
 
   // Filter rule: is this node permitted under the project scope? Drops:
   //   - Project nodes that aren't the current project (e.g. cat-breeds
-  //     project node leaking into an acorn-companion session)
+  //     project node leaking into an spore-go session)
   //   - Session nodes whose has_session edge doesn't link to the
   //     current project (cross-project past sessions)
   //   - Concept/library/system nodes whose `discovered_in` edges ONLY
   //     point at sessions in OTHER projects (e.g. TheCatAPI was
   //     discovered in a kimi_test session, never in any other project
-  //     → in an acorn-companion session, drop it)
+  //     → in an spore-go session, drop it)
   // Lets through nodes with NO discovered_in edges (seed/reference/
   // manual nodes) and nodes discovered in at least one current-project
   // session (legitimately learned here too).
@@ -910,7 +910,7 @@ Rules:
       // Project-scope filter: drop episodes whose session_id isn't on
       // the has_session edge list of the current project. Same bleed
       // surface as _buildRelevantContext — past cat-breeds sessions
-      // shouldn't surface in an acorn-companion session.
+      // shouldn't surface in an spore-go session.
       if (scope && scope.allowedSessionIds.size > 0) {
         out = out.filter(ep => !ep.sessionId || scope.allowedSessionIds.has(ep.sessionId));
       }

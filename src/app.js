@@ -260,7 +260,7 @@ async function boot() {
   const config = loadConfig();
   const log = createLogger(config.logLevel);
 
-  log.info('SPORE v0.3.0 starting...');
+  log.info('Spore Core v0.3.0 starting...');
   log.info(`Model: ${config.model}`);
 
   // Multi-graph registry — manages multiple knowledge graphs per spore
@@ -415,7 +415,7 @@ async function boot() {
     if (_webGw && typeof _webGw._broadcastToSessionKey === 'function') {
       tools._wsBroadcast = (sessionKey, payload) => _webGw._broadcastToSessionKey(sessionKey, payload);
     }
-    log.info('SPORE is running.');
+    log.info('Spore Core is running.');
   } catch (e) {
     log.error('Failed to connect gateways:', e.message);
     process.exit(1);
@@ -645,7 +645,7 @@ async function boot() {
       sessions.close();
       learner.close();
       graph.close();
-      log.info('SPORE stopped cleanly.');
+      log.info('Spore Core stopped cleanly.');
     } catch (e) {
       log.error('Error during shutdown:', e.message);
     }
@@ -803,7 +803,7 @@ module.exports = { boot, startHealthServer };
 
 if (require.main === module) {
   boot().catch(e => {
-    console.error('SPORE boot failed:', e);
+    console.error('Spore Core boot failed:', e);
     process.exit(1);
   });
 }

@@ -891,12 +891,24 @@ class PluginManager {
       const meta = {};
       if (pane.schema) {
         for (const field of pane.schema) {
-          const v = slot[field.key];
+          // Resolution order: plugin slot in spore.json → schema-declared
+          // envFallback (e.g. ANTHROPIC_API_KEY) → schema default. The
+          // env fallback lets the wizard/operator persist provider keys
+          // straight to .env (which is bind-mounted + survives data
+          // wipes) without needing to also write the plugin slot. Without
+          // this fallback, a /data wipe leaves env keys live but the
+          // settings UI shows the fields blank.
+          const slotV = slot[field.key];
+          const envV = field.envFallback ? process.env[field.envFallback] : undefined;
+          const hasSlot = slotV !== undefined && slotV !== null && slotV !== '';
+          const hasEnv = envV !== undefined && envV !== null && envV !== '';
+          const resolved = hasSlot ? slotV : (hasEnv ? envV : undefined);
           if (field.secret) {
             values[field.key] = '';
-            meta[field.key] = { isSet: v !== undefined && v !== null && v !== '' };
+            meta[field.key] = { isSet: hasSlot || hasEnv };
           } else {
-            values[field.key] = v !== undefined ? v : (field.default !== undefined ? field.default : null);
+            values[field.key] = resolved !== undefined ? resolved
+              : (field.default !== undefined ? field.default : null);
           }
         }
       }

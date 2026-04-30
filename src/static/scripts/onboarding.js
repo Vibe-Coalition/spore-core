@@ -171,7 +171,7 @@ function _obStartHero() {
   const host = document.getElementById('ob-hero-mark');
   if (!host) return;
   _obStopHero();
-  host.innerHTML = `<svg viewBox="-1 -1 2 2" width="160" height="160" style="overflow:visible" aria-label="SPORE">
+  host.innerHTML = `<svg viewBox="-1 -1 2 2" width="160" height="160" style="overflow:visible" aria-label="Spore Core">
     <g data-hero-spokes stroke="currentColor" stroke-width="0.04" stroke-linecap="round">
       ${_OB_PETALS.map((_, i) => `<line data-i="${i}" x1="0" y1="0"></line>`).join('')}
     </g>
@@ -1419,7 +1419,7 @@ function startUserWizard() {
   if (headMark && window.BRAND?.chatLogo) headMark.innerHTML = window.BRAND.chatLogo;
   // Repaint the header copy for guest context.
   document.getElementById('ob-title').textContent = 'Set up your account';
-  document.getElementById('ob-subtitle').textContent = `Welcome to ${(window.BRAND?.Agent || 'SPORE')}.`;
+  document.getElementById('ob-subtitle').textContent = `Welcome to ${(window.BRAND?.Agent || 'Spore Core')}.`;
   _obRenderDots();
   _obRenderThemeGrid();
   _obShowStep(1);

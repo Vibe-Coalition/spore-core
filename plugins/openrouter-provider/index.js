@@ -55,7 +55,7 @@ module.exports = function register(api) {
       apiKey,
       headers: {
         'HTTP-Referer': process.env.OPENROUTER_REFERER || config.openrouterReferer || slot.referer || 'https://spore.local',
-        'X-Title': config.openrouterTitle || slot.title || (config.displayName || 'SPORE'),
+        'X-Title': config.openrouterTitle || slot.title || (config.displayName || 'Spore Core'),
       },
       timeoutMs: config.apiTimeoutMs || 120000,
     });
@@ -147,10 +147,13 @@ module.exports = function register(api) {
     description: 'Single key, hundreds of models. Use model strings like `openrouter/anthropic/claude-haiku-4-5` in tier routing.',
     schema: [
       { key: 'apiKey', label: 'OPENROUTER_API_KEY', type: 'password', secret: true,
+        envFallback: 'OPENROUTER_API_KEY',
         help: 'OpenRouter API key (sk-or-…).' },
       { key: 'baseUrl', label: 'Base URL (optional)', type: 'text',
+        envFallback: 'OPENROUTER_BASE_URL',
         help: 'Default https://openrouter.ai/api/v1.' },
       { key: 'referer', label: 'HTTP-Referer (attribution)', type: 'text',
+        envFallback: 'OPENROUTER_REFERER',
         help: 'OpenRouter requires a Referer for free-tier; defaults to https://spore.local.' },
     ],
   });

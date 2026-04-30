@@ -352,7 +352,7 @@ module.exports = function register(api) {
     }
     const sendRes = await sendEmail(api, {
       to: cfg.address,
-      subject: 'SPORE email self-test',
+      subject: 'Spore Core email self-test',
       body: `Self-test at ${new Date().toISOString()} — if you see this, SMTP from ${cfg.address} is working.`,
     });
     if (sendRes.error) {

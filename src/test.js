@@ -44,14 +44,14 @@ async function runTests() {
   if (!fs.existsSync(pre.graphDbPath)) {
     const seedSql = fs.readFileSync(path.join(__dirname, 'seed-graph.sql'), 'utf8')
       .replace(/AGENT_ID/g, 'spore')
-      .replace(/AGENT_NAME/g, 'SPORE');
+      .replace(/AGENT_NAME/g, 'Spore Core');
     const tmpSeed = path.join(os.tmpdir(), 'spore-test-seed.sql');
     fs.writeFileSync(tmpSeed, seedSql);
     try {
       execSync(`sqlite3 "${pre.graphDbPath}" < "${tmpSeed}"`, { stdio: 'pipe' });
     } catch (e) {
       console.error('\nTests need sqlite3 and a seedable graph path. Install sqlite3, or run:\n');
-      console.error(`  sed -e 's/AGENT_ID/spore/g' -e 's/AGENT_NAME/SPORE/g' seed-graph.sql | sqlite3 "${pre.graphDbPath}"\n`);
+      console.error(`  sed -e 's/AGENT_ID/spore/g' -e "s/AGENT_NAME/Spore Core/g" seed-graph.sql | sqlite3 "${pre.graphDbPath}"\n`);
       process.exit(1);
     }
   }
@@ -131,7 +131,7 @@ async function runTests() {
   assertContains(basicPrompt, 'Channel Awareness', 'Prompt contains Channel Awareness');
   assertContains(basicPrompt, 'Anti-Patterns', 'Prompt contains Anti-Patterns');
   assertContains(basicPrompt, 'Available Tools', 'Prompt contains tool descriptions');
-  assertContains(basicPrompt, 'SPORE', 'Prompt identifies as SPORE');
+  assertContains(basicPrompt, 'Spore Core', 'Prompt identifies as Spore Core');
   
   // Test prompt with channel context
   const channelPrompt = graph.buildSystemPrompt({

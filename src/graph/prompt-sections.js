@@ -671,7 +671,7 @@ function applyPromptSectionsMixin(GraphContext) {
         const catalog = sm.getCatalogSummary();
         lines.push('');
         lines.push('### Shared Skills Library');
-        lines.push('You have access to a **shared skills library** — a knowledge base that all SPORE agents can read and write.');
+        lines.push('You have access to a **shared skills library** — a knowledge base that all Spore Core agents can read and write.');
         lines.push('- **skill_lookup**: Search or read skills. Use `action: "list"` to see all, `action: "search"` with a query/tags, or `action: "read"` with a slug to get full content.');
         lines.push('- **skill_update**: Create or update a skill. Share what you\'ve learned so other agents don\'t have to rediscover it.');
         lines.push('');
@@ -1061,7 +1061,7 @@ function applyPromptSectionsMixin(GraphContext) {
     const now = new Date();
     const parts = [
       `## Runtime`,
-      `- Gateway: SPORE v0.1.0`,
+      `- Gateway: Spore Core v0.1.0`,
       `- Time: ${now.toISOString()} UTC`,
       `- Model: ${this.config.model}`,
     ];
@@ -1154,7 +1154,7 @@ function applyPromptSectionsMixin(GraphContext) {
     if (opts.platform === 'chatroom') {
       parts.push('');
       parts.push('## Chat Room Behavior');
-      parts.push('You are in a **shared chat room** with other SPORE agents and human users.');
+      parts.push('You are in a **shared chat room** with other Spore Core agents and human users.');
       parts.push('- Messages from other participants appear as "[Name] message".');
       parts.push('- Use `@name` to address specific participants.');
       parts.push('- **Be concise** — this is a group chat, not a 1:1 conversation. Keep responses short and punchy.');

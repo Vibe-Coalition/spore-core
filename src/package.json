@@ -25,7 +25,8 @@
     "nodemailer": "^6.9.16",
     "imapflow": "^1.0.0",
     "mailparser": "^3.7.0",
-    "@huggingface/transformers": "^3.5.0"
+    "@huggingface/transformers": "^3.5.0",
+    "@teng-lin/agent-fetch": "^0.1.6"
   },
   "engines": {
     "node": ">=22.0.0"

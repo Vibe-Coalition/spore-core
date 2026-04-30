@@ -2398,7 +2398,7 @@ class WebGateway {
 
     const indexPath = path.join(serveDir, 'index.html');
     if (!fs.existsSync(indexPath)) {
-      const name = this.config.displayName || this.config.agentId || 'SPORE';
+      const name = this.config.displayName || this.config.agentId || 'Spore Core';
       fs.writeFileSync(indexPath, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${name}</title><style>*{margin:0;padding:0;box-sizing:border-box}body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0f;color:#e0e0e0;font-family:system-ui,sans-serif}h1{font-size:2.5rem;opacity:.8}</style></head><body><h1>${name}</h1></body></html>`);
     }
 
