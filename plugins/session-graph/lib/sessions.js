@@ -100,7 +100,7 @@ function upsertSessionNode(learner, opts = {}) {
   if (cwd) {
     const projRes = projects.upsertProject(learner, userId || 'anon', {
       cwd, project: opts.project, gitBranch: opts.gitBranch, gitHash: opts.gitHash,
-      projectType: opts.projectType, sporeMd: opts.sporeMd, acornMd: opts.acornMd, tree: opts.tree,
+      projectType: opts.projectType, sporeMd: opts.sporeMd, tree: opts.tree,
       tools: opts.tools, os: opts.os, arch: opts.arch,
       sessionId,
     });

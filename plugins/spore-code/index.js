@@ -538,15 +538,10 @@ function buildProjectContextSection(api, opts) {
       parts.push(`- Project tree (${pc.tree.length} entries${pc.tree.length > shown.length ? `, showing first ${shown.length}` : ''}):`);
       for (const path of shown) parts.push(`    ${path}`);
     }
-    // Dual-read sporeMd ?? acornMd: post-rebrand binaries send sporeMd
-    // (project file SPORE.md). Pre-rebrand acorn binaries send acornMd
-    // (ACORN.md). Accept both for one release; remove the acornMd
-    // fallback in v1.1+.
-    const projectMarkdown = pc.sporeMd || pc.acornMd;
-    if (projectMarkdown) {
+    if (pc.sporeMd) {
       parts.push('');
       parts.push('### SPORE.md (project instructions from the user)');
-      parts.push(projectMarkdown);
+      parts.push(pc.sporeMd);
     }
     if (opts.cachedProjectNodeId) {
       parts.push('');
@@ -1195,20 +1190,13 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/auth',     { public: true, handler: (req, res) => handleAuth(api, req, res) });
   api.registerWebRoute('GET',  '/sessions', { public: true, handler: (req, res) => handleSessions(api, req, res) });
 
-  // Public-URL aliases. Two are registered:
-  //   /api/spore-code/* → /api/plugins/spore-code/*  (canonical, post-rebrand)
-  //   /api/acorn/*      → /api/plugins/spore-code/*  (legacy — kept forever
-  //                       because deployed acorn-cli v0.x binaries hardcode
-  //                       /api/acorn/auth in their wire protocol).
-  // Core's request handler walks all plugins' aliases at request time,
-  // applies CORS for cross-origin clients, and rewrites the full path.
-  // When the plugin is uninstalled both aliases disappear with the rest
-  // of the plugin and the routes 404 like any other unknown path.
+  // Public-URL alias: /api/spore-code/* → /api/plugins/spore-code/*.
+  // Core's request handler walks plugin aliases at request time,
+  // applies CORS for cross-origin clients, and rewrites the path.
+  // The pre-rebrand /api/acorn/* alias was dropped — we did the rename
+  // before the app had wide distribution, so there are no deployed v0.x
+  // binaries to maintain compatibility with.
   api.registerPathAlias('spore-code', {
-    cors: true,
-    notFoundCode: 'SPORE_CODE_ROUTE_NOT_FOUND',
-  });
-  api.registerPathAlias('acorn', {
     cors: true,
     notFoundCode: 'SPORE_CODE_ROUTE_NOT_FOUND',
   });
@@ -1602,5 +1590,5 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/spore-code + /api/acorn (legacy) aliases + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
+  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/spore-code alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
 };

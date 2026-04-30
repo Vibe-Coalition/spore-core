@@ -130,13 +130,10 @@ function upsertProject(learner, userId, pc) {
   }
   if (manifestAttrs.length) replaceAttrs('manifest', manifestAttrs, 6);
 
-  // conventions: SPORE.md (or legacy ACORN.md). Stable unless user
-  // edits the file. Replace wholesale — cheaper than diffing.
-  // Dual-read sporeMd ?? acornMd for one release: post-rebrand binaries
-  // send sporeMd, pre-rebrand send acornMd.
-  const projectMarkdown = pc.sporeMd || pc.acornMd;
-  if (projectMarkdown) {
-    replaceAttrs('conventions', [projectMarkdown], 7);
+  // conventions: SPORE.md. Stable unless user edits the file.
+  // Replace wholesale — cheaper than diffing.
+  if (pc.sporeMd) {
+    replaceAttrs('conventions', [pc.sporeMd], 7);
   }
 
   // tree: one attribute per path. Skip on cached hits to keep writes

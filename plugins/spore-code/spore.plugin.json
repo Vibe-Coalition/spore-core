@@ -5,5 +5,5 @@
   "kind": "tool",
   "entry": "./index.js",
   "depends": ["session-graph"],
-  "description": "Spore Code (CLI) integration: /api/spore-code/auth + /api/spore-code/sessions HTTP routes plus the legacy /api/acorn/* aliases (Go-binary protocol contract — deployed binaries hit this), session:start / session:end WS handlers, the Spore Code settings pane, the project-context + plan-mode prompt sections, the webapp self-register team-key gate, and the graph_update temp-tagging middleware. Depends on session-graph for the underlying session-node persistence + note_discovery tool + recall-skip heuristic + per-turn breadcrumb helpers. Uninstall to disable Spore Code entirely; uninstall session-graph first if it has no other dependents."
+  "description": "Spore Code (CLI) integration: /api/spore-code/auth + /api/spore-code/sessions HTTP routes (the Go-binary protocol contract), session:start / session:end WS handlers, the Spore Code settings pane, the project-context + plan-mode prompt sections, the webapp self-register team-key gate, and the graph_update temp-tagging middleware. Depends on session-graph for the underlying session-node persistence + note_discovery tool + recall-skip heuristic + per-turn breadcrumb helpers. Uninstall to disable Spore Code entirely; uninstall session-graph first if it has no other dependents."
 }

@@ -437,11 +437,9 @@ function loadConfigFresh() {
   //      webapp user account).
   //   2. Spore Code /auth gate (Go binaries pass the key to obtain a
   //      Bearer token).
-  // Reads SPORE_INVITE_KEY first, falls back to legacy SPORE_ACORN_KEY
-  // for backward compat. Plugins read `config.inviteKey` from the host
-  // config; nobody owns this slot from a plugin.
+  // Plugins read `config.inviteKey` from the host config; nobody owns
+  // this slot from a plugin.
   if (process.env.SPORE_INVITE_KEY) config.inviteKey = process.env.SPORE_INVITE_KEY;
-  else if (process.env.SPORE_ACORN_KEY) config.inviteKey = process.env.SPORE_ACORN_KEY;
 
   // Public URL (set by manager during creation, or derived from legacy ingress vars)
   if (process.env.SPORE_PUBLIC_URL) {

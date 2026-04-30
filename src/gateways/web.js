@@ -3088,10 +3088,8 @@ class WebGateway {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
         }
-        // Accept inviteKey (direct field name, current login UI),
-        // teamKey (older login UI), or acornKey (pre-rebrand legacy
-        // clients — kept for back-compat with deployed Spore Code).
-        const typedKey = String(parsed.inviteKey || parsed.teamKey || parsed.acornKey || '').trim();
+        // Accept inviteKey (direct field name) or teamKey (older login UI).
+        const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
         if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid invite key' })); return;
