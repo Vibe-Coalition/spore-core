@@ -2962,13 +2962,30 @@ class WebGateway {
         const available = mgr.listAvailable?.() || [];
         const panes = mgr.getSettingsPanes?.() || [];
         const panesById = Object.fromEntries(panes.map(p => [p.pluginId, p]));
-        // Recommended defaults — wizard preselects these on render.
+        // Provider plugins are tagged so the wizard's provider tile
+        // picker (step 'pp') can build itself dynamically — no more
+        // hardcoded OB_PROVIDERS / OB_PROVIDER_PLUGIN_MAP. The block
+        // carries everything the wizard needs: provider name (which
+        // becomes the tile id), label (display), defaultBaseUrl
+        // (placeholder), capabilities (informational).
+        const providers = mgr.getProviders?.() || [];
+        const providerByPluginId = new Map();
+        for (const pr of providers) providerByPluginId.set(pr.pluginId, pr);
         const RECOMMENDED_ON = new Set(['session-graph', 'acorn-cli', 'embedder-gemma', 'whisper']);
-        const enriched = available.map(p => ({
-          ...p,
-          recommended: RECOMMENDED_ON.has(p.id),
-          pane: panesById[p.id] || null,
-        }));
+        const enriched = available.map(p => {
+          const pr = providerByPluginId.get(p.id);
+          return {
+            ...p,
+            recommended: RECOMMENDED_ON.has(p.id),
+            pane: panesById[p.id] || null,
+            provider: pr ? {
+              name: pr.name,
+              label: pr.label || pr.name,
+              defaultBaseUrl: pr.defaultBaseUrl || null,
+              capabilities: pr.capabilities || {},
+            } : null,
+          };
+        });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ plugins: enriched }));
         return;

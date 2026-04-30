@@ -14,23 +14,14 @@ const OB_STEP_MAP = {
   user: ['1', '2', 'u3', 'u4'],
 };
 
-// Map: provider-plugin id → wizard provider tile id. Provider plugins
-// are filtered OUT of the plugins step and toggled instead from the
-// provider type-picker (step 'pp'). Picking a provider tile flips its
-// plugin's enabled flag in _obData.plugins so the standard onboarding
-// finish handler installs/skips the right ones.
-const OB_PROVIDER_PLUGIN_MAP = {
-  'anthropic-provider':  'anthropic',
-  'openai-provider':     'openai',
-  'openrouter-provider': 'openrouter',
-  'gemini-provider':     'gemini',
-  'local-oai-provider':  'local',  // tile labelled "OAI-compatible endpoint"; saves baseUrl/apiKey to localModelBaseUrl/localModelApiKey
-};
-
-// Reverse map for committing picker selections back into _obData.plugins.
-const OB_TILE_TO_PLUGIN = Object.fromEntries(
-  Object.entries(OB_PROVIDER_PLUGIN_MAP).map(([plugin, tile]) => [tile, plugin])
-);
+// Provider tile ↔ plugin id maps. Populated at runtime by
+// _obLoadProviderTiles from /api/onboarding/plugins (which tags each
+// plugin's `provider` block when registerProvider was called). This
+// replaces the hardcoded list — adding a provider plugin (with
+// registerSettingsPane + registerProvider) makes its tile appear in
+// step 'pp' automatically.
+let OB_PROVIDER_PLUGIN_MAP = {}; // pluginId → tile.id (== provider name)
+let OB_TILE_TO_PLUGIN = {};      // tile.id → pluginId
 const OB_OPTIONAL_BY_MODE = {
   operator: new Set([7, 8]),
   user: new Set(),
@@ -54,6 +45,12 @@ function startOnboarding() {
   if (headMark && window.BRAND?.chatLogo) headMark.innerHTML = window.BRAND.chatLogo;
   const titleEl = document.getElementById('ob-title');
   if (titleEl && window.BRAND?.Agent) titleEl.textContent = `Welcome to ${window.BRAND.Agent}`;
+  // Load the provider tile list dynamically from registered provider
+  // plugins BEFORE any step renders. Async but step 1 doesn't reference
+  // provider data, so it's safe to fire-and-forget — by the time the
+  // operator clicks through to step 'pp' the tiles are populated.
+  // Re-renders happen automatically when _obShowStep('pp') runs.
+  _obLoadProviderTiles().catch(() => {});
   _obRenderDots();
   _obRenderThemeGrid();
   _obRenderProvidersList();
@@ -237,13 +234,92 @@ function _obPickTheme(name) {
   });
 }
 
-const OB_PROVIDERS = [
-  { id: 'anthropic', label: 'Anthropic', sub: 'Claude models', fields: [{ key: 'apiKey', type: 'password', placeholder: 'sk-ant-...' }], modelsPlaceholder: 'claude-sonnet-4-6, claude-haiku-4-5' },
-  { id: 'openai', label: 'OpenAI', sub: 'GPT + Whisper', fields: [{ key: 'apiKey', type: 'password', placeholder: 'sk-...' }, { key: 'baseUrl', type: 'text', placeholder: 'optional base url' }], modelsPlaceholder: 'gpt-4o, gpt-4o-mini' },
-  { id: 'openrouter', label: 'OpenRouter', sub: 'Many models, one key', fields: [{ key: 'apiKey', type: 'password', placeholder: 'sk-or-...' }], modelsPlaceholder: 'anthropic/claude-sonnet-4-6' },
-  { id: 'gemini', label: 'Google Gemini', sub: 'Multimodal: vision + audio + video', fields: [{ key: 'apiKey', type: 'password', placeholder: 'AIza...' }], modelsPlaceholder: 'gemini-2.5-flash, gemini-2.0-pro' },
-  { id: 'local', label: 'OAI-compatible endpoint', sub: 'Any OpenAI-style API — vLLM, LM Studio, Ollama, llama.cpp, self-hosted, third-party. Use prefix oai/<model>.', fields: [{ key: 'baseUrl', type: 'text', placeholder: 'http://your-host:8080/v1' }, { key: 'apiKey', type: 'password', placeholder: 'optional bearer token' }], modelsPlaceholder: 'glm-5.1-fp8, llama-3.1-8b', authHeaderField: true },
-];
+// Built-in provider tiles. Populated at wizard-show time by
+// _obLoadProviderTiles from /api/onboarding/plugins. Each entry is
+// derived from a provider plugin's pane schema:
+//   id             — provider name (e.g. 'anthropic', 'zai'); == tile.id
+//   label          — plugin's `label` opt on registerProvider
+//   sub            — pane.description, truncated
+//   fields         — pane.schema entries with type 'text' or 'password',
+//                    keyed by their `key` field (apiKey, baseUrl, ...)
+//   modelsPlaceholder — best-effort hint per provider name (no plugin
+//                       opt for this yet; falls back to a generic string)
+//   authHeaderField — true when the schema declares an authHeader key
+//                     (only the local-oai-provider currently does)
+//   pluginId       — used to flip _obData.plugins[<id>].enabled
+let OB_PROVIDERS = [];
+
+// Hint table — provider name → models placeholder shown in the tier
+// picker. Populated alongside the dynamic tile load. Plugins can
+// override their hint by adding `placeholder` to a schema field with
+// key 'modelExamples', but most use this fallback table.
+const OB_MODEL_PLACEHOLDER_HINTS = {
+  anthropic:  'claude-sonnet-4-6, claude-haiku-4-5',
+  openai:     'gpt-4o, gpt-4o-mini',
+  openrouter: 'anthropic/claude-sonnet-4-6',
+  gemini:     'gemini-2.5-flash, gemini-2.0-pro',
+  local:      'glm-5.1-fp8, llama-3.1-8b',
+  zai:        'glm-4.6, glm-z1-flash',
+};
+
+async function _obLoadProviderTiles() {
+  let plugins = [];
+  try {
+    const r = await fetch('/api/onboarding/plugins');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    plugins = Array.isArray(data?.plugins) ? data.plugins : [];
+  } catch (e) {
+    console.warn('[wizard] failed to load provider tiles:', e?.message || e);
+    return;
+  }
+  const tiles = [];
+  const pluginMap = {};
+  const tileMap = {};
+  for (const p of plugins) {
+    if (!p?.provider || !p.provider.name) continue;
+    const schema = p.pane?.schema || [];
+    // Filter to text/password fields the wizard knows how to render.
+    // Skip the `tab: 'providers'` marker fields. The wizard only needs
+    // the basic apiKey + baseUrl + maybe authHeader / referer; richer
+    // fields are reachable via Settings post-onboarding.
+    const fields = schema
+      .filter(f => f && (f.type === 'password' || f.type === 'text'))
+      .map(f => ({
+        key: f.key,
+        type: f.type,
+        placeholder: f.placeholder || f.help || '',
+      }));
+    const tile = {
+      id: p.provider.name,
+      label: p.provider.label || p.name || p.id,
+      sub: (p.pane?.description || '').slice(0, 200),
+      fields,
+      modelsPlaceholder: OB_MODEL_PLACEHOLDER_HINTS[p.provider.name] || '',
+      authHeaderField: schema.some(f => f?.key === 'authHeader'),
+      pluginId: p.id,
+    };
+    tiles.push(tile);
+    pluginMap[p.id] = tile.id;
+    tileMap[tile.id] = p.id;
+  }
+  // Stable order: prefer the canonical built-ins first when present,
+  // then any extras (e.g. zai or future plugins) alphabetically.
+  const PRIMARY = ['anthropic', 'openai', 'openrouter', 'gemini', 'local'];
+  tiles.sort((a, b) => {
+    const ai = PRIMARY.indexOf(a.id);
+    const bi = PRIMARY.indexOf(b.id);
+    if (ai !== -1 || bi !== -1) {
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    }
+    return a.label.localeCompare(b.label);
+  });
+  OB_PROVIDERS = tiles;
+  OB_PROVIDER_PLUGIN_MAP = pluginMap;
+  OB_TILE_TO_PLUGIN = tileMap;
+}
 
 // Provider step is state-driven now: operator adds providers one at a
 // time via a small flow (Add → pick type → fill form → save → card).
@@ -262,9 +338,19 @@ let _obCaptureEditorForm = null; // closure exposed by _obRenderProviderEditor; 
 // _obProviderEntries (which step '5' renders as a fillable card) AND
 // flips _obData.plugins[<plugin-id>].enabled so the existing
 // onboarding/complete handler installs the right plugins.
-function _obRenderProviderTypePicker() {
+async function _obRenderProviderTypePicker() {
   const root = document.getElementById('ob-pp-grid');
   if (!root) return;
+  // If the loader hasn't populated tiles yet (operator clicked
+  // through fast), show a placeholder + await the fetch then re-render.
+  if (!Array.isArray(OB_PROVIDERS) || OB_PROVIDERS.length === 0) {
+    root.innerHTML = '<div class="ob-note" style="opacity:0.6">Loading providers…</div>';
+    await _obLoadProviderTiles();
+    if (!Array.isArray(OB_PROVIDERS) || OB_PROVIDERS.length === 0) {
+      root.innerHTML = '<div class="ob-error">No provider plugins available. Install at least one before continuing.</div>';
+      return;
+    }
+  }
   const isPicked = (id) => _obProviderEntries.some(e => e.kind === 'builtin' && e.id === id);
   const isPickedCustom = () => _obProviderEntries.some(e => e.kind === 'custom');
 
