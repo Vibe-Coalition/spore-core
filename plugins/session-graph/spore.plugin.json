@@ -5,5 +5,5 @@
   "kind": "tool",
   "entry": "./index.js",
   "depends": [],
-  "description": "Generic session-graph primitives: long-conversation tracking as graph nodes (session-end summary + distillation), per-(user, cwd) project nodes, the note_discovery tool, failure-fix discovery synthesis, per-turn round breadcrumbs, and the looksLikeCodingTurn recall-skip heuristic. Other plugins (acorn-cli, future CLI plugins, web/Discord session trackers) declare this as a dependency and consume the primitives via require('../session-graph/lib/...')."
+  "description": "Generic session-graph primitives: long-conversation tracking as graph nodes (session-end summary + distillation), per-(user, cwd) project nodes, the note_discovery tool, failure-fix discovery synthesis, per-turn round breadcrumbs, and the looksLikeCodingTurn recall-skip heuristic. Other plugins (spore-code, future CLI plugins, web/Discord session trackers) declare this as a dependency and consume the primitives via require('../session-graph/lib/...')."
 }

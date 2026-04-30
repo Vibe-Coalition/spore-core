@@ -88,7 +88,7 @@ module.exports = function register(api) {
       'Creates a dedicated `script:<projectId>:<name>` graph node with body + meta + stats aspects, ' +
       'and a lightweight summary entry on the project node\'s `scripts_index` aspect. ' +
       'Bodies are scanned for common credential shapes (sk-, ghp_, AWS keys, password=, etc.) and rejected unless `force:true`. ' +
-      'On success returns a `materializePath` (default `.acorn/scratch/<name>.<ext>`) the CLI can use to write the body to disk for immediate exec — the graph stays the source of truth.',
+      'On success returns a `materializePath` (default `.spore-code/scratch/<name>.<ext>`) the CLI can use to write the body to disk for immediate exec — the graph stays the source of truth.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -104,7 +104,7 @@ module.exports = function register(api) {
     },
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
-      if (!projectId) return { ok: false, error: 'no project context — save_project_script only works inside an acorn session' };
+      if (!projectId) return { ok: false, error: 'no project context — save_project_script only works inside a Spore Code session' };
       const learner = api._appContext?.learner;
       return scripts.upsertScriptNode(learner, {
         projectId,
@@ -147,7 +147,7 @@ module.exports = function register(api) {
   api.registerTool('get_project_script', {
     namespaced: false,
     description:
-      'Fetch the full body + meta + stats for one script saved on the current project. Returns `materializePath` so the CLI can write the body to .acorn/scratch/<name>.<ext> if it\'s not already there (handles the "fresh laptop" case automatically).',
+      'Fetch the full body + meta + stats for one script saved on the current project. Returns `materializePath` so the CLI can write the body to .spore-code/scratch/<name>.<ext> if it\'s not already there (handles the "fresh laptop" case automatically).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -167,8 +167,8 @@ module.exports = function register(api) {
     namespaced: false,
     description:
       'Mirror a structural code-index summary (clusters, tech stack, entry points, hot paths, stats) into the current project node\'s `code_graph` aspect. ' +
-      'Call this AFTER running the local `architecture` tool — pass its result through. The summary survives across sessions and shows up in the SPORE graph viewer alongside other project memory. ' +
-      'Authoritative symbol/CALLS data stays in the client-side .acorn/index.db; this is the cheap, persistable summary.',
+      'Call this AFTER running the local `architecture` tool — pass its result through. The summary survives across sessions and shows up in the Spore Core graph viewer alongside other project memory. ' +
+      'Authoritative symbol/CALLS data stays in the client-side .spore-code/index.db; this is the cheap, persistable summary.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -183,7 +183,7 @@ module.exports = function register(api) {
     },
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
-      if (!projectId) return { ok: false, error: 'no project context — update_code_graph_summary only works inside an acorn session' };
+      if (!projectId) return { ok: false, error: 'no project context — update_code_graph_summary only works inside a Spore Code session' };
       const learner = api._appContext?.learner;
       const userId = ctx?.userId || ctx?.userName || 'anon';
       const cwd = ctx?.projectContext?.cwd || ctx?.projectContext?.clientCwd;
@@ -240,7 +240,7 @@ module.exports = function register(api) {
     },
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
-      if (!projectId) return { ok: false, error: 'no project context — decisions_new only works inside an acorn session' };
+      if (!projectId) return { ok: false, error: 'no project context — decisions_new only works inside a Spore Code session' };
       const learner = api._appContext?.learner;
       const author = input?.author || ctx?.userName || ctx?.userId || null;
       return decisions.newDecision(learner, {

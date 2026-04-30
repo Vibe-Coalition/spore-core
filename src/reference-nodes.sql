@@ -34,7 +34,7 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), '/workspace/ — persistent writable workspace (scripts, files, projects)', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/workspace/web/ — publicly served at your web URL', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/data/ — config and databases (.env lives here)', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), '/app/ — SPORE runtime (mostly read-only)', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '/app/ — Spore Core runtime (mostly read-only)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Never log or print full API key values', 9, 'seed', 'seed');
 
 
@@ -50,7 +50,7 @@ INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-search-
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
   ((SELECT MAX(id) FROM aspects), 'PREFER grep over exec+grep/awk/sed for any code search — returns structured {file, line, text} hits, no shell quoting pitfalls', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'PREFER glob over exec+find/ls for filename lookups — returns paths relative to the search root', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'For acorn (CLI) sessions both tools execute on the user''s machine via the CLI; for web/telegram/etc. they run server-side over /workspace', 7, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'For Spore Code (CLI) sessions both tools execute on the user''s machine via the CLI; for web/telegram/etc. they run server-side over /workspace', 7, 'seed', 'seed');
 
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-search-tools', 'caps_and_filters', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
@@ -219,48 +219,48 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 
 
 -- ═══════════════════════════════════════════════════════════════
--- NODE: Acorn Client Context
+-- NODE: Spore Code Client Context
 -- ═══════════════════════════════════════════════════════════════
 
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-acorn-context', 'Acorn Client Context', 'reference',
-  'How Acorn sessions map to a scoped project on the user''s machine and how to work within that client-side environment.', 8, 'seed');
+VALUES ('ref-spore-code-context', 'Spore Code Client Context', 'reference',
+  'How Spore Code sessions map to a scoped project on the user''s machine and how to work within that client-side environment.', 8, 'seed');
 
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'scope', 9, 'seed');
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-spore-code-context', 'scope', 9, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Acorn sessions are bound to a specific project CWD on the user''s machine. Stay inside that project unless the user explicitly redirects you.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Spore Code sessions are bound to a specific project CWD on the user''s machine. Stay inside that project unless the user explicitly redirects you.', 10, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'File reads, writes, edits, and execs are sandboxed to projectContext.cwd by default (scope=strict). When the user wants you to touch paths outside cwd (shared dotfiles, sibling repo, home dir), tell them to run /scope expanded — that lifts the cwd containment AND clears this sandbox warning from your prompt.', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Do NOT use /workspace or other container-local paths for Acorn project work. Those are server-side paths, not the user''s repo.', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'When you mention files back to the user, use the client project path from the Acorn context or tool results, not a container path.', 8, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'Do NOT use /workspace or other container-local paths for Spore Code project work. Those are server-side paths, not the user''s repo.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'When you mention files back to the user, use the client project path from the Spore Code context or tool results, not a container path.', 8, 'seed', 'seed');
 
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'workflow', 8, 'seed');
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-spore-code-context', 'workflow', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Acorn CLI and Acorn Companion connect to the same server runtime, but each session preserves its own project scope and local-machine context.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Spore Code and Spore Go connect to the same server runtime, but each session preserves its own project scope and local-machine context.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use the normal coding tools inside that provided project scope. Keep replies concise and execution-focused.', 8, 'seed', 'seed');
 
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'project_context', 9, 'seed');
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-spore-code-context', 'project_context', 9, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Acorn sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, acornMd, tree, tools, OS, Arch. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'projectContext.acornMd is the full ACORN.md from the user''s project (capped at 4KB). Read it for project-specific conventions, available scripts, naming patterns. If it''s missing, suggest /init to scaffold one.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, OS, Arch. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'projectContext.sporeMd is the full SPORE.md from the user''s project (capped at 4KB). Read it for project-specific conventions, available scripts, naming patterns. If it''s missing, suggest /init to scaffold one.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'projectContext.tools lists detected build/runtime tools (e.g. ["go", "node", "git"]). Use these as a hint for which language ecosystem you''re in, but verify by reading actual project files before assuming.', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Per-(user, cwd) project nodes persist in the graph across sessions. Use graph_query to recall prior decisions, conventions, and discoveries from past acorn sessions in the same project.', 8, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'Per-(user, cwd) project nodes persist in the graph across sessions. Use graph_query to recall prior decisions, conventions, and discoveries from past Spore Code sessions in the same project.', 8, 'seed', 'seed');
 
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'mode', 9, 'seed');
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-spore-code-context', 'mode', 9, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
   ((SELECT MAX(id) FROM aspects), 'projectContext.mode is "plan" or "execute". In plan mode you MUST NOT call mutating tools (write_file, edit_file, exec, graph_update, etc.) — only read/search/query. Output the plan as prose and end with PLAN_READY on its own line; the user gets an approval modal.', 10, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Plan mode requires asking clarifying questions when material ambiguity exists. Emit them in the QUESTIONS: protocol — see the system prompt''s Plan Mode section for the exact format. JSON-fenced and prose forms are both accepted by the parser.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'On execute turns the plan-mode rules are gone and the full mutating toolset (write_file, edit_file, exec, etc.) is available. The acorn UI flips to execute mode automatically when the user approves the plan.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'On execute turns the plan-mode rules are gone and the full mutating toolset (write_file, edit_file, exec, etc.) is available. The Spore Code UI flips to execute mode automatically when the user approves the plan.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'For non-trivial plans, delegate parallel research with delegate_task({persona: "researcher", task: "..."}). The researcher persona has only web_search + web_fetch and returns a structured Findings/Caveats/Recommendation summary. Fan out 1-3 researchers per plan, wait for results, splice findings into the plan. Codebase reading stays in your own turns — sub-agents have no CLI bridge to the user''s files.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'In plan mode, ALWAYS ask about tooling choices the user might care about: language/runtime, framework, package manager, build tool, test runner, linter/formatter, type system, styling, database/ORM, auth, deployment target, state management. Skip a category only when the project doesn''t need it OR when the existing codebase already commits to a choice (check package.json, go.mod, pyproject.toml, etc. before asking).', 9, 'seed', 'seed');
 
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-acorn-context', 'client_routing', 8, 'seed');
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-spore-code-context', 'client_routing', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'For Acorn sessions, file ops (read_file, write_file, edit_file, exec, grep, glob) are FORWARDED to the user''s machine and executed by the CLI in-process. The "result" you see is what actually ran on their disk.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'If the CLI disconnects mid-tool, the call falls back to the SPORE container — which means it would run against /workspace, NOT the user''s project. Watch for tool errors that mention container paths instead of project paths and pause to reconnect.', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'For Spore Code sessions, file ops (read_file, write_file, edit_file, exec, grep, glob) are FORWARDED to the user''s machine and executed by the CLI in-process. The "result" you see is what actually ran on their disk.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'If the CLI disconnects mid-tool, the call falls back to the Spore Core container — which means it would run against /workspace, NOT the user''s project. Watch for tool errors that mention container paths instead of project paths and pause to reconnect.', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use grep/glob (native tools) instead of exec+grep/find for code search — structured results, no shell quoting issues. See ref-search-tools for caps and patterns.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'When the user asks about local state — "is the dev server up", "what''s in this file", "why is X slow", "did the build finish", "is port N open" — RUN THE TOOLS (exec, read_file, grep) and answer with the actual result. Do NOT respond like a remote chatbot ("I can''t see your machine, here''s how you could check"). For acorn sessions you ARE on the user''s box; behave like it.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'When the user asks about local state — "is the dev server up", "what''s in this file", "why is X slow", "did the build finish", "is port N open" — RUN THE TOOLS (exec, read_file, grep) and answer with the actual result. Do NOT respond like a remote chatbot ("I can''t see your machine, here''s how you could check"). For Spore Code sessions you ARE on the user''s box; behave like it.', 10, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'For project-wide listings, NEVER use exec ls -laR / exec find / exec tree — they walk node_modules and hit the 3-minute tool timeout. Use the glob tool (auto-skips noise dirs, capped at 500 paths) or read the Project Tree from the system prompt.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'When showing exec output / describing a project, FILTER noise dirs from your reply even if the tool returned them. Suppress: .git, node_modules, .venv, venv, __pycache__, dist, build, target, .next, .cache, .acorn, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode, *.egg-info, coverage, .nyc_output, .DS_Store. The user does not want to see node_modules in chat.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'When showing exec output / describing a project, FILTER noise dirs from your reply even if the tool returned them. Suppress: .git, node_modules, .venv, venv, __pycache__, dist, build, target, .next, .cache, .spore-code, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode, *.egg-info, coverage, .nyc_output, .DS_Store. The user does not want to see node_modules in chat.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'For things you CAN''T learn from the user''s machine — current library versions, framework docs, error messages you''ve never seen, "is X deprecated", recent breaking changes — use `web_search` (then `web_fetch` the best 1-3 results). Don''t guess from training data; the web is more current. See ref-web-search for caps + workflow patterns.', 9, 'seed', 'seed');
 
 
@@ -388,8 +388,8 @@ INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
   SELECT 'spore', 'ref-browser-automation', 'documents', 0.8, 'seed'
   WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-browser-automation');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'spore', 'ref-acorn-context', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-acorn-context');
+  SELECT 'spore', 'ref-spore-code-context', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-spore-code-context');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
   SELECT 'spore', 'ref-cross-agent-messaging', 'documents', 0.8, 'seed'
   WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-cross-agent-messaging');

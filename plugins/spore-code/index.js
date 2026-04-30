@@ -1,21 +1,21 @@
-// Acorn CLI plugin.
+// Spore Code plugin.
 //
 // Depends on the `session-graph` plugin (manifest's `depends` field) for
 // the generic primitives — session/project node persistence, the
 // note_discovery tool, the per-turn breadcrumb + failure-fix capture
-// helpers, and the recall-skip heuristic. Acorn-cli imports those via
+// helpers, and the recall-skip heuristic. spore-code imports those via
 // require('../session-graph/lib/...') and wires them into the agent
 // loop via the lifecycle hooks below.
 //
-// Acorn-cli's own surface (the parts that are genuinely
-// acorn-specific):
-//   • Reference-node SQL (5 ref-acorn-* migrations + graphcorn-discovery)
-//   • /api/acorn/auth + /api/acorn/sessions HTTP routes — the Go-binary
-//     wire-protocol contract (registerPathAlias rewrites /api/acorn/*
-//     to /api/plugins/spore-code/*).
+// spore-code's own surface (the parts that are genuinely Spore-Code-
+// specific):
+//   • Reference-node SQL (ref-spore-code-* + graphcorn-discovery)
+//   • /api/spore-code/auth + /api/spore-code/sessions HTTP routes — the
+//     Go-binary wire-protocol contract (registerPathAlias rewrites
+//     /api/spore-code/* to /api/plugins/spore-code/*).
 //   • WS handlers: session:start / session:end (Go-binary wire frames).
-//   • Project Context + Plan Mode prompt sections (acorn-specific UX:
-//     PHASE 1-6 plan mode, QUESTIONS marker, ACORN.md handling).
+//   • Project Context + Plan Mode prompt sections (Spore-Code-specific
+//     UX: PHASE 1-6 plan mode, QUESTIONS marker, SPORE.md handling).
 //   • Lifecycle hooks that call into session-graph's lib helpers:
 //       - afterTurn: failure-fix + round checkpoints + project activity
 //       - afterLearn: discovered_in edges + session-temp tagging
@@ -32,7 +32,7 @@
 const crypto = require('crypto');
 
 // ── Resolve the host invite key ────────────────────────────────────
-// The acorn-cli /auth endpoint validates incoming Go-binary connections
+// The spore-code /auth endpoint validates incoming Go-binary connections
 // against the host-level SPORE invite key (same key webapp self-register
 // uses). Stored in core's config.inviteKey slot; the plugin reads it
 // without owning it.
@@ -73,7 +73,7 @@ async function handleAuth(api, req, res) {
   const inviteKey = resolveInviteKey(api);
   if (!inviteKey) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'No SPORE invite key set on this instance', code: 'INVITE_KEY_NOT_CONFIGURED' }));
+    res.end(JSON.stringify({ error: 'No Spore Core invite key set on this instance', code: 'INVITE_KEY_NOT_CONFIGURED' }));
     return;
   }
   if (!username || typeof username !== 'string' || username.length > 32 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
@@ -102,19 +102,19 @@ async function handleAuth(api, req, res) {
     return;
   }
 
-  const acornSid = crypto.randomBytes(16).toString('hex');
-  webSessions.set(acornSid, {
+  const sporeSid = crypto.randomBytes(16).toString('hex');
+  webSessions.set(sporeSid, {
     user: username.toLowerCase().trim(),
     // 'cli' is core's generic CLI-class role — core's WS handler treats
     // any session with type 'cli' as a CLI client (sessionId-keyed
     // history, no graph-event broadcast, etc.). Plugin-specific role
-    // names like 'acorn' would couple core to this plugin.
+    // names like 'spore-code' would couple core to this plugin.
     type: 'cli',
     created: Date.now(),
   });
   api.getLogger().info(`Auth OK for user: ${username}`);
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, token: acornSid, user: username }));
+  res.end(JSON.stringify({ ok: true, token: sporeSid, user: username }));
 }
 
 async function handleSessions(api, req, res) {
@@ -129,11 +129,17 @@ async function handleSessions(api, req, res) {
     return;
   }
 
-  // Bearer token validation
+  // Bearer token validation. Accepts BOTH:
+  //   - CLI Bearer tokens issued by /api/spore-code/auth (type='cli')
+  //   - Webapp session sids issued by /api/auth/login (type='webapp'|'creator'|'admin')
+  // Both live in the same Map (web.js: `const _sessions = this._webSessions`),
+  // so the Bearer header is just the lookup key. This lets the Spore Go
+  // mobile app authenticate once via webapp creds and still see the
+  // user's CLI sessions in the same list.
   const authHeader = req.headers['authorization'] || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   const session = token ? webSessions.get(token) : null;
-  if (!session || session.type !== 'cli') {
+  if (!session || !session.user) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid or missing token' }));
     return;
@@ -315,7 +321,7 @@ function noteProjectActivity(api, opts, finalText, toolLog) {
 }
 
 // ── WS handlers: session:start / session:end ────────────────────────
-// graphcorn: session:start fires once per acorn launch right after the
+// graphcorn: session:start fires once per Spore Code launch right after the
 // WS handshake, before the first chat:submit. Creates a session-<id>
 // graph node + edge to the project node so everything captured during
 // the conversation has a graph anchor. Idempotent — flaky reconnects
@@ -438,7 +444,7 @@ function recordScriptOutcomeFromExecHandler(api, ws, msg) {
 }
 
 // codeGraphSummaryHandler — receives a structural-index summary
-// payload from the acorn CLI and writes it to the project node's
+// payload from Spore Code and writes it to the project node's
 // `code_graph` aspect via projectsLib.upsertProjectCodeGraph.
 //
 // Why this exists: until v0.7 we relied on the agent to call
@@ -477,17 +483,17 @@ function codeGraphSummaryHandler(api, ws, msg) {
 // ── Prompt sections ─────────────────────────────────────────────────
 // Acorn-specific prompt content. Originally lived inline in
 // src/graph/prompt-sections.js _buildRuntimeSection (~225 lines),
-// gated on opts.platform === 'cli'. Moved out so non-acorn turns
-// see ZERO acorn content and uninstalling the plugin removes both
+// gated on opts.platform === 'cli'. Moved out so non-cli turns
+// see ZERO cli-specific content and uninstalling the plugin removes both
 // blocks entirely.
 //
-// Project Context: emitted on every acorn turn, branches on cached
+// Project Context: emitted on every cli turn, branches on cached
 //   project node (short reference if already in graph) vs uncached
 //   (full inline tree + ACORN.md). Includes the "This Session" sub-
 //   block when the session-<id> node exists.
 //
 // Plan Mode: emitted when projectContext.mode === 'plan'. Verbatim
-//   port of the Python PLAN_PREFIX from acorn/cli.py — preserves the
+//   port of the Python PLAN_PREFIX from the legacy acorn/cli.py — preserves the
 //   QUESTIONS: marker format, JSON+prose accepted, the 'ask first
 //   then plan' rule, and the PHASE 1-6 structure.
 
@@ -574,9 +580,9 @@ function buildProjectContextSection(api, opts) {
 
   parts.push('');
   if (pc.scope === 'expanded') {
-    parts.push(`**Sandbox**: the user has run \`/scope expanded\`, lifting the cwd containment for this session. file operations may target any path on the user's machine — but the project root is still ${pc.cwd}, so write project files there unless the user has asked you to touch something elsewhere (shared dotfiles, a sibling repo, their home directory, etc.). Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart.`);
+    parts.push(`**Sandbox**: the user has run \`/scope expanded\`, lifting the cwd containment for this session. file operations may target any path on the user's machine — but the project root is still ${pc.cwd}, so write project files there unless the user has asked you to touch something elsewhere (shared dotfiles, a sibling repo, their home directory, etc.). Do NOT use /workspace/ or any server-side path — those live inside the Spore Core container and will be lost on restart.`);
   } else {
-    parts.push(`**Sandbox**: ALL file operations (read_file, write_file, edit_file, exec) are sandboxed to ${pc.cwd}. Paths outside that directory will be REJECTED by the tool executor on the user's machine. If the user explicitly asks you to touch a path outside ${pc.cwd}, tell them to run \`/scope expanded\` first to lift the sandbox. Do NOT use /workspace/ or any server-side path — those live inside the SPORE container and will be lost on restart. Write everything to ${pc.cwd}.`);
+    parts.push(`**Sandbox**: ALL file operations (read_file, write_file, edit_file, exec) are sandboxed to ${pc.cwd}. Paths outside that directory will be REJECTED by the tool executor on the user's machine. If the user explicitly asks you to touch a path outside ${pc.cwd}, tell them to run \`/scope expanded\` first to lift the sandbox. Do NOT use /workspace/ or any server-side path — those live inside the Spore Core container and will be lost on restart. Write everything to ${pc.cwd}.`);
   }
   parts.push('**Work style**: One or two tool calls per turn, not six. After each file write or command, briefly tell the user what you did and what is next. Do NOT batch many write_file calls in a single response — the user cannot see progress and it takes too long to generate.');
   // Project memory summary — counts only, never bodies. Cheap: pulls
@@ -1224,9 +1230,9 @@ module.exports = function register(api) {
   // older CLI is connected, or someone called the tool from a non-CLI
   // ctx (web/discord/cron). All return a clear error in that case so
   // the agent doesn't silently produce wrong results.
-  const requireAcornClient = (toolName) => () => ({
+  const requireSporeClient = (toolName) => () => ({
     ok: false,
-    error: `${toolName} runs on the user's machine via the acorn CLI; no acorn CLI v0.4.0+ client is currently connected to this session.`,
+    error: `${toolName} runs on the user's machine via the Spore Code CLI; no Spore Code v0.4.0+ client is currently connected to this session.`,
   });
 
   api.registerTool('index_codebase', {
@@ -1245,7 +1251,7 @@ module.exports = function register(api) {
         force:     { type: 'boolean', description: 'Re-parse every file even if mtime unchanged. Default false.' },
       },
     },
-    execute: requireAcornClient('index_codebase'),
+    execute: requireSporeClient('index_codebase'),
   });
 
   api.registerTool('search_symbols', {
@@ -1266,7 +1272,7 @@ module.exports = function register(api) {
         limit:    { type: 'number', description: 'Default 200, hard cap.' },
       },
     },
-    execute: requireAcornClient('search_symbols'),
+    execute: requireSporeClient('search_symbols'),
   });
 
   api.registerTool('trace_calls', {
@@ -1285,7 +1291,7 @@ module.exports = function register(api) {
         limit:     { type: 'number', description: 'Total edge cap; default and max 200.' },
       },
     },
-    execute: requireAcornClient('trace_calls'),
+    execute: requireSporeClient('trace_calls'),
   });
 
   api.registerTool('get_snippet', {
@@ -1302,7 +1308,7 @@ module.exports = function register(api) {
         end_line:   { type: 'number' },
       },
     },
-    execute: requireAcornClient('get_snippet'),
+    execute: requireSporeClient('get_snippet'),
   });
 
   api.registerTool('architecture', {
@@ -1311,7 +1317,7 @@ module.exports = function register(api) {
       'Produce a structured codebase summary: tech stack (file/symbol counts per language), clusters by top-level directory, entry points (Go main/init, JS main/bootstrap), hot paths (top-N symbols by inbound CALLS count), and coverage notes. ' +
       'Call this ONCE early in plan mode to orient yourself — far cheaper than grepping for "main" or reading package.json + go.mod.',
     inputSchema: { type: 'object', properties: {} },
-    execute: requireAcornClient('architecture'),
+    execute: requireSporeClient('architecture'),
   });
 
   api.registerTool('impact', {
@@ -1327,7 +1333,7 @@ module.exports = function register(api) {
         limit: { type: 'number', description: 'Total symbol cap; default 100, max 200.' },
       },
     },
-    execute: requireAcornClient('impact'),
+    execute: requireSporeClient('impact'),
   });
 
   api.registerTool('verify_implementation', {
@@ -1344,7 +1350,7 @@ module.exports = function register(api) {
         paths:  { type: 'array', items: { type: 'string' }, description: 'Repo-relative file paths; verifies every indexed symbol declared there.' },
       },
     },
-    execute: requireAcornClient('verify_implementation'),
+    execute: requireSporeClient('verify_implementation'),
   });
 
   // Prompt sections — Project Context (every acorn turn) + Plan Mode (when

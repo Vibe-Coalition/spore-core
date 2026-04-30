@@ -96,7 +96,7 @@ console.log('\nplugins/session-graph/lib/scripts.test.js\n');
   });
   ok('save returns ok=true',           r1.ok === true, JSON.stringify(r1));
   ok('save returns scriptNodeId',      typeof r1.scriptNodeId === 'string' && r1.scriptNodeId.startsWith('script:'));
-  ok('save returns materializePath',   r1.materializePath === '.acorn/scratch/list-pids.sh');
+  ok('save returns materializePath',   r1.materializePath === '.spore-code/scratch/list-pids.sh');
 
   // Save with a secret in the body — must reject.
   const r2 = scripts.upsertScriptNode(learner, {
@@ -127,7 +127,7 @@ console.log('\nplugins/session-graph/lib/scripts.test.js\n');
   ok('get returns ok',                       r4.ok === true);
   ok('get returns body',                     r4.body && r4.body.includes('ps -ef'));
   ok('get returns parsed meta',              r4.meta && r4.meta.description === 'list running pids matching a regex');
-  ok('get returns materializePath',          r4.materializePath === '.acorn/scratch/list-pids.sh');
+  ok('get returns materializePath',          r4.materializePath === '.spore-code/scratch/list-pids.sh');
 
   // Get for unknown name — error.
   const r5 = scripts.getScriptNode(learner, projectId, 'unknown-script');
@@ -175,8 +175,8 @@ console.log('\nplugins/session-graph/lib/scripts.test.js\n');
   // Seed legacy scratch_helpers aspect on the project node.
   db.prepare("INSERT INTO aspects (node_id, name, weight) VALUES (?, 'scratch_helpers', 5)").run(projectId);
   const aspId = db.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'scratch_helpers'").get(projectId).id;
-  db.prepare("INSERT INTO attributes (aspect_id, content, importance) VALUES (?, ?, 5)").run(aspId, '.acorn/scratch/get-lan-ip.js — print LAN IP');
-  db.prepare("INSERT INTO attributes (aspect_id, content, importance) VALUES (?, ?, 5)").run(aspId, '.acorn/scratch/gen-qr.sh — produce QR for given URL');
+  db.prepare("INSERT INTO attributes (aspect_id, content, importance) VALUES (?, ?, 5)").run(aspId, '.spore-code/scratch/get-lan-ip.js — print LAN IP');
+  db.prepare("INSERT INTO attributes (aspect_id, content, importance) VALUES (?, ?, 5)").run(aspId, '.spore-code/scratch/gen-qr.sh — produce QR for given URL');
   db.prepare("INSERT INTO attributes (aspect_id, content, importance) VALUES (?, ?, 5)").run(aspId, 'unparseable garbage line without separator');
 
   const m = scripts.migrateScratchHelpers(learner, projectId);

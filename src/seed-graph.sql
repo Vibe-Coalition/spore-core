@@ -174,7 +174,7 @@ VALUES (
   'AGENT_ID',
   'AGENT_NAME',
   'self',
-  'AI agent running on SPORE. Identity lives in this knowledge graph.',
+  'AI agent running on Spore Core. Identity lives in this knowledge graph.',
   10, 1, 'self', 'seed'
 );
 
@@ -259,15 +259,15 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
 
 
 -- ═══════════════════════════════════════════════════════════════
--- NODE 2: SPORE platform (node id kept as 'spore' for backward compat with existing edges)
+-- NODE 2: Spore Core platform (node id kept as 'spore' for backward compat with existing edges)
 -- ═══════════════════════════════════════════════════════════════
 
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
 VALUES (
   'spore',
-  'SPORE',
+  'Spore Core',
   'system',
-  'SPORE — secure AI agent platform. A persistent, learning agent that remembers conversations, builds knowledge over time, and tries to be genuinely useful.',
+  'Spore Core — secure AI agent platform. A persistent, learning agent that remembers conversations, builds knowledge over time, and tries to be genuinely useful.',
   9, 'seed'
 );
 
@@ -361,7 +361,7 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), '/workspace/ — persistent writable workspace (scripts, files, projects)', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/workspace/web/ — publicly served at your web URL', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/data/ — config and databases (.env lives here)', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), '/app/ — SPORE runtime (mostly read-only)', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '/app/ — Spore Core runtime (mostly read-only)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Never log or print full API key values', 9, 'seed', 'seed');
 
 -- ref-bfl-api (FLUX Image Generation) moved to plugins/flux/sql/install.sql.
@@ -427,11 +427,11 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'Actions: launch, navigate, click, type, scroll, screenshot, evaluate, close, status.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Set backend="playwright" only when you explicitly need the Playwright path.', 8, 'seed', 'seed');
 
--- ref-acorn-context moved to plugins/acorn-cli/sql/install.sql (phase 2.3a).
--- Operators who want acorn must install the acorn-cli plugin; fresh installs
--- without the plugin won't have any acorn-context ref content. The plugin's
+-- ref-spore-code-context moved to plugins/spore-code/sql/install.sql (phase 2.3a).
+-- Operators who want Spore Code must install the spore-code plugin; fresh installs
+-- without the plugin won't have any spore-code-context ref content. The plugin's
 -- install SQL is self-sufficient (creates the node + scope/workflow + the
--- spore→ref-acorn-context documents edge) so it works on both fresh installs
+-- spore→ref-spore-code-context documents edge) so it works on both fresh installs
 -- and after a clean uninstall+reinstall cycle.
 
 -- NODE: Cron & Startup Tasks
