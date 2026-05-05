@@ -3807,7 +3807,7 @@ class WebGateway {
         return;
       }
 
-      if (urlPath === '/api/tokens' || urlPath === '/api/activity-log' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch') || urlPath.startsWith('/api/benchmark')) {
+      if (urlPath === '/api/tokens' || urlPath === '/api/activity-log' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch') || urlPath.startsWith('/api/benchmark') || urlPath.startsWith('/api/queue')) {
         // Wizard bootstrap: allow the wizard's read-only/test endpoints
         // through WITHOUT auth when no webapp users exist yet AND the
         // wizard hasn't completed. This lets us defer user-account
