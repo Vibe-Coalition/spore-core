@@ -23,6 +23,7 @@ const { AgentLoop } = require('./agent');
 const { Learner, Maintainer, Janitor, ChannelDistiller, BackupWorker, GraphMaintenanceCoordinator } = require('./workers');
 const { GatewayManager } = require('./gateways');
 const { PluginManager } = require('./plugins');
+const { RuntimeJobQueue } = require('./runtime');
 
 async function ensureGraph(config, log) {
   const dbPath = config.graphDbPath;
@@ -396,7 +397,6 @@ async function boot() {
   log.info(`Channel distiller initialized (interval=${config.channelDistillerIntervalMinutes || 120}m, idle=${config.channelDistillerIdleMinutes || 45}m)`);
 
   const backup = new BackupWorker(config, log, learner.db, config.graphDbPath, graphRegistry);
-  backup.start();
 
   const graphMaintenance = new GraphMaintenanceCoordinator(config, log, llmClient, learner, graphRegistry, {
     maintainer,
@@ -429,6 +429,32 @@ async function boot() {
   agent.graphContext = graph;
   tools._agent = agent;
   graphMaintenance.agent = agent;
+
+  let runtimeQueue = null;
+  if (config.runtimeQueueEnabled !== false) {
+    runtimeQueue = new RuntimeJobQueue(config, log, sessions, {
+      agent,
+      tools,
+      learner,
+      maintainer,
+      janitor,
+      backup,
+      graphMaintenance,
+      channelDistiller,
+    });
+    runtimeQueue.init();
+    tools._jobQueue = runtimeQueue;
+    agent._jobQueue = runtimeQueue;
+    graphMaintenance.queue = runtimeQueue;
+    log.info(`Runtime job queue initialized (lanes=${Object.entries(runtimeQueue.laneLimits).map(([k, v]) => `${k}:${v}`).join(', ')})`);
+  } else {
+    log.warn('Runtime job queue disabled; falling back to legacy direct worker execution.');
+  }
+
+  const runRuntimeWorker = (kind, payload, meta, fallback) => {
+    if (runtimeQueue?.submitWorkerJob) return runtimeQueue.submitWorkerJob(kind, payload, meta);
+    return typeof fallback === 'function' ? fallback() : null;
+  };
 
   const gateways = new GatewayManager(config, log, agent, tools);
   graph._gatewayManager = gateways;
@@ -651,9 +677,17 @@ async function boot() {
       if (config.maintainerIdleOnly && agent.activeRuns.size > 0) {
         log.info('[heartbeat] Skipping maintenance — conversations active');
       } else {
-        cycleSummary = await maintainer.runMaintenance();
+        cycleSummary = await runRuntimeWorker('maintenance.run', { opts: {} }, {
+          lane: 'maintenance',
+          priority: 25,
+          route: 'heartbeat',
+        }, () => maintainer.runMaintenance({}));
         if (config.graphMaintenanceEnabled !== false) {
-          await graphMaintenance.run({ reason: 'heartbeat' });
+          await runRuntimeWorker('graphMaintenance.run', { opts: { reason: 'heartbeat' } }, {
+            lane: 'maintenance',
+            priority: 22,
+            route: 'heartbeat',
+          }, () => graphMaintenance.run({ reason: 'heartbeat' }));
         }
       }
     } catch (e) {
@@ -700,12 +734,20 @@ async function boot() {
   log.info(`[maintainer] First cycle delayed ${Math.round(maintainerDelay / 60000)}m after boot`);
   setTimeout(async () => {
     try {
-      const cycleSummary = await maintainer.runMaintenance();
+      const cycleSummary = await runRuntimeWorker('maintenance.run', { opts: {} }, {
+        lane: 'maintenance',
+        priority: 25,
+        route: 'boot-maintenance',
+      }, () => maintainer.runMaintenance({}));
       if (cycleSummary && config.proactive?.enabled) {
         dispatchProactive(cycleSummary);
       }
       if (config.graphMaintenanceEnabled !== false) {
-        await graphMaintenance.run({ reason: 'boot' });
+        await runRuntimeWorker('graphMaintenance.run', { opts: { reason: 'boot' } }, {
+          lane: 'maintenance',
+          priority: 22,
+          route: 'boot-maintenance',
+        }, () => graphMaintenance.run({ reason: 'boot' }));
       }
     } catch (e) {
       log.error('[boot-maintenance] Error:', e.message);
@@ -718,12 +760,24 @@ async function boot() {
   const janitorTimer = setInterval(async () => {
     if (config.janitorEnabled === false) return;
     if (config.maintainerIdleOnly && agent.activeRuns.size > 0) return;
-    try { await janitor.runJanitor(); } catch (e) { log.error('[janitor] Interval error:', e.message); }
+    try {
+      await runRuntimeWorker('janitor.run', { opts: {} }, {
+        lane: 'maintenance',
+        priority: 20,
+        route: 'janitor.interval',
+      }, () => janitor.runJanitor({}));
+    } catch (e) { log.error('[janitor] Interval error:', e.message); }
   }, janitorIntervalMs);
   log.info(`[janitor] Scheduled every ${Math.round(janitorIntervalMs / 60000)}m, first cycle in ${Math.round(janitorBootDelay / 60000)}m`);
   setTimeout(async () => {
     if (config.janitorEnabled === false) return;
-    try { await janitor.runJanitor(); } catch (e) { log.error('[boot-janitor] Error:', e.message); }
+    try {
+      await runRuntimeWorker('janitor.run', { opts: {} }, {
+        lane: 'maintenance',
+        priority: 20,
+        route: 'janitor.boot',
+      }, () => janitor.runJanitor({}));
+    } catch (e) { log.error('[boot-janitor] Error:', e.message); }
   }, janitorBootDelay);
 
   // Channel distiller: channel conversations do not have a reliable
@@ -733,13 +787,48 @@ async function boot() {
   const channelDistillerTimer = setInterval(async () => {
     if (config.channelDistillerEnabled === false) return;
     if (config.maintainerIdleOnly && agent.activeRuns.size > 0) return;
-    try { await channelDistiller.run(); } catch (e) { log.error('[channel-distill] Interval error:', e.message); }
+    try {
+      await runRuntimeWorker('channelDistill.run', { opts: {} }, {
+        lane: 'background',
+        priority: 12,
+        route: 'channel-distill.interval',
+      }, () => channelDistiller.run({}));
+    } catch (e) { log.error('[channel-distill] Interval error:', e.message); }
   }, channelDistillerIntervalMs);
   log.info(`[channel-distill] Scheduled every ${Math.round(channelDistillerIntervalMs / 60000)}m, idle threshold ${config.channelDistillerIdleMinutes || 45}m, first cycle in ${Math.round(channelDistillerBootDelay / 60000)}m`);
   setTimeout(async () => {
     if (config.channelDistillerEnabled === false) return;
-    try { await channelDistiller.run(); } catch (e) { log.error('[boot-channel-distill] Error:', e.message); }
+    try {
+      await runRuntimeWorker('channelDistill.run', { opts: {} }, {
+        lane: 'background',
+        priority: 12,
+        route: 'channel-distill.boot',
+      }, () => channelDistiller.run({}));
+    } catch (e) { log.error('[boot-channel-distill] Error:', e.message); }
   }, channelDistillerBootDelay);
+
+  const backupIntervalMs = Math.max(1, Number(config.graphBackupIntervalMinutes) || 60) * 60_000;
+  const backupTimer = setInterval(async () => {
+    if (config.graphBackupEnabled === false) return;
+    try {
+      await runRuntimeWorker('backup.run', { opts: { force: false } }, {
+        lane: 'maintenance',
+        priority: 15,
+        route: 'backup.interval',
+      }, () => backup.runBackups({ force: false }));
+    } catch (e) { log.error('[backup] Interval error:', e.message); }
+  }, backupIntervalMs);
+  log.info(`[backup] Scheduled through runtime queue every ${Math.round(backupIntervalMs / 60000)}m, retention=${config.graphBackupRetention || 20}`);
+  setTimeout(async () => {
+    if (config.graphBackupEnabled === false) return;
+    try {
+      await runRuntimeWorker('backup.run', { opts: { force: false } }, {
+        lane: 'maintenance',
+        priority: 15,
+        route: 'backup.boot',
+      }, () => backup.runBackups({ force: false }));
+    } catch (e) { log.error('[backup] boot snapshot error:', e.message); }
+  }, 120_000);
 
   log.info(`Heartbeat scheduled every ${config.heartbeatIntervalMinutes || 45} minutes`);
 
@@ -750,6 +839,8 @@ async function boot() {
       clearInterval(wakeupSweepTimer);
       clearInterval(janitorTimer);
       clearInterval(channelDistillerTimer);
+      clearInterval(backupTimer);
+      try { runtimeQueue?.stop?.(); } catch (e) { console.warn('[app] runtimeQueue.stop failed: ' + e.message); }
       try { backup.stop(); } catch (e) { console.warn('[app] backup.stop failed: ' + e.message); }
       tools._killAllTracked();
       await plugins.shutdownAll();
@@ -833,7 +924,7 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
           'to the sending spore only — your user will NOT see it unless you use notify_user.',
         ].filter(v => v !== null).join('\n');
 
-        const resultPromise = agent.processMessage({
+        const agentOpts = {
           content: invokeLines,
           channelId: invokeSessionKey,
           channelName: 'invoke',
@@ -842,7 +933,16 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
           isDm: true,
           trigger: 'invoke',
           platform: 'api',
-        });
+        };
+
+        const resultPromise = tools?._jobQueue?.submitAgentTurn
+          ? tools._jobQueue.submitAgentTurn(agentOpts, {
+              lane: 'interactive',
+              priority: 95,
+              route: 'api.invoke',
+              allowInterjection: false,
+            })
+          : agent.processMessage(agentOpts);
 
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Invoke timed out')), timeoutMs)

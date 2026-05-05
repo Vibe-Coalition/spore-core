@@ -190,7 +190,7 @@ class TelegramGateway {
 
     let result;
     try {
-      result = await this.agent.processMessage({
+      const agentOpts = {
         content: labeledContent,
         messageContent: labeledContent,
         media: mediaBlocks,
@@ -206,7 +206,15 @@ class TelegramGateway {
         platform: 'telegram',
         sourceId: targetId,
         suppressLearning: !policy.learn,
-      });
+      };
+      result = this.agent._jobQueue?.submitAgentTurn
+        ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
+            lane: 'channel',
+            priority: 85,
+            route: 'telegram.message',
+            allowInterjection: true,
+          })
+        : await this.agent.processMessage(agentOpts);
     } catch (e) {
       clearInterval(typingInterval);
       this.log.error(`[telegram] Agent error in ${channelName}: ${e.message}`);
@@ -423,7 +431,7 @@ class TelegramGateway {
     setImmediate(async () => {
       try {
         this._api('sendChatAction', { chat_id: target.chatId, action: 'typing' }).catch(() => {});
-        const result = await this.agent.processMessage({
+        const agentOpts = {
           content: prompt,
           messageContent: prompt,
           channelId: targetId,
@@ -442,7 +450,15 @@ class TelegramGateway {
           platform: 'telegram',
           sourceId: targetId,
           suppressLearning: true,
-        });
+        };
+        const result = this.agent._jobQueue?.submitAgentTurn
+          ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
+              lane: 'deferred',
+              priority: 55,
+              route: 'telegram.proactive',
+              allowInterjection: false,
+            })
+          : await this.agent.processMessage(agentOpts);
 
         const text = result?.text;
         if (!text || text.trim() === 'NO_REPLY' || text.includes('NO_REPLY')) {

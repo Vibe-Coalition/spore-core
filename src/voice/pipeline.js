@@ -1,7 +1,7 @@
 /**
  * voice/pipeline.js — Voice pipeline orchestrator
  *
- * Coordinates: audio in → STT → agent processMessage → TTS → audio out
+ * Coordinates: audio in → STT → queued agent turn → TTS → audio out
  * Used by both Discord voice channels and Telegram voice notes.
  */
 
@@ -53,13 +53,19 @@ class VoicePipeline {
     this._unsubPlugins = null;
   }
 
+  _submitAgentTurn(agentLoop, opts, meta = {}) {
+    const queue = agentLoop?._jobQueue;
+    if (queue?.submitAgentTurn) return queue.submitAgentTurn(opts, meta);
+    return agentLoop?.processMessage(opts);
+  }
+
   /**
    * Full voice pipeline: audio buffer → transcription → agent → TTS audio.
    *
    * @param {Buffer} audioBuffer - Raw audio data (PCM, OGG, etc.)
    * @param {string} mimeType - Audio MIME type
    * @param {object} agentLoop - The AgentLoop instance
-   * @param {object} messageOpts - Options for agent.processMessage() (channelId, userId, etc.)
+   * @param {object} messageOpts - Options for an agent turn (channelId, userId, etc.)
    * @returns {Promise<{transcription: string, responseText: string, audioBuffer: Buffer|null, error: string|null}>}
    */
   async process(audioBuffer, mimeType, agentLoop, messageOpts) {
@@ -85,11 +91,17 @@ class VoicePipeline {
     // Step 2: Agent — process transcription exactly like a text message
     let responseText;
     try {
-      const result = await agentLoop.processMessage({
+      const result = await this._submitAgentTurn(agentLoop, {
         ...messageOpts,
         content: messageOpts.isDm ? transcription : `[${messageOpts.userName}]: ${transcription}`,
         messageContent: transcription,
         modality: 'voice',
+      }, {
+        lane: 'channel',
+        priority: 88,
+        route: 'voice.message',
+        sessionKey: messageOpts.channelId || messageOpts.channelName || messageOpts.userId || null,
+        allowInterjection: true,
       });
 
       if (result?.skipped) {
@@ -134,11 +146,17 @@ class VoicePipeline {
   async processFromText(transcription, agentLoop, messageOpts) {
     let responseText;
     try {
-      const result = await agentLoop.processMessage({
+      const result = await this._submitAgentTurn(agentLoop, {
         ...messageOpts,
         content: messageOpts.isDm ? transcription : `[${messageOpts.userName}]: ${transcription}`,
         messageContent: transcription,
         modality: 'voice',
+      }, {
+        lane: 'channel',
+        priority: 88,
+        route: 'voice.text',
+        sessionKey: messageOpts.channelId || messageOpts.channelName || messageOpts.userId || null,
+        allowInterjection: true,
       });
       if (result?.skipped) return { transcription, responseText: null, audioBuffer: null, error: 'Agent busy' };
       responseText = result?.text;

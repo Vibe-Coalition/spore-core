@@ -742,6 +742,12 @@ class WebGateway {
     }
   }
 
+  _submitAgentTurn(opts, meta = {}) {
+    const queue = this.tools?._jobQueue;
+    if (queue?.submitAgentTurn) return queue.submitAgentTurn(opts, meta);
+    return this.tools?._agent?.processMessage(opts);
+  }
+
   /**
    * Wire the settings store's reactive subscribers to the WebGateway's
    * caches. Fires on every applyPatch (via transport) and on plugin
@@ -1512,7 +1518,7 @@ class WebGateway {
         // bubble in the CLI even though the prompt was never posted
         // to the cli session.
         this._sendToSession(sessionId, { type: 'chat:start', sessionId });
-        const result = await agent.processMessage({
+        const result = await this._submitAgentTurn({
           content: prompt,
           channelId: sessionId,
           channelName: 'control-panel',
@@ -1540,6 +1546,11 @@ class WebGateway {
               }
             } catch (e) { this.log.warn('[web] startsWith failed: ' + e.message); }
           },
+        }, {
+          lane: 'deferred',
+          priority: 55,
+          route: 'web.proactive',
+          allowInterjection: false,
         });
 
         const text = result?.text;
@@ -5334,7 +5345,20 @@ class WebGateway {
               } : undefined,
             };
 
-            let result = await this.tools._agent.processMessage(agentOpts);
+            let result = await this._submitAgentTurn(agentOpts, {
+              lane: 'interactive',
+              priority: isCli ? 105 : 100,
+              route: isCli ? 'cli.chat' : 'web.chat',
+              allowInterjection: true,
+            });
+
+            if (result?.interjected) {
+              this.log.info(`[ws] Interjection accepted for ${sessionId}`);
+              const payload = { type: 'chat:status', status: 'interjected' };
+              if (isCli) { this._sendToSession(sessionId, payload); }
+              else { try { ws.send(JSON.stringify(payload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
+              return;
+            }
 
             // Handle interjection: session was busy, try to inject into running loop
             if (result.skipped) {
@@ -5370,7 +5394,12 @@ class WebGateway {
                 // Re-send chat:start for the retry
                 if (isCli) { this._sendToSession(sessionId, { type: 'chat:start', sessionId }); }
                 else { try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
-                result = await this.tools._agent.processMessage(agentOpts);
+                result = await this._submitAgentTurn(agentOpts, {
+                  lane: 'interactive',
+                  priority: isCli ? 105 : 100,
+                  route: isCli ? 'cli.chat.retry' : 'web.chat.retry',
+                  allowInterjection: false,
+                });
               } catch (waitErr) {
                 this.log.error(`[ws] Interjection wait failed: ${waitErr.message}`);
                 const errPayload = { type: 'chat:error', error: 'Session busy — try again in a moment' };
@@ -5425,7 +5454,7 @@ class WebGateway {
           try {
             ws.send(JSON.stringify({ type: 'voice:user-text', text: msg.content }));
             ws.send(JSON.stringify({ type: 'voice:thinking' }));
-            const result = await this.tools._agent.processMessage({
+            const result = await this._submitAgentTurn({
               content: msg.content,
               channelId: sessionId, channelName: 'voice-call',
               userId: ws._user || 'operator',
@@ -5438,6 +5467,11 @@ class WebGateway {
               onToolUse: (toolName) => {
                 try { ws.send(JSON.stringify({ type: 'voice:tool', tool: toolName })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               },
+            }, {
+              lane: 'interactive',
+              priority: 100,
+              route: 'web.voice',
+              allowInterjection: true,
             });
             const resp = {
               type: 'voice:response', transcription: null, text: result?.text,
@@ -6051,11 +6085,22 @@ class WebGateway {
         const coordinator = this.tools?._graphMaintenance;
         if (!coordinator) return jsonRes({ error: 'graph maintenance coordinator not available' }, 503);
         const body = await jsonBody().catch(() => ({}));
-        const result = await coordinator.maintainGraph(slug, {
-          force: body.force !== false,
-          includeActive: true,
-          reason: body.reason || 'manual',
-        });
+        const payload = {
+          slug,
+          opts: {
+            force: body.force !== false,
+            includeActive: true,
+            reason: body.reason || 'manual',
+          },
+        };
+        const result = this.tools?._jobQueue?.submitWorkerJob
+          ? await this.tools._jobQueue.submitWorkerJob('graphMaintenance.maintainGraph', payload, {
+              lane: 'maintenance',
+              priority: 35,
+              route: 'graph.maintenance.manual',
+              graph: slug,
+            })
+          : await coordinator.maintainGraph(slug, payload.opts);
         return jsonRes(result, result.ok ? 200 : 400);
       } catch (e) {
         return jsonRes({ error: e.message }, 500);
@@ -6394,6 +6439,44 @@ class WebGateway {
       return;
     }
 
+    // ── Runtime queue status / control ──
+    if (urlPath === '/api/queue/status' && req.method === 'GET') {
+      try {
+        const queue = this.tools?._jobQueue;
+        if (!queue) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'runtime queue not available' })); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(queue.getStats()));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/queue/jobs' && req.method === 'GET') {
+      try {
+        const queue = this.tools?._jobQueue;
+        if (!queue) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'runtime queue not available' })); return; }
+        const queueParams = new URL(req.url, 'http://x').searchParams;
+        const status = queueParams.get('status') || null;
+        const limit = Number(queueParams.get('limit') || 100);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jobs: queue.listJobs({ status, limit }) }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    const queueControlMatch = urlPath.match(/^\/api\/queue\/jobs\/([^/]+)\/(cancel|retry)$/);
+    if (queueControlMatch && req.method === 'POST') {
+      try {
+        const queue = this.tools?._jobQueue;
+        if (!queue) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'runtime queue not available' })); return; }
+        const id = decodeURIComponent(queueControlMatch[1]);
+        const action = queueControlMatch[2];
+        const out = action === 'cancel' ? queue.cancelJob(id, 'operator cancelled') : queue.retryJob(id);
+        res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
     // ── Janitor on-demand + status + recycling bin ──
     if (urlPath === '/api/janitor/run' && req.method === 'POST') {
       try {
@@ -6405,7 +6488,14 @@ class WebGateway {
           return;
         }
         this._janitorRunJob = { state: 'running', started: Date.now(), error: null, result: null };
-        janitor.runJanitor({ force: true })
+        const run = this.tools?._jobQueue?.submitWorkerJob
+          ? this.tools._jobQueue.submitWorkerJob('janitor.run', { opts: { force: true } }, {
+              lane: 'maintenance',
+              priority: 30,
+              route: 'janitor.manual',
+            })
+          : janitor.runJanitor({ force: true });
+        Promise.resolve(run)
           .then(r => { this._janitorRunJob = { state: 'done', started: this._janitorRunJob.started, completed: Date.now(), result: r }; })
           .catch(e => { this._janitorRunJob = { state: 'error', started: this._janitorRunJob.started, completed: Date.now(), error: e?.message || String(e) }; });
         res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -7185,7 +7275,7 @@ class WebGateway {
         const sessionKey = `research-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         // Fire and forget — the agent's graph_update calls will broadcast via
         // graphEvents and the viewer will pick them up over its existing WS.
-        agent.processMessage({
+        const researchRun = this._submitAgentTurn({
           content: prompt,
           channelId: sessionKey,
           channelName: 'research',
@@ -7194,7 +7284,15 @@ class WebGateway {
           trigger: 'dm',
           platform: 'web',
           isDm: true,
-        }).catch(e => this.log.warn(`[research] agent run failed: ${e.message}`));
+        }, {
+          lane: 'background',
+          priority: 15,
+          route: 'graph.research',
+          graph: req._graphApiSlug || null,
+          persistent: true,
+          allowInterjection: false,
+        });
+        Promise.resolve(researchRun).catch(e => this.log.warn(`[research] agent run failed: ${e.message}`));
 
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionKey, nodeCount: ids.length }));
@@ -7325,7 +7423,7 @@ class WebGateway {
         // messages and blow the upstream context → 504 from the LLM proxy).
         // The prompt is self-contained; it doesn't need any prior turns.
         const sessionKey = `${mode}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        agent.processMessage({
+        const graphEditRun = this._submitAgentTurn({
           content: prompt,
           channelId: sessionKey,
           channelName: mode,
@@ -7334,7 +7432,15 @@ class WebGateway {
           trigger: 'channel',
           platform: 'web',
           isDm: false,
-        }).catch(e => this.log.warn(`[${mode}] agent run failed: ${e.message}`));
+        }, {
+          lane: 'background',
+          priority: 20,
+          route: `graph.${mode}`,
+          graph: req._graphApiSlug || null,
+          persistent: true,
+          allowInterjection: false,
+        });
+        Promise.resolve(graphEditRun).catch(e => this.log.warn(`[graph:${mode}] agent run failed: ${e.message}`));
 
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionKey, sourceId, targetId }));

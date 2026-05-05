@@ -102,9 +102,34 @@ class SessionManager {
         fired       INTEGER NOT NULL DEFAULT 0,
         fired_at    INTEGER,
         failed      INTEGER NOT NULL DEFAULT 0,
-        error       TEXT
+        error       TEXT,
+        queue_job_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_wakeups_fire_at ON wakeups(fire_at, fired);
+
+      CREATE TABLE IF NOT EXISTS runtime_jobs (
+        id            TEXT PRIMARY KEY,
+        kind          TEXT NOT NULL,
+        lane          TEXT NOT NULL,
+        priority      INTEGER NOT NULL DEFAULT 1,
+        status        TEXT NOT NULL DEFAULT 'queued',
+        session_key   TEXT,
+        route         TEXT,
+        graph         TEXT,
+        run_at        INTEGER NOT NULL,
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        max_attempts  INTEGER NOT NULL DEFAULT 1,
+        payload       TEXT NOT NULL,
+        result        TEXT,
+        error         TEXT,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        started_at    INTEGER,
+        completed_at  INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_runtime_jobs_ready ON runtime_jobs(status, run_at, priority);
+      CREATE INDEX IF NOT EXISTS idx_runtime_jobs_session ON runtime_jobs(session_key, status);
+      CREATE INDEX IF NOT EXISTS idx_runtime_jobs_kind ON runtime_jobs(kind, status);
 
       CREATE TABLE IF NOT EXISTS tasks (
         id           TEXT PRIMARY KEY,
@@ -154,6 +179,10 @@ class SessionManager {
     const cols = this.db.prepare("PRAGMA table_info(sessions)").all();
     if (!cols.some(c => c.name === 'plan_mode')) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0");
+    }
+    const wakeupCols = this.db.prepare("PRAGMA table_info(wakeups)").all();
+    if (!wakeupCols.some(c => c.name === 'queue_job_id')) {
+      this.db.exec("ALTER TABLE wakeups ADD COLUMN queue_job_id TEXT");
     }
   }
   

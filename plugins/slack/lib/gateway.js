@@ -358,7 +358,7 @@ class SlackGateway {
 
     try {
       const policy = resolveSourcePolicy(this.config, 'slack', channelId);
-      const result = await this.agent.processMessage({
+      const agentOpts = {
         content: merged,
         messageContent: merged,
         channelId,
@@ -394,7 +394,15 @@ class SlackGateway {
         onError: (err) => {
           this.log.error(`[slack] Agent error in #${last.channelName}:`, err.message);
         },
-      });
+      };
+      const result = this.agent._jobQueue?.submitAgentTurn
+        ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
+            lane: 'channel',
+            priority: 85,
+            route: 'slack.message',
+            allowInterjection: true,
+          })
+        : await this.agent.processMessage(agentOpts);
 
       await cleanupStall();
       ch._lastIntermediateAt = 0;

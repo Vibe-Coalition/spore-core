@@ -9,6 +9,7 @@
 const { Maintainer } = require('./maintainer');
 const { Janitor } = require('./janitor');
 const graphEvents = require('../graph/events');
+const { DatabaseSync } = require('node:sqlite');
 
 const DEFAULT_INTERVAL_MINUTES = 120;
 const DEFAULT_BATCH_SIZE = 4;
@@ -57,6 +58,7 @@ class GraphMaintenanceCoordinator {
     this.activeJanitor = deps.janitor || null;
     this.backup = deps.backup || null;
     this.agent = deps.agent || null;
+    this.queue = deps.queue || null;
     this._running = false;
     this._locks = new Set();
     this._lastRunAt = null;
@@ -352,7 +354,7 @@ class GraphMaintenanceCoordinator {
     } catch {}
 
     this.stats.lastKbResearchAt = queuedAt;
-    this.agent.processMessage({
+    const agentOpts = {
       content: prompt,
       channelId: sessionKey,
       channelName: 'general-kb-research',
@@ -362,7 +364,40 @@ class GraphMaintenanceCoordinator {
       platform: 'system',
       isDm: false,
       memoryEnvelope,
-    }).then(result => {
+    };
+    if (this.queue?.submitWorkerJob) {
+      this.queue.submitWorkerJob('generalKbResearch.run', {
+        slug,
+        nodeIds,
+        agentOpts,
+      }, {
+        id: `general-kb-research-${slug}-${nowMs}`,
+        persistent: true,
+        lane: 'background',
+        priority: 10,
+        route: 'general-kb-research',
+        graph: slug,
+        maxAttempts: 2,
+      });
+    } else {
+      Promise.resolve(this.runGeneralKbResearchJob({ slug, nodeIds, agentOpts }))
+        .catch(e => this.log.warn(`[general-kb-research] ${slug} failed: ${e.message}`));
+    }
+
+    return { ok: true, queued: nodeIds.length, nodes: nodeIds, sessionKey };
+  }
+
+  async runGeneralKbResearchJob({ slug, nodeIds = [], agentOpts = null } = {}) {
+    if (!slug) throw new Error('generalKbResearch.run requires slug');
+    if (!this.agent?.processMessage) throw new Error('agent unavailable');
+    const graph = this.registry?.get?.(slug);
+    if (!graph) throw new Error(`graph not found: ${slug}`);
+    const dbPath = this.registry?.getDbPath?.(slug);
+    if (!dbPath) throw new Error(`graph db path not found: ${slug}`);
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      const result = await this.agent.processMessage(agentOpts || {});
       this._markGeneralKbResearchCompleted(db, nodeIds, {
         completedAt: new Date().toISOString(),
         resultPreview: String(result?.text || result?.content || '').slice(0, 500),
@@ -375,13 +410,13 @@ class GraphMaintenanceCoordinator {
           detail: `${nodeIds.length} node(s) researched`,
         });
       } catch {}
-    }).catch(e => {
+      return { ok: true, nodes: nodeIds, text: result?.text || null, iterations: result?.iterations };
+    } catch (e) {
       this.stats.kbResearchErrors++;
       this._markGeneralKbResearchFailed(db, nodeIds, {
         failedAt: new Date().toISOString(),
         error: (e.message || String(e)).slice(0, 300),
       });
-      this.log.warn(`[general-kb-research] ${slug} failed: ${e.message}`);
       try {
         graphEvents.emit('change', {
           op: 'general-kb-research:fail',
@@ -390,9 +425,10 @@ class GraphMaintenanceCoordinator {
           detail: (e.message || '').slice(0, 120),
         });
       } catch {}
-    });
-
-    return { ok: true, queued: nodeIds.length, nodes: nodeIds, sessionKey };
+      throw e;
+    } finally {
+      try { db.close(); } catch {}
+    }
   }
 
   _selectGeneralKbResearchCandidates(db, { batchSize = 1 } = {}) {

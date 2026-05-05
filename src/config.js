@@ -123,6 +123,15 @@ const DEFAULTS = {
   generalKbResearchEnabled: true,      // SPORE_GENERAL_KB_RESEARCH_ENABLED=false to disable background KB enrichment
   generalKbResearchIntervalHours: 24,  // SPORE_GENERAL_KB_RESEARCH_INTERVAL_HOURS
   generalKbResearchBatchSize: 1,       // SPORE_GENERAL_KB_RESEARCH_BATCH_SIZE
+  runtimeQueueEnabled: true,           // SPORE_RUNTIME_QUEUE_ENABLED=false to bypass central runtime queue
+  runtimeQueueLaneLimits: {            // SPORE_RUNTIME_QUEUE_LANE_LIMITS='{"interactive":2,...}'
+    interactive: 2,
+    channel: 1,
+    deferred: 1,
+    learner: 1,
+    maintenance: 1,
+    background: 1,
+  },
   graphBackupEnabled: true,          // SPORE_BACKUP_ENABLED=false to disable
   graphBackupIntervalMinutes: 60,    // SPORE_BACKUP_INTERVAL_MINUTES
   graphBackupRetention: 20,          // SPORE_BACKUP_RETENTION — rolling count kept
@@ -597,6 +606,15 @@ function loadConfigFresh() {
     const n = Number(process.env.SPORE_GENERAL_KB_RESEARCH_BATCH_SIZE);
     if (Number.isFinite(n) && n > 0) config.generalKbResearchBatchSize = Math.floor(n);
   }
+  if (process.env.SPORE_RUNTIME_QUEUE_ENABLED === 'false') config.runtimeQueueEnabled = false;
+  if (process.env.SPORE_RUNTIME_QUEUE_LANE_LIMITS) {
+    try {
+      const limits = JSON.parse(process.env.SPORE_RUNTIME_QUEUE_LANE_LIMITS);
+      if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
+        config.runtimeQueueLaneLimits = { ...(config.runtimeQueueLaneLimits || {}), ...limits };
+      }
+    } catch {}
+  }
   if (process.env.SPORE_BACKUP_ENABLED === 'false') config.graphBackupEnabled = false;
   if (process.env.SPORE_BACKUP_INTERVAL_MINUTES) {
     const n = Number(process.env.SPORE_BACKUP_INTERVAL_MINUTES);
@@ -899,6 +917,7 @@ function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
     'graphMaintenanceBatchSize',
     'generalKbResearchEnabled', 'generalKbResearchIntervalHours',
     'generalKbResearchBatchSize',
+    'runtimeQueueEnabled', 'runtimeQueueLaneLimits',
     'graphBackupEnabled', 'graphBackupIntervalMinutes', 'graphBackupRetention',
     'graphBackupDir', 'graphBackupOnChangeOnly',
     'heartbeatIntervalMinutes',

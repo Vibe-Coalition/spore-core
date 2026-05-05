@@ -4412,27 +4412,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // Queue delivery to prevent concurrent deliveries from interleaving
           if (!this._deliveryQueue) this._deliveryQueue = Promise.resolve();
           this._deliveryQueue = this._deliveryQueue.then(async () => {
-            // Wait for any active session run to finish before attempting delivery.
-            // For acorn the sessionKey uses the session:false (non-DM) branch
-            // because acorn treats each launch as its own channel — isDm for
-            // session key purposes is just "deliverable independently".
             const sessionKey = this._agent.sessions?.constructor?.buildKey?.(channelId, true, deliveryUserId) || `dm:${deliveryUserId}`;
-            const MAX_WAIT = 120000;
-            const waitStart = Date.now();
-            let waited = false;
-            while (this._agent.activeRuns?.has(sessionKey) && Date.now() - waitStart < MAX_WAIT) {
-              if (!waited) {
-                this.log.info(`[subagent:${taskId}] Waiting for session ${sessionKey} to become free before delivering result`);
-                waited = true;
-              }
-              await new Promise(r => setTimeout(r, 1500));
-            }
 
             let chatStartSent = false;
             try {
               this.broadcast({ type: 'chat:start', sessionId: channelId });
               chatStartSent = true;
-              const result = await this._agent.processMessage({
+              const agentOpts = {
                 content,
                 channelId,
                 channelName: isCli ? `cli:${deliveryUserId}` : 'control-panel',
@@ -4448,8 +4434,17 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                 onToolUse: (toolName) => {
                   this.broadcast({ type: 'chat:tool', tool: toolName });
                 },
-              });
-              if (result.skipped) {
+              };
+              const result = this._jobQueue?.submitAgentTurn
+                ? await this._jobQueue.submitAgentTurn(agentOpts, {
+                    lane: 'deferred',
+                    priority: 60,
+                    route: 'task_complete',
+                    sessionKey,
+                    allowInterjection: false,
+                  })
+                : await this._agent.processMessage(agentOpts);
+              if (result.skipped || result.interjected) {
                 this._agent.sessions?.addMessage(sessionKey, 'user', content);
                 this.broadcast({ type: 'chat:done', text: `Background task finished: ${statusLabel}. Send a message to see the full summary.` });
                 this.log.info(`[subagent:${taskId}] Session busy at delivery time, result injected for next turn`);
@@ -7363,6 +7358,38 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       ctx.isDm !== false ? 1 : 0,
       fireAt, p, String(reason || '').slice(0, 200), now,
     );
+    if (this._jobQueue?.submitWorkerJob) {
+      try {
+        const job = this._jobQueue.submitWorkerJob('wakeup.fire', {
+          wakeupId: Number(info.lastInsertRowid),
+          opts: {
+            content: p,
+            channelId: ctx.channelId || 'web:control-panel',
+            channelName: ctx.channelName || 'wakeup',
+            userId: ctx.userId || 'operator',
+            userName: ctx.userName || 'Wakeup',
+            trigger: 'wakeup',
+            platform: ctx.platform || 'web',
+            isDm: ctx.isDm !== false,
+            sessionKey: this._ctxSessionKey(),
+          },
+        }, {
+          id: `wakeup-${info.lastInsertRowid}`,
+          persistent: true,
+          runAt: fireAt,
+          lane: 'deferred',
+          priority: 65,
+          route: 'wakeup',
+          sessionKey: this._ctxSessionKey(),
+        });
+        const jobId = job?.jobId || null;
+        if (jobId) {
+          sessions.db.prepare('UPDATE wakeups SET queue_job_id=? WHERE id=?').run(jobId, info.lastInsertRowid);
+        }
+      } catch (e) {
+        this.log.warn(`[wakeup] queue submit failed, legacy sweep will pick it up: ${e.message}`);
+      }
+    }
     this.log.info(`[wakeup] scheduled id=${info.lastInsertRowid} in ${secs}s for ${this._ctxSessionKey()}`);
     return { ok: true, wakeupId: info.lastInsertRowid, fireAt, delaySeconds: secs };
   }
@@ -7389,6 +7416,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (row.fired) return { ok: true, alreadyFired: true };
     sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=?, error=? WHERE id=?')
       .run(Date.now(), 'cancelled', id);
+    try {
+      const jobId = sessions.db.prepare('SELECT queue_job_id FROM wakeups WHERE id=?').get(id)?.queue_job_id;
+      if (jobId && this._jobQueue?.cancelJob) this._jobQueue.cancelJob(jobId, 'wakeup cancelled');
+    } catch {}
     return { ok: true, cancelled: id };
   }
 
@@ -7404,8 +7435,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       'SELECT * FROM wakeups WHERE fired=0 AND fire_at<=? ORDER BY fire_at ASC LIMIT 20'
     ).all(now);
     for (const row of due) {
-      sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=?').run(now, row.id);
       try {
+        if (row.queue_job_id && this._jobQueue?.submitWorkerJob) continue;
         const opts = {
           content: row.prompt,
           channelId: row.channel_id || 'web:control-panel',
@@ -7415,12 +7446,29 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           trigger: 'wakeup',
           platform: row.platform || 'web',
           isDm: row.is_dm === 1,
+          sessionKey: row.session_key,
         };
         const key = row.session_key;
-        if (agent.activeRuns?.has(key)) {
+        if (this._jobQueue?.submitWorkerJob) {
+          const job = this._jobQueue.submitWorkerJob('wakeup.fire', {
+            wakeupId: row.id,
+            opts,
+          }, {
+            id: `wakeup-${row.id}`,
+            persistent: true,
+            runAt: now,
+            lane: 'deferred',
+            priority: 65,
+            route: 'wakeup.sweep',
+            sessionKey: key,
+          });
+          if (job?.jobId) sessions.db.prepare('UPDATE wakeups SET queue_job_id=? WHERE id=?').run(job.jobId, row.id);
+        } else if (agent.activeRuns?.has(key)) {
+          sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=?').run(now, row.id);
           this.log.info(`[wakeup] injecting into running session ${key} (id=${row.id})`);
           agent.interject(key, row.prompt);
         } else {
+          sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=?').run(now, row.id);
           this.log.info(`[wakeup] firing processMessage for ${key} (id=${row.id}, reason=${row.reason || ''})`);
           agent.processMessage(opts).catch(e => {
             sessions.db.prepare('UPDATE wakeups SET failed=1, error=? WHERE id=?')

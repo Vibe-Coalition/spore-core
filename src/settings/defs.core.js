@@ -383,6 +383,12 @@ R({ key: 'generalKbResearchIntervalHours', type: 'number', default: 24, envVar: 
 R({ key: 'generalKbResearchBatchSize', type: 'integer', default: 1, envVar: 'SPORE_GENERAL_KB_RESEARCH_BATCH_SIZE',
     scope: ['server', 'settings'], group: 'janitor',
     validate: v => v > 0 ? null : 'must be > 0' });
+R({ key: 'runtimeQueueEnabled', type: 'boolean', default: true, envVar: 'SPORE_RUNTIME_QUEUE_ENABLED',
+    scope: ['server', 'settings'], group: 'janitor' });
+R({ key: 'runtimeQueueLaneLimits', type: 'json', default: {
+      interactive: 2, channel: 1, deferred: 1, learner: 1, maintenance: 1, background: 1,
+    }, envVar: 'SPORE_RUNTIME_QUEUE_LANE_LIMITS',
+    scope: ['server', 'settings'], group: 'janitor' });
 
 // ──────────────────────────────────────────────────────────────────────
 // Backups

@@ -362,7 +362,7 @@ class DiscordGateway {
 
     try {
       const policy = resolveSourcePolicy(this.config, 'discord', last.channelId);
-      const result = await this.agent.processMessage({
+      const agentOpts = {
         content: merged,
         messageContent: merged,
         channelId: last.channelId,
@@ -403,7 +403,15 @@ class DiscordGateway {
         onError: (err) => {
           this.log.error(`Agent error in #${last.channelName}:`, err.message);
         },
-      });
+      };
+      const result = this.agent._jobQueue?.submitAgentTurn
+        ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
+            lane: 'channel',
+            priority: 85,
+            route: 'discord.message',
+            allowInterjection: true,
+          })
+        : await this.agent.processMessage(agentOpts);
 
       cleanupStall();
       if (typingInterval) clearInterval(typingInterval);

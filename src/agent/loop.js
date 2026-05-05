@@ -918,6 +918,12 @@ class AgentLoop {
     while (iterations < safetyCeiling) {
       iterations++;
 
+      if (opts.queueJob?.shouldYield?.()) {
+        this.log.info(`[queue] Yielding ${sessionKey} before iteration ${iterations} for higher-priority work`);
+        if (this.learner) this.learner.setLLMBusy(false);
+        return { text: null, yielded: true, iterations: iterations - 1, sessionKey };
+      }
+
       if (abortSignal?.aborted) {
         this.log.info(`[abort] Session ${sessionKey} aborted by user after ${iterations - 1} iterations`);
         loopBroken = true;
@@ -1273,7 +1279,7 @@ class AgentLoop {
     const learningMode = this.config.learningMode || 'always';
     if (opts.suppressLearning === true) return;
     if (!(finalText && this.learner && learningMode === 'always')) return;
-    this.learner.extractAndLearn(opts.content, finalText, {
+    const learnOpts = {
       userName: opts.userName,
       userId: opts.userId,
       channelName: opts.channelName,
@@ -1288,7 +1294,24 @@ class AgentLoop {
       // `discovered_in` edge. Only fires for cli-platform turns
       // where the session node was actually created at session:start.
       sessionId: opts.platform === 'cli' ? opts.channelId : null,
-    }).catch(e => this.log.error('[learner] Background extraction error:', e.message));
+    };
+    const queue = this.tools?._jobQueue || this._jobQueue || null;
+    if (queue?.submitWorkerJob) {
+      queue.submitWorkerJob('learner.extract', {
+        userMessage: opts.content,
+        assistantResponse: finalText,
+        opts: learnOpts,
+      }, {
+        lane: 'learner',
+        priority: 40,
+        route: 'learner.extract',
+        sessionKey: opts.sessionKey || null,
+        graph: opts.memoryEnvelope?.primarySlug || null,
+      });
+      return;
+    }
+    this.learner.extractAndLearn(opts.content, finalText, learnOpts)
+      .catch(e => this.log.error('[learner] Background extraction error:', e.message));
   }
 
   /**

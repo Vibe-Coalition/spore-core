@@ -45,6 +45,12 @@ class ChatroomGateway {
     this._participants = new Map();
   }
 
+  _submitAgentTurn(opts, meta = {}) {
+    const queue = this.agent?._jobQueue;
+    if (queue?.submitAgentTurn) return queue.submitAgentTurn(opts, meta);
+    return this.agent?.processMessage(opts);
+  }
+
   connect() {
     if (this._closed) return;
     const wsUrl = this.managerUrl.replace(/^http/, 'ws') + '/ws/chatroom';
@@ -209,7 +215,7 @@ class ChatroomGateway {
       const sessionKey = `chatroom:shared`;
       let result;
       try {
-        result = await this.agent.processMessage({
+        result = await this._submitAgentTurn({
           content: merged,
           channelId: sessionKey,
           channelName: 'chatroom',
@@ -223,6 +229,12 @@ class ChatroomGateway {
           onError: (err) => {
             this.log.error(`[chatroom] Agent error: ${err.message}`);
           },
+        }, {
+          lane: 'channel',
+          priority: hasDirect ? 90 : 70,
+          route: 'chatroom.message',
+          sessionKey,
+          allowInterjection: hasDirect,
         });
       } finally {
         clearInterval(typingHeartbeat);
