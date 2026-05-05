@@ -509,9 +509,11 @@ class AgentLoop {
     this.tools._sessionContexts.set(sessionKey, {
       trigger: opts.trigger || null,
       channelId: opts.channelId || null,
+      channelName: opts.channelName || null,
       platform: opts.platform || null,
       messageTarget: opts.messageTarget || null,
       platformMeta: opts.platformMeta || null,
+      isDm: opts.isDm !== false,
       userMessage: opts.content || null,
       userName: opts.userName || null,
       userId: opts.userId || null,

@@ -109,3 +109,64 @@ test('web_serve gateway creation wires ask_user broadcaster', () => {
   assert.equal(result.running, false);
   assert.equal(typeof tools._wsBroadcast, 'function');
 });
+
+test('subagent events for cli route only to originating session', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const calls = [];
+  let globalBroadcasts = 0;
+  tools._wsBroadcast = (sessionKey, payload) => {
+    calls.push({ sessionKey, payload });
+    return sessionKey === 'channel:cli:yam@project' ? 1 : 0;
+  };
+  tools.broadcast = () => { globalBroadcasts++; };
+
+  const delivered = tools._broadcastTaskEvent({
+    taskId: 'task_test',
+    sessionKey: 'channel:cli:yam@project',
+    channelId: 'cli:yam@project',
+    platform: 'cli',
+    userId: 'yam',
+  }, { type: 'subagent:start', taskId: 'task_test' });
+
+  assert.equal(delivered, 1);
+  assert.equal(globalBroadcasts, 0);
+  assert.deepEqual(calls[0], {
+    sessionKey: 'channel:cli:yam@project',
+    payload: { type: 'subagent:start', taskId: 'task_test', sessionId: 'cli:yam@project' },
+  });
+});
+
+test('subagent events for cli do not fall back to web dm routes', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const calls = [];
+  let globalBroadcasts = 0;
+  tools._wsBroadcast = (sessionKey) => {
+    calls.push(sessionKey);
+    return 0;
+  };
+  tools.broadcast = () => { globalBroadcasts++; };
+
+  const delivered = tools._broadcastTaskEvent({
+    taskId: 'task_test',
+    sessionKey: 'channel:cli:yam@project',
+    channelId: 'cli:yam@project',
+    platform: 'cli',
+    userId: 'yam',
+  }, { type: 'subagent:done', taskId: 'task_test' });
+
+  assert.equal(delivered, 0);
+  assert.equal(globalBroadcasts, 0);
+  assert.equal(calls.includes('dm:yam'), false);
+  assert.equal(calls.includes('shared:dm:cli:yam'), false);
+});
+
+test('subagent delivery for cli preserves project session key', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const taskEntry = {
+    sessionKey: 'channel:cli:yam@project',
+    channelId: 'cli:yam@project',
+    platform: 'cli',
+  };
+
+  assert.equal(tools._deliverySessionKey(taskEntry, true, 'yam'), 'channel:cli:yam@project');
+});

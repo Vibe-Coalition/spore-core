@@ -3597,6 +3597,57 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return { status: 'update_queued', taskId, message: 'Instructions queued — the sub-agent will see them on its next step.' };
   }
 
+  _taskRouteKeys(taskEntry = {}) {
+    const keys = [];
+    const add = (v) => { if (v && !keys.includes(v)) keys.push(v); };
+    add(taskEntry.sessionKey);
+    if (taskEntry.channelId) {
+      add(taskEntry.channelId);
+      add(`channel:${taskEntry.channelId}`);
+      if (taskEntry.platform) add(`shared:channel:${taskEntry.platform}:${taskEntry.channelId}`);
+    }
+    if (taskEntry.userId && taskEntry.platform !== 'cli') {
+      add(`dm:${taskEntry.userId}`);
+      if (taskEntry.platform) add(`shared:dm:${taskEntry.platform}:${taskEntry.userId}`);
+    }
+    return keys;
+  }
+
+  _broadcastTaskEvent(taskEntry, payload, opts = {}) {
+    const msg = taskEntry?.channelId && !payload.sessionId
+      ? { ...payload, sessionId: taskEntry.channelId }
+      : payload;
+    const broadcaster = this._getSessionBroadcaster();
+    if (typeof broadcaster === 'function') {
+      for (const key of this._taskRouteKeys(taskEntry)) {
+        try {
+          const delivered = broadcaster(key, msg);
+          if (delivered > 0) return delivered;
+        } catch (e) {
+          this.log.warn(`[subagent:${taskEntry?.taskId || '?'}] session broadcast failed for ${key}: ${e.message}`);
+        }
+      }
+    }
+
+    // Never global-broadcast CLI subagent frames: that leaks project-session
+    // progress/results into the generic web app. Web/non-channel tasks retain
+    // the old global fallback so existing browser-only flows keep working.
+    if (opts.fallbackGlobal !== false && taskEntry?.platform !== 'cli') {
+      this.broadcast(msg);
+      return -1;
+    }
+    return 0;
+  }
+
+  _deliverySessionKey(taskEntry, isCli, deliveryUserId) {
+    if (taskEntry?.sessionKey) return taskEntry.sessionKey;
+    return this._agent?.sessions?.constructor?.buildKey?.(
+      taskEntry?.channelId,
+      !isCli,
+      deliveryUserId,
+    ) || (isCli && taskEntry?.channelId ? `channel:${taskEntry.channelId}` : `dm:${deliveryUserId}`);
+  }
+
   /**
    * Build a compact context block from the parent's knowledge graph
    * so subagents inherit identity, user info, and workspace awareness.
@@ -3752,10 +3803,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     // channel + B's projectContext.
     const _dctx = this._ctx?.() || {};
     this._delegatedTasks.set(taskId, {
+      taskId,
       status: 'running',
       startedAt: Date.now(),
+      sessionKey:          _dctx.sessionKey          ?? this._ctxSessionKey?.()     ?? null,
       channelId:           _dctx.channelId           ?? this._currentChannelId       ?? null,
+      channelName:         _dctx.channelName         ?? null,
       platform:            _dctx.platform            ?? this._currentPlatform        ?? null,
+      isDm:                _dctx.isDm                ?? null,
       userId:              _dctx.userId              ?? this._currentUserId          ?? 'operator',
       originalUserMessage: _dctx.userMessage         ?? this._currentUserMessage     ?? task,
       originalUserName:    _dctx.userName            ?? this._currentUserName        ?? null,
@@ -3764,6 +3819,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       // context to processMessage. Without this the wake-up turn
       // wouldn't know the cwd/tools/tree the user was working in.
       projectContext:      _dctx.projectContext      ?? this._currentProjectContext  ?? null,
+      memoryEnvelope:      _dctx.memoryEnvelope      ?? this._currentMemoryEnvelope  ?? null,
       abortCtrl,
     });
 
@@ -3773,7 +3829,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     abortTimer.unref?.();
 
     const taskEntry = this._delegatedTasks.get(taskId);
-    this.broadcast({ type: 'subagent:start', taskId, model: subModel, task: task.substring(0, 300), timeout: maxTimeoutSec });
+    this._broadcastTaskEvent(taskEntry, { type: 'subagent:start', taskId, model: subModel, task: task.substring(0, 300), timeout: maxTimeoutSec });
 
     (async () => {
       try {
@@ -4001,7 +4057,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           }
 
           // Stream the response so we can broadcast deltas to the panel
-          this.broadcast({ type: 'subagent:iter', taskId, iteration: i + 1, maxIter, model: subModel });
+          this._broadcastTaskEvent(taskEntry, { type: 'subagent:iter', taskId, iteration: i + 1, maxIter, model: subModel });
           this.log.info(`[subagent:${taskId}] Iter ${i + 1} starting — model=${subModel}, max_tokens=${subMaxTokens}`);
               let streamingText = '';
               let thinkingTokens = 0;
@@ -4026,20 +4082,20 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                     const elapsed = Math.round((Date.now() - _subStreamStart) / 1000);
                     const toolInfo = _toolInputBytes > 0 ? `, ${_currentToolName} ${Math.round(_toolInputBytes / 1024)}KB` : '';
                     this.log.info(`[subagent:${taskId}] Iter ${i + 1} streaming — ${elapsed}s, ${streamingText.length} chars, ${_subStreamToolCount} tool(s), ${thinkingTokens} thinking${toolInfo}`);
-                    this.broadcast({ type: 'subagent:heartbeat', taskId, iteration: i + 1, elapsed, chars: streamingText.length, tools: _subStreamToolCount, thinking: thinkingTokens, toolBytes: _toolInputBytes, toolName: _currentToolName });
+                    this._broadcastTaskEvent(taskEntry, { type: 'subagent:heartbeat', taskId, iteration: i + 1, elapsed, chars: streamingText.length, tools: _subStreamToolCount, thinking: thinkingTokens, toolBytes: _toolInputBytes, toolName: _currentToolName });
                   }, 10000);
                   subHeartbeat.unref?.();
 
                   stream.on('text', (text) => {
                     streamingText += text;
-                    this.broadcast({ type: 'subagent:text', taskId, iteration: i + 1, text });
+                    this._broadcastTaskEvent(taskEntry, { type: 'subagent:text', taskId, iteration: i + 1, text });
                   });
 
                   let _thinkingText = '';
                   stream.on('event', (event) => {
                     if (event.type === 'content_block_start' && event.content_block?.type === 'thinking') {
                       _thinkingText = '';
-                      this.broadcast({ type: 'subagent:thinking_start', taskId, iteration: i + 1 });
+                      this._broadcastTaskEvent(taskEntry, { type: 'subagent:thinking_start', taskId, iteration: i + 1 });
                     }
                     if (event.type === 'content_block_delta' && event.delta?.type === 'thinking_delta') {
                       thinkingTokens++;
@@ -4048,21 +4104,21 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                         const snippet = _thinkingText.length > 120
                           ? _thinkingText.slice(-120).replace(/^\S*\s/, '')
                           : _thinkingText;
-                        this.broadcast({ type: 'subagent:thinking', taskId, iteration: i + 1, tokens: thinkingTokens, snippet });
+                        this._broadcastTaskEvent(taskEntry, { type: 'subagent:thinking', taskId, iteration: i + 1, tokens: thinkingTokens, snippet });
                       }
                     }
                     if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
                       _subStreamToolCount++;
                       _toolInputBytes = 0;
                       _currentToolName = event.content_block.name || '';
-                      this.broadcast({ type: 'subagent:tool_start', taskId, iteration: i + 1, tool: _currentToolName });
+                      this._broadcastTaskEvent(taskEntry, { type: 'subagent:tool_start', taskId, iteration: i + 1, tool: _currentToolName });
                     }
                     if (event.type === 'content_block_delta' && event.delta?.type === 'input_json_delta') {
                       const prevKB = Math.floor(_toolInputBytes / 2048);
                       _toolInputBytes += (event.delta.partial_json || '').length;
                       const newKB = Math.floor(_toolInputBytes / 2048);
                       if (newKB > prevKB) {
-                        this.broadcast({ type: 'subagent:tool_progress', taskId, iteration: i + 1, tool: _currentToolName, bytes: _toolInputBytes });
+                        this._broadcastTaskEvent(taskEntry, { type: 'subagent:tool_progress', taskId, iteration: i + 1, tool: _currentToolName, bytes: _toolInputBytes });
                       }
                     }
                   });
@@ -4079,7 +4135,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               if (!retryable || attempt >= MAX_API_RETRIES) throw retryErr;
               const delay = isTimeout ? 3000 : retryErr.status === 429 ? 5000 : (attempt + 1) * 5000;
               this.log.warn(`[subagent:${taskId}] ${isTimeout ? 'API call timed out (180s)' : `API error ${retryErr.status}`}, retry ${attempt + 1}/${MAX_API_RETRIES} in ${delay / 1000}s`);
-              this.broadcast({ type: 'subagent:text', taskId, iteration: i + 1, text: `\n[retrying — API returned ${retryErr.status}…]\n` });
+              this._broadcastTaskEvent(taskEntry, { type: 'subagent:text', taskId, iteration: i + 1, text: `\n[retrying — API returned ${retryErr.status}…]\n` });
               await new Promise(r => setTimeout(r, delay));
             }
           }
@@ -4106,7 +4162,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           iterStats.iterCount = i + 1;
           iterStats.textChars += newText.length;
           this.log.info(`[subagent:${taskId}] Iter ${i + 1}/${maxIter}: ${iterMs}ms, ${toolBlocks.length} tools, ${newText.length} chars text, stop=${response.stop_reason}, tokens=${iterUsage.input_tokens || 0}in/${iterUsage.output_tokens || 0}out`);
-          this.broadcast({ type: 'subagent:iter_done', taskId, iteration: i + 1, durationMs: iterMs, toolCount: toolBlocks.length, textChars: newText.length, stopReason: response.stop_reason });
+          this._broadcastTaskEvent(taskEntry, { type: 'subagent:iter_done', taskId, iteration: i + 1, durationMs: iterMs, toolCount: toolBlocks.length, textChars: newText.length, stopReason: response.stop_reason });
 
           // Mid-task nudge: if the task is about creating files and we're past 40%
           // of iterations without any writes, inject a reminder
@@ -4129,7 +4185,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             const codeBlockCount = (newText.match(/```/g) || []).length / 2;
             if (codeBlockCount >= 1 && i < maxIter - 1) {
               this.log.warn(`[subagent:${taskId}] Iter ${i + 1}: generated ${newText.length} chars with ~${Math.floor(codeBlockCount)} code blocks but NO tool calls — nudging to write files`);
-              this.broadcast({ type: 'subagent:warn', taskId, iteration: i + 1, message: `${newText.length} chars with code blocks but no write_file calls — nudging` });
+              this._broadcastTaskEvent(taskEntry, { type: 'subagent:warn', taskId, iteration: i + 1, message: `${newText.length} chars with code blocks but no write_file calls — nudging` });
               messages.push({ role: 'assistant', content: response.content });
               messages.push({ role: 'user', content: '[SYSTEM: You generated code/content in your text response but did NOT call write_file to save it. Text responses are NOT persisted — the user will not see this code. You MUST call write_file now to write the content to disk. Extract the code blocks from your previous response and write each one to the appropriate file path.]' });
               continue;
@@ -4143,7 +4199,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // the model sees it failed and can adjust (e.g. break into smaller writes).
           if (toolBlocks.length > 0 && response.stop_reason === 'max_tokens') {
             this.log.warn(`[subagent:${taskId}] Iter ${i + 1}: max_tokens hit with ${toolBlocks.length} tool call(s) — response truncated, nudging retry`);
-            this.broadcast({ type: 'subagent:warn', taskId, iteration: i + 1, message: `max_tokens truncated ${toolBlocks.length} tool call(s) — retrying with smaller output` });
+            this._broadcastTaskEvent(taskEntry, { type: 'subagent:warn', taskId, iteration: i + 1, message: `max_tokens truncated ${toolBlocks.length} tool call(s) — retrying with smaller output` });
             const textOnly = response.content.filter(b => b.type === 'text');
             if (textOnly.length > 0) {
               messages.push({ role: 'assistant', content: textOnly });
@@ -4209,9 +4265,19 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                   (m, val) => m.replace(val, val.slice(0, 4) + '***'))
                 .replace(/[A-Fa-f0-9]{32,}/g, (m) => m.slice(0, 6) + '***');
               this.log.info(`[subagent:${taskId}] Tool: ${tb.name}(${_safeSnippet.substring(0, 80)})`);
-              this.broadcast({ type: 'subagent:tool_call', taskId, iteration: i + 1, tool: tb.name, input: _safeSnippet.substring(0, 200) });
+              this._broadcastTaskEvent(taskEntry, { type: 'subagent:tool_call', taskId, iteration: i + 1, tool: tb.name, input: _safeSnippet.substring(0, 200) });
               sendProgress(`🔧 \`${tb.name}\``);
-              const result = await this.executeTool(tb.name, tb.input);
+              const result = await this.executeTool(tb.name, tb.input, {
+                sessionKey: taskEntry.sessionKey || null,
+                channelId: taskEntry.channelId || null,
+                channelName: taskEntry.channelName || null,
+                platform: taskEntry.platform || null,
+                userId: taskEntry.userId || null,
+                userName: taskEntry.originalUserName || null,
+                userMessage: taskEntry.originalUserMessage || null,
+                projectContext: taskEntry.projectContext || null,
+                memoryEnvelope: taskEntry.memoryEnvelope || null,
+              });
               let resultStr = JSON.stringify(result);
               const subCap = { read_file: 80000, web_fetch: 15000 }[tb.name] || 20000;
               if (resultStr.length > subCap) {
@@ -4242,7 +4308,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               if (isWebServeSuccess) {
                 taskEntry._terminalToolReached = true;
                 this.log.info(`[subagent:${taskId}] web_serve succeeded at iter ${i + 1} — marking task complete`);
-                this.broadcast({ type: 'subagent:finishing', taskId, iteration: i + 1 });
+                this._broadcastTaskEvent(taskEntry, { type: 'subagent:finishing', taskId, iteration: i + 1 });
               }
 
               toolResults.push({ type: 'tool_result', tool_use_id: tb.id, content: resultStr });
@@ -4288,7 +4354,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const codeBlocksInFinal = (finalText.match(/```/g) || []).length / 2;
         if (iterStats.writeFileCalls === 0 && codeBlocksInFinal >= 1 && finalText.length > 300) {
           this.log.warn(`[subagent:${taskId}] EMPTY-HAND: ${Math.floor(codeBlocksInFinal)} code blocks in ${finalText.length} chars of text but 0 write_file calls — attempting auto-extraction`);
-          this.broadcast({ type: 'subagent:warn', taskId, message: `Empty-hand: extracting ${Math.floor(codeBlocksInFinal)} stranded code blocks to disk` });
+          this._broadcastTaskEvent(taskEntry, { type: 'subagent:warn', taskId, message: `Empty-hand: extracting ${Math.floor(codeBlocksInFinal)} stranded code blocks to disk` });
 
           const codeBlockRe = /```(\w+)?\s*\n([\s\S]*?)```/g;
           let match;
@@ -4328,12 +4394,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
           if (extracted > 0) {
             this.log.info(`[subagent:${taskId}] Auto-extracted ${extracted} code blocks to disk`);
-            this.broadcast({ type: 'subagent:info', taskId, message: `Auto-extracted ${extracted} code blocks to disk` });
+            this._broadcastTaskEvent(taskEntry, { type: 'subagent:info', taskId, message: `Auto-extracted ${extracted} code blocks to disk` });
             iterStats.writeFileCalls += extracted;
           }
         }
 
-        this.broadcast({ type: 'subagent:done', taskId, elapsed: elapsedSec, usage: totalUsage, iterations: iterStats.iterCount, toolCalls: iterStats.totalToolCalls, writeFileCalls: iterStats.writeFileCalls, textChars: iterStats.textChars });
+        this._broadcastTaskEvent(taskEntry, { type: 'subagent:done', taskId, elapsed: elapsedSec, usage: totalUsage, iterations: iterStats.iterCount, toolCalls: iterStats.totalToolCalls, writeFileCalls: iterStats.writeFileCalls, textChars: iterStats.textChars });
         sendProgressDone(false);
 
         // Store subagent result as an episode so research is durably searchable
@@ -4358,7 +4424,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         taskEntry.result = { error: friendlyError };
         taskEntry.completedAt = Date.now();
         this.log.warn(`[subagent:${taskId}] Failed: ${taskEntry.result.error}`);
-        this.broadcast({ type: 'subagent:error', taskId, error: taskEntry.result.error });
+        this._broadcastTaskEvent(taskEntry, { type: 'subagent:error', taskId, error: taskEntry.result.error });
         try { if (typeof sendProgressDone === 'function') sendProgressDone(true); } catch (e) { this.log.warn('[tools] sendProgressDone failed: ' + e.message); }
       } finally {
         clearTimeout(abortTimer);
@@ -4378,20 +4444,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const { channelId, platform, userId: taskUserId } = taskEntry;
       if (!channelId) return;
 
-      // Web panel AND Spore Code both deliver via the same WebSocket
-      // gateway — channelId = sessionId (per-(user,cwd) for acorn,
-      // "web:control-panel" for web), broadcast frames go to all
-      // connected clients (acorn filters by its active sessionId).
-      // Previously CLI fell through to platformManager.getGateway('cli')
-      // which returns null (no CLI gateway exists), so the push
-      // silently dropped and the agent never got woken up.
+      // Web panel and Spore Code both deliver through the web gateway,
+      // but delivery must stay session-scoped. CLI session ids map to
+      // _sessionClients; web DMs map to the current web user. Falling
+      // back to global broadcast for CLI would leak project-task output
+      // into the generic web app.
       if (platform === 'web' || platform === 'cli') {
         const isCli = platform === 'cli';
         const deliveryUserId = taskUserId || 'operator';
         const elapsed = Math.round((taskEntry.completedAt - taskEntry.startedAt) / 1000);
         const status = taskEntry.status === 'done' ? 'completed' : 'failed';
         const resultText = taskEntry.status === 'done' ? (taskEntry.result?.result || '').substring(0, 4000) : (taskEntry.result?.error || 'unknown error');
-        this.broadcast({ type: 'subagent:result', taskId, status, elapsed, result: resultText });
+        this._broadcastTaskEvent(taskEntry, { type: 'subagent:result', taskId, status, elapsed, result: resultText });
 
         // Trigger agent to process the result and respond to the user
         if (this._agent) {
@@ -4412,27 +4476,29 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // Queue delivery to prevent concurrent deliveries from interleaving
           if (!this._deliveryQueue) this._deliveryQueue = Promise.resolve();
           this._deliveryQueue = this._deliveryQueue.then(async () => {
-            const sessionKey = this._agent.sessions?.constructor?.buildKey?.(channelId, true, deliveryUserId) || `dm:${deliveryUserId}`;
+            const sessionKey = this._deliverySessionKey(taskEntry, isCli, deliveryUserId);
 
             let chatStartSent = false;
             try {
-              this.broadcast({ type: 'chat:start', sessionId: channelId });
+              this._broadcastTaskEvent(taskEntry, { type: 'chat:start', sessionId: channelId });
               chatStartSent = true;
               const agentOpts = {
                 content,
                 channelId,
-                channelName: isCli ? `cli:${deliveryUserId}` : 'control-panel',
+                channelName: taskEntry.channelName || (isCli ? `cli:${deliveryUserId}` : 'control-panel'),
                 userId: deliveryUserId,
                 userName: taskEntry.originalUserName || 'System',
                 trigger: 'task_complete',
                 platform: isCli ? 'cli' : 'web',
                 isDm: !isCli, // CLI sessions aren't DM — preserves per-session isolation
+                sessionKey,
                 projectContext: taskEntry.projectContext || null,
+                memoryEnvelope: taskEntry.memoryEnvelope || null,
                 onTextDelta: (delta) => {
-                  this.broadcast({ type: 'chat:delta', text: delta });
+                  this._broadcastTaskEvent(taskEntry, { type: 'chat:delta', text: delta });
                 },
                 onToolUse: (toolName) => {
-                  this.broadcast({ type: 'chat:tool', tool: toolName });
+                  this._broadcastTaskEvent(taskEntry, { type: 'chat:tool', tool: toolName });
                 },
               };
               const result = this._jobQueue?.submitAgentTurn
@@ -4441,15 +4507,16 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                     priority: 60,
                     route: 'task_complete',
                     sessionKey,
+                    graph: taskEntry.memoryEnvelope?.primarySlug || null,
                     allowInterjection: false,
                   })
                 : await this._agent.processMessage(agentOpts);
               if (result.skipped || result.interjected) {
                 this._agent.sessions?.addMessage(sessionKey, 'user', content);
-                this.broadcast({ type: 'chat:done', text: `Background task finished: ${statusLabel}. Send a message to see the full summary.` });
+                this._broadcastTaskEvent(taskEntry, { type: 'chat:done', text: `Background task finished: ${statusLabel}. Send a message to see the full summary.` });
                 this.log.info(`[subagent:${taskId}] Session busy at delivery time, result injected for next turn`);
               } else {
-                this.broadcast({
+                this._broadcastTaskEvent(taskEntry, {
                   type: 'chat:done',
                   text: result.text,
                   usage: result.usage,
@@ -4460,7 +4527,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             } catch (e) {
               this.log.warn(`[subagent:${taskId}] ${isCli ? 'CLI' : 'Web'} result delivery failed: ${e.message}`);
               this._agent.sessions?.addMessage(sessionKey, 'user', content);
-              if (chatStartSent) this.broadcast({ type: 'chat:done', text: `Background task finished but delivery failed. Send a message to see results.` });
+              if (chatStartSent) this._broadcastTaskEvent(taskEntry, { type: 'chat:done', text: `Background task finished but delivery failed. Send a message to see results.` });
             }
           }).catch(e => {
             this.log.warn(`[subagent:${taskId}] Delivery queue error: ${e.message}`);
