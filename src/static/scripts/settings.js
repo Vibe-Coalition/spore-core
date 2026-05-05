@@ -949,6 +949,14 @@ const SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES = {
   maintenance: 1,
   background: 1,
 };
+const SETTINGS_RUNTIME_QUEUE_LANE_HELP = {
+  interactive: 'Live web and CLI agent turns. Keep this high enough that direct user sessions do not feel blocked.',
+  channel: 'Inbound chat gateways and voice turns, including Telegram, Slack, Discord, and STT-driven messages.',
+  deferred: 'Scheduled or resumable user work such as wakeups, delayed tasks, and channel follow-up sends.',
+  learner: 'After-turn learning jobs that distill sessions into memory and update graph summaries.',
+  maintenance: 'Operational upkeep: graph maintenance, janitor runs, backups, and manual maintenance actions.',
+  background: 'Low-priority enrichment jobs such as General KB research, channel distillation, and graph side work.',
+};
 
 function _settingsCheckboxIfPresent(id) {
   const el = document.getElementById(id);
@@ -1028,6 +1036,17 @@ function _settingsEnsureGraphRuntimeStyles() {
     .settings-runtime-grid input {
       padding: 6px 8px;
       font-size: .76rem;
+    }
+    .settings-runtime-lane-control {
+      display: grid;
+      gap: 4px;
+      align-content: start;
+    }
+    .settings-runtime-lane-hint {
+      color: var(--text-dim);
+      font-size: .62rem;
+      line-height: 1.35;
+      opacity: .82;
     }
     .settings-runtime-note {
       margin-top: 8px;
@@ -1114,9 +1133,10 @@ function _settingsEnsureGraphRuntimeControls() {
       </div>
       <div class="settings-runtime-grid">
         ${SETTINGS_RUNTIME_QUEUE_LANES.map(lane => `
-          <div>
+          <div class="settings-runtime-lane-control">
             <label for="settings-runtime-lane-${lane}">${lane}</label>
             <input id="settings-runtime-lane-${lane}" type="number" min="1" step="1" placeholder="${SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1}">
+            <div class="settings-runtime-lane-hint">${SETTINGS_RUNTIME_QUEUE_LANE_HELP[lane] || ''}</div>
           </div>
         `).join('')}
       </div>
