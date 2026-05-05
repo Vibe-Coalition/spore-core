@@ -84,6 +84,7 @@ COPY src/tools/ ./tools-default/
 COPY src/voice/ ./voice/
 COPY src/static/ ./static/
 COPY src/settings/ ./settings/
+COPY src/runtime/ ./runtime/
 # Plugin manager core (api.js, manager.js, openclaw-adapter.js, index.js).
 COPY src/plugins/ ./plugins/
 # Bundled plugin packages live at the repo root (../plugins/ relative to src/).
