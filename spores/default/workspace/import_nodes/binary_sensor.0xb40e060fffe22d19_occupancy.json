@@ -1,6 +1,0 @@
-{
-  "nodeId": "binary_sensor.0xb40e060fffe22d19_occupancy",
-  "label": "Garage Occupancy Sensor",
-  "type": "binary_sensor",
-  "description": "Occupancy sensor for garage"
-}

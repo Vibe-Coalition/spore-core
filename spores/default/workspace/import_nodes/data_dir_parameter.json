@@ -1,6 +1,0 @@
-{
-  "nodeId": "data_dir_parameter",
-  "label": "Data Directory Parameter",
-  "type": "configuration",
-  "description": "Constructor parameter for PairingStore: 'dataDir' (not file path)"
-}

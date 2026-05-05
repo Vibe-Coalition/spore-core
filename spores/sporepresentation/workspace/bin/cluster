@@ -1,9 +1,0 @@
-#!/bin/bash
-# Ensure tailscaled is running
-if ! /workspace/bin/tailscale --socket /workspace/tailscale.sock status &>/dev/null; then
-    /workspace/bin/tailscaled --state /workspace/tailscale.state --socket /workspace/tailscale.sock --tun=userspace-networking &>/tmp/tsd.log
-    sleep 2
-fi
-
-export HOME=/workspace
-ssh -F /workspace/.ssh/config "$@"

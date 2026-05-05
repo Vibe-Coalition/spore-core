@@ -1,3 +1,0 @@
-SHELL=/bin/bash
-PATH=/usr/local/bin:/usr/bin:/bin
-*/5 13-20 * * 1-5 /workspace/scripts/nvda-analyze-trigger.sh >>/workspace/logs/cron-nvda-analyze.log 2>&1

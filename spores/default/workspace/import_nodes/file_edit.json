@@ -1,6 +1,0 @@
-{
-  "nodeId": "file_edit",
-  "label": "File edit operation",
-  "type": "file_operation",
-  "description": "Modified /workspace/tools/fb-marketplace.sh to update directory path"
-}
