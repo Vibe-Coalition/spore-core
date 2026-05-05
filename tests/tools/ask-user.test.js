@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const { ToolSystem } = require('../../src/tools');
 const { WebGateway } = require('../../src/gateways/web');
+const { SessionManager } = require('../../src/agent/sessions');
 
 function tmpConfig() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-ask-user-'));
@@ -13,6 +14,7 @@ function tmpConfig() {
     dataDir: dir,
     workspacePath: dir,
     sharedSkillsDir: path.join(dir, 'skills'),
+    sessionDbPath: path.join(dir, 'sessions.db'),
   };
 }
 
@@ -169,4 +171,48 @@ test('subagent delivery for cli preserves project session key', () => {
   };
 
   assert.equal(tools._deliverySessionKey(taskEntry, true, 'yam'), 'channel:cli:yam@project');
+});
+
+test('task list events for cli route only to originating session', async () => {
+  const config = tmpConfig();
+  const sessions = new SessionManager(config, logger(), null);
+  assert.equal(sessions.init(), true);
+  const tools = new ToolSystem(config, logger(), null, null, null);
+  tools._sessions = sessions;
+  const calls = [];
+  let globalBroadcasts = 0;
+  tools._wsBroadcast = (sessionKey, payload) => {
+    calls.push({ sessionKey, payload });
+    return sessionKey === 'channel:cli:yam@project' ? 1 : 0;
+  };
+  tools.broadcast = () => { globalBroadcasts++; };
+
+  try {
+    const ctx = {
+      sessionKey: 'channel:cli:yam@project',
+      channelId: 'cli:yam@project',
+      platform: 'cli',
+      userId: 'yam',
+    };
+    const created = await tools.executeTool('task_create', {
+      id: 'route-test',
+      subject: 'Route test task',
+    }, ctx);
+    const progressed = await tools.executeTool('task_progress', {
+      id: 'route-test',
+      status: 'done',
+    }, ctx);
+
+    assert.deepEqual(created, { ok: true, id: 'route-test' });
+    assert.deepEqual(progressed, { ok: true });
+    assert.equal(globalBroadcasts, 0);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].sessionKey, 'channel:cli:yam@project');
+    assert.equal(calls[0].payload.type, 'task:create');
+    assert.equal(calls[1].sessionKey, 'channel:cli:yam@project');
+    assert.equal(calls[1].payload.type, 'task:update');
+  } finally {
+    try { sessions.db.close(); } catch {}
+    fs.rmSync(config.dataDir, { recursive: true, force: true });
+  }
 });

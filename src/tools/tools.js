@@ -3597,46 +3597,63 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return { status: 'update_queued', taskId, message: 'Instructions queued — the sub-agent will see them on its next step.' };
   }
 
-  _taskRouteKeys(taskEntry = {}) {
+  _isCliRoute(route = {}) {
+    return route.platform === 'cli'
+      || String(route.sessionKey || '').startsWith('channel:cli:')
+      || String(route.channelId || '').startsWith('cli:');
+  }
+
+  _sessionRouteKeys(route = {}) {
     const keys = [];
     const add = (v) => { if (v && !keys.includes(v)) keys.push(v); };
-    add(taskEntry.sessionKey);
-    if (taskEntry.channelId) {
-      add(taskEntry.channelId);
-      add(`channel:${taskEntry.channelId}`);
-      if (taskEntry.platform) add(`shared:channel:${taskEntry.platform}:${taskEntry.channelId}`);
+    add(route.sessionKey);
+    if (route.channelId) {
+      add(route.channelId);
+      add(`channel:${route.channelId}`);
+      if (route.platform) add(`shared:channel:${route.platform}:${route.channelId}`);
     }
-    if (taskEntry.userId && taskEntry.platform !== 'cli') {
-      add(`dm:${taskEntry.userId}`);
-      if (taskEntry.platform) add(`shared:dm:${taskEntry.platform}:${taskEntry.userId}`);
+    if (route.userId && !this._isCliRoute(route)) {
+      add(`dm:${route.userId}`);
+      if (route.platform) add(`shared:dm:${route.platform}:${route.userId}`);
     }
     return keys;
   }
 
-  _broadcastTaskEvent(taskEntry, payload, opts = {}) {
-    const msg = taskEntry?.channelId && !payload.sessionId
-      ? { ...payload, sessionId: taskEntry.channelId }
+  _taskRouteKeys(taskEntry = {}) {
+    return this._sessionRouteKeys(taskEntry);
+  }
+
+  _broadcastSessionEvent(route, payload, opts = {}) {
+    const msg = route?.channelId && !payload.sessionId
+      ? { ...payload, sessionId: route.channelId }
       : payload;
     const broadcaster = this._getSessionBroadcaster();
     if (typeof broadcaster === 'function') {
-      for (const key of this._taskRouteKeys(taskEntry)) {
+      for (const key of this._sessionRouteKeys(route)) {
         try {
           const delivered = broadcaster(key, msg);
           if (delivered > 0) return delivered;
         } catch (e) {
-          this.log.warn(`[subagent:${taskEntry?.taskId || '?'}] session broadcast failed for ${key}: ${e.message}`);
+          this.log.warn(`[${opts.logPrefix || 'session-event'}] session broadcast failed for ${key}: ${e.message}`);
         }
       }
     }
 
-    // Never global-broadcast CLI subagent frames: that leaks project-session
-    // progress/results into the generic web app. Web/non-channel tasks retain
+    // Never global-broadcast CLI/project frames: that leaks project-session
+    // progress/results into the generic web app. Web/non-channel flows retain
     // the old global fallback so existing browser-only flows keep working.
-    if (opts.fallbackGlobal !== false && taskEntry?.platform !== 'cli') {
+    if (opts.fallbackGlobal !== false && !this._isCliRoute(route)) {
       this.broadcast(msg);
       return -1;
     }
     return 0;
+  }
+
+  _broadcastTaskEvent(taskEntry, payload, opts = {}) {
+    return this._broadcastSessionEvent(taskEntry, payload, {
+      ...opts,
+      logPrefix: `subagent:${taskEntry?.taskId || '?'}`,
+    });
   }
 
   _deliverySessionKey(taskEntry, isCli, deliveryUserId) {
@@ -7415,14 +7432,16 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const p = String(prompt || '').trim();
     if (!p) return { error: 'prompt is required' };
     const info = sessions.db.prepare(
-      `INSERT INTO wakeups (session_key, channel_id, channel_name, user_id, user_name, platform, is_dm, fire_at, prompt, reason, created)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO wakeups (session_key, channel_id, channel_name, user_id, user_name, platform, is_dm, project_context, memory_envelope, fire_at, prompt, reason, created)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       this._ctxSessionKey(),
       ctx.channelId || null, ctx.channelName || null,
       ctx.userId || null, ctx.userName || null,
       ctx.platform || 'web',
       ctx.isDm !== false ? 1 : 0,
+      ctx.projectContext ? JSON.stringify(ctx.projectContext) : null,
+      ctx.memoryEnvelope ? JSON.stringify(ctx.memoryEnvelope) : null,
       fireAt, p, String(reason || '').slice(0, 200), now,
     );
     if (this._jobQueue?.submitWorkerJob) {
@@ -7439,6 +7458,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             platform: ctx.platform || 'web',
             isDm: ctx.isDm !== false,
             sessionKey: this._ctxSessionKey(),
+            projectContext: ctx.projectContext || null,
+            memoryEnvelope: ctx.memoryEnvelope || null,
           },
         }, {
           id: `wakeup-${info.lastInsertRowid}`,
@@ -7448,6 +7469,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           priority: 65,
           route: 'wakeup',
           sessionKey: this._ctxSessionKey(),
+          graph: ctx.memoryEnvelope?.primarySlug || ctx.memoryEnvelope?.writeScopes?.defaultSlug || null,
         });
         const jobId = job?.jobId || null;
         if (jobId) {
@@ -7514,6 +7536,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           platform: row.platform || 'web',
           isDm: row.is_dm === 1,
           sessionKey: row.session_key,
+          projectContext: row.project_context ? JSON.parse(row.project_context) : null,
+          memoryEnvelope: row.memory_envelope ? JSON.parse(row.memory_envelope) : null,
         };
         const key = row.session_key;
         if (this._jobQueue?.submitWorkerJob) {
@@ -7528,6 +7552,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             priority: 65,
             route: 'wakeup.sweep',
             sessionKey: key,
+            graph: opts.memoryEnvelope?.primarySlug || opts.memoryEnvelope?.writeScopes?.defaultSlug || null,
           });
           if (job?.jobId) sessions.db.prepare('UPDATE wakeups SET queue_job_id=? WHERE id=?').run(job.jobId, row.id);
         } else if (agent.activeRuns?.has(key)) {
@@ -7572,12 +7597,15 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     } catch (e) {
       return { error: `Failed to create: ${e.message}` };
     }
-    // Broadcast so clients (Spore Code in particular) can render a
-    // live task-list side panel. sessionKey lets old/unscoped clients
-    // filter — the acorn CLI listens for task:* frames and only
-    // renders rows tagged with its own session.
+    // Route so clients (Spore Code in particular) can render a live task-list
+    // side panel without leaking project task rows into other sessions.
     try {
-      this.broadcast({
+      this._broadcastSessionEvent({
+        sessionKey: this._ctxSessionKey() || null,
+        channelId: ctx.channelId || null,
+        platform: ctx.platform || null,
+        userId: ctx.userId || null,
+      }, {
         type: 'task:create',
         id: slug,
         subject: subj,
@@ -7587,7 +7615,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         blockedBy: Array.isArray(blockedBy) ? blockedBy : [],
         sessionKey: this._ctxSessionKey() || null,
         channelId: ctx.channelId || null,
-      });
+      }, { logPrefix: 'tasklist:create' });
     } catch (e) { this.log.warn('[tools] broadcast failed: ' + e.message); }
     return { ok: true, id: slug };
   }
@@ -7617,7 +7645,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     // carried from the task row (not ctx) since task_progress can be
     // called for tasks created in a different context.
     try {
-      this.broadcast({
+      this._broadcastSessionEvent({
+        sessionKey: row.session_key || this._ctxSessionKey() || null,
+        channelId: row.channel_id || null,
+        platform: (row.session_key || '').includes(':cli:') ? 'cli' : (this._ctx()?.platform || null),
+        userId: row.user_id || null,
+      }, {
         type: 'task:update',
         id,
         subject: row.subject,
@@ -7627,7 +7660,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         priority: Number.isFinite(priority) ? priority : row.priority,
         sessionKey: row.session_key || this._ctxSessionKey() || null,
         channelId: row.channel_id || null,
-      });
+      }, { logPrefix: 'tasklist:update' });
     } catch (e) { this.log.warn('[tools] broadcast failed: ' + e.message); }
     // Cascade: if status flipped to done, unblock dependents whose remaining
     // blockers are all done. Cheap even on large task tables — we filter by

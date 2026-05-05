@@ -309,14 +309,83 @@ class RuntimeJobQueue {
     if (wakeupId && this.db) {
       this.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=? AND fired=0').run(now(), wakeupId);
     }
+    const opts = { ...(payload.opts || {}) };
+    const sessionSender = this._attachWakeupSessionCallbacks(opts);
     try {
-      return await this._runAgentTurn(payload);
+      const result = await this._runAgentTurn({ ...payload, opts });
+      if (sessionSender) {
+        sessionSender({
+          type: 'chat:done',
+          text: result?.text || '',
+          usage: result?.usage,
+          iterations: result?.iterations,
+          toolUsage: result?.toolUsage,
+        });
+      } else {
+        await this._deliverWakeupChannelResult(opts, result);
+      }
+      return result;
     } catch (e) {
       if (wakeupId && this.db) {
         this.db.prepare('UPDATE wakeups SET failed=1, error=? WHERE id=?')
           .run(String(e.message || e).slice(0, 500), wakeupId);
       }
+      if (sessionSender) {
+        sessionSender({ type: 'chat:error', error: e?.message || String(e) });
+        sessionSender({ type: 'chat:done', text: '' });
+      }
       throw e;
+    }
+  }
+
+  _attachWakeupSessionCallbacks(opts) {
+    const platform = String(opts?.platform || '').toLowerCase();
+    if (platform !== 'web' && platform !== 'cli') return null;
+    if (opts.onTextDelta || opts.onToolUse || opts.onStatus) return null;
+
+    const tools = this.tools || this.workerDeps.tools || null;
+    const broadcaster = tools?._getSessionBroadcaster?.();
+    if (typeof broadcaster !== 'function') return null;
+    const routeKeys = typeof tools._sessionRouteKeys === 'function'
+      ? tools._sessionRouteKeys(opts)
+      : [opts.sessionKey, opts.channelId, opts.channelId ? `channel:${opts.channelId}` : null].filter(Boolean);
+    const uniqueKeys = [...new Set(routeKeys.filter(Boolean))];
+    if (!uniqueKeys.length) return null;
+
+    const send = (payload) => {
+      const msg = opts.channelId && !payload.sessionId ? { ...payload, sessionId: opts.channelId } : payload;
+      let delivered = 0;
+      for (const key of uniqueKeys) {
+        try { delivered += Number(broadcaster(key, msg) || 0); } catch (e) { this.log.warn(`[wakeup] session delivery failed for ${key}: ${e.message}`); }
+      }
+      return delivered;
+    };
+
+    send({ type: 'chat:start', sessionId: opts.channelId || opts.sessionKey || 'wakeup' });
+    opts.onTextDelta = (delta) => send({ type: 'chat:delta', text: delta });
+    opts.onThinkingDelta = (delta) => send({ type: 'chat:thinking', text: delta });
+    opts.onToolUse = (toolName) => send({ type: 'chat:tool', tool: toolName });
+    opts.onStatus = (evt = {}) => {
+      const payload = String(evt.type || '').startsWith('code:')
+        ? evt
+        : { type: 'chat:status', status: evt.type, ...Object.fromEntries(Object.entries(evt).filter(([k]) => k !== 'type')) };
+      send(payload);
+    };
+    return send;
+  }
+
+  async _deliverWakeupChannelResult(opts, result) {
+    const text = result?.text;
+    if (!text || text.trim() === 'NO_REPLY' || text.includes('NO_REPLY')) return;
+    const platform = String(opts?.platform || '').toLowerCase();
+    if (!platform || platform === 'web' || platform === 'cli') return;
+    const manager = (this.tools || this.workerDeps.tools)?.platformManager;
+    const gateway = manager?.getGateway?.(platform);
+    if (!gateway?.sendMessage || !opts.channelId) return;
+    try {
+      await gateway.sendMessage(opts.channelId, text, null, { trigger: 'wakeup', notify: true });
+    } catch (e) {
+      this.log.warn(`[wakeup] ${platform} result delivery failed: ${e.message}`);
     }
   }
 
@@ -351,6 +420,12 @@ class RuntimeJobQueue {
     const wakeupCols = this.db.prepare('PRAGMA table_info(wakeups)').all().map(c => c.name);
     if (!wakeupCols.includes('queue_job_id')) {
       try { this.db.exec('ALTER TABLE wakeups ADD COLUMN queue_job_id TEXT'); } catch {}
+    }
+    if (!wakeupCols.includes('project_context')) {
+      try { this.db.exec('ALTER TABLE wakeups ADD COLUMN project_context TEXT'); } catch {}
+    }
+    if (!wakeupCols.includes('memory_envelope')) {
+      try { this.db.exec('ALTER TABLE wakeups ADD COLUMN memory_envelope TEXT'); } catch {}
     }
   }
 

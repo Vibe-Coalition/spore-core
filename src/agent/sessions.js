@@ -95,6 +95,8 @@ class SessionManager {
         user_name   TEXT,
         platform    TEXT,
         is_dm       INTEGER NOT NULL DEFAULT 1,
+        project_context TEXT,
+        memory_envelope TEXT,
         fire_at     INTEGER NOT NULL,
         prompt      TEXT NOT NULL,
         reason      TEXT,
@@ -183,6 +185,12 @@ class SessionManager {
     const wakeupCols = this.db.prepare("PRAGMA table_info(wakeups)").all();
     if (!wakeupCols.some(c => c.name === 'queue_job_id')) {
       this.db.exec("ALTER TABLE wakeups ADD COLUMN queue_job_id TEXT");
+    }
+    if (!wakeupCols.some(c => c.name === 'project_context')) {
+      this.db.exec("ALTER TABLE wakeups ADD COLUMN project_context TEXT");
+    }
+    if (!wakeupCols.some(c => c.name === 'memory_envelope')) {
+      this.db.exec("ALTER TABLE wakeups ADD COLUMN memory_envelope TEXT");
     }
   }
   

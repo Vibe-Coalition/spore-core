@@ -223,6 +223,11 @@ class TelegramGateway {
     }
     clearInterval(typingInterval);
 
+    if (result?.interjected) {
+      this.log.info(`[telegram] Interjected follow-up into active session for ${channelName}`);
+      return;
+    }
+
     if (result?.text) {
       await this.sendMessage(targetId, result.text, null, { replyToMessageId: message.message_id });
       if (policy.shareToFeed) {
@@ -477,6 +482,76 @@ class TelegramGateway {
         } catch (e) { this.log.warn('[telegram] feed.log failed: ' + e.message); }
       } catch (e) {
         this.log.warn(`[telegram] [proactive] Failed for ${targetId}: ${e.message}`);
+      }
+    });
+  }
+
+  /**
+   * Deliver a completed delegate_task result back into the same Telegram
+   * chat/topic that launched it. Slack/Discord go through MessageQueue;
+   * Telegram is direct, so it needs an explicit task-complete path.
+   */
+  injectTaskComplete(chatId, taskId, taskEntry) {
+    const target = this._parseTarget(chatId);
+    const targetId = target.threadId ? `${target.chatId}:topic:${target.threadId}` : target.chatId;
+    const isDm = taskEntry?.isDm ?? !String(target.chatId).startsWith('-');
+    const userId = taskEntry?.userId || (isDm ? String(target.chatId) : 'system');
+    const channelName = taskEntry?.channelName || (isDm ? 'telegram-dm' : `telegram:${target.chatId}`);
+    const elapsed = Math.round(((taskEntry?.completedAt || Date.now()) - (taskEntry?.startedAt || Date.now())) / 1000);
+    const status = taskEntry?.status === 'done' ? 'completed successfully' : `failed: ${taskEntry?.result?.error || 'unknown error'}`;
+    const resultSummary = taskEntry?.status === 'done' && taskEntry?.result?.result
+      ? String(taskEntry.result.result).slice(0, 3000)
+      : '';
+    const usage = taskEntry?.result?.usage;
+    const usageStr = usage ? ` (${usage.input_tokens}/${usage.output_tokens} tokens)` : '';
+    const content = [
+      `[BACKGROUND TASK ${status}]`,
+      `Task ID: ${taskId}`,
+      `Duration: ${elapsed}s${usageStr}`,
+      resultSummary ? `\nResult:\n${resultSummary}` : '',
+      '\nSummarize the outcome for the user concisely. If the task produced files, mention their paths.',
+    ].filter(Boolean).join('\n');
+
+    setImmediate(async () => {
+      try {
+        this._api('sendChatAction', { chat_id: target.chatId, action: 'typing' }).catch(() => {});
+        const policy = resolveSourcePolicy(this.config, 'telegram', String(target.chatId));
+        const agentOpts = {
+          content,
+          messageContent: content,
+          channelId: targetId,
+          channelName,
+          sessionKey: taskEntry?.sessionKey || this.agent.sessions.constructor.buildKey({
+            platform: 'telegram',
+            channelId: targetId,
+            isDm,
+            userId,
+            private: !!policy.private,
+          }),
+          userId,
+          userName: taskEntry?.originalUserName || 'System',
+          guildName: 'Telegram',
+          isDm,
+          trigger: 'task_complete',
+          platform: 'telegram',
+          sourceId: targetId,
+          suppressLearning: true,
+        };
+        const result = this.agent._jobQueue?.submitAgentTurn
+          ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
+              lane: 'channel',
+              priority: 80,
+              route: 'telegram.task_complete',
+              allowInterjection: false,
+            })
+          : await this.agent.processMessage(agentOpts);
+
+        if (result?.text && result.text.trim() !== 'NO_REPLY' && !result.text.includes('NO_REPLY')) {
+          await this.sendMessage(targetId, result.text);
+        }
+        this.log.info(`[telegram] [task-deliver] Delivered result for ${taskId} in ${channelName}`);
+      } catch (e) {
+        this.log.warn(`[telegram] [task-deliver] Failed for ${taskId}: ${e.message}`);
       }
     });
   }

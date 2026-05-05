@@ -313,3 +313,65 @@ test('persistent wakeup jobs mark wakeups fired and run the agent once', async (
     fixture.cleanup();
   }
 });
+
+test('wakeup jobs preserve cli route and project memory context', async () => {
+  const fixture = makeDb();
+  const events = [];
+  let observedOpts = null;
+  const tools = {
+    _getSessionBroadcaster() {
+      return (sessionKey, payload) => {
+        events.push({ sessionKey, payload });
+        return sessionKey === 'channel:cli:yam@project' ? 1 : 0;
+      };
+    },
+    _sessionRouteKeys(opts) {
+      return [opts.sessionKey];
+    },
+  };
+  const agent = {
+    activeRuns: new Set(),
+    async processMessage(opts) {
+      observedOpts = opts;
+      opts.onTextDelta?.('wake ');
+      opts.onToolUse?.('read_file');
+      return { text: 'wake done', iterations: 1, usage: { input_tokens: 1, output_tokens: 2 } };
+    },
+  };
+  const queue = makeQueue(fixture.sessions, { agent, tools });
+  const inserted = fixture.db.prepare('INSERT INTO wakeups (fired, failed) VALUES (0, 0)').run();
+  const wakeupId = inserted.lastInsertRowid;
+
+  try {
+    const result = await queue.submitWorkerJob('wakeup.fire', {
+      wakeupId,
+      opts: {
+        content: 'ping project',
+        channelId: 'cli:yam@project',
+        userId: 'yam',
+        platform: 'cli',
+        isDm: false,
+        sessionKey: 'channel:cli:yam@project',
+        projectContext: { cwd: '/work/project', mode: 'execute' },
+        memoryEnvelope: { primarySlug: 'project-yam', writeScopes: { defaultSlug: 'project-yam' } },
+      },
+    }, {
+      id: `wakeup-${wakeupId}`,
+      persistent: true,
+      awaitResult: true,
+      lane: 'deferred',
+      sessionKey: 'channel:cli:yam@project',
+      graph: 'project-yam',
+    });
+
+    assert.equal(result.text, 'wake done');
+    assert.equal(observedOpts.projectContext.cwd, '/work/project');
+    assert.equal(observedOpts.memoryEnvelope.primarySlug, 'project-yam');
+    assert.deepEqual(events.map(e => e.payload.type), ['chat:start', 'chat:delta', 'chat:tool', 'chat:done']);
+    assert.equal(events.every(e => e.sessionKey === 'channel:cli:yam@project'), true);
+    assert.equal(events[0].payload.sessionId, 'cli:yam@project');
+  } finally {
+    queue.stop();
+    fixture.cleanup();
+  }
+});

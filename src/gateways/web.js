@@ -1595,7 +1595,7 @@ class WebGateway {
         }
       } catch (e) {
         this.log.warn(`[proactive:web] Failed: ${e.message}`);
-        this.broadcast({ type: 'chat:done', text: '' });
+        this._sendToSession(sessionId, { type: 'chat:done', text: '' });
       }
     }).catch(e => {
       this.log.warn(`[proactive:web] Queue error: ${e.message}`);
