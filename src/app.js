@@ -442,11 +442,9 @@ async function boot() {
       graphMaintenance,
       channelDistiller,
     });
-    runtimeQueue.init();
     tools._jobQueue = runtimeQueue;
     agent._jobQueue = runtimeQueue;
     graphMaintenance.queue = runtimeQueue;
-    log.info(`Runtime job queue initialized (lanes=${Object.entries(runtimeQueue.laneLimits).map(([k, v]) => `${k}:${v}`).join(', ')})`);
   } else {
     log.warn('Runtime job queue disabled; falling back to legacy direct worker execution.');
   }
@@ -515,6 +513,11 @@ async function boot() {
     log.info(`Provider ready — main model backend: ${require('./providers').detectBackend(config.model, config)}`);
   } catch (e) {
     log.warn(`[boot] setProviderManager failed: ${e.message}`);
+  }
+
+  if (runtimeQueue) {
+    runtimeQueue.init();
+    log.info(`Runtime job queue initialized (lanes=${Object.entries(runtimeQueue.laneLimits).map(([k, v]) => `${k}:${v}`).join(', ')})`);
   }
 
   const healthServer = startHealthServer(config, log, graph, sessions, gateways, learner, maintainer, tools, agent);

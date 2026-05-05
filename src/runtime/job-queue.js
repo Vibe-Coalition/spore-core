@@ -61,7 +61,7 @@ class RuntimeJobQueue {
     this._running = new Map();
     this._runningSessions = new Set();
     this._timer = null;
-    this._stopped = false;
+    this._stopped = true;
     this._pumpScheduled = false;
     this.stats = {
       queued: 0,
