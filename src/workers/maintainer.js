@@ -1430,6 +1430,15 @@ ${reflectionBlock || 'none yet'}`
     if (!active) return; // no embedder plugin installed/configured — skip
 
     try {
+      for (const col of [
+        'ALTER TABLE nodes ADD COLUMN embedding TEXT',
+        'ALTER TABLE nodes ADD COLUMN embedding_provider TEXT',
+        'ALTER TABLE nodes ADD COLUMN embedding_dim INTEGER',
+      ]) {
+        try { this.db.exec(col); } catch (e) {
+          if (!String(e.message || '').includes('duplicate column')) throw e;
+        }
+      }
       const rows = this.db.prepare(`
         SELECT id FROM nodes
         WHERE embedding IS NULL
