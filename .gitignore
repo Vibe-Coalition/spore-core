@@ -24,6 +24,22 @@ animas/.ingress.json
 animas/cleanup-graph.sh
 !animas/.gitkeep
 
+# Per-spore instances (runtime data, secrets, DBs)
+spores/*
+!spores/.template/
+!spores/.template/**
+spores/.auth-config.json
+spores/.spore-users.json
+spores/.vault-key
+spores/.vault.db
+spores/.ollama-status.json
+spores/.ollama-cmd
+spores/.ollama-result
+spores/.ingress.json
+spores/cleanup-graph.sh
+!spores/.gitkeep
+pairing.json
+
 # One-off migration scripts (already executed, not needed in repo)
 scripts/migrate-*.js
 

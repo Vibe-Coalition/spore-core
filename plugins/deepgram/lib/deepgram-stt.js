@@ -1,9 +1,8 @@
 // Server-side Deepgram Nova-3 STT.
 // Extracted from src/voice/stt.js DeepgramSTT class — same shape, same
 // API contract (transcribe(audioBuffer, mimeType) → {text, confidence}).
-// Reads the API key from the plugin slot first, then falls back to the
-// legacy host-level `deepgramApiKey` (which is loaded from the
-// DEEPGRAM_API_KEY env var by config.js).
+// Reads the API key from the plugin slot first, then falls back to
+// process.env.DEEPGRAM_API_KEY so existing .env files keep working.
 
 const https = require('https');
 const { URL } = require('url');
@@ -11,7 +10,7 @@ const { URL } = require('url');
 class DeepgramSTT {
   constructor(config) {
     const slot = config?.plugins?.deepgram || {};
-    this.apiKey = slot.apiKey || config?.deepgramApiKey || null;
+    this.apiKey = slot.apiKey || process.env.DEEPGRAM_API_KEY || null;
     this.model = slot.model || config?.voice?.deepgramModel || 'nova-3';
     this.language = slot.language || config?.voice?.deepgramLanguage || 'en';
     if (!this.apiKey) throw new Error('Deepgram STT: no API key (set plugins.deepgram.apiKey or DEEPGRAM_API_KEY)');

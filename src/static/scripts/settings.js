@@ -22,7 +22,7 @@ function _populatePluginsTab(plugins) {
     if (!enabled) {
       stateEl.textContent = 'Plugin system is disabled. Set SPORE_PLUGINS_ENABLED=true to enable. Plugins run unsandboxed with full process privileges.';
     } else if (!hot) {
-      stateEl.textContent = 'Plugin system enabled (read-only). Set SPORE_PLUGINS_HOT_RELOAD=true to allow runtime install/uninstall and git clone.';
+      stateEl.textContent = 'Plugin system enabled (read-only). Remove SPORE_PLUGINS_HOT_RELOAD=false or set it to true to allow runtime install/uninstall and git clone.';
     } else {
       stateEl.textContent = 'Plugin system enabled with hot reload. Install/uninstall takes effect without restart; updating an existing plugin still needs a restart.';
     }
@@ -35,7 +35,8 @@ function _populatePluginsTab(plugins) {
   if (cloneRow) cloneRow.style.display = (enabled && hot && plugins.dirs?.user) ? 'block' : 'none';
 
   // Unified list: everything on disk, with install/uninstall toggle per row.
-  const available = Array.isArray(plugins.available) ? plugins.available : [];
+  const availableAll = Array.isArray(plugins.available) ? plugins.available : [];
+  const available = availableAll.filter(p => !_isChannelPlugin(p));
   if (available.length === 0) {
     mgrEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugins found in either discovery dir.</div>';
   } else {
@@ -45,7 +46,7 @@ function _populatePluginsTab(plugins) {
   // Schema-driven panes — for now, only render panes that target the 'plugins' tab.
   // (Cross-tab placement — pane.tab === 'agent' filing under the Agent tab — will
   //  follow in a later pass; the API supports it but the host needs more wiring.)
-  const panes = Array.isArray(plugins.panes) ? plugins.panes.filter(p => !p.tab || p.tab === 'plugins') : [];
+  const panes = Array.isArray(plugins.panes) ? plugins.panes.filter(p => (!p.tab || p.tab === 'plugins') && !_isChannelPane(p, availableAll)) : [];
   if (panes.length === 0) {
     panesEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugin settings to configure.</div>';
   } else {
@@ -100,11 +101,38 @@ function _renderPluginPane(pane) {
   const fields = (pane.schema || []).map(field => _renderPluginField(pane.pluginId, field, pane.values?.[field.key], pane.meta?.[field.key])).join('');
   const desc = pane.description ? `<div class="settings-note" style="margin-bottom:8px">${_escapeHtml(pane.description)}</div>` : '';
   const customHtml = pane.html ? `<div data-plugin-custom="${pane.pluginId}">${pane.html}</div>` : '';
+  const channelHtml = pane.pluginId === 'telegram' ? _renderTelegramPairingPanel() : '';
   return `<div class="settings-plugin-pane" data-plugin-pane="${pane.pluginId}" style="margin-bottom:18px;padding:10px 0;border-top:1px solid var(--border)">
     <h5 style="margin:0 0 6px 0">${_escapeHtml(pane.title)}</h5>
     ${desc}
     ${fields}
     ${customHtml}
+    ${channelHtml}
+  </div>`;
+}
+
+function _renderTelegramPairingPanel() {
+  return `<div class="settings-channel-pairing" data-telegram-pairing>
+    <div class="settings-channel-pairing-head">
+      <div>
+        <h6>Telegram pairing</h6>
+        <div class="settings-note">Pending requests can be approved here.</div>
+      </div>
+      <button type="button" class="settings-btn-secondary" data-telegram-pair-refresh>Refresh</button>
+    </div>
+    <div class="settings-channel-pairing-status" data-telegram-pairing-status></div>
+    <div class="settings-channel-pairing-group">
+      <div class="settings-channel-pairing-label">Pending requests</div>
+      <div class="settings-channel-pairing-list" data-telegram-pairing-pending>
+        <div class="settings-note" style="opacity:.6">Loading...</div>
+      </div>
+    </div>
+    <div class="settings-channel-pairing-group">
+      <div class="settings-channel-pairing-label">Approved users</div>
+      <div class="settings-channel-pairing-list" data-telegram-pairing-approved>
+        <div class="settings-note" style="opacity:.6">Loading...</div>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -143,12 +171,182 @@ function _renderPluginField(pluginId, field, value, meta) {
   }
 }
 
+function _isChannelPlugin(p) {
+  if (!p) return false;
+  return !!p.channel || p.category === 'channels' || ['discord', 'telegram', 'slack'].includes(p.id);
+}
+
+function _isChannelPane(pane, plugins) {
+  if (!pane) return false;
+  if (pane.tab === 'channels') return true;
+  const meta = (plugins || []).find(p => p.id === pane.pluginId);
+  return _isChannelPlugin(meta);
+}
+
+function _populateChannelsTab(plugins) {
+  const listEl = document.getElementById('settings-channels-list');
+  const panesEl = document.getElementById('settings-channels-panes');
+  if (!listEl || !panesEl) return;
+  const hot = !!plugins.hotReload;
+  const available = (Array.isArray(plugins.available) ? plugins.available : []).filter(_isChannelPlugin);
+  const gatewayRows = Array.isArray(plugins.gateways)
+    ? plugins.gateways
+    : Object.entries(plugins.gateways || {}).map(([platform, status]) => ({ platform, status }));
+  const statuses = new Map(gatewayRows.map(g => [g.platform || g.name, g]));
+
+  const builtins = [
+    {
+      id: 'web',
+      name: 'Web',
+      description: 'Always-on browser chat and graph UI. This stays in core because it hosts Settings, onboarding, auth, files, and the app shell.',
+      isInstalled: true,
+      fixed: true,
+      status: 'connected',
+    },
+    {
+      id: 'cli',
+      name: 'CLI / Spore Code',
+      description: 'Enabled by the Spore Code plugin and invite key. CLI sessions are kept as a first-class local channel rather than a public chat integration.',
+      isInstalled: true,
+      fixed: true,
+      status: 'available',
+    },
+  ];
+  const channelRows = available.map(p => ({
+    ...p,
+    status: statuses.get(p.id)?.status || (p.isInstalled ? 'registered' : 'available'),
+  }));
+  listEl.innerHTML = builtins.concat(channelRows).map(p => _renderChannelRow(hot, p)).join('');
+
+  const panes = Array.isArray(plugins.panes)
+    ? plugins.panes.filter(p => _isChannelPane(p, available))
+    : [];
+  panesEl.innerHTML = panes.length
+    ? panes.map(_renderPluginPane).join('')
+    : '<div class="settings-note" style="opacity:.6">No channel plugin settings available.</div>';
+  try {
+    document.dispatchEvent(new CustomEvent('spore-channel-panes-rendered', { detail: { panes } }));
+  } catch {}
+  try { _settingsRefreshTelegramPairing(); } catch {}
+}
+
+function _renderChannelRow(hotReload, p) {
+  const status = p.status || (p.isInstalled ? 'installed' : 'available');
+  const statusClass = status === 'connected' ? 'ok' : (status === 'disabled' || status === 'available' ? '' : 'warn');
+  const action = p.fixed ? ''
+    : (hotReload
+      ? (p.isInstalled
+        ? `<button type="button" class="settings-btn-secondary" data-plugin-uninstall="${_escapeAttr(p.id)}">Uninstall</button>`
+        : `<button type="button" class="settings-btn-secondary" data-plugin-install="${_escapeAttr(p.id)}">Install</button>`)
+      : '');
+  const deps = (p.depends || []).length
+    ? `<span class="settings-note" style="opacity:.55">depends: ${p.depends.map(_escapeHtml).join(', ')}</span>`
+    : '';
+  return `<div class="settings-channel-row">
+    <div class="settings-channel-main">
+      <div class="settings-channel-title">
+        <strong>${_escapeHtml(p.name || p.id)}</strong>
+        <span class="settings-channel-id">${_escapeHtml(p.id)}</span>
+        <span class="settings-channel-status ${statusClass}">${_escapeHtml(status)}</span>
+      </div>
+      <div class="settings-note" style="opacity:.72">${_escapeHtml(p.description || 'Channel integration plugin.')}</div>
+      ${deps}
+    </div>
+    ${action}
+  </div>`;
+}
+
 function _escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 function _escapeAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
 
+function _settingsTelegramPairingStatus(message, kind = '') {
+  const el = document.querySelector('[data-telegram-pairing-status]');
+  if (!el) return;
+  el.textContent = message || '';
+  el.setAttribute('data-kind', kind || '');
+}
+
+function _settingsPairingName(req) {
+  const meta = req?.meta || {};
+  const username = meta.username ? `@${meta.username}` : '';
+  const name = [meta.name, username].filter(Boolean).join(' ');
+  return name || `Telegram user ${req?.id || 'unknown'}`;
+}
+
+function _settingsPairingTime(iso) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '';
+  try { return new Date(t).toLocaleString(); } catch { return ''; }
+}
+
+function _settingsRenderTelegramPending(reqs) {
+  if (!reqs.length) return '<div class="settings-note" style="opacity:.6">No pending Telegram pairing requests.</div>';
+  return reqs.map(req => {
+    const lastSeen = _settingsPairingTime(req.lastSeenAt || req.createdAt);
+    const details = [
+      req.id ? `ID ${_escapeHtml(req.id)}` : '',
+      lastSeen ? `last seen ${_escapeHtml(lastSeen)}` : '',
+    ].filter(Boolean).join(' - ');
+    return `<div class="settings-channel-pairing-row">
+      <div class="settings-channel-pairing-main">
+        <div class="settings-channel-pairing-title">${_escapeHtml(_settingsPairingName(req))}</div>
+        <div class="settings-channel-pairing-code">${_escapeHtml(req.code || '')}</div>
+        ${details ? `<div class="settings-note">${details}</div>` : ''}
+      </div>
+      <button type="button" class="settings-btn-secondary" data-telegram-pair-approve="${_escapeAttr(req.code || '')}">Approve</button>
+    </div>`;
+  }).join('');
+}
+
+function _settingsRenderTelegramApproved(ids) {
+  if (!ids.length) return '<div class="settings-note" style="opacity:.6">No approved Telegram users.</div>';
+  return ids.map(id => `<div class="settings-channel-pairing-row">
+    <div class="settings-channel-pairing-main">
+      <div class="settings-channel-pairing-title">Telegram user</div>
+      <div class="settings-channel-pairing-code">${_escapeHtml(id)}</div>
+    </div>
+    <button type="button" class="settings-btn-secondary" data-telegram-pair-revoke="${_escapeAttr(id)}">Revoke</button>
+  </div>`).join('');
+}
+
+async function _settingsFetchPairingJson(path, options = {}) {
+  const r = await fetch(API + path, {
+    ...options,
+    headers: { ...(options.headers || {}), ...authHeaders() },
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${r.status}`);
+  return data;
+}
+
+async function _settingsRefreshTelegramPairing() {
+  const panel = document.querySelector('[data-telegram-pairing]');
+  if (!panel) return;
+  const pendingEl = panel.querySelector('[data-telegram-pairing-pending]');
+  const approvedEl = panel.querySelector('[data-telegram-pairing-approved]');
+  if (!pendingEl || !approvedEl) return;
+  pendingEl.innerHTML = '<div class="settings-note" style="opacity:.6">Loading...</div>';
+  approvedEl.innerHTML = '<div class="settings-note" style="opacity:.6">Loading...</div>';
+  _settingsTelegramPairingStatus('', '');
+  try {
+    const [pendingData, approvedData] = await Promise.all([
+      _settingsFetchPairingJson('/api/pairing/pending'),
+      _settingsFetchPairingJson('/api/pairing/approved'),
+    ]);
+    const pending = Array.isArray(pendingData?.telegram) ? pendingData.telegram : [];
+    const approved = Array.isArray(approvedData?.telegram) ? approvedData.telegram : [];
+    pendingEl.innerHTML = _settingsRenderTelegramPending(pending);
+    approvedEl.innerHTML = _settingsRenderTelegramApproved(approved);
+  } catch (err) {
+    pendingEl.innerHTML = '<div class="settings-note" style="opacity:.6">Unable to load pairing requests.</div>';
+    approvedEl.innerHTML = '<div class="settings-note" style="opacity:.6">Unable to load approved users.</div>';
+    _settingsTelegramPairingStatus(err?.message || 'Pairing API unavailable', 'err');
+  }
+}
+
 function _collectPluginSettingsPayload() {
   const out = {};
-  document.querySelectorAll('#settings-plugins-panes [data-plugin-field]').forEach(wrap => {
+  document.querySelectorAll('#settings-plugins-panes [data-plugin-field], #settings-channels-panes [data-plugin-field]').forEach(wrap => {
     const [pluginId, key] = wrap.getAttribute('data-plugin-field').split('.');
     const isSecret = wrap.getAttribute('data-plugin-secret') === '1';
     const original = wrap.getAttribute('data-plugin-original');
@@ -187,6 +385,64 @@ async function _refreshSettingsFromServer() {
 document.addEventListener('click', async (e) => {
   const t = e.target;
   if (!(t instanceof Element)) return;
+
+  const pairRefresh = t.closest?.('[data-telegram-pair-refresh]');
+  if (pairRefresh) {
+    await _settingsRefreshTelegramPairing();
+    return;
+  }
+
+  const pairApprove = t.closest?.('[data-telegram-pair-approve]');
+  if (pairApprove) {
+    const code = pairApprove.getAttribute('data-telegram-pair-approve') || '';
+    if (!code) return;
+    pairApprove.disabled = true;
+    _settingsTelegramPairingStatus('Approving...', '');
+    try {
+      const data = await _settingsFetchPairingJson('/api/pairing/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'telegram', code }),
+      });
+      toast(`Approved Telegram user ${data.id || ''}`.trim());
+      await _settingsRefreshTelegramPairing();
+      _settingsTelegramPairingStatus('Approved.', 'ok');
+    } catch (err) {
+      const msg = err?.message || 'Approval failed';
+      _settingsTelegramPairingStatus(msg, 'err');
+      toast(msg, true);
+    } finally {
+      pairApprove.disabled = false;
+    }
+    return;
+  }
+
+  const pairRevoke = t.closest?.('[data-telegram-pair-revoke]');
+  if (pairRevoke) {
+    const id = pairRevoke.getAttribute('data-telegram-pair-revoke') || '';
+    if (!id) return;
+    if (!confirm(`Revoke Telegram user "${id}"?`)) return;
+    pairRevoke.disabled = true;
+    _settingsTelegramPairingStatus('Revoking...', '');
+    try {
+      const data = await _settingsFetchPairingJson('/api/pairing/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'telegram', id }),
+      });
+      if (!data.ok) throw new Error('Revoke failed');
+      toast(`Revoked Telegram user ${id}`);
+      await _settingsRefreshTelegramPairing();
+      _settingsTelegramPairingStatus('Revoked.', 'ok');
+    } catch (err) {
+      const msg = err?.message || 'Revoke failed';
+      _settingsTelegramPairingStatus(msg, 'err');
+      toast(msg, true);
+    } finally {
+      pairRevoke.disabled = false;
+    }
+    return;
+  }
 
   // Per-row Uninstall
   const uninstallId = t.getAttribute?.('data-plugin-uninstall');
@@ -497,22 +753,45 @@ function _settingsRefreshTierModelList(key) {
   const dl = document.getElementById(`settings-model-${key}-datalist`);
   if (!dl) return;
   const provider = document.getElementById(`settings-model-${key}-provider`)?.value || '';
-  // For built-in providers (anthropic/openai/openrouter/gemini), ids in
-  // _settingsKnownLimits look like `openai/gpt-5.4`. For custom providers
-  // like "glm", they look like `glm/<model-id>`. Bare model ids (no slash)
-  // are treated as belonging to 'anthropic' by convention.
+
+  // Source #1: the model library (curated, vendor-augmented).
+  // Source #2: _settingsKnownLimits — populated by the "Populate
+  //   models" probe; legacy fallback for models the operator hasn't
+  //   added to their library yet.
+  const seen = new Set();
   const entries = [];
+  const lib = (window.ModelLibrary && window.ModelLibrary.load && window.ModelLibrary._cache) || null;
+  // Pull from cache only — the library module owns its own load
+  // lifecycle. populateSettingsPanel ensures the cache is warm before
+  // tier rows render.
+  const libCache = (window.ModelLibrary && typeof window.ModelLibrary.populateTierDatalist === 'function')
+    ? (window.ModelLibrary.__cache || []) : (lib || []);
+  // Prefer the public accessor if it's wired (set below by populateSettingsPanel).
+  const libEntries = window.ModelLibrary?.__cache || [];
+  for (const e of libEntries) {
+    if (e?.enabled === false) continue;
+    if (provider && e.provider !== provider) continue;
+    if (seen.has(e.modelId)) continue;
+    seen.add(e.modelId);
+    entries.push({ id: e.modelId, ctx: e.contextWindow || 0, fromLibrary: true });
+  }
   for (const k of Object.keys(_settingsKnownLimits)) {
     const slash = k.indexOf('/');
     const pref = slash >= 0 ? k.slice(0, slash) : 'anthropic';
     const id = slash >= 0 ? k.slice(slash + 1) : k;
     if (pref !== provider) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
     const ctx = _settingsKnownLimits[k]?.contextLength;
-    entries.push({ id, ctx: ctx || 0 });
+    entries.push({ id, ctx: ctx || 0, fromLibrary: false });
   }
-  entries.sort((a, b) => (b.ctx - a.ctx) || a.id.localeCompare(b.id));
+  // Library entries first (curated > probed), then by ctx desc.
+  entries.sort((a, b) => {
+    if (a.fromLibrary !== b.fromLibrary) return a.fromLibrary ? -1 : 1;
+    return (b.ctx - a.ctx) || a.id.localeCompare(b.id);
+  });
   dl.innerHTML = entries.map(e =>
-    `<option value="${_settingsEscapeHtml(e.id)}"${e.ctx ? ` label="${e.ctx.toLocaleString()} ctx"` : ''}></option>`
+    `<option value="${_settingsEscapeHtml(e.id)}" label="${e.ctx ? e.ctx.toLocaleString() + ' ctx' : ''}${e.fromLibrary ? ' · library' : ''}"></option>`
   ).join('');
 }
 
@@ -543,7 +822,7 @@ async function _settingsAutoDetectModelLimits(data) {
     if (!p?.url || !p?.name) continue;
     tasks.push(fetch(API + '/api/providers/list-models', {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ kind: 'custom', baseUrl: p.url, apiKey: p.key, authHeader: p.authHeader }),
+      body: JSON.stringify({ kind: 'custom', name: p.name, baseUrl: p.url, apiKey: p.key, authHeader: p.authHeader }),
     }).then(r => r.json()).then(d => {
       if (!d?.ok) return;
       for (const m of (d.models || [])) {
@@ -642,19 +921,478 @@ function _mergeProviderPluginPayload(pluginPayload) {
   return out;
 }
 
+const SETTINGS_HOST_PROVIDER_FIELDS = {
+  anthropic: new Set(['apiKey']),
+  openai: new Set(['apiKey', 'baseUrl']),
+  openrouter: new Set(['apiKey', 'baseUrl', 'referer']),
+  local: new Set(['apiKey', 'baseUrl', 'authHeader']),
+  gemini: new Set(['apiKey']),
+};
+
+function _settingsInputValue(id) {
+  return (document.getElementById(id)?.value || '').trim();
+}
+
+function _settingsPositiveIntOrNull(id) {
+  const raw = _settingsInputValue(id);
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+const SETTINGS_RUNTIME_QUEUE_LANES = ['interactive', 'channel', 'deferred', 'learner', 'maintenance', 'background'];
+const SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES = {
+  interactive: 2,
+  channel: 1,
+  deferred: 1,
+  learner: 1,
+  maintenance: 1,
+  background: 1,
+};
+const SETTINGS_RUNTIME_QUEUE_LANE_HELP = {
+  interactive: 'Live web and CLI agent turns. Keep this high enough that direct user sessions do not feel blocked.',
+  channel: 'Inbound chat gateways and voice turns, including Telegram, Slack, Discord, and STT-driven messages.',
+  deferred: 'Scheduled or resumable user work such as wakeups, delayed tasks, and channel follow-up sends.',
+  learner: 'After-turn learning jobs that distill sessions into memory and update graph summaries.',
+  maintenance: 'Operational upkeep: graph maintenance, janitor runs, backups, and manual maintenance actions.',
+  background: 'Low-priority enrichment jobs such as General KB research, channel distillation, and graph side work.',
+};
+
+function _settingsCheckboxIfPresent(id) {
+  const el = document.getElementById(id);
+  return el ? !!el.checked : undefined;
+}
+
+function _settingsPositiveNumberIfPresent(id, fallback, opts = {}) {
+  const el = document.getElementById(id);
+  if (!el) return undefined;
+  const raw = (el.value || '').trim();
+  const parsed = raw ? Number(raw) : Number(fallback);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return opts.integer ? Math.floor(parsed) : parsed;
+}
+
+function _settingsPatchIfPresent(patch, key, value) {
+  if (value !== undefined) patch[key] = value;
+}
+
+function _settingsRuntimeLaneLimitsPayload() {
+  if (!document.getElementById('settings-runtime-lane-interactive')) return undefined;
+  const out = {};
+  for (const lane of SETTINGS_RUNTIME_QUEUE_LANES) {
+    out[lane] = _settingsPositiveNumberIfPresent(`settings-runtime-lane-${lane}`, SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1, { integer: true }) || SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1;
+  }
+  return out;
+}
+
+function _settingsEnsureGraphRuntimeStyles() {
+  if (document.getElementById('settings-graph-runtime-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'settings-graph-runtime-styles';
+  style.textContent = `
+    #settings-graph-runtime-controls {
+      margin-top: 14px;
+      margin-bottom: 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .settings-runtime-card {
+      border: 1px solid color-mix(in srgb, var(--accent2) 22%, var(--border));
+      border-radius: 11px;
+      padding: 11px;
+      background: linear-gradient(135deg,
+        color-mix(in srgb, var(--accent2) 7%, var(--panel)),
+        color-mix(in srgb, var(--surface) 72%, transparent));
+    }
+    .settings-runtime-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .settings-runtime-card-title {
+      font-size: .76rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
+    .settings-runtime-card .settings-check {
+      margin: 0;
+      white-space: nowrap;
+      color: var(--text-dim);
+      font-size: .68rem;
+    }
+    .settings-runtime-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .settings-runtime-grid label {
+      margin-top: 0;
+      font-size: .62rem;
+    }
+    .settings-runtime-grid input {
+      padding: 6px 8px;
+      font-size: .76rem;
+    }
+    .settings-runtime-lane-control {
+      display: grid;
+      gap: 4px;
+      align-content: start;
+    }
+    .settings-runtime-lane-hint {
+      color: var(--text-dim);
+      font-size: .62rem;
+      line-height: 1.35;
+      opacity: .82;
+    }
+    .settings-runtime-note {
+      margin-top: 8px;
+      color: var(--text-dim);
+      font-size: .66rem;
+      line-height: 1.45;
+    }
+    .settings-runtime-status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.3em;
+      color: var(--text-dim);
+      font-family: var(--font-body);
+      font-size: .64rem;
+      opacity: .82;
+    }
+    @media (max-width: 760px) {
+      .settings-runtime-card-head { align-items: flex-start; flex-direction: column; }
+      .settings-runtime-grid { grid-template-columns: 1fr; }
+      .settings-runtime-card .settings-check { white-space: normal; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function _settingsEnsureGraphRuntimeControls() {
+  if (document.getElementById('settings-graph-runtime-controls')) return;
+  const section = document.getElementById('settings-maintainer-run')?.closest('.settings-section');
+  if (!section) return;
+  _settingsEnsureGraphRuntimeStyles();
+  const wrap = document.createElement('div');
+  wrap.id = 'settings-graph-runtime-controls';
+  wrap.innerHTML = `
+    <div class="settings-runtime-card">
+      <div class="settings-runtime-card-head">
+        <div class="settings-runtime-card-title">Graph maintenance</div>
+        <label class="settings-check" for="settings-graph-maintenance-enabled">
+          <input id="settings-graph-maintenance-enabled" type="checkbox">
+          <span>enabled</span>
+        </label>
+      </div>
+      <div class="settings-runtime-grid">
+        <div>
+          <label for="settings-graph-maintenance-interval">Interval minutes</label>
+          <input id="settings-graph-maintenance-interval" type="number" min="1" step="1" placeholder="120">
+        </div>
+        <div>
+          <label for="settings-graph-maintenance-batch">Batch size</label>
+          <input id="settings-graph-maintenance-batch" type="number" min="1" step="1" placeholder="4">
+        </div>
+      </div>
+      <div class="settings-runtime-note">Runs per-graph upkeep through the central queue: gap filling, sparse-node connection, dedup, reasoning, clustering, and embeddings.</div>
+    </div>
+    <div class="settings-runtime-card">
+      <div class="settings-runtime-card-head">
+        <div class="settings-runtime-card-title">General KB research</div>
+        <label class="settings-check" for="settings-general-kb-research-enabled">
+          <input id="settings-general-kb-research-enabled" type="checkbox">
+          <span>enabled</span>
+        </label>
+      </div>
+      <div class="settings-runtime-grid">
+        <div>
+          <label for="settings-general-kb-research-interval">Interval hours</label>
+          <input id="settings-general-kb-research-interval" type="number" min="0.25" step="0.25" placeholder="24">
+        </div>
+        <div>
+          <label for="settings-general-kb-research-batch">Nodes per run</label>
+          <input id="settings-general-kb-research-batch" type="number" min="1" step="1" placeholder="1">
+        </div>
+      </div>
+      <div class="settings-runtime-note">Only targets the General Knowledge Base graph. It enriches under-researched nodes with usage guidance and supporting detail.</div>
+    </div>
+    <div class="settings-runtime-card">
+      <div class="settings-runtime-card-head">
+        <div>
+          <div class="settings-runtime-card-title">Runtime job queue</div>
+          <span id="settings-runtime-queue-status" class="settings-runtime-status">status not loaded</span>
+        </div>
+        <label class="settings-check" for="settings-runtime-queue-enabled">
+          <input id="settings-runtime-queue-enabled" type="checkbox">
+          <span>enabled</span>
+        </label>
+      </div>
+      <div class="settings-runtime-grid">
+        ${SETTINGS_RUNTIME_QUEUE_LANES.map(lane => `
+          <div class="settings-runtime-lane-control">
+            <label for="settings-runtime-lane-${lane}">${lane}</label>
+            <input id="settings-runtime-lane-${lane}" type="number" min="1" step="1" placeholder="${SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1}">
+            <div class="settings-runtime-lane-hint">${SETTINGS_RUNTIME_QUEUE_LANE_HELP[lane] || ''}</div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="settings-runtime-note">Coordinates web, CLI, channel, learner, wakeup, and maintenance work. Enable/disable, lane limits, and timer cadence apply after server restart.</div>
+    </div>
+  `;
+  const janitorRow = document.getElementById('settings-janitor-run')?.closest('div');
+  if (janitorRow && janitorRow.parentElement === section) section.insertBefore(wrap, janitorRow);
+  else section.appendChild(wrap);
+}
+
+function _settingsCanonicalValue(data, key, fallback) {
+  if (data?.values && Object.prototype.hasOwnProperty.call(data.values, key)) return data.values[key];
+  return fallback;
+}
+
+function _settingsNumberValue(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function _settingsJsonObjectValue(value, fallback = {}) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+  return fallback;
+}
+
+function _settingsSetRuntimeInput(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value ?? '';
+}
+
+function _settingsSetRuntimeChecked(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.checked = !!value;
+}
+
+function _populateGraphRuntimeSettings(data) {
+  _settingsEnsureGraphRuntimeControls();
+  _settingsSetRuntimeChecked('settings-graph-maintenance-enabled',
+    _settingsCanonicalValue(data, 'graphMaintenanceEnabled', true));
+  _settingsSetRuntimeInput('settings-graph-maintenance-interval',
+    _settingsNumberValue(_settingsCanonicalValue(data, 'graphMaintenanceIntervalMinutes', 120), 120));
+  _settingsSetRuntimeInput('settings-graph-maintenance-batch',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'graphMaintenanceBatchSize', 4), 4)));
+
+  _settingsSetRuntimeChecked('settings-general-kb-research-enabled',
+    _settingsCanonicalValue(data, 'generalKbResearchEnabled', true));
+  _settingsSetRuntimeInput('settings-general-kb-research-interval',
+    _settingsNumberValue(_settingsCanonicalValue(data, 'generalKbResearchIntervalHours', 24), 24));
+  _settingsSetRuntimeInput('settings-general-kb-research-batch',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'generalKbResearchBatchSize', 1), 1)));
+
+  _settingsSetRuntimeChecked('settings-runtime-queue-enabled',
+    _settingsCanonicalValue(data, 'runtimeQueueEnabled', true));
+  const lanes = {
+    ...SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES,
+    ..._settingsJsonObjectValue(_settingsCanonicalValue(data, 'runtimeQueueLaneLimits', SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES), {}),
+  };
+  for (const lane of SETTINGS_RUNTIME_QUEUE_LANES) {
+    _settingsSetRuntimeInput(`settings-runtime-lane-${lane}`, Math.floor(_settingsNumberValue(lanes[lane], SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1)));
+  }
+  _runtimeQueueRefreshStatus();
+}
+
+async function _runtimeQueueRefreshStatus() {
+  const el = document.getElementById('settings-runtime-queue-status');
+  if (!el) return;
+  el.textContent = 'loading status...';
+  try {
+    const r = await fetch(API + '/api/queue/status', { headers: authHeaders() });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+    const persistent = data.persistent || {};
+    const queued = Number(data.memoryPending || 0) + Number(persistent.queued || 0);
+    const running = Number(data.running || 0);
+    const failed = Number(persistent.failed || 0);
+    const stopped = data.stopped ? 'stopped' : 'active';
+    const lanes = Object.entries(data.lanes || {})
+      .map(([name, info]) => `${name} ${info.running || 0}/${info.limit || 0}`)
+      .join(' · ');
+    el.textContent = `${stopped} · ${running} running · ${queued} queued${failed ? ` · ${failed} failed` : ''}${lanes ? ` · ${lanes}` : ''}`;
+  } catch (e) {
+    el.textContent = `status unavailable: ${e?.message || e}`;
+  }
+}
+
+function _settingsBlankToNull(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed ? trimmed : null;
+}
+
+function _settingsComposeModelRef(provider, model) {
+  const p = String(provider || 'anthropic').trim().toLowerCase() || 'anthropic';
+  const m = String(model || '').trim();
+  if (!m) return null;
+  return p === 'anthropic' ? m : `${p}/${m}`;
+}
+
+function _addPluginPatchEntries(patch, pluginPayload) {
+  for (const [pluginId, values] of Object.entries(pluginPayload || {})) {
+    if (!values || typeof values !== 'object') continue;
+    for (const [field, value] of Object.entries(values)) {
+      patch[`plugins.${pluginId}.${field}`] = value;
+    }
+  }
+}
+
+function _buildSettingsPatchPayload(modelLimits, models) {
+  const patch = {
+    displayName: _settingsInputValue('settings-display-name'),
+    nicknames: _settingsInputValue('settings-nicknames').split(',').map(s => s.trim()).filter(Boolean),
+    enhancedRecall: !!document.getElementById('settings-enhanced-recall')?.checked,
+    modelLimits,
+    browserBackend: document.getElementById('settings-browser-backend')?.value || 'zendriver',
+    publicUrl: _settingsBlankToNull(_settingsInputValue('settings-runtime-public-url-input')),
+    'providers.custom': typeof collectSettingsCustomProviders === 'function'
+      ? collectSettingsCustomProviders({ preserveStoredKey: true })
+      : [],
+    'webSearch.searxngUrl': _settingsBlankToNull(_settingsInputValue('settings-websearch-searxng-url')),
+  };
+
+  _settingsPatchIfPresent(patch, 'graphMaintenanceEnabled',
+    _settingsCheckboxIfPresent('settings-graph-maintenance-enabled'));
+  _settingsPatchIfPresent(patch, 'graphMaintenanceIntervalMinutes',
+    _settingsPositiveNumberIfPresent('settings-graph-maintenance-interval', 120, { integer: true }));
+  _settingsPatchIfPresent(patch, 'graphMaintenanceBatchSize',
+    _settingsPositiveNumberIfPresent('settings-graph-maintenance-batch', 4, { integer: true }));
+  _settingsPatchIfPresent(patch, 'generalKbResearchEnabled',
+    _settingsCheckboxIfPresent('settings-general-kb-research-enabled'));
+  _settingsPatchIfPresent(patch, 'generalKbResearchIntervalHours',
+    _settingsPositiveNumberIfPresent('settings-general-kb-research-interval', 24));
+  _settingsPatchIfPresent(patch, 'generalKbResearchBatchSize',
+    _settingsPositiveNumberIfPresent('settings-general-kb-research-batch', 1, { integer: true }));
+  _settingsPatchIfPresent(patch, 'runtimeQueueEnabled',
+    _settingsCheckboxIfPresent('settings-runtime-queue-enabled'));
+  _settingsPatchIfPresent(patch, 'runtimeQueueLaneLimits',
+    _settingsRuntimeLaneLimitsPayload());
+
+  for (const [tier, value] of Object.entries(models || {})) {
+    patch[`models.${tier}`] = _settingsComposeModelRef(value.provider, value.model);
+  }
+
+  const proactiveChannels = _settingsInputValue('settings-proactive-channels').split(',').map(s => s.trim()).filter(Boolean);
+  patch['proactive.enabled'] = !!document.getElementById('settings-proactive-enabled')?.checked;
+  patch['proactive.cooldownMinutes'] = parseInt(_settingsInputValue('settings-proactive-cooldown'), 10) || 60;
+  patch['proactive.maxPerDay'] = parseInt(_settingsInputValue('settings-proactive-max-day'), 10) || 5;
+  patch['proactive.channels'] = proactiveChannels;
+
+  patch['voice.enabled'] = !!document.getElementById('settings-voice-enabled')?.checked;
+  patch['voice.sttProvider'] = _settingsBlankToNull(_settingsInputValue('settings-stt-provider'));
+  patch['voice.ttsProvider'] = _settingsBlankToNull(_settingsInputValue('settings-tts-provider'));
+  patch['voice.ttsVoice'] = _settingsBlankToNull(_settingsInputValue('settings-tts-voice'));
+  patch['voice.edgeVoice'] = _settingsBlankToNull(_settingsInputValue('settings-edge-voice'));
+  patch['voice.ttsModel'] = _settingsBlankToNull(_settingsInputValue('settings-tts-model'));
+
+  const pluginPayload = _collectPluginSettingsPayload();
+  document.querySelectorAll('[data-provider-form]').forEach(wrap => {
+    const name = wrap.getAttribute('data-provider-form');
+    const pluginId = wrap.getAttribute('data-provider-plugin-id') || '';
+    if (!name || name === 'custom') return;
+    const hostFields = SETTINGS_HOST_PROVIDER_FIELDS[name] || new Set();
+    wrap.querySelectorAll('[data-provider-field]').forEach(input => {
+      const field = input.getAttribute('data-provider-field');
+      if (!field) return;
+      const isSecret = input.getAttribute('data-provider-secret') === '1';
+      const raw = (input.value || '').trim();
+      if (isSecret && !raw) return;
+      const value = raw ? raw : null;
+      if (hostFields.has(field)) patch[`providers.${name}.${field}`] = value;
+      if (pluginId) {
+        if (!pluginPayload[pluginId]) pluginPayload[pluginId] = {};
+        pluginPayload[pluginId][field] = value;
+      }
+    });
+  });
+  _addPluginPatchEntries(patch, pluginPayload);
+
+  const sectionBudgets = {};
+  document.querySelectorAll('#settings-budget-sections-grid input[data-budget-section]').forEach(el => {
+    const key = el.getAttribute('data-budget-section');
+    const raw = (el.value || '').trim();
+    if (!raw) return;
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n > 0) sectionBudgets[key] = n;
+  });
+  const runtimeBudget = _settingsPositiveIntOrNull('settings-budget-runtime');
+  if (runtimeBudget) sectionBudgets.runtime = runtimeBudget;
+  patch.sectionBudgets = sectionBudgets;
+  patch.totalPromptBudget = _settingsPositiveIntOrNull('settings-budget-total');
+
+  patch.agentEffort = _collectAgentEffortPayload();
+  const agentBudgets = _collectAgentBudgetsPayload();
+  for (const [key, value] of Object.entries(agentBudgets)) patch[key] = value;
+
+  const searxngKey = _settingsInputValue('settings-websearch-searxng-key');
+  const braveKey = _settingsInputValue('settings-websearch-brave-key');
+  if (searxngKey) patch['webSearch.searxngApiKey'] = searxngKey;
+  if (braveKey) patch['webSearch.braveApiKey'] = braveKey;
+
+  const actions = {};
+  const inviteValue = _settingsInputValue('settings-invite-key');
+  if (_pendingInviteRegenerate) actions.regenerateInviteKey = true;
+  else if (_pendingInviteClear) patch.inviteKey = null;
+  else if (inviteValue) patch.inviteKey = inviteValue;
+
+  return { patch, actions };
+}
+
 // Live model-list refresh — lets the operator paste an API key into a
 // provider input and watch the per-tier datalists populate without
 // having to hit Save first. Walks every dynamically-rendered provider
 // card (data-provider-form) and binds a debounced 'input' handler to
 // each apiKey + baseUrl field. Generic — adding a new provider plugin
 // gets the live probe automatically with no UI patching here.
-let _settingsLiveProbeTimer = null;
-function _settingsLiveProbeOneProvider(kind, apiKey, baseUrl) {
+const _settingsProviderProbeTimers = new WeakMap();
+function _settingsProviderFormValues(wrap) {
+  const values = {};
+  wrap.querySelectorAll('[data-provider-field]').forEach(input => {
+    const key = input.getAttribute('data-provider-field');
+    if (!key) return;
+    values[key] = (input.value || '').trim();
+  });
+  return values;
+}
+function _settingsProviderProbeHash(kind, values) {
+  return [kind, values.apiKey || '', values.baseUrl || '', values.authHeader || '', values.referer || ''].join('|');
+}
+function _settingsProviderReadyForProbe(wrap, values) {
+  if (wrap.getAttribute('data-provider-configured') === '1') return true;
+  const hasSecret = !!wrap.querySelector('[data-provider-secret="1"]');
+  if (hasSecret && !Object.values(values).some(v => String(v || '').trim())) return false;
+  if (values.apiKey) return true;
+  return Object.entries(values)
+    .some(([key, value]) => !['authHeader', 'referer'].includes(key) && !!String(value || '').trim());
+}
+function _settingsLiveProbeOneProvider(kind, values = {}, resultEl = null, opts = {}) {
+  const body = (values && typeof values === 'object')
+    ? { kind, ...values }
+    : { kind, apiKey: values || '', baseUrl: arguments[2] || '' };
   return fetch(API + '/api/providers/list-models', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ kind, apiKey: apiKey || '', baseUrl: baseUrl || '' }),
+    body: JSON.stringify(body),
   }).then(r => r.json()).then(d => {
-    if (!d?.ok) return;
+    if (!d?.ok) {
+      if (resultEl) {
+        resultEl.className = 'settings-test-result err';
+        resultEl.textContent = String(d?.error || 'probe failed').slice(0, 120);
+      }
+      return false;
+    }
     for (const m of (d.models || [])) {
       if (!m?.id) continue;
       const ref = (kind === 'anthropic') ? m.id : `${kind}/${m.id}`;
@@ -667,34 +1405,49 @@ function _settingsLiveProbeOneProvider(kind, apiKey, baseUrl) {
       _settingsRefreshTierModelList(key);
       _settingsRefreshTierPlaceholders(key);
     }
-  }).catch(() => {});
+    if (resultEl) {
+      const n = (d.models || []).length;
+      resultEl.className = 'settings-test-result ok';
+      resultEl.textContent = `${opts.auto ? 'auto ' : ''}✓ ${n} model${n === 1 ? '' : 's'} loaded`;
+    }
+    return true;
+  }).catch(e => {
+    if (resultEl) {
+      resultEl.className = 'settings-test-result err';
+      resultEl.textContent = String(e?.message || e).slice(0, 120);
+    }
+    return false;
+  });
 }
 
 function _bindSettingsProviderLiveProbe() {
   document.querySelectorAll('[data-provider-form]').forEach(wrap => {
     const kind = wrap.getAttribute('data-provider-form');
     if (!kind) return;
-    const apiKeyInp = wrap.querySelector('[data-provider-field="apiKey"]');
-    const baseInp   = wrap.querySelector('[data-provider-field="baseUrl"]');
-    if (!apiKeyInp || apiKeyInp.dataset.liveProbeBound === '1') return;
-    apiKeyInp.dataset.liveProbeBound = '1';
-    const fire = () => {
-      const apiKey = (apiKeyInp.value || '').trim();
-      if (!apiKey || apiKey === '***hidden***') return;
-      const baseUrl = baseInp ? (baseInp.value || '').trim() : '';
-      clearTimeout(_settingsLiveProbeTimer);
-      _settingsLiveProbeTimer = setTimeout(
-        () => _settingsLiveProbeOneProvider(kind, apiKey, baseUrl),
-        // 1.2s debounce — long enough to stop firing mid-paste, short
-        // enough to feel responsive after the operator stops typing.
-        1200
-      );
+    if (wrap.dataset.liveProbeBound === '1') return;
+    wrap.dataset.liveProbeBound = '1';
+    const resultEl = document.querySelector(`[data-provider-result="${kind}"]`);
+    const fire = (delay = 900) => {
+      const values = _settingsProviderFormValues(wrap);
+      if (!_settingsProviderReadyForProbe(wrap, values)) return;
+      const hash = _settingsProviderProbeHash(kind, values);
+      if (wrap.dataset.liveProbeHash === hash) return;
+      const existing = _settingsProviderProbeTimers.get(wrap);
+      if (existing) clearTimeout(existing);
+      if (resultEl) { resultEl.className = 'settings-test-result'; resultEl.textContent = 'auto-probing…'; }
+      const timer = setTimeout(async () => {
+        const latest = _settingsProviderFormValues(wrap);
+        if (_settingsProviderProbeHash(kind, latest) !== hash) return;
+        const ok = await _settingsLiveProbeOneProvider(kind, latest, resultEl, { auto: true });
+        if (ok) wrap.dataset.liveProbeHash = hash;
+      }, delay);
+      _settingsProviderProbeTimers.set(wrap, timer);
     };
-    apiKeyInp.addEventListener('input', fire);
-    if (baseInp && baseInp.dataset.liveProbeBound !== '1') {
-      baseInp.dataset.liveProbeBound = '1';
-      baseInp.addEventListener('input', fire);
-    }
+    wrap.querySelectorAll('[data-provider-field]').forEach(input => {
+      const eventName = input.tagName === 'SELECT' ? 'change' : 'input';
+      input.addEventListener(eventName, () => fire());
+    });
+    fire(1200);
   });
 }
 
@@ -735,12 +1488,14 @@ const SETTINGS_TABS = [
   { id: 'graph-memory', label: 'Graph & Memory', forAll: false },
   { id: 'backups',      label: 'Backups',       forAll: false },
   { id: 'tools',        label: 'Tools',         forAll: false },
+  { id: 'channels',     label: 'Channels',      forAll: false },
   { id: 'plugins',      label: 'Plugins',       forAll: false },
   { id: 'users',        label: 'Users',         forAll: false },
   { id: 'advanced',     label: 'Advanced',      forAll: false },
 ];
 const _SETTINGS_TAB_REFRESHERS = {
   'graph-memory': () => {
+    try { if (typeof _runtimeQueueRefreshStatus === 'function') _runtimeQueueRefreshStatus(); } catch {}
     try { if (typeof _maintRefreshStatus === 'function') _maintRefreshStatus(); } catch {}
     try { if (typeof _janRefreshStatus === 'function') _janRefreshStatus(); } catch {}
     try { if (typeof _janLoadBin === 'function') _janLoadBin(); } catch {}
@@ -748,6 +1503,9 @@ const _SETTINGS_TAB_REFRESHERS = {
   'backups': () => {
     try { if (typeof _bkLoadStatus === 'function') _bkLoadStatus(); } catch {}
     try { if (typeof _bkLoadList === 'function') _bkLoadList(); } catch {}
+  },
+  'channels': () => {
+    try { _settingsRefreshTelegramPairing(); } catch {}
   },
   // Tailscale + compute-cluster live in their plugins now (Plugins
   // tab). No 'cluster' refresher needed.
@@ -818,6 +1576,16 @@ async function openSettingsPanel() {
   _hidePluginUiIfMissing();
   if (typeof _focusFloatingWindow === 'function') _focusFloatingWindow('settings-pane');
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
+
+  if (!_isCreatorRole()) {
+    _reparentSettingsSections();
+    _applyRoleGatingToSettings();
+    _renderSettingsTabs();
+    await _populateProfileSection();
+    _settingsSwitchTab('profile');
+    setSettingsBusy(false, '');
+    return;
+  }
 
   try {
     const r = await fetch(API + '/api/settings', { headers: authHeaders() });
@@ -910,21 +1678,134 @@ async function renderSettingsGraphsList() {
     }
     container.innerHTML = graphs.map(g => {
       const nodes = g.nodeCount != null ? g.nodeCount : '?';
-      return `<div class="settings-graph-row${g.active ? ' active' : ''}" data-slug="${esc(g.slug)}" title="${esc(g.description || g.name)}">
-        <span class="sg-name">${esc(g.name)}</span>
-        <span class="sg-count">${nodes}n</span>
-        ${g.active ? '<span class="sg-badge">active</span>' : ''}
+      const backlog = Number(g.embeddingBacklog || 0);
+      const maintenanceLabel = g.maintenanceStatus === 'running'
+        ? 'maintaining'
+        : (g.communityState === 'unclustered'
+          ? 'needs clustering'
+          : (backlog > 0
+            ? `${backlog} embeddings queued`
+            : (g.lastMaintainedAt ? `maintained ${new Date(g.lastMaintainedAt).toLocaleDateString()}` : 'not maintained')));
+      const maintenanceTone = g.maintenanceStatus === 'error'
+        ? 'error'
+        : (g.maintenanceStatus === 'running'
+          ? 'running'
+          : ((g.communityState === 'unclustered' || backlog > 0 || !g.lastMaintainedAt) ? 'stale' : 'ok'));
+      const inspectOnly = typeof _isInspectOnlyGraph === 'function'
+        ? _isInspectOnlyGraph(g)
+        : !!(g.inspectOnly || g.activationLocked || g.managed || g.protected || g.role === 'project' || g.role === 'general_kb');
+      const canManage = g?.canManage !== false && !g?.readOnly && (typeof _isCreatorRole !== 'function' || _isCreatorRole());
+      const viewing = typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === g.slug && !g.active;
+      const canDelete = canManage && !g.active && !g.protected && g.role !== 'main' && g.role !== 'general_kb';
+      const canReset = canManage && g.role === 'general_kb';
+      return `<div class="settings-graph-row${g.active ? ' active' : ''}${viewing ? ' viewing' : ''}${inspectOnly ? ' protected' : ''}" data-slug="${esc(g.slug)}" title="${esc(g.description || g.name)}">
+        <div class="sg-main">
+          <span class="sg-name">${esc(g.name)}</span>
+          <span class="sg-count">${nodes}n${g.role ? ` · ${esc(g.role)}` : ''}</span>
+          ${g.active ? '<span class="sg-badge">active</span>' : ''}
+          ${viewing ? '<span class="sg-badge">viewing</span>' : ''}
+          ${inspectOnly ? `<span class="sg-badge">${g.role === 'project' ? 'project' : 'system'}</span>` : ''}
+          <span class="sg-maintenance ${maintenanceTone}" title="${esc(g.maintenanceError || maintenanceLabel)}">${esc(maintenanceLabel)}</span>
+        </div>
+        <div class="sg-actions">
+          ${canManage ? `<button type="button" class="sg-action" data-graph-maintain="${esc(g.slug)}">maintain</button>` : ''}
+          ${canReset ? `<button type="button" class="sg-action" data-graph-reset="${esc(g.slug)}">reset</button>` : ''}
+          ${canDelete ? `<button type="button" class="sg-action danger" data-graph-delete="${esc(g.slug)}">delete</button>` : ''}
+        </div>
       </div>`;
     }).join('');
     container.querySelectorAll('.settings-graph-row').forEach(el => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
         const slug = el.dataset.slug;
         const g = graphs.find(x => x.slug === slug);
-        if (g && !g.active && typeof switchToGraph === 'function') switchToGraph(slug);
+        const inspectOnly = typeof _isInspectOnlyGraph === 'function'
+          ? _isInspectOnlyGraph(g)
+          : !!(g?.inspectOnly || g?.activationLocked || g?.managed || g?.protected || g?.role === 'project' || g?.role === 'general_kb');
+        if (inspectOnly && typeof inspectGraph === 'function') inspectGraph(slug);
+        else if (g?.active && typeof viewActiveGraph === 'function') viewActiveGraph(slug);
+        else if (g && !g.active && typeof switchToGraph === 'function') switchToGraph(slug);
       });
+    });
+    container.querySelectorAll('[data-graph-delete]').forEach(btn => {
+      btn.addEventListener('click', () => _deleteSettingsGraph(btn.dataset.graphDelete, graphs.find(g => g.slug === btn.dataset.graphDelete)));
+    });
+    container.querySelectorAll('[data-graph-reset]').forEach(btn => {
+      btn.addEventListener('click', () => _resetSettingsGraph(btn.dataset.graphReset, graphs.find(g => g.slug === btn.dataset.graphReset)));
+    });
+    container.querySelectorAll('[data-graph-maintain]').forEach(btn => {
+      btn.addEventListener('click', () => _maintainSettingsGraph(btn.dataset.graphMaintain, graphs.find(g => g.slug === btn.dataset.graphMaintain)));
     });
   } catch (e) {
     container.innerHTML = `<div style="opacity:.5;font-size:.66rem;padding:6px;color:var(--danger)">Failed: ${esc(e.message)}</div>`;
+  }
+}
+
+async function _maintainSettingsGraph(slug, graph) {
+  if (!slug) return;
+  const name = graph?.name || slug;
+  try {
+    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/maintenance/run`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true, reason: 'settings' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'maintenance failed');
+    toast(`Maintained ${name}`);
+    if (typeof loadGraphsList === 'function') loadGraphsList();
+    await renderSettingsGraphsList();
+    if (typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === slug && typeof inspectGraph === 'function') inspectGraph(slug);
+  } catch (e) {
+    toast(`Maintenance failed: ${e.message || e}`, true);
+    await renderSettingsGraphsList();
+  }
+}
+
+async function _deleteSettingsGraph(slug, graph) {
+  if (!slug) return;
+  const name = graph?.name || slug;
+  if (!confirm(`Delete graph "${name}"? This removes its database file. This cannot be undone from the UI.`)) return;
+  try {
+    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'delete failed');
+    toast(`Deleted graph ${name}`);
+    if (typeof loadGraphsList === 'function') loadGraphsList();
+    await renderSettingsGraphsList();
+    if (typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === slug && typeof viewActiveGraph === 'function') {
+      const active = (typeof _graphsList !== 'undefined' ? _graphsList : []).find(g => g.active);
+      if (active) viewActiveGraph(active.slug);
+    }
+  } catch (e) {
+    toast(`Delete failed: ${e.message || e}`, true);
+  }
+}
+
+async function _resetSettingsGraph(slug, graph) {
+  if (!slug) return;
+  const name = graph?.name || slug;
+  if (!confirm(`Reset "${name}" to its seed nodes? This wipes distilled reusable memory but keeps the graph itself.`)) return;
+  const typed = prompt(`Type RESET to reset "${name}"`);
+  if (typed !== 'RESET') return;
+  try {
+    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/reset`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: 'RESET' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'reset failed');
+    const a = data.after || {};
+    toast(`Reset ${name}: ${a.nodes ?? '?'} nodes`);
+    if (typeof loadGraphsList === 'function') loadGraphsList();
+    await renderSettingsGraphsList();
+    if (typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === slug && typeof inspectGraph === 'function') inspectGraph(slug);
+  } catch (e) {
+    toast(`Reset failed: ${e.message || e}`, true);
   }
 }
 
@@ -939,6 +1820,7 @@ async function renderSettingsGraphsList() {
 // call posts `inviteKeyRegenerate: true` instead of the typed value.
 let _inviteKeyBound = false;
 let _pendingInviteRegenerate = false;
+let _pendingInviteClear = false;
 function _bindInviteKeyButtons() {
   if (_inviteKeyBound) return;
   _inviteKeyBound = true;
@@ -956,10 +1838,20 @@ function _bindInviteKeyButtons() {
   document.getElementById('settings-invite-key-regen')?.addEventListener('click', async () => {
     if (!confirm('Regenerate the Spore Core invite key? Existing webapp guests + Spore Code users will lose access until they get the new key.')) return;
     _pendingInviteRegenerate = true;
+    _pendingInviteClear = false;
     if (input) input.value = '';
     const note = document.getElementById('settings-invite-key-note');
     if (note) note.textContent = 'Will mint a fresh UUID on Save.';
     toast('Click Save to mint the new key');
+  });
+  document.getElementById('settings-invite-key-clear')?.addEventListener('click', async () => {
+    if (!confirm('Disable the invite key? Self-registration and Spore Code invite auth will stop working until a new key is set.')) return;
+    _pendingInviteClear = true;
+    _pendingInviteRegenerate = false;
+    if (input) input.value = '';
+    const note = document.getElementById('settings-invite-key-note');
+    if (note) note.textContent = 'Will disable invite auth on Save.';
+    toast('Click Save to disable the invite key');
   });
 }
 
@@ -1247,76 +2139,44 @@ async function saveSettingsPanel() {
   }
   const models = {};
   const modelLimits = {};
+  // modelLimits is keyed by model, not tier. When multiple tiers route to
+  // the same model (e.g. all nine pointed at one local Qwen) every tier
+  // would otherwise fight over the same entry and an `auto` row would
+  // wipe a non-default set by a sibling. Merge-only: first non-default
+  // wins, default never deletes. Numerics fold via Math.max so two tiers
+  // with different values converge on the larger one instead of
+  // silently shrinking. Server-side replace of SPORE_MODEL_LIMITS still
+  // clears stale entries when no tier sets a field.
   for (const [key] of SETTINGS_MODEL_FIELDS) {
     const provider = document.getElementById(`settings-model-${key}-provider`)?.value || 'anthropic';
     const model = document.getElementById(`settings-model-${key}-name`)?.value.trim() || '';
     models[key] = { provider, model };
+    if (!model) continue;
     const ctx = parseInt(document.getElementById(`settings-model-${key}-ctx`)?.value, 10);
     const cmp = parseInt(document.getElementById(`settings-model-${key}-compact`)?.value, 10);
     const mxo = parseInt(document.getElementById(`settings-model-${key}-maxout`)?.value, 10);
     const eff = document.getElementById(`settings-model-${key}-effort`)?.value || 'auto';
-    if ((ctx > 0 || cmp > 0 || mxo > 0 || (eff && eff !== 'auto')) && model) {
-      const limKey = (provider && provider !== 'anthropic') ? `${provider}/${model}` : model;
-      const entry = modelLimits[limKey] || {};
-      if (ctx > 0) entry.contextWindow = ctx;
-      if (cmp > 0) entry.compactAt = cmp;
-      if (mxo > 0) entry.maxTokens = mxo;
-      if (eff && eff !== 'auto') entry.reasoningEffort = eff;
-      modelLimits[limKey] = entry;
-    }
+    const limKey = (provider && provider !== 'anthropic') ? `${provider}/${model}` : model;
+    const entry = modelLimits[limKey] || {};
+    if (ctx > 0) entry.contextWindow = Math.max(entry.contextWindow || 0, ctx);
+    if (cmp > 0) entry.compactAt    = Math.max(entry.compactAt    || 0, cmp);
+    if (mxo > 0) entry.maxTokens    = Math.max(entry.maxTokens    || 0, mxo);
+    if (eff && eff !== 'auto' && !entry.reasoningEffort) entry.reasoningEffort = eff;
+    if (Object.keys(entry).length) modelLimits[limKey] = entry;
   }
-  const payload = {
-    displayName: document.getElementById('settings-display-name').value.trim(),
-    nicknames: document.getElementById('settings-nicknames').value.split(',').map(s => s.trim()).filter(Boolean),
-    enhancedRecall: document.getElementById('settings-enhanced-recall').checked,
-    proactive: {
-      enabled: document.getElementById('settings-proactive-enabled').checked,
-      cooldownMinutes: parseInt(document.getElementById('settings-proactive-cooldown').value, 10) || 60,
-      maxPerDay: parseInt(document.getElementById('settings-proactive-max-day').value, 10) || 5,
-      channels: document.getElementById('settings-proactive-channels').value.split(',').map(s => s.trim()).filter(Boolean),
-    },
-    voice: {
-      enabled: document.getElementById('settings-voice-enabled').checked,
-      sttProvider: document.getElementById('settings-stt-provider').value,
-      ttsProvider: document.getElementById('settings-tts-provider').value,
-      ttsVoice: document.getElementById('settings-tts-voice').value.trim(),
-      edgeVoice: document.getElementById('settings-edge-voice').value.trim(),
-      ttsModel: document.getElementById('settings-tts-model').value.trim(),
-    },
-    models,
-    modelLimits,
-    providers: _collectProvidersPayload(),
-    browser: {
-      backend: document.getElementById('settings-browser-backend').value,
-    },
-    publicUrl: document.getElementById('settings-runtime-public-url-input')?.value.trim() || '',
-    budgets: _collectBudgetsPayload(),
-    agent: { effort: _collectAgentEffortPayload(), budgets: _collectAgentBudgetsPayload() },
-    webSearch: {
-      searxngUrl: document.getElementById('settings-websearch-searxng-url').value.trim(),
-      searxngApiKey: document.getElementById('settings-websearch-searxng-key').value.trim(),
-      braveApiKey: document.getElementById('settings-websearch-brave-key').value.trim(),
-    },
-    plugins: _mergeProviderPluginPayload(_collectPluginSettingsPayload()),
-    // Invite key: regen flag wins (mint fresh UUID server-side).
-    // Otherwise send the typed value (empty string = disable).
-    ...(_pendingInviteRegenerate
-      ? { inviteKeyRegenerate: true }
-      : { inviteKey: document.getElementById('settings-invite-key')?.value.trim() ?? '' }),
-  };
-  // Reset the regen latch after the body is built; the next save would
-  // be a normal value-update unless the operator clicks regen again.
-  _pendingInviteRegenerate = false;
+  const { patch, actions } = _buildSettingsPatchPayload(modelLimits, models);
 
   setSettingsBusy(true, 'Saving settings...');
   try {
     const r = await fetch(API + '/api/settings', {
-      method: 'PUT',
+      method: 'PATCH',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ patch, actions }),
     });
     const data = await r.json();
     if (!r.ok || !data?.ok) throw new Error(data?.error || 'Failed to save settings');
+    _pendingInviteRegenerate = false;
+    _pendingInviteClear = false;
     // Profile tab's "What should the agent call you?" lives in per-user prefs,
     // not /api/settings (which is global agent config). Save it separately so
     // the Profile tab's value persists across reopens for creators too.
@@ -1344,14 +2204,25 @@ async function saveSettingsPanel() {
     }
     if (sectionFailures.length) toast('Some subsections failed: ' + sectionFailures.join('; '), true);
     populateSettingsPanel(data.settings);
+    if (data.secrets?.inviteKey) {
+      const input = document.getElementById('settings-invite-key');
+      if (input) { input.value = data.secrets.inviteKey; input.type = 'text'; }
+      const note = document.getElementById('settings-invite-key-note');
+      if (note) note.textContent = 'New invite key generated. Copy it now; it will be hidden after reload.';
+      const showBtn = document.getElementById('settings-invite-key-show');
+      if (showBtn) showBtn.textContent = 'hide';
+    }
     if (theme && theme !== _currentTheme) applyGraphTheme(theme);
     updateErBadge(!!data.settings?.memory?.enhancedRecall);
     setSettingsBusy(false, 'Saved');
     toast('Settings saved');
-    closeSettingsPanel();
+    // Stay open — the panel re-populates from the server's response
+    // above, so the operator sees the just-saved values reflected
+    // immediately. Closing on save (the previous behaviour) forced a
+    // re-open cycle every time a value depended on a previous save
+    // landing first. The panel still has a manual close button.
   } catch (e) {
     setSettingsBusy(false, e?.message || 'Failed to save settings');
     toast(e?.message || 'Failed to save settings', true);
   }
 }
-

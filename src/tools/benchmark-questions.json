@@ -1,0 +1,12 @@
+{
+  "questions": [
+    "What is your role and what do you do?",
+    "Who is the primary user and what do they care about?",
+    "What projects are currently in flight?",
+    "What rules govern your behavior?",
+    "What did the user share recently that you should remember?",
+    "Which tools do you have available and when do you use them?",
+    "What patterns have you observed in the user's preferences?",
+    "What questions remain open in your knowledge graph?"
+  ]
+}

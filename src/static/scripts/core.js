@@ -28,10 +28,8 @@ const API = window.location.pathname.replace(/\/(graph|mobile)\/?$/, '');
 //
 // Picker UX: a single sun/moon toggle button in the header. No dropdown.
 //
-// Migration: legacy theme names (midnight, terminal, ember, arctic, neon,
-// forest, paper) are normalized in normalizeThemeName() — `paper` → `light`,
-// everything else → `dark`. Applied silently on first load and rewritten to
-// localStorage + /api/preferences so old names never leak again.
+// Theme names: only `dark` and `light`. Stale values from older
+// multi-theme builds are normalized to `dark` by normalizeThemeName.
 const THEMES = {
   dark: {
     label: 'Dark',
@@ -138,10 +136,7 @@ const THEMES = {
 // gateways/web.js so user preferences from before the redesign don't leak
 // stale names anywhere.
 function normalizeThemeName(name) {
-  if (name === 'light' || name === 'paper' || name === 'arctic') return 'light';
-  // dark, midnight, terminal, ember, neon, forest, undefined, anything else
-  // → dark (the new baseline).
-  return 'dark';
+  return name === 'light' ? 'light' : 'dark';
 }
 
 let _currentTheme = 'dark';
@@ -289,7 +284,6 @@ const SETTINGS_PROVIDER_FALLBACK_LABELS = {
   anthropic: 'anthropic / claude',
   openai: 'openai',
   openrouter: 'openrouter',
-  local: 'local / oai-compat',
   gemini: 'gemini',
   zai: 'z.ai (glm)',
 };
@@ -314,31 +308,34 @@ function _settingsEscapeHtml(value) {
 // enough for inline querySelector calls (e.g., the live-probe
 // handler in settings.js) without keeping a parallel registry.
 function _renderProviderGroups(registered) {
-  const host = document.getElementById('settings-providers-dynamic');
-  if (!host) return;
+  const vendorHost = document.getElementById('settings-providers-dynamic');
+  const oaiHost = document.getElementById('settings-providers-oai-local');
+  if (!vendorHost && !oaiHost) return;
   if (!Array.isArray(registered) || registered.length === 0) {
-    host.innerHTML = '<div class="settings-note" style="opacity:0.6">No provider plugins are loaded. Install at least one provider plugin (Plugins tab) to configure model routing.</div>';
+    if (vendorHost) vendorHost.innerHTML = '<div class="settings-note" style="opacity:0.6">No provider plugins are loaded. Install at least one provider plugin (Plugins tab) to configure model routing.</div>';
+    if (oaiHost) oaiHost.innerHTML = '';
     return;
   }
-  // Stable order: alphabetical by label, with the canonical 5 built-ins
-  // first if present, so the layout doesn't reshuffle when an
-  // optional provider plugin loads later.
-  const PRIMARY_ORDER = ['anthropic', 'openai', 'openrouter', 'gemini', 'local'];
-  // Filter out the 'custom' meta-provider — the legacy custom-providers
-  // grid below the dynamic block handles its UI separately, and showing
-  // both produces a confusing duplicate.
-  registered = registered.filter(p => p.name !== 'custom');
-  const sorted = [...registered].sort((a, b) => {
-    const ai = PRIMARY_ORDER.indexOf(a.name);
-    const bi = PRIMARY_ORDER.indexOf(b.name);
-    if (ai !== -1 || bi !== -1) {
-      if (ai === -1) return 1;
-      if (bi === -1) return -1;
-      return ai - bi;
-    }
-    return String(a.label || a.name).localeCompare(String(b.label || b.name));
-  });
-  host.innerHTML = sorted.map(_renderOneProviderGroup).join('');
+  // Filter out OAI-compatible meta/legacy providers. The custom
+  // endpoint list below is the single UI for all OAI-compatible
+  // endpoints, including legacy LOCAL_MODEL_* migrated as "local".
+  registered = registered.filter(p => p.name !== 'custom' && p.name !== 'local');
+  // Vendor-specific cards go in the top section. OAI-compatible
+  // endpoints are rendered as rows in the custom endpoint list.
+  const VENDOR_ORDER = ['anthropic', 'openai', 'openrouter', 'gemini'];
+  const vendors = registered
+    .sort((a, b) => {
+      const ai = VENDOR_ORDER.indexOf(a.name);
+      const bi = VENDOR_ORDER.indexOf(b.name);
+      if (ai !== -1 || bi !== -1) {
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        return ai - bi;
+      }
+      return String(a.label || a.name).localeCompare(String(b.label || b.name));
+    });
+  if (vendorHost) vendorHost.innerHTML = vendors.map(_renderOneProviderGroup).join('');
+  if (oaiHost) oaiHost.innerHTML = '';
 }
 
 function _renderOneProviderGroup(p) {
@@ -365,7 +362,7 @@ function _renderOneProviderGroup(p) {
   const stacked = otherFields.map(f => _renderProviderField(p, f)).join('');
   const desc = p.description ? `<div class="settings-note" style="opacity:0.65;margin-bottom:6px">${_settingsEscapeHtml(p.description)}</div>` : '';
   return `
-    <div class="settings-provider-group" data-provider-form="${_settingsEscapeHtml(p.name)}" data-provider-plugin-id="${_settingsEscapeHtml(p.pluginId || '')}">
+    <div class="settings-provider-group" data-provider-form="${_settingsEscapeHtml(p.name)}" data-provider-plugin-id="${_settingsEscapeHtml(p.pluginId || '')}" data-provider-configured="${p.configured ? '1' : '0'}">
       <div class="settings-provider-head"><strong>${_settingsEscapeHtml(p.label || p.name)}</strong></div>
       ${desc}
       ${inlineRow}
@@ -425,7 +422,9 @@ function _settingsProviderChoices() {
   // cache is empty (panel not yet loaded), fall back to the built-in
   // table so the wizard / first-paint dropdowns aren't blank.
   const builtins = _settingsRegisteredProviders.length
-    ? _settingsRegisteredProviders.map(p => p.name)
+    ? _settingsRegisteredProviders
+        .map(p => p.name)
+        .filter(name => name !== 'custom' && name !== 'local')
     : Object.keys(SETTINGS_PROVIDER_FALLBACK_LABELS);
   return builtins.concat(customNames.filter(name => !builtins.includes(name)).sort());
 }
@@ -456,6 +455,7 @@ function _settingsOnAuthSelectChange(selectEl) {
     if (customInp) { customInp.style.display = 'none'; }
     if (hidden) hidden.value = selectEl.value;
   }
+  _scheduleSettingsCustomProviderProbe(row);
 }
 
 function _settingsOnAuthCustomInput(inputEl) {
@@ -463,6 +463,7 @@ function _settingsOnAuthCustomInput(inputEl) {
   if (!row) return;
   const hidden = row.querySelector('[data-custom-provider-auth]');
   if (hidden) hidden.value = inputEl.value.trim() || 'bearer';
+  _scheduleSettingsCustomProviderProbe(row);
 }
 
 function _settingsApplyPreset(selectEl) {
@@ -495,18 +496,19 @@ function _settingsApplyPreset(selectEl) {
   if (keyI && preset.keyHint) keyI.placeholder = 'API key — get one from ' + preset.keyHint;
   if (hintEl) hintEl.textContent = preset.keyHint ? 'Get a key: ' + preset.keyHint : '';
   if (keyI && !keyI.value) setTimeout(() => keyI.focus(), 30);
+  _scheduleSettingsCustomProviderProbe(row);
 }
 
 function _settingsCustomProviderRow(provider = {}) {
   const name = _settingsEscapeHtml(provider.name || '');
   const url = _settingsEscapeHtml(provider.url || '');
-  const key = _settingsEscapeHtml(provider.key || '');
+  const keySet = !!provider.keySet || !!provider.key;
   const authHeader = _settingsEscapeHtml(provider.authHeader || 'bearer');
   const presetOptions = PROVIDER_PRESETS.map(p =>
     `<option value="${_settingsEscapeHtml(p.id)}">${_settingsEscapeHtml(p.label)}</option>`
   ).join('');
   return `
-    <div class="settings-custom-provider">
+    <div class="settings-custom-provider" data-custom-provider-key-set="${keySet ? '1' : '0'}">
       <div class="settings-custom-provider-head">
         <strong>${name ? _settingsEscapeHtml(name) : 'Custom Provider'}</strong>
         <button type="button" class="settings-danger-btn" onclick="removeSettingsCustomProvider(this)">Remove</button>
@@ -539,7 +541,7 @@ function _settingsCustomProviderRow(provider = {}) {
       <label>Base URL</label>
       <input data-custom-provider-url type="text" value="${url}" placeholder="https://api.example.com/v1">
       <label>API Key</label>
-      <input data-custom-provider-key type="password" value="${key}" placeholder="paste API key here">
+      <input data-custom-provider-key type="password" value="" placeholder="${keySet ? 'stored - leave blank to keep' : 'paste API key here'}">
       <div class="settings-hint" data-custom-provider-hint></div>
       <div class="settings-test-row">
         <button type="button" class="settings-test-btn" onclick="populateSettingsCustomProvider(this)">test connection &amp; load models</button>
@@ -549,17 +551,20 @@ function _settingsCustomProviderRow(provider = {}) {
   `;
 }
 
-async function populateSettingsCustomProvider(btn) {
-  const row = btn.closest('.settings-custom-provider');
+async function populateSettingsCustomProvider(btn, opts = {}) {
+  const row = btn?.closest ? btn.closest('.settings-custom-provider') : btn;
+  if (!row) return false;
   const out = row.querySelector('[data-custom-provider-populate-result]');
   const v = _settingsReadCustomRow(row);
-  if (!v.url) { out.className = 'settings-test-result err'; out.textContent = 'base URL required'; return; }
-  if (!v.name) { out.className = 'settings-test-result err'; out.textContent = 'prefix required (e.g. "groq" — the first part of model IDs like groq/llama-3.3-70b)'; return; }
-  btn.disabled = true; out.className = 'settings-test-result'; out.textContent = 'testing…';
+  if (!v.url) { out.className = 'settings-test-result err'; out.textContent = 'base URL required'; return false; }
+  if (!v.name) { out.className = 'settings-test-result err'; out.textContent = 'prefix required (e.g. "groq" — the first part of model IDs like groq/llama-3.3-70b)'; return false; }
+  const button = row.querySelector('.settings-test-btn');
+  if (button) button.disabled = true;
+  out.className = 'settings-test-result'; out.textContent = opts.auto ? 'auto-probing…' : 'testing…';
   try {
     const r = await fetch(API + '/api/providers/list-models', {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ kind: 'custom', baseUrl: v.url, apiKey: v.key, authHeader: v.authHeader }),
+      body: JSON.stringify({ kind: 'custom', name: v.name, baseUrl: v.url, apiKey: v.key, authHeader: v.authHeader }),
     });
     const d = await r.json();
     if (!d.ok) {
@@ -600,17 +605,59 @@ async function populateSettingsCustomProvider(btn) {
         _settingsRefreshTierPlaceholders(key);
       }
     }
+    row.dataset.autoProbeHash = _settingsCustomProviderHash(row);
+    return true;
   } catch (e) {
     out.className = 'settings-test-result err';
     out.textContent = String(e.message || e).slice(0, 180);
-  } finally { btn.disabled = false; }
+    return false;
+  } finally { if (button) button.disabled = false; }
 }
 
-function _settingsReadCustomRow(row) {
+const _settingsCustomProbeTimers = new WeakMap();
+function _settingsCustomProviderHash(row) {
+  const v = _settingsReadCustomRow(row);
+  return [v.name, v.url, v.key || '', v.authHeader || 'bearer'].join('|');
+}
+function _scheduleSettingsCustomProviderProbe(row, delay = 900) {
+  if (!row) return;
+  const v = _settingsReadCustomRow(row);
+  const out = row.querySelector('[data-custom-provider-populate-result]');
+  if (!v.name || !v.url) {
+    if (out && !v.url) { out.className = 'settings-test-result'; out.textContent = ''; }
+    return;
+  }
+  const hash = _settingsCustomProviderHash(row);
+  if (row.dataset.autoProbeHash === hash) return;
+  const existing = _settingsCustomProbeTimers.get(row);
+  if (existing) clearTimeout(existing);
+  if (out) { out.className = 'settings-test-result'; out.textContent = 'auto-probing…'; }
+  const timer = setTimeout(() => {
+    if (_settingsCustomProviderHash(row) !== hash) return;
+    populateSettingsCustomProvider(row, { auto: true });
+  }, delay);
+  _settingsCustomProbeTimers.set(row, timer);
+}
+function _bindSettingsCustomProviderAutoProbe(root = document) {
+  root.querySelectorAll?.('.settings-custom-provider')?.forEach(row => {
+    if (row.dataset.autoProbeBound === '1') return;
+    row.dataset.autoProbeBound = '1';
+    row.querySelectorAll('[data-custom-provider-name], [data-custom-provider-url], [data-custom-provider-key], [data-custom-provider-auth-select], [data-custom-provider-auth-custom]')
+      .forEach(el => {
+        const eventName = el.tagName === 'SELECT' ? 'change' : 'input';
+        el.addEventListener(eventName, () => _scheduleSettingsCustomProviderProbe(row));
+      });
+    _scheduleSettingsCustomProviderProbe(row, 1200);
+  });
+}
+
+function _settingsReadCustomRow(row, opts = {}) {
+  const key = (row.querySelector('[data-custom-provider-key]')?.value || '').trim();
+  const keySet = row.getAttribute('data-custom-provider-key-set') === '1';
   return {
     name: (row.querySelector('[data-custom-provider-name]')?.value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, ''),
     url: (row.querySelector('[data-custom-provider-url]')?.value || '').trim(),
-    key: (row.querySelector('[data-custom-provider-key]')?.value || '').trim(),
+    key: (!key && keySet && opts.preserveStoredKey) ? '__KEEP__' : key,
     authHeader: row.querySelector('[data-custom-provider-auth]')?.value || 'bearer',
   };
 }
@@ -636,6 +683,7 @@ function renderSettingsCustomProviders(providers = []) {
   container.innerHTML = list.length
     ? list.map(provider => _settingsCustomProviderRow(provider)).join('')
     : '<div class="settings-note" id="settings-custom-providers-empty">No custom OAI-compatible providers configured.</div>';
+  _bindSettingsCustomProviderAutoProbe(container);
   renderSettingsModelProviderOptions();
 }
 
@@ -645,6 +693,7 @@ function addSettingsCustomProvider() {
   const empty = document.getElementById('settings-custom-providers-empty');
   if (empty) empty.remove();
   container.insertAdjacentHTML('beforeend', _settingsCustomProviderRow({ authHeader: 'bearer' }));
+  _bindSettingsCustomProviderAutoProbe(container);
   renderSettingsModelProviderOptions();
 }
 
@@ -665,16 +714,30 @@ function onSettingsCustomProviderNameChange(input) {
     .replace(/[^a-z0-9_]+/g, '_')
     .replace(/^_+|_+$/g, '');
   if (cleaned !== input.value) input.value = cleaned;
+  _scheduleSettingsCustomProviderProbe(input.closest('.settings-custom-provider'));
   renderSettingsModelProviderOptions();
 }
 
-function collectSettingsCustomProviders() {
-  return [...document.querySelectorAll('.settings-custom-provider')].map((row) => ({
-    name: row.querySelector('[data-custom-provider-name]')?.value.trim().toLowerCase() || '',
-    url: row.querySelector('[data-custom-provider-url]')?.value.trim() || '',
-    key: row.querySelector('[data-custom-provider-key]')?.value.trim() || '',
-    authHeader: row.querySelector('[data-custom-provider-auth]')?.value.trim() || 'bearer',
-  })).filter(provider => provider.name);
+function collectSettingsCustomProviders(opts = {}) {
+  const preserveStoredKey = opts.preserveStoredKey !== false;
+  return [...document.querySelectorAll('.settings-custom-provider')]
+    .map(row => _settingsReadCustomRow(row, { preserveStoredKey }))
+    .filter(provider => provider.name);
+}
+
+function _settingsDiscoveryProviders(data) {
+  const registered = Array.isArray(data.providers?.registered) ? data.providers.registered : [];
+  const vendors = registered.filter(p => p.configured && p.name !== 'custom' && p.name !== 'local');
+  const custom = (data.providers?.custom || [])
+    .filter(p => p?.name && p?.url)
+    .map(p => ({
+      name: p.name,
+      label: `OAI: ${p.name}`,
+      configured: true,
+      pluginId: 'local-oai-provider',
+      customEndpoint: true,
+    }));
+  return vendors.concat(custom);
 }
 
 function setSettingsBusy(busy, message = '') {
@@ -685,6 +748,34 @@ function setSettingsBusy(busy, message = '') {
 
 function populateSettingsPanel(data) {
   if (!data) return;
+  // Warm the model library cache + render the management pane + the
+  // tier-row comboboxes. Library backs both surfaces, so we trigger
+  // the load up front and let it resolve in the background — the
+  // tier-row code below mounts its comboboxes which read the cache
+  // again the moment it lands. Stash registered providers
+  // synchronously so the library pane renders its "Discover from
+  // <provider>" buttons in the same tick.
+  window._settingsProvidersRegistered = _settingsDiscoveryProviders(data);
+  if (window.ModelLibrary?.load) {
+    window.ModelLibrary.load(true).then(entries => {
+      // load() now mirrors to ML.__cache itself, but set it again
+      // here to be defensive against ordering quirks.
+      window.ModelLibrary.__cache = entries;
+      // Refresh the visible Models pane and every tier-row datalist /
+      // combobox so the just-loaded library entries show up.
+      window.ModelLibrary.renderLibraryPane('settings-model-library-pane');
+      if (Array.isArray(SETTINGS_MODEL_FIELDS)) {
+        for (const [key] of SETTINGS_MODEL_FIELDS) {
+          try { _settingsRefreshTierModelList?.(key); } catch { /* ignore */ }
+          // Tier comboboxes (mounted below) cache their dropdown HTML
+          // until reopened — refresh ensures they re-render when the
+          // user opens the dropdown next.
+          const row = document.querySelector(`[data-settings-tier-ctx="${key}"]`)?.closest('.settings-model-row');
+          row?._comboInstance?.refresh?.();
+        }
+      }
+    }).catch(() => { /* non-fatal — pane shows empty state */ });
+  }
   document.getElementById('settings-display-name').value = data.identity?.displayName || '';
   document.getElementById('settings-nicknames').value = _settingsList(data.identity?.nicknames || []);
   document.getElementById('settings-enhanced-recall').checked = !!data.memory?.enhancedRecall;
@@ -744,6 +835,75 @@ function populateSettingsPanel(data) {
       providerSelect.value = providerValue;
     }
     if (modelInput) modelInput.value = modelData.model || '';
+
+    // Mount the typed combobox alongside the legacy provider+model
+    // fields. The combobox writes through to the hidden underlying
+    // fields so the existing payload-builder code (which reads
+    // settings-model-<key>-provider / -name) keeps working without
+    // change. The legacy fields are kept in the DOM but visually
+    // hidden — they're the persistence contract.
+    const tierRow = providerSelect?.closest('.settings-model-row');
+    if (tierRow && window.ModelLibrary?.attachTierCombobox && !tierRow.dataset.comboMounted) {
+      tierRow.dataset.comboMounted = '1';
+      // Hide the original provider/model cells (the two divs after .settings-model-name).
+      const cells = tierRow.children;
+      // Index 0 is the tier name; provider cell is 1, model cell is 2.
+      if (cells[1]) cells[1].classList.add('settings-model-legacy-cell');
+      if (cells[2]) cells[2].classList.add('settings-model-legacy-cell');
+      const slot = document.createElement('div');
+      slot.className = 'settings-model-combobox';
+      tierRow.insertBefore(slot, cells[1]);
+      const combo = window.ModelLibrary.attachTierCombobox(slot, {
+        value: { provider: modelData.provider || 'anthropic', modelId: modelData.model || '' },
+        placeholder: `Pick a ${key} model`,
+        onChange: ({ provider, modelId, libraryEntry }) => {
+          const provSel = document.getElementById(`settings-model-${key}-provider`);
+          const modelInp = document.getElementById(`settings-model-${key}-name`);
+          if (provSel) {
+            // Ensure the option exists — picking a custom provider from
+            // the combobox shouldn't silently fall back to the prior
+            // value just because the <select> doesn't list it yet.
+            if (![...provSel.options].some(o => o.value === provider)) {
+              const opt = document.createElement('option');
+              opt.value = provider;
+              opt.textContent = provider;
+              provSel.appendChild(opt);
+            }
+            provSel.value = provider;
+            provSel.dataset.currentValue = provider;
+          }
+          if (modelInp) modelInp.value = modelId;
+          // Update tier ctx/compact/etc. from the picked library
+          // entry. Picking a model is a deliberate intent — overwrite
+          // the row's parameter inputs to match the library's values
+          // so the tier reflects the model's actual ctx/maxOut/etc.
+          // The operator can still override after picking; the next
+          // pick will replace those overrides too (consistent with
+          // "library is the source of truth for picked models").
+          const ctxInp = document.getElementById(`settings-model-${key}-ctx`);
+          const cmpInp = document.getElementById(`settings-model-${key}-compact`);
+          const moInp = document.getElementById(`settings-model-${key}-maxout`);
+          const efInp = document.getElementById(`settings-model-${key}-effort`);
+          if (libraryEntry) {
+            if (ctxInp) ctxInp.value = libraryEntry.contextWindow || '';
+            if (cmpInp) cmpInp.value = libraryEntry.compactAt || '';
+            if (moInp)  moInp.value  = libraryEntry.maxOutput || '';
+            if (efInp)  efInp.value  = libraryEntry.reasoningEffortDefault || 'auto';
+          } else {
+            // Custom (non-library) pick — clear ctx so the operator
+            // knows nothing's auto-detected, but leave any prior
+            // manual override in place.
+            if (ctxInp && !ctxInp.value) ctxInp.placeholder = 'auto (no library entry)';
+          }
+          if (typeof _settingsOnTierModelChange === 'function') _settingsOnTierModelChange(key);
+        },
+      });
+      tierRow.dataset.comboInstance = '1';
+      tierRow._comboInstance = combo;
+    } else if (tierRow?._comboInstance) {
+      tierRow._comboInstance.setValue({ provider: modelData.provider || 'anthropic', modelId: modelData.model || '' });
+      tierRow._comboInstance.refresh();
+    }
     // Attach a <datalist> of known model ids to the model input — populated
     // from _settingsKnownLimits (filled by provider-populate + auto-detect).
     if (modelInput && providerSelect) {
@@ -847,14 +1007,19 @@ function populateSettingsPanel(data) {
 
   const inviteInput = document.getElementById('settings-invite-key');
   if (inviteInput) {
-    inviteInput.value = data.inviteKey || '';
-    inviteInput.type = 'password';
+    let onboardingInviteKey = '';
+    try { onboardingInviteKey = sessionStorage.getItem('spore-onboarding-invite-key') || ''; } catch {}
+    inviteInput.value = onboardingInviteKey || data.inviteKey || '';
+    inviteInput.type = onboardingInviteKey ? 'text' : 'password';
+    inviteInput.placeholder = data.inviteKeySet ? 'stored - leave blank to keep' : 'empty = self-register + Spore Code disabled';
     const showBtn = document.getElementById('settings-invite-key-show');
-    if (showBtn) showBtn.textContent = 'show';
+    if (showBtn) showBtn.textContent = onboardingInviteKey ? 'hide' : 'show';
     const inviteNote = document.getElementById('settings-invite-key-note');
-    if (inviteNote) inviteNote.textContent = data.inviteKeySet
-      ? 'Self-registration + Spore Code auth are enabled.'
-      : 'No invite key set — self-registration + Spore Code auth are disabled.';
+    if (inviteNote) inviteNote.textContent = onboardingInviteKey
+      ? 'Invite key was generated during onboarding. Copy it now; it will be hidden after this browser session.'
+      : (data.inviteKeySet
+        ? 'Invite key is stored. Leave blank to keep it, type a replacement, clear to disable, or regen to mint a new key.'
+        : 'No invite key set — self-registration + Spore Code auth are disabled.');
   }
 
   document.getElementById('settings-websearch-searxng-url').value = data.webSearch?.searxngUrl || '';
@@ -880,6 +1045,7 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-runtime-web-port').textContent = _settingsValue(data.runtime?.webPort);
   document.getElementById('settings-runtime-workspace').textContent = _settingsValue(data.runtime?.workspacePath);
   document.getElementById('settings-runtime-data-dir').textContent = _settingsValue(data.runtime?.dataDir);
+  if (typeof _populateGraphRuntimeSettings === 'function') _populateGraphRuntimeSettings(data);
 
   // System-prompt budgets — headline knobs (runtime + total) plus the
   // collapsed all-sections grid. Inputs left blank when the current
@@ -899,7 +1065,9 @@ function populateSettingsPanel(data) {
   _applyRoleGatingToSettings();
   _populateProfileSection();
   _populateUsersSection();
-  _populatePluginsTab(data.plugins || { enabled: false, hotReload: false, panes: [], dockItems: [], installed: [] });
+  const pluginsBlock = data.plugins || { enabled: false, hotReload: false, panes: [], dockItems: [], installed: [] };
+  _populatePluginsTab(pluginsBlock);
+  if (typeof _populateChannelsTab === 'function') _populateChannelsTab(pluginsBlock);
 }
 
 const TYPE_COLORS = {
@@ -1001,4 +1169,3 @@ const TYPE_VISUALS = {
 
 let graphData = { nodes: [], edges: [] };
 let simulation, svg, gLinks, gNodes, zoom;
-

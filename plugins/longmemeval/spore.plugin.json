@@ -1,0 +1,9 @@
+{
+  "id": "longmemeval",
+  "name": "LongMemEval Benchmark",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Run the LongMemEval long-term memory benchmark against this Spore's recall pipeline. The first run downloads the dataset from HuggingFace (oracle ~15 MB / small ~277 MB / medium ~2.7 GB); each run is wrapped in a fresh ephemeral graph so it doesn't pollute your real memory. Results land in <dataDir>/longmemeval-results.json. Recommended with Enhanced Recall enabled."
+}

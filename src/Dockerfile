@@ -83,6 +83,7 @@ COPY src/providers/ ./providers/
 COPY src/tools/ ./tools-default/
 COPY src/voice/ ./voice/
 COPY src/static/ ./static/
+COPY src/settings/ ./settings/
 # Plugin manager core (api.js, manager.js, openclaw-adapter.js, index.js).
 COPY src/plugins/ ./plugins/
 # Bundled plugin packages live at the repo root (../plugins/ relative to src/).
@@ -91,7 +92,7 @@ COPY src/plugins/ ./plugins/
 COPY plugins/ ./plugins/
 COPY src/lib/ ./lib/
 COPY src/reference-nodes.sql ./
-COPY src/migrate-ref-email.sql ./
+COPY src/migrate-ref-*.sql ./
 
 RUN groupadd -g 2000 spore && useradd -r -u 2000 -g 2000 spore \
     && mkdir -p /data /workspace /app/tools \

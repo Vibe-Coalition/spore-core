@@ -77,7 +77,7 @@ setInterval(() => {
 }, SPORE_WATCHDOG_TICK);
 
 // ── F01 Six-petal mark — animation engine ───────────────────────────
-// Spec lives in /mnt/user/appdata/anima/design_stuff/spore logo and node/.
+// Spec lives in the spore logo + node design spec.
 // One rAF loop drives the self-node geometry through one of 11 named
 // behaviors from the design system (A01-A12 minus the one-shot Spawn).
 // Each anim is a pure function of (R, t) → geometry. The engine lerps
@@ -1360,7 +1360,7 @@ function _upsertNodeVisuals(nodeSelection) {
         .attr('pointer-events', 'none');
     }
     // F01 mark elements for self-type nodes only (spec:
-    //   /mnt/user/appdata/anima/design_stuff/spore logo and node/).
+    //   the spore logo + node design spec).
     // Stack order: spokes → halos → petals → center.
     // Halos sit between spokes and petals so listen/rings animations
     // ripple from behind each petal outward without occluding it.
@@ -1652,7 +1652,23 @@ function _beginGraphMarquee(e) {
   e.stopPropagation();
 
   const pt = _clientToSvgPoint(e.clientX, e.clientY);
-  _graphMarquee = { active: true, moved: false, startX: pt.x, startY: pt.y };
+  // Snapshot the current selection at marquee start so subsequent
+  // drags ADD to it instead of replacing — lets you grab nodes from
+  // multiple regions of the graph in successive marquees. To start
+  // fresh, click empty background first (clears selection), then
+  // marquee. Holding Alt during the marquee TOGGLES instead of adds:
+  // nodes already in startingIds get removed if they fall in the rect,
+  // new ones get added — useful for fine-tuning a noisy selection.
+  const startingIds = new Set(selectedNodeIds || []);
+  const toggle = !!e.altKey;
+  _graphMarquee = {
+    active: true, moved: false, startX: pt.x, startY: pt.y,
+    startingIds, toggle,
+  };
+  // One-line dev signal so the user can confirm this build is loaded
+  // and that the snapshot picked up the prior selection. Remove or
+  // gate behind a debug flag once the additive flow is verified.
+  console.log(`[marquee] start  starting=${startingIds.size}  toggle=${toggle}`);
   svg?.classed('is-marquee-selecting', true);
   _showSelectionRect(pt.x, pt.y, 0, 0);
 }
@@ -1679,15 +1695,34 @@ function _updateGraphMarquee(clientX, clientY) {
   if (!_graphMarquee.moved) return;
 
   const t = d3.zoomTransform(svg.node());
-  const ids = graphData.nodes
-    .filter(n => {
-      const sx = t.applyX(n.x);
-      const sy = t.applyY(n.y);
-      return sx >= x && sx <= x + width && sy >= y && sy <= y + height;
-    })
-    .map(n => n.id);
-
-  selectedNodeIds = new Set(ids);
+  // Skip nodes that are currently filtered out (type-filter / timeline
+  // / search) — selecting dimmed nodes is a usability footgun.
+  const visible = (typeof window._isNodeVisible === 'function')
+    ? window._isNodeVisible
+    : () => true;
+  const inRect = new Set();
+  for (const n of graphData.nodes) {
+    if (!visible(n)) continue;
+    const sx = t.applyX(n.x);
+    const sy = t.applyY(n.y);
+    if (sx >= x && sx <= x + width && sy >= y && sy <= y + height) {
+      inRect.add(n.id);
+    }
+  }
+  // Combine with the snapshot taken at marquee start: ADD by default,
+  // TOGGLE when Alt was held. We rebuild from `startingIds` every
+  // tick (rather than mutating selectedNodeIds in place) so dragging
+  // the rect smaller correctly drops nodes that are no longer in it.
+  const next = new Set(_graphMarquee.startingIds);
+  if (_graphMarquee.toggle) {
+    for (const id of inRect) {
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+    }
+  } else {
+    for (const id of inRect) next.add(id);
+  }
+  selectedNodeIds = next;
   _applyGraphSelectionStyles();
 }
 
@@ -1733,7 +1768,7 @@ async function doResearchSelectedNodes() {
   hideGraphContextMenu();
   toast(`Researching ${ids.length} node${ids.length === 1 ? '' : 's'}…`);
   try {
-    const r = await fetch(API + '/api/graph/research', {
+    const r = await fetch(graphApiUrl('/api/graph/research'), {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ nodeIds: ids }),
     });
@@ -1751,4 +1786,3 @@ function toast(msg, isError) {
   el.className = 'toast show' + (isError ? ' error' : '');
   setTimeout(() => el.className = 'toast', 2500);
 }
-

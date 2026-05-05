@@ -129,10 +129,15 @@ function stripPrefix(model) {
 /** Detect which backend a model string targets. Plugin-registered
  *  providers win first via slash-prefix match (resolveProviderForModel)
  *  or longest-prefix bare-name match (the fallback walker below). */
-function detectBackend(model) {
+function detectBackend(model, config = null) {
   if (!model) return 'none';
   const pluginEntry = _resolvePluginProvider(model);
   if (pluginEntry) return pluginEntry.name;
+  const slash = String(model || '').indexOf('/');
+  if (slash > 0 && config?.customProviders) {
+    const prefix = String(model).slice(0, slash);
+    if (config.customProviders[prefix]) return 'custom';
+  }
   // Bare names — walk plugins and match the longest prefix.
   // anthropic-provider declares prefixes:['claude'], so 'claude-opus-4-7'
   // and 'claude-haiku-4-5' route here.
@@ -189,6 +194,18 @@ function _hasVideo(params) {
 
 function _hasTools(params) {
   return params.tools && params.tools.length > 0;
+}
+
+function _hasForcedToolChoice(params) {
+  const choice = params?.tool_choice || params?.toolChoice;
+  if (!choice) return false;
+  if (typeof choice === 'string') {
+    return !['auto', 'none', 'required'].includes(choice.toLowerCase());
+  }
+  if (choice.type === 'tool' && choice.name) return true;
+  if (choice.type === 'function' && choice.function?.name) return true;
+  if (choice.name) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +280,20 @@ function createClientForModel(model, config) {
   // Slash-prefixed forms hit resolveProviderForModel first.
   const pluginEntry = _resolvePluginProvider(model);
   if (pluginEntry) return pluginEntry.factory(config);
+
+  // Ephemeral settings/wizard tests can pass a customProviders map that
+  // includes prefixes not yet present in the plugin manager's live host
+  // config. Let the always-registered OAI-compatible provider claim
+  // those pending custom prefixes for this one request.
+  const slash = String(model || '').indexOf('/');
+  if (slash > 0 && config?.customProviders) {
+    const prefix = String(model).slice(0, slash);
+    if (config.customProviders[prefix] && _providerManager?.getProviders) {
+      const customEntry = _providerManager.getProviders()
+        .find(p => p.name === 'custom' || p.pluginId === 'local-oai-provider');
+      if (customEntry) return customEntry.factory(config);
+    }
+  }
 
   // Bare names like 'claude-opus-4-7' — resolveProviderForModel doesn't
   // handle them (it requires a slash). Walk plugins via detectBackend's
@@ -360,7 +391,7 @@ class MultiProvider {
     );
     let caps = this._getCaps(adapted.model);
 
-    if (_hasTools(adapted) && caps.tools === false) {
+    if (_hasTools(adapted) && caps.tools === false && !_hasForcedToolChoice(adapted)) {
       const { tools, tool_choice, ...rest } = adapted;
       adapted = rest;
     }
@@ -458,14 +489,16 @@ class MultiProvider {
     const serviceKey = config.managerServiceKey;
     if (!managerUrl || !serviceKey) return;
 
+    // Voice provider keys (DEEPGRAM_API_KEY, XI_API_KEY, etc.) live
+    // inside their plugins now — each plugin reads its own env var.
+    // Core only vault-fetches the model + search keys it actually
+    // consumes itself.
     const keyMap = {
       ANTHROPIC_API_KEY: 'anthropicApiKey',
       OPENROUTER_API_KEY: 'openrouterApiKey',
       OPENAI_API_KEY: 'openaiApiKey',
       GEMINI_API_KEY: 'geminiApiKey',
       LOCAL_MODEL_API_KEY: 'localModelApiKey',
-      DEEPGRAM_API_KEY: 'deepgramApiKey',
-      XI_API_KEY: 'xiApiKey',
       REPLICATE_API_TOKEN: 'replicateApiToken',
       BRAVE_API_KEY: 'braveApiKey',
     };
@@ -516,5 +549,6 @@ module.exports = {
   getDefaultReasoningEffort,
   wrapSystemPromptForModel,
   _hasImages,
+  _hasForcedToolChoice,
   _inferCapabilities,
 };

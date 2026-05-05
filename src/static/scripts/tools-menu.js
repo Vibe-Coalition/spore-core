@@ -45,12 +45,8 @@ document.getElementById('tmi-graphs')?.addEventListener('click', (e) => {
   else { graphPickerEl?.classList.remove('open'); }
 });
 
-document.getElementById('tmi-longmemeval')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  toolsMenu.style.display = 'none';
-  _toolsMenuOpen = false;
-  lmeOpen();
-});
+// LongMemEval menu item moved to plugins/longmemeval (registers a dock
+// item that opens window.__lmeOpen()).
 
 // Enhanced Recall toggle
 let _erEnabled = false;

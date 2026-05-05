@@ -107,14 +107,22 @@ class GraphContext {
     // to 3000 above.
     plugin: 6000,
     episodes: 8000,
+    // overview: Graph Overview section (god nodes / surprising bridges /
+    // suggested questions, computed by maintainer.runGraphOverview). Sits
+    // between selfknowledge and reflections. Drop early under context
+    // pressure — it's a navigation aid, not load-bearing context.
+    overview: 400,
+    // hyperedges: top recent / highest-weight n-ary relationships. Drops
+    // very early — group facts are nice-to-have, not load-bearing.
+    hyperedges: 250,
   };
   static TOTAL_BUDGET = 40000;
-  static DROP_ORDER = ['gaps', 'anti', 'selfknowledge', 'plugin', 'feed', 'tooling', 'runtime', 'reflections', 'derived', 'episodes'];
+  static DROP_ORDER = ['gaps', 'anti', 'overview', 'hyperedges', 'selfknowledge', 'plugin', 'feed', 'tooling', 'runtime', 'reflections', 'derived', 'episodes'];
 
   static PROMPT_MODES = {
-    full: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'relevant', 'episodes', 'anti', 'feed', 'tooling', 'behavior', 'reflections', 'gaps', 'runtime', 'cluster'],
-    chat: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'plugin', 'channel', 'person', 'episodes', 'tooling', 'behavior', 'cluster'],
-    recall: ['persona', 'identity', 'relevant', 'episodes', 'derived', 'reflections', 'person'],
+    full: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'overview', 'plugin', 'channel', 'person', 'relevant', 'episodes', 'hyperedges', 'anti', 'feed', 'tooling', 'behavior', 'reflections', 'gaps', 'runtime', 'cluster'],
+    chat: ['persona', 'identity', 'voice', 'rules', 'selfknowledge', 'overview', 'plugin', 'channel', 'person', 'episodes', 'tooling', 'behavior', 'cluster'],
+    recall: ['persona', 'identity', 'overview', 'relevant', 'episodes', 'derived', 'hyperedges', 'reflections', 'person'],
     minimal: ['identity', 'rules', 'tooling', 'runtime', 'cluster'],
     none: ['identity'],
   };
@@ -170,10 +178,13 @@ class GraphContext {
           content TEXT NOT NULL,
           observed_at TEXT,
           embedding TEXT,
+          user_id TEXT,
+          user_name TEXT,
           created TEXT DEFAULT CURRENT_TIMESTAMP
         )`);
         this.db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id)');
         this.db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_observed ON episodes(observed_at)');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_user ON episodes(user_id)');
         this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(content, tokenize='porter unicode61')`);
       } catch (e) {
         this.log.warn?.('Episodes table init:', e.message);
@@ -198,6 +209,58 @@ class GraphContext {
         )`);
       } catch (e) {
         this.log.warn?.('Provenance migration:', e.message);
+      }
+
+      // Per-turn learner dedup. SHA256 over (userMessage \0 assistantResponse).
+      // Skips redundant LLM extraction calls when the same exchange replays.
+      try {
+        this.db.exec(`CREATE TABLE IF NOT EXISTS learner_processed (
+          content_hash TEXT PRIMARY KEY,
+          episode_id INTEGER,
+          processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_learner_processed_at ON learner_processed(processed_at)');
+      } catch (e) {
+        this.log.warn?.('learner_processed init:', e.message);
+      }
+
+      // Maintainer-computed graph overview (god nodes, bridges, suggested
+      // questions). One current row at a time; payload is JSON.
+      try {
+        this.db.exec(`CREATE TABLE IF NOT EXISTS graph_overviews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL,
+          computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          payload TEXT NOT NULL,
+          superseded_at DATETIME
+        )`);
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_graph_overviews_active ON graph_overviews(superseded_at, computed_at)');
+      } catch (e) {
+        this.log.warn?.('graph_overviews init:', e.message);
+      }
+
+      // Hyperedges: n-ary relationships across 3+ nodes that don't
+      // decompose naturally into binary edges (group meetings, shared
+      // concepts, multi-party agreements). Members carry optional roles.
+      try {
+        this.db.exec(`CREATE TABLE IF NOT EXISTS hyperedges (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          label TEXT,
+          type TEXT NOT NULL,
+          confidence TEXT,
+          weight REAL DEFAULT 1.0,
+          extracted_with TEXT,
+          extracted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+        this.db.exec(`CREATE TABLE IF NOT EXISTS hyperedge_members (
+          hyperedge_id INTEGER REFERENCES hyperedges(id) ON DELETE CASCADE,
+          node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+          role TEXT,
+          PRIMARY KEY (hyperedge_id, node_id)
+        )`);
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_hyp_members_node ON hyperedge_members(node_id)');
+      } catch (e) {
+        this.log.warn?.('hyperedges init:', e.message);
       }
 
       // Themes / semantic groupings produced by the maintainer's categorization step
@@ -424,6 +487,165 @@ class GraphContext {
     return parts.join('\n\n');
   }
 
+  _buildProjectOperatingReferences(graph, scope) {
+    if (!graph?.db) return null;
+    const refConfig = scope?.role === 'project'
+      ? {
+          like: 'ref-project-%',
+          heading: `### Project Operating References (${scope.slug})`,
+          note: '_Stable project-session rules loaded from the project graph seed nodes._',
+        }
+      : (scope?.role === 'channel'
+        ? {
+            like: 'ref-channel-%',
+            heading: `### Channel Operating References (${scope.slug})`,
+            note: '_Stable channel-mode rules loaded from the channel graph seed nodes._',
+          }
+        : null);
+    if (!refConfig) return null;
+    try {
+      const rows = graph.db.prepare(`
+        SELECT *
+          FROM nodes
+         WHERE type = 'reference'
+           AND id LIKE ?
+         ORDER BY importance DESC, id ASC
+         LIMIT 20
+      `).all(refConfig.like);
+      if (!rows.length) return null;
+
+      const refs = rows.map(r => graph._hydrateNode(r)).filter(Boolean);
+      if (!refs.length) return null;
+
+      const lines = [
+        refConfig.heading,
+        refConfig.note,
+      ];
+      for (const ref of refs) {
+        const desc = ref.description ? `: ${ref.description}` : '';
+        lines.push(`- **${ref.label}**${desc}`);
+        for (const asp of (ref.aspects || []).slice(0, 4)) {
+          const attrs = (asp.attributes || [])
+            .map(a => String(a.content || '').trim())
+            .filter(Boolean)
+            .slice(0, 3);
+          if (attrs.length) lines.push(`  - ${asp.name}: ${attrs.join(' ')}`);
+        }
+      }
+      return lines.join('\n');
+    } catch (e) {
+      this.log.warn(`[graph] scoped operating refs failed for ${scope?.slug || 'unknown'}: ${e.message}`);
+      return null;
+    }
+  }
+
+  async _buildScopedRecallBundle(opts = {}) {
+    const env = opts.memoryEnvelope;
+    const scopes = Array.isArray(env?.readScopes) ? env.readScopes.filter(s => s?.dbPath) : [];
+    if (!opts.messageContent || scopes.length === 0) return null;
+
+    const { classifyQueryType, QUERY_TYPE_PARAMS } = require('./retrieval');
+    const queryType = opts._queryType || classifyQueryType(opts.messageContent);
+    const qp = opts._queryParams || QUERY_TYPE_PARAMS[queryType] || QUERY_TYPE_PARAMS.specific;
+    const queries = [opts.messageContent];
+    const eventGraphs = scopes.map(s => s.slug).filter(Boolean);
+    const eventScope = eventGraphs.length ? { graphs: eventGraphs } : {};
+
+    if (this.config.enhancedRecall && opts._llmClient) {
+      try {
+        this.log.info(`[graph] Scoped Enhanced Recall (${env.mode || 'unknown'}): decomposing "${opts.messageContent.slice(0, 80)}..."`);
+        try { graphEvents.emit('change', { op: 'recall:start', source: 'scoped-recall', detail: `${env.mode || 'scoped'} · "${opts.messageContent.slice(0, 50)}"`, ...eventScope }); } catch {}
+        const decomposed = await this._llmDecomposeQuery(opts._llmClient, opts.messageContent);
+        for (const q of decomposed?.subQueries || []) {
+          if (q && typeof q === 'string' && !queries.includes(q)) queries.push(q);
+        }
+        if (queries.length > 1) {
+          try { graphEvents.emit('change', { op: 'recall:decompose', source: 'scoped-recall', detail: `${queries.length - 1} sub-queries`, ...eventScope }); } catch {}
+        }
+      } catch (e) {
+        this.log.warn(`[graph] Scoped Enhanced Recall decomposition failed: ${e.message}`);
+        try { graphEvents.emit('change', { op: 'recall:fail', source: 'scoped-recall', detail: (e.message || '').slice(0, 80), ...eventScope }); } catch {}
+      }
+    }
+
+    const headingByRole = {
+      project: 'Project Memory',
+      general_kb: 'Reusable Engineering Memory',
+      main: 'User/System Preferences',
+      channel: 'Channel/Thread Memory',
+    };
+    const sections = ['## Scoped Recall Bundle', '_Memory is separated by origin. Treat project or channel memory as local truth for this session; reusable engineering memory as patterns that may apply; user/system preferences as operator preference/config._'];
+    const accessed = [];
+
+    for (const scope of scopes) {
+      let graph = this;
+      let closeWhenDone = false;
+      try {
+        if (scope.dbPath !== this.config.graphDbPath) {
+          graph = new this.constructor({ ...this.config, graphDbPath: scope.dbPath }, this.log);
+          graph._pluginManager = this._pluginManager;
+          if (!graph.init()) continue;
+          closeWhenDone = true;
+        }
+
+        const operatingRefs = this._buildProjectOperatingReferences(graph, scope);
+        if (operatingRefs) sections.push(`\n${operatingRefs}`);
+
+        const found = new Map();
+        const perQueryLimit = Math.max(4, Math.min(12, Number(scope.budget) || 10));
+        const search = scope.role === 'main'
+          ? graph.hybridSearchSelf.bind(graph)
+          : graph.hybridSearch.bind(graph);
+        for (const q of queries) {
+          const rows = await search(q, perQueryLimit).catch(() => []);
+          for (const n of rows || []) {
+            if (!found.has(n.id)) found.set(n.id, n);
+          }
+        }
+        const results = Array.from(found.values())
+          .sort((a, b) => (b._hybridScore || 0) - (a._hybridScore || 0))
+          .slice(0, Math.max(6, Number(scope.budget) || 10));
+
+        let text = null;
+        if (results.length) {
+          text = graph._buildRelevantContext(opts.messageContent, {
+            _precomputedResults: results,
+            _referenceDate: opts._referenceDate,
+            _queryType: queryType,
+            _queryParams: qp,
+            userId: opts.userId,
+            userName: opts.userName,
+            projectContext: null,
+          });
+        }
+        const episodes = graph._buildEpisodesSection(opts.messageContent, qp, {
+          userId: opts.userId,
+          userName: opts.userName,
+          projectContext: null,
+        });
+
+        if (text || episodes) {
+          const title = headingByRole[scope.role] || scope.label || scope.slug;
+          sections.push(`\n### ${title} (${scope.slug})`);
+          if (text) sections.push(text.replace(/^## Relevant Context \(from graph\)\n?/, '').trim());
+          if (episodes) sections.push(episodes.trim());
+          accessed.push(...results.map(n => n.id));
+        }
+      } catch (e) {
+        this.log.warn(`[graph] scoped recall failed for ${scope.slug}: ${e.message}`);
+      } finally {
+        if (closeWhenDone) {
+          try { graph.db?.close(); } catch {}
+        }
+      }
+    }
+
+    if (accessed.length) {
+      try { graphEvents.emit('change', { op: 'node:accessed', nodeIds: accessed, source: 'scoped-recall', ...eventScope }); } catch {}
+    }
+    return sections.length > 2 ? sections.join('\n') : null;
+  }
+
   async buildSystemPromptAsync(opts = {}) {
     this._refreshSharedGraphs();
     if (opts.messageContent) {
@@ -434,11 +656,10 @@ class GraphContext {
 
       // Plugin lifecycle hook: shouldSkipRecall — gives plugins a
       // chance to short-circuit the (expensive) Enhanced Recall
-      // pipeline (LLM query decomposition + hybrid search × N
-      // sub-queries + 2-hop graph walks). Acorn-cli's handler returns
-      // true for cli-platform coding turns where recall is pure
-      // overhead. Any plugin returning true wins; other plugins'
-      // handlers are still consulted.
+      // pipeline. This check must run before scoped project recall too;
+      // otherwise capability questions such as "which tools do you have"
+      // can pull stale tool lore from the project graph instead of relying
+      // on the runtime tool contract.
       const mgr = this._pluginManager;
       if (mgr) {
         const hooks = mgr.getLifecycleHooks?.('shouldSkipRecall') || [];
@@ -450,6 +671,12 @@ class GraphContext {
             return this.buildSystemPrompt(opts);
           }
         }
+      }
+
+      if (opts.memoryEnvelope?.readScopes?.length) {
+        opts._scopedRecallBundle = await this._buildScopedRecallBundle(opts);
+        opts._skipDefaultRecallSections = true;
+        return this.buildSystemPrompt(opts);
       }
 
       try {
@@ -758,6 +985,10 @@ class GraphContext {
       runtime: allowedKeys.has('runtime') ? this._truncateToTokenBudget(
         this._buildRuntimeSection(opts), B.runtime) : null,
       cluster: allowedKeys.has('runtime') ? this._buildClusterAccessSection() : null,
+      overview: allowedKeys.has('overview') ? this._truncateToTokenBudget(
+        this._buildOverviewSection({ userId: opts.userId, projectContext: opts.projectContext }), B.overview) : null,
+      hyperedges: allowedKeys.has('hyperedges') ? this._truncateToTokenBudget(
+        this._buildHyperedgesSection({ userId: opts.userId, projectContext: opts.projectContext }), B.hyperedges) : null,
       reflections: allowedKeys.has('reflections') ? this._truncateToTokenBudget(
         this._buildReflectionsSection({ userId: opts.userId, projectContext: opts.projectContext }), B.reflections) : null,
       derived: allowedKeys.has('derived') ? this._truncateToTokenBudget(
@@ -769,6 +1000,15 @@ class GraphContext {
       episodes: allowedKeys.has('episodes') && opts.messageContent ? this._truncateToTokenBudget(
         this._buildEpisodesSection(opts.messageContent, opts._queryParams, { userId: opts.userId, projectContext: opts.projectContext }), B.episodes) : null,
     };
+
+    if (opts._skipDefaultRecallSections) {
+      sectionMap.relevant = null;
+      sectionMap.episodes = null;
+      sectionMap.derived = null;
+      sectionMap.reflections = null;
+      sectionMap.overview = null;
+      sectionMap.hyperedges = null;
+    }
 
     const orderedKeys = GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full;
 
@@ -805,7 +1045,7 @@ class GraphContext {
     // content doesn't get truncated by the section-budget pass.
     const pluginExt = this._buildPluginPromptSections(mode, opts);
 
-    return [...staticSections, ...dynamicSections, pluginExt].filter(Boolean).join('\n\n');
+    return [...staticSections, opts._scopedRecallBundle || null, ...dynamicSections, pluginExt].filter(Boolean).join('\n\n');
   }
 
   // ── Cache Management ──────────────────────────────────────────────────────

@@ -5,7 +5,7 @@
  * Implements Discord-style lull system for multi-agent/user chat:
  *   - Direct triggers (@mention) → immediate agent invocation
  *   - Passive messages → lull timer, then decide whether to respond
- *   - Anti-pile-on jitter → stagger responses from multiple animas
+ *   - Anti-pile-on jitter → stagger responses from multiple Spores
  *   - NO_REPLY gating → agent can opt out silently
  */
 
@@ -43,6 +43,12 @@ class ChatroomGateway {
     this._recentAnimaResponses = 0;
     this._recentAnimaResponseTimer = null;
     this._participants = new Map();
+  }
+
+  _submitAgentTurn(opts, meta = {}) {
+    const queue = this.agent?._jobQueue;
+    if (queue?.submitAgentTurn) return queue.submitAgentTurn(opts, meta);
+    return this.agent?.processMessage(opts);
   }
 
   connect() {
@@ -209,7 +215,7 @@ class ChatroomGateway {
       const sessionKey = `chatroom:shared`;
       let result;
       try {
-        result = await this.agent.processMessage({
+        result = await this._submitAgentTurn({
           content: merged,
           channelId: sessionKey,
           channelName: 'chatroom',
@@ -223,6 +229,12 @@ class ChatroomGateway {
           onError: (err) => {
             this.log.error(`[chatroom] Agent error: ${err.message}`);
           },
+        }, {
+          lane: 'channel',
+          priority: hasDirect ? 90 : 70,
+          route: 'chatroom.message',
+          sessionKey,
+          allowInterjection: hasDirect,
         });
       } finally {
         clearInterval(typingHeartbeat);

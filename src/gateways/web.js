@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const graphEvents = require('../graph/events');
-const { EFFORT_PRESETS, EFFORT_TIERS, DEFAULT_EFFORT, resolveEffortTier, effortDefaults } = require('../agent/effort');
+const { WebSettingsService } = require('./web/settings-service');
 
 /** Pick the newer of two file paths (by mtime). Skips null/missing paths. */
 function _newerFile(a, b) {
@@ -43,14 +43,10 @@ const _THEME_VARS = {
   },
 };
 
-// Mirror of the client-side normalizer in graph-viewer.html. Maps any
-// legacy theme name (midnight, paper, terminal, ember, arctic, neon,
-// forest, anything else) onto the surviving two — `paper`/`arctic` →
-// `light`, everything else → `dark`. Used everywhere a stored theme
-// name might come back from preferences.json.
+// Theme names: only 'light' and 'dark'. Anything else (including
+// stored values from earlier multi-theme builds) falls back to 'dark'.
 function _normalizeThemeName(name) {
-  if (name === 'light' || name === 'paper' || name === 'arctic') return 'light';
-  return 'dark';
+  return name === 'light' ? 'light' : 'dark';
 }
 
 function _readServerTheme(dataDir) {
@@ -96,42 +92,18 @@ function _isOnboardingNeeded(dataDir, config) {
   try { prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
   if (prefs.onboardingCompleted === true) return false;
   if (prefs.onboardingCompleted === false) return true;
-  // Auto-backfill for pre-existing installs: if the instance already has
-  // webapp users + a usable model+provider configured, treat it as already
-  // onboarded so we don't ambush returning operators with the wizard.
+  // No prefs file yet → wizard has never finished. Default to "needed"
+  // and let /api/onboarding/complete be the SOLE path that flips the
+  // bit to true.
   //
-  // CRITICAL: only fire when webapp-users.json was created more than 5
-  // minutes ago. Without that age check, the auto-backfill triggers
-  // mid-wizard the moment the operator creates their account at step 4
-  // (which writes webapp-users.json) — flipping onboardingCompleted
-  // before they finish, which 403s subsequent /api/onboarding/*
-  // endpoints out of their own data.
-  if (config) {
-    let hasUsers = false;
-    let usersFileAge = 0;
-    const usersPath = path.join(dataDir, 'webapp-users.json');
-    try {
-      hasUsers = JSON.parse(fs.readFileSync(usersPath, 'utf8')).length > 0;
-      usersFileAge = Date.now() - fs.statSync(usersPath).mtimeMs;
-    } catch { /* silent: malformed JSON → fallback */ }
-    const hasProvider = !!(
-      config.anthropicApiKey || config.openaiApiKey || config.openrouterApiKey ||
-      config.localModelBaseUrl ||
-      (config.customProviders && Object.keys(config.customProviders).length > 0)
-    );
-    const hasModel = !!(config.plannerModel || config.normalModel || config.casualModel);
-    const FRESH_INSTALL_GRACE_MS = 5 * 60 * 1000;
-    if (hasUsers && hasProvider && hasModel && usersFileAge > FRESH_INSTALL_GRACE_MS) {
-      try {
-        prefs.onboardingCompleted = true;
-        prefs.onboardingBackfilledAt = Date.now();
-        const tmp = prefsPath + '.tmp.' + process.pid;
-        fs.writeFileSync(tmp, JSON.stringify(prefs, null, 2));
-        fs.renameSync(tmp, prefsPath);
-      } catch (e) { console.warn('[web] _backfillOnboardingFlag write failed: ' + e.message); }
-      return false;
-    }
-  }
+  // We removed the legacy auto-backfill heuristic that used to inspect
+  // (any user account + any provider key + any model selection) and
+  // declare onboarding "done" after a 5-minute grace period. That
+  // heuristic locked operators OUT of their own wizard if they
+  // paused mid-flow, because the wizard's per-step writes (webapp
+  // user at step 4, provider keys at step 5) made the heuristic match
+  // by minute 6. Now the wizard owns the entire lifecycle: nothing
+  // outside `/api/onboarding/complete` is allowed to mark it done.
   return true;
 }
 
@@ -139,6 +111,150 @@ function _writeJsonAtomic(filePath, data) {
   const tmp = filePath + '.tmp.' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, filePath);
+}
+
+function _graphAuthIsCreator(authContext) {
+  const role = String(authContext?.role || authContext?.type || '').toLowerCase();
+  return authContext?.creator === true || role === 'creator' || role === 'admin';
+}
+
+function _safeGraphUserPart(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function _graphAccessValues(value, out = []) {
+  if (value === undefined || value === null || value === false) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) _graphAccessValues(item, out);
+    return out;
+  }
+  if (value instanceof Set) {
+    for (const item of value) _graphAccessValues(item, out);
+    return out;
+  }
+  if (typeof value === 'object') {
+    for (const key of ['username', 'user', 'userId', 'id', 'name', 'slug', 'key', 'identityKey', 'projectKey']) {
+      if (value[key] !== undefined) _graphAccessValues(value[key], out);
+    }
+    for (const [key, val] of Object.entries(value)) {
+      if (val === true || val === 'read' || val === 'write' || val === 'admin') out.push(key);
+      else if (Array.isArray(val) || (val && typeof val === 'object')) _graphAccessValues(val, out);
+    }
+    return out;
+  }
+  const s = String(value).trim();
+  if (!s) return out;
+  out.push(s);
+  if (s.includes(',')) {
+    for (const part of s.split(',')) {
+      const trimmed = part.trim();
+      if (trimmed) out.push(trimmed);
+    }
+  }
+  return out;
+}
+
+function _graphAccessMatches(values, candidates) {
+  const wanted = new Set((candidates || []).map(v => String(v || '').trim().toLowerCase()).filter(Boolean));
+  if (!wanted.size) return false;
+  for (const value of values || []) {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized) continue;
+    if (wanted.has(normalized) || normalized === '*' || normalized === 'all') return true;
+  }
+  return false;
+}
+
+function _projectUserFromIdentityKey(identityKey) {
+  const match = String(identityKey || '').match(/^cwd:([^:]+):/i);
+  return match ? match[1] : null;
+}
+
+function _graphProjectCandidates(graph) {
+  return [
+    graph?.slug,
+    graph?.identityKey,
+    graph?.projectKey,
+    graph?.projectSlug,
+    graph?.name,
+    graph?.projectName,
+    graph?.projectRoot,
+    graph?.root,
+    graph?.remote,
+    graph?.projectRemote,
+  ].filter(v => v !== undefined && v !== null && String(v).trim());
+}
+
+function _userRecordAllowsGraph(userRecord, graph) {
+  if (!userRecord || !graph) return false;
+  const candidates = _graphProjectCandidates(graph);
+  for (const key of ['allowedGraphs', 'graphAccess', 'graphs', 'projectGraphs', 'projectSlugs', 'projectKeys', 'projects', 'collaborations']) {
+    const value = userRecord[key];
+    if (!value) continue;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const candidate of candidates) {
+        const grant = value[candidate];
+        if (grant === true || grant === 'read' || grant === 'write' || grant === 'admin') return true;
+        if (grant && typeof grant === 'object' && grant.enabled !== false && grant.access !== 'none') return true;
+      }
+    }
+    if (_graphAccessMatches(_graphAccessValues(value), candidates)) return true;
+  }
+  return false;
+}
+
+function _graphMetadataAllowsUser(graph, username) {
+  if (!graph || !username) return false;
+  const userCandidates = [username, _safeGraphUserPart(username)].filter(Boolean);
+  const values = [];
+  for (const key of [
+    'owner', 'createdFor', 'webappUser', 'username', 'userId',
+    'allowedUsers', 'allowedWebUsers', 'collaborators', 'members', 'users', 'viewers',
+  ]) {
+    _graphAccessValues(graph[key], values);
+  }
+  const identityUser = _projectUserFromIdentityKey(graph.identityKey);
+  if (identityUser) values.push(identityUser);
+  return _graphAccessMatches(values, userCandidates);
+}
+
+function _isDefaultOrGeneralGraph(graph, registry) {
+  if (!graph) return false;
+  const mainSlug = registry?.getMainSlug?.();
+  const generalSlug = registry?.getGeneralKnowledgeSlug?.();
+  return graph.role === 'main'
+    || graph.role === 'general_kb'
+    || graph.slug === 'default'
+    || (mainSlug && graph.slug === mainSlug)
+    || graph.slug === 'spore-knowledge-base'
+    || (generalSlug && graph.slug === generalSlug);
+}
+
+function _canGraphAuthViewGraph(graph, authContext, registry) {
+  if (!graph) return false;
+  if (_graphAuthIsCreator(authContext)) return true;
+  if (_isDefaultOrGeneralGraph(graph, registry)) return true;
+  if (graph.role !== 'project') return false;
+  const username = authContext?.username || authContext?.user || authContext?.userRecord?.username || null;
+  return _userRecordAllowsGraph(authContext?.userRecord, graph) || _graphMetadataAllowsUser(graph, username);
+}
+
+function _shapeGraphForAuth(graph, authContext, registry) {
+  const shaped = { ...(graph || {}) };
+  if (!_graphAuthIsCreator(authContext)) {
+    delete shaped.dbPath;
+    shaped.readOnly = true;
+    shaped.canManage = false;
+    shaped.canActivate = false;
+    shaped.inspectOnly = true;
+    shaped.access = _canGraphAuthViewGraph(graph, authContext, registry) ? 'read' : 'none';
+  }
+  return shaped;
 }
 
 // ── Provider / model smoke-test helpers ──
@@ -153,27 +269,115 @@ function _readJsonBody(req) {
 
 // Build an ephemeral config object suitable for createClientForModel from
 // posted form values, so the test uses what the user just typed (not what's saved).
-function _ephemeralConfig(formProviders = {}) {
-  const cp = {};
-  for (const p of (formProviders.custom || [])) {
-    if (p?.name && p?.url) cp[p.name] = { url: p.url, key: p.key || '', authHeader: p.authHeader || 'bearer' };
-  }
-  return {
-    anthropicApiKey: formProviders.anthropic?.apiKey || '',
-    openaiApiKey: formProviders.openai?.apiKey || '',
-    openaiBaseUrl: formProviders.openai?.baseUrl || '',
-    openrouterApiKey: formProviders.openrouter?.apiKey || '',
-    openrouterBaseUrl: formProviders.openrouter?.baseUrl || '',
-    openrouterReferer: formProviders.openrouter?.referer || '',
-    localModelBaseUrl: formProviders.local?.baseUrl || '',
-    localModelApiKey: formProviders.local?.apiKey || '',
-    // OAI-compatible auth header — bearer (default) / x-api-key / x-key.
-    // Read by local-oai-provider's buildLocalClient; some self-hosted
-    // endpoints (e.g. BFL) require x-key instead of Authorization Bearer.
-    localModelAuthHeader: formProviders.local?.authHeader || '',
-    customProviders: cp,
-    apiTimeoutMs: 240000,
+function _ephemeralConfig(formProviders = {}, appConfig = {}) {
+  const cfg = { apiTimeoutMs: 240000 };
+  const setIfPresent = (key, value) => {
+    if (value === undefined || value === null) return;
+    const trimmed = String(value).trim();
+    if (!trimmed || trimmed === '__KEEP__') return;
+    cfg[key] = trimmed;
   };
+
+  setIfPresent('anthropicApiKey', formProviders.anthropic?.apiKey);
+  setIfPresent('openaiApiKey', formProviders.openai?.apiKey);
+  setIfPresent('openaiBaseUrl', formProviders.openai?.baseUrl);
+  setIfPresent('openrouterApiKey', formProviders.openrouter?.apiKey);
+  setIfPresent('openrouterBaseUrl', formProviders.openrouter?.baseUrl);
+  setIfPresent('openrouterReferer', formProviders.openrouter?.referer);
+  setIfPresent('geminiApiKey', formProviders.gemini?.apiKey);
+  setIfPresent('zaiApiKey', formProviders.zai?.apiKey);
+  setIfPresent('zaiBaseUrl', formProviders.zai?.baseUrl);
+
+  const existingCustom = appConfig.customProviders || {};
+  const cp = {};
+  if (formProviders.local?.baseUrl || formProviders.local?.apiKey) {
+    cp.local = {
+      url: String(formProviders.local?.baseUrl || existingCustom.local?.url || appConfig.localModelBaseUrl || '').trim(),
+      key: String(formProviders.local?.apiKey || existingCustom.local?.key || appConfig.localModelApiKey || '').trim(),
+      authHeader: String(formProviders.local?.authHeader || existingCustom.local?.authHeader || appConfig.localModelAuthHeader || 'bearer').trim() || 'bearer',
+    };
+  }
+  for (const p of (formProviders.custom || [])) {
+    const name = String(p?.name || '').trim().toLowerCase();
+    if (!name) continue;
+    const existing = existingCustom[name] || {};
+    const url = String(p?.url || existing.url || '').trim();
+    if (!url) continue;
+    const key = p?.key === '__KEEP__'
+      ? (existing.key || '')
+      : String(p?.key || existing.key || '').trim();
+    cp[name] = {
+      url,
+      key,
+      authHeader: String(p?.authHeader || existing.authHeader || 'bearer').trim() || 'bearer',
+    };
+  }
+  if (Object.keys(cp).length) cfg.customProviders = { ...existingCustom, ...cp };
+
+  const pluginOverrides = {};
+  const pluginForms = formProviders.__plugins || {};
+  for (const [pluginId, values] of Object.entries(pluginForms)) {
+    if (!values || typeof values !== 'object') continue;
+    const next = {};
+    for (const [field, value] of Object.entries(values)) {
+      if (field === 'models') continue;
+      if (value === undefined || value === null) continue;
+      const trimmed = String(value).trim();
+      if (!trimmed || trimmed === '__KEEP__') continue;
+      next[field] = trimmed;
+    }
+    if (Object.keys(next).length) {
+      pluginOverrides[pluginId] = { ...(appConfig.plugins?.[pluginId] || {}), ...next };
+    }
+  }
+  if (Object.keys(pluginOverrides).length) {
+    cfg.plugins = { ...(appConfig.plugins || {}), ...pluginOverrides };
+  }
+
+  return cfg;
+}
+
+function _findProviderEntry(pluginManager, providerName) {
+  const provider = String(providerName || '').trim().toLowerCase();
+  if (!provider) return null;
+  const entries = pluginManager?.getProviders?.() || [];
+  return entries.find(p => String(p.name || '').toLowerCase() === provider)
+    || entries.find(p => (p.prefixes || []).map(x => String(x).toLowerCase()).includes(provider))
+    || null;
+}
+
+function _customProviderConfig(appConfig, providerName) {
+  const provider = String(providerName || '').trim().toLowerCase();
+  if (!provider) return null;
+  const custom = appConfig?.customProviders?.[provider];
+  if (custom?.url) return custom;
+  if (provider === 'local') {
+    const slot = appConfig?.plugins?.['local-oai-provider'] || {};
+    const url = appConfig?.localModelBaseUrl || slot.baseUrl || '';
+    if (!url) return null;
+    return {
+      url,
+      key: appConfig?.localModelApiKey || slot.apiKey || '',
+      authHeader: appConfig?.localModelAuthHeader || slot.authHeader || 'bearer',
+    };
+  }
+  return null;
+}
+
+function _customProviderProbeArgs(providerName, appConfig, body = {}) {
+  const provider = String(providerName || body.name || body.kind || '').trim().toLowerCase();
+  const saved = _customProviderConfig(appConfig, provider) || {};
+  return {
+    kind: 'custom',
+    name: provider,
+    baseUrl: body.baseUrl || body.url || saved.url || '',
+    apiKey: body.apiKey || body.key || saved.key || '',
+    authHeader: body.authHeader || saved.authHeader || 'bearer',
+  };
+}
+
+function _isCustomProviderEntry(entry, providerName, appConfig) {
+  return entry?.name === 'custom' || !!_customProviderConfig(appConfig, providerName);
 }
 
 // Plugin-aware provider probe. The wizard's "test" button hits
@@ -184,12 +388,12 @@ function _ephemeralConfig(formProviders = {}) {
 // vendor branches in core; if no plugin claims the name we return
 // an actionable error.
 async function _probeProvider(name, body, pluginManager) {
-  const entry = pluginManager?.getProviders?.().find(p => p.name === name);
+  const entry = _findProviderEntry(pluginManager, name);
   if (!entry?.probe) {
     return { ok: false, error: `No probe registered for provider '${name}'. Install the matching provider plugin and restart.` };
   }
   try {
-    return await entry.probe(body || {});
+    return await entry.probe(entry.name === 'custom' ? { ...(body || {}), kind: 'custom', name } : (body || {}));
   } catch (e) {
     return { ok: false, error: (e?.message || String(e)).slice(0, 300) };
   }
@@ -198,8 +402,9 @@ async function _probeProvider(name, body, pluginManager) {
 // Generic OAI-compatible context-length resolver — reads vendor-shaped
 // fields from a /models response entry. Used only by the no-plugin
 // fallback path of _listModelsForProvider for unclaimed `kind` values.
-// Vendor-specific tables (Anthropic prefix lookups, OpenAI per-family
-// caps) live in each provider plugin's listModels.
+// Vendor-specific enrichment lives in each provider plugin's listModels.
+// Official OpenAI /v1/models does not expose context/max-output fields;
+// custom OAI-compatible endpoints may.
 function _resolveContextLength(rawModel) {
   if (!rawModel) return null;
   const fields = ['context_length', 'context_window', 'max_context_length', 'max_model_len', 'max_position_embeddings', 'max_input_tokens'];
@@ -225,28 +430,35 @@ function _resolveContextLength(rawModel) {
 // `pluginManager` is optional — when provided, plugin-registered listModels
 // (e.g. anthropic-provider's vendor-aware probe) is preferred over the
 // in-tree _listModelsForProvider.
-async function _enrichModelLimits(modelLimits, models, providers, pluginManager) {
+async function _enrichModelLimits(modelLimits, models, providers, pluginManager, appConfig = {}) {
   const out = { ...(modelLimits || {}) };
   const tierEntries = Object.values(models || {}).filter(t => t?.model);
   if (!tierEntries.length) return out;
   const probedProviders = new Map(); // providerName → cached models response
   const probeProvider = async (providerName) => {
     if (probedProviders.has(providerName)) return probedProviders.get(providerName);
-    const entry = pluginManager?.getProviders?.().find(p => p.name === providerName);
+    const p = providers || {};
+    const customRow = (p.custom || []).find(x => x?.name === providerName);
+    const entry = _findProviderEntry(pluginManager, providerName)
+      || (customRow ? (pluginManager?.getProviders?.() || []).find(x => x.name === 'custom' || x.pluginId === 'local-oai-provider') : null);
     if (!entry?.listModels) { probedProviders.set(providerName, null); return null; }
     // Build the probe body from the wizard's posted form values so the
     // plugin can probe with the operator's pending key/baseUrl before
     // it's been persisted. Each plugin understands the shape it cares
     // about — extra fields are ignored.
-    const p = providers || {};
     const slot = p[providerName] || {};
-    const customRow = (p.custom || []).find(x => x?.name === providerName);
-    const probeArgs = {
-      kind: providerName,
-      apiKey: slot.apiKey || customRow?.key,
-      baseUrl: slot.baseUrl || customRow?.url,
-      authHeader: slot.authHeader || customRow?.authHeader,
-    };
+    const probeArgs = _isCustomProviderEntry(entry, providerName, appConfig)
+      ? _customProviderProbeArgs(providerName, appConfig, {
+          apiKey: customRow?.key || slot.apiKey,
+          baseUrl: customRow?.url || slot.baseUrl,
+          authHeader: customRow?.authHeader || slot.authHeader,
+        })
+      : {
+          kind: providerName,
+          apiKey: slot.apiKey || customRow?.key,
+          baseUrl: slot.baseUrl || customRow?.url,
+          authHeader: slot.authHeader || customRow?.authHeader,
+        };
     const res = await entry.listModels(probeArgs).catch(() => null);
     probedProviders.set(providerName, res);
     return res;
@@ -341,7 +553,13 @@ async function _probeModelTier(tier, body, appConfig) {
   if (!model) return { ok: false, error: 'missing model' };
 
   // Merge config with posted form values so the ephemeral client honors current keys
-  const cfg = { ...(appConfig || {}), ..._ephemeralConfig(providers || {}) };
+  const overrides = _ephemeralConfig(providers || {}, appConfig || {});
+  const cfg = {
+    ...(appConfig || {}),
+    ...overrides,
+    plugins: overrides.plugins || appConfig?.plugins,
+    customProviders: overrides.customProviders || appConfig?.customProviders,
+  };
 
   // Compose the effective model id (provider prefix + model).
   // The /api/settings API returns the model split into provider + model where
@@ -504,14 +722,140 @@ class WebGateway {
     this._webSessions = new Map();
     // Session client registry: sessionId -> Set<{ws, role:'origin'|'observer'}>
     this._sessionClients = new Map();
+    this._settingsService = new WebSettingsService(this);
+
+    // Subscribe to settings changes so caches and downstream consumers
+    // pick up new values without a restart. This replaces the manual
+    // `this._voicePipeline = null` / `agent.client = null` lines in the
+    // old _persistSettingsPatch body.
+    this._wireSettingsSubscriptions();
+
+    // Mirror once at construct time. Plugins register their settings
+    // synchronously when the manager loads them, so by the time
+    // WebGateway is built (after plugin load), the store has every
+    // plugin key. The boot-time mirror in config.js runs BEFORE
+    // plugins load, so it can't see plugin values — this catches up
+    // legacy `this.config.plugins[id]` consumers (the providers tab
+    // form-population path, model lookups, etc.).
+    try { this._mirrorSettingsToLegacyConfig(); } catch (e) {
+      this.log.warn(`[settings] initial mirror failed: ${e.message}`);
+    }
   }
 
+  _submitAgentTurn(opts, meta = {}) {
+    const queue = this.tools?._jobQueue;
+    if (queue?.submitAgentTurn) return queue.submitAgentTurn(opts, meta);
+    return this.tools?._agent?.processMessage(opts);
+  }
+
+  /**
+   * Wire the settings store's reactive subscribers to the WebGateway's
+   * caches. Fires on every applyPatch (via transport) and on plugin
+   * config changes (which also flow through transport).
+   *
+   *   voice.*           → drop the voice pipeline so it rebuilds
+   *   models.* | providers.*  → clear the LLM client cache, re-init agent
+   *   sectionBudgets / totalPromptBudget → live-apply to GraphContext
+   */
+  _wireSettingsSubscriptions() {
+    if (this._settingsSubsWired) return;
+    const settings = require('../settings');
+
+    // Voice — staleness fix. Discord/Telegram gateways own their own
+    // pipeline instances and have their own subscribes; this one is
+    // for the web-built pipeline used by /api/voice.
+    settings.subscribe('voice.*', () => { this._voicePipeline = null; });
+
+    // Models or providers changed — invalidate the LLM client cache and
+    // ask the agent loop to re-init so it picks up new model refs.
+    // ** = any depth; provider keys are two-deep (providers.openai.apiKey)
+    // and plugin keys vary by plugin. We mirror BEFORE reinit so
+    // agent.init() sees the post-patch values on this.config.* instead
+    // of the stale pre-patch ones (subscribers fire mid-patch, before
+    // the wrapper code mirrors).
+    const mirrorThenReinit = () => {
+      try { this._mirrorSettingsToLegacyConfig(); } catch (e) {
+        this.log.warn(`[settings] mirror failed: ${e.message}`);
+      }
+      this._reinitAgent();
+    };
+    settings.subscribe('models.*', mirrorThenReinit);
+    settings.subscribe('providers.**', mirrorThenReinit);
+    settings.subscribe('plugins.**', mirrorThenReinit);
+
+    // Live-apply prompt budgets to the running GraphContext.
+    settings.subscribe('sectionBudgets', () => {
+      const G = this.graph?.constructor;
+      if (this.graph && G) this.graph._sectionBudgets = { ...G.SECTION_BUDGETS, ...(settings.get('sectionBudgets') || {}) };
+    });
+    settings.subscribe('totalPromptBudget', () => {
+      const G = this.graph?.constructor;
+      if (this.graph && G) this.graph._totalBudget = settings.get('totalPromptBudget') || G.TOTAL_BUDGET;
+    });
+
+    this._settingsSubsWired = true;
+  }
+
+  _reinitAgent() {
+    try {
+      this.tools?.llmClient?.clearCache?.();
+      const agent = this.tools?._agent;
+      if (agent) {
+        agent.client = null;
+        if (typeof agent.init === 'function') agent.init();
+      }
+    } catch (e) {
+      this.log.warn(`[settings] agent re-init failed: ${e.message}`);
+    }
+  }
+
+  _modelLibraryProviderStatus(providerName) {
+    const provider = String(providerName || '').trim().toLowerCase();
+    const mgr = this.tools?._pluginManager;
+    const registered = mgr?.getProviders?.() || [];
+    const entry = registered.find(p => (
+      p.name === provider || (Array.isArray(p.prefixes) && p.prefixes.map(x => String(x).toLowerCase()).includes(provider))
+    ));
+    const custom = _customProviderConfig(this.config, provider);
+    const configuredByHost = (
+      (provider === 'anthropic' && !!this.config.anthropicApiKey) ||
+      (provider === 'openai' && !!this.config.openaiApiKey) ||
+      (provider === 'openrouter' && !!this.config.openrouterApiKey) ||
+      (provider === 'gemini' && !!this.config.geminiApiKey) ||
+      (provider === 'zai' && !!this.config.zaiApiKey) ||
+      !!custom?.url
+    );
+    const configured = !!(entry?.configured || configuredByHost);
+    return {
+      registered: !!entry,
+      configured,
+      pluginId: entry?.pluginId || null,
+      available: !!entry && configured,
+    };
+  }
+
+  _visibleModelLibraryEntries(entries = [], opts = {}) {
+    if (opts.includeUnavailable) return entries;
+    const mgr = this.tools?._pluginManager;
+    if (!mgr?.getProviders) return entries;
+    return entries
+      .map(e => ({ ...e, providerStatus: this._modelLibraryProviderStatus(e.provider) }))
+      .filter(e => e.providerStatus.available);
+  }
+
+  // Wizard / settings persistence targets. We always write to the
+  // Phase 2: settings.db is the canonical store. spore.json is migrated
+  // on first boot then renamed; .env is read at boot for operator overrides
+  // but never written. The path helpers are kept as harmless utilities so
+  // any external tool referencing them still works.
   _settingsConfigPath() {
-    return path.resolve(__dirname, '..', 'spore.json');
+    const dataDir = this.config?.dataDir || process.env.SPORE_DATA_DIR;
+    return dataDir ? path.join(dataDir, 'spore.json') : null;
   }
 
   _settingsEnvPath() {
-    return path.resolve(__dirname, '..', '.env');
+    const dataDir = this.config?.dataDir || process.env.SPORE_DATA_DIR;
+    return dataDir ? path.join(dataDir, '.env') : null;
   }
 
   // Wipes all user-data tables in the graph DB, then re-applies the
@@ -650,1105 +994,200 @@ class WebGateway {
     return { backup, before, after };
   }
 
-  _readSettingsConfigFile() {
-    const filePath = this._settingsConfigPath();
+  async _resetGeneralKnowledgeGraph(slug = 'spore-knowledge-base') {
+    const registry = this.tools?._graphRegistry;
+    if (!registry) throw new Error('multi-graph registry not initialized');
+    const graph = registry.get(slug);
+    if (!graph) throw new Error(`Graph "${slug}" not found`);
+    if (graph.role !== 'general_kb') throw new Error('Only the General Knowledge Base can be reset here');
+
+    const dbPath = registry.getDbPath(slug);
+    if (!dbPath || !fs.existsSync(dbPath)) throw new Error('general knowledge graph db missing on disk');
+
+    const { DatabaseSync } = require('node:sqlite');
+    const backupDir = path.join(path.dirname(dbPath), 'backups');
+    fs.mkdirSync(backupDir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:T]/g, '-').replace(/\..+/, '').slice(0, 19);
+    const backup = path.join(backupDir, `${slug}.pre-reset.${ts}.bak`);
+
+    const learner = this.tools?.learner || this.tools?._agent?.learner || null;
+    const cachedDb = learner?._graphDbs?.[slug] || null;
+    const db = cachedDb || new DatabaseSync(dbPath);
+
+    const count = (table) => {
+      try { return db.prepare(`SELECT COUNT(*) c FROM ${table}`).get().c; } catch { return 0; }
+    };
+    const before = {
+      nodes: count('nodes'),
+      aspects: count('aspects'),
+      attrs: count('attributes'),
+      edges: count('edges'),
+      episodes: count('episodes'),
+    };
+
     try {
-      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
     } catch {
-      return {};
+      try { fs.copyFileSync(dbPath, backup); } catch (e) { throw new Error(`backup failed: ${e.message}`); }
     }
+
+    const userTables = [
+      'edges', 'attribute_history', 'attributes', 'aspects', 'gaps',
+      'hints', 'derived_facts', 'reflections', 'quality_audits',
+      'recycle_bin', 'node_sources', 'edge_sources', 'aliases',
+      'node_group_members', 'node_groups', 'episodes', 'meta',
+      'plugin_installs',
+      'nodes',
+    ];
+    const ftsTables = ['attr_fts', 'episodes_fts', 'hints_fts'];
+
+    db.exec('PRAGMA foreign_keys=OFF');
+    db.exec('BEGIN TRANSACTION');
+    try {
+      for (const t of userTables) {
+        try { db.exec(`DELETE FROM ${t}`); } catch (e) { this.log.debug(`[reset-general-kb] skipping ${t}: ${e.message}`); }
+      }
+      for (const fts of ftsTables) {
+        try { db.exec(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`); } catch {}
+      }
+
+      const appDir = path.resolve(__dirname, '..');
+      const seedGraphPath = path.join(appDir, 'seed-graph.sql');
+      if (!fs.existsSync(seedGraphPath)) throw new Error('seed-graph.sql missing');
+      const agentId = this.config.agentId || 'spore';
+      const agentName = this.config.displayName ||
+        agentId.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      let sql = fs.readFileSync(seedGraphPath, 'utf8');
+      sql = sql.replace(/AGENT_ID/g, agentId).replace(/AGENT_NAME/g, agentName);
+      db.exec(sql);
+
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      db.exec('PRAGMA foreign_keys=ON');
+      throw e;
+    }
+    db.exec('PRAGMA foreign_keys=ON');
+
+    const after = {
+      nodes: count('nodes'),
+      aspects: count('aspects'),
+      attrs: count('attributes'),
+      edges: count('edges'),
+      episodes: count('episodes'),
+    };
+
+    if (!cachedDb) {
+      try { db.close(); } catch {}
+    }
+    registry.refreshStats(slug);
+    this.log.warn(`[reset-general-kb] graph reset complete; backup at ${backup}; before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+    return { backup, before, after, graph: registry.get(slug) };
+  }
+
+  _readSettingsConfigFile() {
+    return this._settingsService.readSettingsConfigFile();
   }
 
   _writeSettingsConfigFile(nextConfig) {
-    fs.writeFileSync(this._settingsConfigPath(), `${JSON.stringify(nextConfig, null, 2)}\n`);
+    return this._settingsService.writeSettingsConfigFile(nextConfig);
   }
 
-  _applyEnvUpdates(envUpdates) {
-    const envPath = this._settingsEnvPath();
-    const raw = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
-    const lines = raw ? raw.split(/\r?\n/) : [];
-    const pending = new Map(Object.entries(envUpdates || {}));
-    const seen = new Set();
-    const nextLines = [];
-
-    for (const line of lines) {
-      const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-      if (!m) {
-        nextLines.push(line);
-        continue;
-      }
-      const key = m[1];
-      if (!pending.has(key)) {
-        nextLines.push(line);
-        continue;
-      }
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const value = pending.get(key);
-      pending.delete(key);
-      if (value === null || value === undefined || value === '') continue;
-      nextLines.push(`${key}=${String(value)}`);
-    }
-
-    for (const [key, value] of pending.entries()) {
-      if (value === null || value === undefined || value === '') continue;
-      nextLines.push(`${key}=${String(value)}`);
-    }
-
-    const normalized = nextLines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s*$/, '\n');
-    fs.writeFileSync(envPath, normalized);
-
-    for (const [key, value] of Object.entries(envUpdates || {})) {
-      if (value === null || value === undefined || value === '') delete process.env[key];
-      else process.env[key] = String(value);
-    }
+  _applyEnvUpdates(envUpdates = {}) {
+    return this._settingsService.applyEnvUpdates(envUpdates);
   }
 
   _deriveDisplayName(agentId) {
-    return (agentId || 'spore')
-      .replace(/-/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase());
+    return this._settingsService.deriveDisplayName(agentId);
   }
 
   _normalizeSettingsModelRef(rawValue) {
-    const raw = String(rawValue || '').trim();
-    if (!raw) return { raw: '', provider: 'anthropic', model: '' };
-    const slash = raw.indexOf('/');
-    if (slash <= 0) return { raw, provider: 'anthropic', model: raw };
-    return {
-      raw,
-      provider: raw.slice(0, slash).trim().toLowerCase() || 'anthropic',
-      model: raw.slice(slash + 1).trim(),
-    };
+    return this._settingsService.normalizeSettingsModelRef(rawValue);
   }
 
   _composeSettingsModelRef(value) {
-    if (value === null || value === undefined) return null;
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      return trimmed || null;
-    }
-    const provider = String(value.provider || 'anthropic').trim().toLowerCase() || 'anthropic';
-    const model = String(value.model || value.name || '').trim();
-    if (!model) return null;
-    return provider === 'anthropic' ? model : `${provider}/${model}`;
+    return this._settingsService.composeSettingsModelRef(value);
   }
 
   _currentCustomProviderNames() {
-    const names = new Set(Object.keys(this.config.customProviders || {}));
-    const providerRe = /^SPORE_PROVIDER_([A-Z0-9_]+)_(URL|KEY|AUTH_HEADER)$/;
-    for (const key of Object.keys(process.env)) {
-      const m = key.match(providerRe);
-      if (m) names.add(m[1].toLowerCase());
-    }
-    return [...names];
+    return this._settingsService.currentCustomProviderNames();
   }
 
   _normalizeSettingsCustomProviders(rawProviders) {
-    // Reserved provider names — collect from registered plugins so a
-    // future provider plugin's name automatically becomes off-limits
-    // for custom-OAI prefixes without a code change here.
-    const mgr = this.tools?._pluginManager;
-    const builtins = new Set(
-      (mgr?.getProviders?.() || [])
-        .map(p => String(p.name || '').toLowerCase())
-        .filter(Boolean)
-    );
-    const providers = [];
-    const seen = new Set();
-    for (const entry of Array.isArray(rawProviders) ? rawProviders : []) {
-      const name = String(entry?.name || '').trim().toLowerCase();
-      if (!name) continue;
-      if (builtins.has(name)) {
-        throw new Error(`Custom provider "${name}" conflicts with a built-in provider name`);
-      }
-      if (!/^[a-z0-9_]+$/.test(name)) {
-        throw new Error(`Custom provider "${name}" must use lowercase letters, numbers, and underscores only`);
-      }
-      if (seen.has(name)) continue;
-      seen.add(name);
-      providers.push({
-        name,
-        url: String(entry?.url || '').trim(),
-        key: String(entry?.key || '').trim(),
-        authHeader: String(entry?.authHeader || 'bearer').trim() || 'bearer',
-      });
-    }
-    return providers;
+    return this._settingsService.normalizeSettingsCustomProviders(rawProviders);
   }
 
   _normalizeBrowserBackendSetting(rawValue) {
-    const raw = String(rawValue || '').trim().toLowerCase();
-    if (!raw || raw === 'zd') return 'zendriver';
-    if (raw === 'pw') return 'playwright';
-    if (!['zendriver', 'playwright'].includes(raw)) {
-      throw new Error(`Unknown browser backend "${rawValue}". Use zendriver or playwright.`);
-    }
-    return raw;
+    return this._settingsService.normalizeBrowserBackendSetting(rawValue);
   }
 
   _getSettingsState() {
-    const fileConfig = this._readSettingsConfigFile();
-    const envDisplay = !!process.env.SPORE_DISPLAY_NAME;
-    const envNicknames = !!process.env.SPORE_NICKNAMES;
-    const envVoice = [
-      'SPORE_VOICE_ENABLED',
-      'SPORE_STT_PROVIDER',
-      'SPORE_TTS_PROVIDER',
-      'SPORE_TTS_VOICE',
-      'SPORE_TTS_MODEL',
-      'SPORE_TTS_EDGE_VOICE',
-    ].some(k => !!process.env[k]);
-    const envProactive = [
-      'SPORE_PROACTIVE_ENABLED',
-      'SPORE_PROACTIVE_COOLDOWN',
-      'SPORE_PROACTIVE_MAX_DAY',
-      'SPORE_PROACTIVE_CHANNELS',
-    ].some(k => !!process.env[k]);
-    // STT providers come from plugins (whisper, deepgram, …). When no
-    // STT plugin is installed, voice is disabled — voiceProviders is
-    // empty and the dropdown shows the disabled placeholder.
-    const mgr = this.tools?._pluginManager;
-    const voiceProviders = (mgr?.getSTTProviders?.() || []).map(p => ({
-      name: p.name,
-      pluginId: p.pluginId,
-      configured: p.configured,
-    }));
-    const sttConfigured = voiceProviders.some(p => p.configured);
-    const pipeline = this._ensureVoicePipeline();
-    const customProviders = Object.entries(this.config.customProviders || {})
-      .map(([name, provider]) => ({
-        name,
-        url: provider?.url || '',
-        key: provider?.key || '',
-        authHeader: provider?.authHeader || 'bearer',
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    return {
-      identity: {
-        agentId: this.config.agentId,
-        displayName: this.config.displayName || this._deriveDisplayName(this.config.agentId),
-        nicknames: Array.isArray(this.config.nicknames) ? this.config.nicknames : [],
-      },
-      memory: {
-        enhancedRecall: !!this.config.enhancedRecall,
-      },
-      proactive: {
-        enabled: !!this.config.proactive?.enabled,
-        cooldownMinutes: Number(this.config.proactive?.cooldownMinutes || 60),
-        maxPerDay: Number(this.config.proactive?.maxPerDay || 5),
-        channels: Array.isArray(this.config.proactive?.channels) ? this.config.proactive.channels : [],
-      },
-      voice: {
-        enabled: !!this.config.voice?.enabled,
-        sttProvider: this.config.voice?.sttProvider || (voiceProviders.find(p => p.configured)?.name || ''),
-        providers: voiceProviders,
-        ttsProvider: this.config.voice?.ttsProvider || '',
-        ttsVoice: this.config.voice?.ttsVoice || '',
-        ttsModel: this.config.voice?.ttsModel || '',
-        edgeVoice: this.config.voice?.edgeVoice || 'en-US-AriaNeural',
-        ready: !!pipeline,
-        sttConfigured,
-        note: sttConfigured
-          ? (pipeline ? 'Voice pipeline is ready.' : 'Voice is enabled but the pipeline is not ready.')
-          : 'Voice needs an STT plugin installed (whisper or deepgram) — or set DEEPGRAM_API_KEY / OPENAI_API_KEY in .env.',
-      },
-      runtime: {
-        publicUrl: this.config.publicUrl || null,
-        webPort: this.config.webPort || null,
-        workspacePath: this.config.workspacePath || process.cwd(),
-        dataDir: this.config.dataDir || null,
-      },
-      models: {
-        casual: this._normalizeSettingsModelRef(this.config.casualModel),
-        normal: this._normalizeSettingsModelRef(this.config.normalModel),
-        planner: this._normalizeSettingsModelRef(this.config.plannerModel),
-        subagent: this._normalizeSettingsModelRef(this.config.subagentModel),
-        learner: this._normalizeSettingsModelRef(this.config.learnerModel),
-        imageVlm: this._normalizeSettingsModelRef(this.config.imageVlmModel),
-        videoVlm: this._normalizeSettingsModelRef(this.config.videoVlmModel),
-        audioVlm: this._normalizeSettingsModelRef(this.config.audioVlmModel),
-        recall: this._normalizeSettingsModelRef(this.config.recallModel),
-      },
-      providers: {
-        // Plugin-registered providers, dynamically. Frontend renders
-        // the entire Providers tab from this list — schema, values,
-        // and the per-tier dropdown choices all flow from here.
-        // `formFields` mirrors the plugin's settings pane schema (so
-        // each plugin owns its UI surface in one place); `values`
-        // carries the current persisted values (secrets masked).
-        // `pluginId` lets the save path route changes back to the
-        // plugin's slot (body.plugins[<id>]) which fires its
-        // onConfigChange to mirror values to env + host config.
-        registered: (() => {
-          const mgr = this.tools?._pluginManager;
-          if (!mgr?.getProviders) return [];
-          const panes = mgr.getSettingsPanes ? mgr.getSettingsPanes() : [];
-          const paneByPluginId = new Map(panes.map(p => [p.pluginId, p]));
-          return mgr.getProviders().map(p => {
-            const pane = paneByPluginId.get(p.pluginId) || null;
-            return {
-              name: p.name,
-              pluginId: p.pluginId,
-              label: p.label || p.name,
-              configured: !!p.configured,
-              defaultBaseUrl: p.defaultBaseUrl || null,
-              capabilities: p.capabilities || {},
-              formFields: pane?.schema || [],
-              values: pane?.values || {},
-              meta: pane?.meta || {},
-              description: pane?.description || '',
-            };
-          });
-        })(),
-        anthropic: {
-          apiKey: this.config.anthropicApiKey || '',
-          apiKeySet: !!this.config.anthropicApiKey,
-        },
-        openai: {
-          apiKey: this.config.openaiApiKey || '',
-          apiKeySet: !!this.config.openaiApiKey,
-          baseUrl: this.config.openaiBaseUrl || '',
-        },
-        openrouter: {
-          apiKey: this.config.openrouterApiKey || '',
-          apiKeySet: !!this.config.openrouterApiKey,
-          baseUrl: this.config.openrouterBaseUrl || '',
-          referer: this.config.openrouterReferer || '',
-        },
-        local: {
-          apiKey: this.config.localModelApiKey || '',
-          apiKeySet: !!this.config.localModelApiKey,
-          baseUrl: this.config.localModelBaseUrl || '',
-        },
-        // Z.ai (GLM) — z-ai-provider plugin owns the values; we surface
-        // a thin view here so the settings UI can list-models alongside
-        // the other built-ins. apiKeySet is derived from any of the
-        // resolution paths the plugin honors (env, host config, plugin
-        // slot) so the wizard's "configured?" badge matches reality.
-        zai: (() => {
-          const slot = this.config?.plugins?.['z-ai-provider'] || {};
-          const apiKey = process.env.ZAI_API_KEY || this.config.zaiApiKey || slot.apiKey || '';
-          const baseUrl = process.env.ZAI_BASE_URL || this.config.zaiBaseUrl || slot.baseUrl || '';
-          return { apiKey, apiKeySet: !!apiKey, baseUrl };
-        })(),
-        custom: customProviders,
-      },
-      webSearch: {
-        searxngUrl: this.config.searxngUrl || '',
-        searxngApiKey: this.config.searxngApiKey ? '***hidden***' : '',
-        searxngApiKeySet: !!this.config.searxngApiKey,
-        braveApiKey: this.config.braveApiKey ? '***hidden***' : '',
-        braveApiKeySet: !!this.config.braveApiKey,
-      },
-      // Single host-level invite key — gates webapp self-register +
-      // spore-code /auth. Empty means both are disabled. Surfaced as a
-      // password field with a Regenerate button in the Advanced tab.
-      inviteKey: this.config.inviteKey || '',
-      inviteKeySet: !!this.config.inviteKey,
-      modelLimits: this.config.modelLimits || {},
-      agent: (() => {
-        // Agent Effort preset — one dial that bundles message budgets,
-        // iteration caps, tool-result cap, and sub-agent fan-out. The
-        // budgets.defaults block reflects the ACTIVE preset's values so
-        // the UI placeholder text shows the user what each input will
-        // resolve to if they leave it blank.
-        const tier = resolveEffortTier(this.config);
-        const eff = EFFORT_PRESETS[tier] || EFFORT_PRESETS[DEFAULT_EFFORT];
-        return {
-          effort: {
-            value: tier,
-            tiers: EFFORT_TIERS,
-            presets: EFFORT_PRESETS, // expose so the UI can preview a tier before saving
-          },
-          budgets: {
-            casualMessageBudget:    Number.isFinite(this.config.casualMessageBudget)   ? this.config.casualMessageBudget   : null,
-            complexMessageBudget:   Number.isFinite(this.config.complexMessageBudget)  ? this.config.complexMessageBudget  : null,
-            compactTokenThreshold:  Number.isFinite(this.config.compactTokenThreshold) ? this.config.compactTokenThreshold : null,
-            maxToolResultChars:     Number.isFinite(this.config.maxToolResultChars)    ? this.config.maxToolResultChars    : null,
-            defaults: {
-              casualMessageBudget:   eff.casualMessageBudget,
-              complexMessageBudget:  eff.complexMessageBudget,
-              compactTokenThreshold: 120000, // hardCeiling override; not preset-controlled
-              maxToolResultChars:    eff.maxToolResultChars,
-            },
-          },
-        };
-      })(),
-      budgets: (() => {
-        // System-prompt section budgets (graph/context.js GraphContext).
-        // Surface the current effective values + class defaults so the UI
-        // can show "default: N" alongside each input. The UI exposes
-        // runtime + total as headline knobs; an "all 18 sections"
-        // expander uses sections + sectionDefaults.
-        const G = this.graph?.constructor;
-        const sectionDefaults = G ? { ...G.SECTION_BUDGETS } : {};
-        const totalDefault = G ? G.TOTAL_BUDGET : 40000;
-        const sections = this.graph?._sectionBudgets ? { ...this.graph._sectionBudgets } : { ...sectionDefaults };
-        const total = this.graph?._totalBudget ?? totalDefault;
-        return {
-          runtime: sections.runtime ?? sectionDefaults.runtime ?? null,
-          total,
-          sections,
-          sectionDefaults,
-          totalDefault,
-        };
-      })(),
-      browser: {
-        backend: this.config.browserBackend || 'zendriver',
-        availableBackends: ['zendriver', 'playwright'],
-      },
-      sources: {
-        displayName: envDisplay ? 'env' : (fileConfig.displayName ? 'file' : 'derived'),
-        nicknames: envNicknames ? 'env' : ((Array.isArray(fileConfig.nicknames) && fileConfig.nicknames.length) ? 'file' : 'derived'),
-        proactive: envProactive ? 'env' : (fileConfig.proactive ? 'file' : 'default'),
-        voice: envVoice ? 'env' : (fileConfig.voice ? 'file' : 'default'),
-        enhancedRecall: Object.prototype.hasOwnProperty.call(fileConfig, 'enhancedRecall') ? 'file' : 'default',
-        models: 'env',
-        providers: 'env',
-        browser: process.env.SPORE_BROWSER_BACKEND ? 'env' : (fileConfig.browserBackend ? 'file' : 'default'),
-      },
-      plugins: this._buildPluginsSettingsBlock(),
-    };
+    return this._settingsService.getSettingsState();
   }
 
-  /**
-   * Collect installed plugins' settings panes for the settings UI. Returns
-   * `{ enabled, hotReload, panes: [{ pluginId, title, tab, schema, values, meta, ... }] }`.
-   * Secret fields are masked: `meta[key].isSet` is the only signal the UI gets.
-   */
   _buildPluginsSettingsBlock() {
-    const mgr = this.tools?._pluginManager;
-    if (!mgr?.getSettingsPanes) {
-      return { enabled: !!this.config.pluginsEnabled, hotReload: !!this.config.pluginsHotReload, panes: [], dockItems: [], available: [], dirs: { bundled: null, user: null } };
-    }
-    const dirs = mgr.getDiscoveryDirs?.() || {};
-    return {
-      enabled: !!this.config.pluginsEnabled,
-      hotReload: !!this.config.pluginsHotReload,
-      dirs: { bundled: dirs.bundled || null, user: dirs.user || null },
-      panes: mgr.getSettingsPanes(),
-      dockItems: mgr.getDockItems?.() || [],
-      available: mgr.listAvailable?.() || [],
-    };
+    return this._settingsService.buildPluginsSettingsBlock();
   }
 
-  /**
-   * Wire `pluginManager.setConfigPersister` so plugin code calling
-   * `api.setConfig(partial)` flows through the same _persistSettingsPatch
-   * path the settings UI uses. Idempotent — registered once per process.
-   */
   _ensurePluginConfigPersister() {
-    const mgr = this.tools?._pluginManager;
-    if (!mgr?.setConfigPersister) return;
-    if (mgr._configPersister) return; // already wired
-    mgr.setConfigPersister(async (pluginId, partial) => {
-      this._persistSettingsPatch({ plugins: { [pluginId]: partial } });
-      return { ...(this.config.plugins?.[pluginId] || {}) };
-    });
+    return this._settingsService.ensurePluginConfigPersister();
   }
 
-  _persistSettingsPatch(body = {}) {
-    this._ensurePluginConfigPersister();
-    // Diagnostic: surface the body shape so we can pinpoint who's
-    // writing what. Plugins keys especially noisy — scope to those.
-    if (body.plugins) {
-      const pluginKeys = Object.keys(body.plugins);
-      this.log.info(`[persist] body.plugins keys=[${pluginKeys.join(',')}] sample=${JSON.stringify(body.plugins).slice(0, 240)}`);
-    }
-    const fileConfig = this._readSettingsConfigFile();
-    const nextConfig = {
-      ...fileConfig,
-      proactive: { ...(fileConfig.proactive || this.config.proactive || {}) },
-      voice: { ...(fileConfig.voice || this.config.voice || {}) },
-    };
-    const envUpdates = {};
-    const runtimePatch = {};
-    let voiceTouched = false;
-    let modelTouched = false;
-    let providerTouched = false;
+  _persistSettingsPatch(body = {}, opts = {}) {
+    return this._settingsService.persistSettingsPatch(body, opts);
+  }
 
-    if (Object.prototype.hasOwnProperty.call(body, 'displayName')) {
-      const displayName = String(body.displayName || '').trim();
-      if (displayName) {
-        nextConfig.displayName = displayName;
-        runtimePatch.displayName = displayName;
-        envUpdates.SPORE_DISPLAY_NAME = displayName;
-      } else {
-        delete nextConfig.displayName;
-        runtimePatch.displayName = this._deriveDisplayName(this.config.agentId);
-        envUpdates.SPORE_DISPLAY_NAME = null;
-      }
-    }
-
-    if (Object.prototype.hasOwnProperty.call(body, 'nicknames')) {
-      const raw = Array.isArray(body.nicknames)
-        ? body.nicknames
-        : String(body.nicknames || '').split(',');
-      const nicknames = raw.map(v => String(v).toLowerCase().trim()).filter(Boolean);
-      nextConfig.nicknames = nicknames;
-      runtimePatch.nicknames = nicknames;
-      envUpdates.SPORE_NICKNAMES = nicknames.length ? nicknames.join(',') : null;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(body, 'enhancedRecall')) {
-      const enabled = !!body.enhancedRecall;
-      nextConfig.enhancedRecall = enabled;
-      runtimePatch.enhancedRecall = enabled;
-    }
-
-    if (body.proactive && typeof body.proactive === 'object') {
-      const nextProactive = { ...(nextConfig.proactive || {}) };
-      if (Object.prototype.hasOwnProperty.call(body.proactive, 'enabled')) {
-        nextProactive.enabled = !!body.proactive.enabled;
-        envUpdates.SPORE_PROACTIVE_ENABLED = nextProactive.enabled ? 'true' : 'false';
-      }
-      if (Object.prototype.hasOwnProperty.call(body.proactive, 'cooldownMinutes')) {
-        nextProactive.cooldownMinutes = Math.max(1, parseInt(body.proactive.cooldownMinutes, 10) || 60);
-        envUpdates.SPORE_PROACTIVE_COOLDOWN = String(nextProactive.cooldownMinutes);
-      }
-      if (Object.prototype.hasOwnProperty.call(body.proactive, 'maxPerDay')) {
-        nextProactive.maxPerDay = Math.max(1, parseInt(body.proactive.maxPerDay, 10) || 5);
-        envUpdates.SPORE_PROACTIVE_MAX_DAY = String(nextProactive.maxPerDay);
-      }
-      if (Object.prototype.hasOwnProperty.call(body.proactive, 'channels')) {
-        const raw = Array.isArray(body.proactive.channels)
-          ? body.proactive.channels
-          : String(body.proactive.channels || '').split(',');
-        nextProactive.channels = raw.map(v => String(v).trim()).filter(Boolean);
-        envUpdates.SPORE_PROACTIVE_CHANNELS = nextProactive.channels.length ? nextProactive.channels.join(',') : null;
-      }
-      nextConfig.proactive = nextProactive;
-      runtimePatch.proactive = {
-        ...(this.config.proactive || {}),
-        ...nextProactive,
-      };
-    }
-
-    if (body.voice && typeof body.voice === 'object') {
-      const nextVoice = { ...(nextConfig.voice || {}) };
-      const runtimeVoice = { ...(this.config.voice || {}) };
-      if (Object.prototype.hasOwnProperty.call(body.voice, 'enabled')) {
-        nextVoice.enabled = !!body.voice.enabled;
-        runtimeVoice.enabled = !!body.voice.enabled;
-        envUpdates.SPORE_VOICE_ENABLED = nextVoice.enabled ? 'true' : null;
-        voiceTouched = true;
-      }
-      if (Object.prototype.hasOwnProperty.call(body.voice, 'sttProvider')) {
-        const sttProvider = String(body.voice.sttProvider || 'deepgram').trim() || 'deepgram';
-        nextVoice.sttProvider = sttProvider;
-        runtimeVoice.sttProvider = sttProvider;
-        envUpdates.SPORE_STT_PROVIDER = sttProvider;
-        voiceTouched = true;
-      }
-      if (Object.prototype.hasOwnProperty.call(body.voice, 'ttsProvider')) {
-        const ttsProvider = String(body.voice.ttsProvider || '').trim();
-        nextVoice.ttsProvider = ttsProvider || null;
-        runtimeVoice.ttsProvider = ttsProvider || null;
-        envUpdates.SPORE_TTS_PROVIDER = ttsProvider || null;
-        voiceTouched = true;
-      }
-      if (Object.prototype.hasOwnProperty.call(body.voice, 'ttsVoice')) {
-        const ttsVoice = String(body.voice.ttsVoice || '').trim();
-        nextVoice.ttsVoice = ttsVoice || null;
-        runtimeVoice.ttsVoice = ttsVoice || null;
-        envUpdates.SPORE_TTS_VOICE = ttsVoice || null;
-        voiceTouched = true;
-      }
-      if (Object.prototype.hasOwnProperty.call(body.voice, 'ttsModel')) {
-        const ttsModel = String(body.voice.ttsModel || '').trim();
-        nextVoice.ttsModel = ttsModel || null;
-        runtimeVoice.ttsModel = ttsModel || null;
-        envUpdates.SPORE_TTS_MODEL = ttsModel || null;
-        voiceTouched = true;
-      }
-      if (Object.prototype.hasOwnProperty.call(body.voice, 'edgeVoice')) {
-        const edgeVoice = String(body.voice.edgeVoice || '').trim();
-        nextVoice.edgeVoice = edgeVoice || 'en-US-AriaNeural';
-        runtimeVoice.edgeVoice = edgeVoice || 'en-US-AriaNeural';
-        envUpdates.SPORE_TTS_EDGE_VOICE = edgeVoice || null;
-        voiceTouched = true;
-      }
-      Object.keys(nextVoice).forEach(key => {
-        if (nextVoice[key] === null || nextVoice[key] === undefined || nextVoice[key] === '') delete nextVoice[key];
-      });
-      nextConfig.voice = nextVoice;
-      runtimePatch.voice = runtimeVoice;
-    }
-
-    if (body.models && typeof body.models === 'object') {
-      const modelFields = [
-        ['casual', 'casualModel', 'SPORE_CASUAL_MODEL'],
-        ['normal', 'normalModel', 'SPORE_NORMAL_MODEL'],
-        ['planner', 'plannerModel', 'SPORE_PLANNER_MODEL'],
-        ['subagent', 'subagentModel', 'SPORE_SUBAGENT_MODEL'],
-        ['learner', 'learnerModel', 'SPORE_LEARNER_MODEL'],
-        ['imageVlm', 'imageVlmModel', 'SPORE_IMAGE_VLM_MODEL'],
-        ['videoVlm', 'videoVlmModel', 'SPORE_VIDEO_VLM_MODEL'],
-        ['audioVlm', 'audioVlmModel', 'SPORE_AUDIO_VLM_MODEL'],
-        ['recall', 'recallModel', 'SPORE_RECALL_MODEL'],
-      ];
-      for (const [bodyKey, configKey, envKey] of modelFields) {
-        if (!Object.prototype.hasOwnProperty.call(body.models, bodyKey)) continue;
-        const rawModel = this._composeSettingsModelRef(body.models[bodyKey]);
-        envUpdates[envKey] = rawModel || null;
-        runtimePatch[configKey] = rawModel || null;
-        modelTouched = true;
-      }
-      if (modelTouched) envUpdates.SPORE_MODEL = null;
-    }
-
-    if (body.providers && typeof body.providers === 'object') {
-      const providers = body.providers;
-      const assignProviderField = (bodyValue, envKey, runtimeKey) => {
-        const nextValue = String(bodyValue || '').trim();
-        // Empty value = "no change", NOT "clear". The wizard / settings
-        // UIs send the full providers payload on every save; an empty
-        // form input for a field the operator never touched would
-        // otherwise wipe persisted values (caused the famous "wizard
-        // saved my baseUrl, then later Settings save dropped it"
-        // regression). Operators clear by removing the env line directly.
-        if (!nextValue) return;
-        envUpdates[envKey] = nextValue;
-        runtimePatch[runtimeKey] = nextValue;
-        providerTouched = true;
-      };
-
-      if (providers.anthropic && typeof providers.anthropic === 'object') {
-        if (Object.prototype.hasOwnProperty.call(providers.anthropic, 'apiKey')) {
-          assignProviderField(providers.anthropic.apiKey, 'ANTHROPIC_API_KEY', 'anthropicApiKey');
-        }
-      }
-
-      if (providers.openai && typeof providers.openai === 'object') {
-        if (Object.prototype.hasOwnProperty.call(providers.openai, 'apiKey')) {
-          assignProviderField(providers.openai.apiKey, 'OPENAI_API_KEY', 'openaiApiKey');
-        }
-        if (Object.prototype.hasOwnProperty.call(providers.openai, 'baseUrl')) {
-          assignProviderField(providers.openai.baseUrl, 'OPENAI_BASE_URL', 'openaiBaseUrl');
-        }
-      }
-
-      if (providers.openrouter && typeof providers.openrouter === 'object') {
-        if (Object.prototype.hasOwnProperty.call(providers.openrouter, 'apiKey')) {
-          assignProviderField(providers.openrouter.apiKey, 'OPENROUTER_API_KEY', 'openrouterApiKey');
-        }
-        if (Object.prototype.hasOwnProperty.call(providers.openrouter, 'baseUrl')) {
-          assignProviderField(providers.openrouter.baseUrl, 'OPENROUTER_BASE_URL', 'openrouterBaseUrl');
-        }
-        if (Object.prototype.hasOwnProperty.call(providers.openrouter, 'referer')) {
-          assignProviderField(providers.openrouter.referer, 'OPENROUTER_REFERER', 'openrouterReferer');
-        }
-      }
-
-      if (providers.local && typeof providers.local === 'object') {
-        // Diagnostic log: surfaces the inbound payload shape so we can
-        // catch wizard-side bugs where fields don't reach the server
-        // (e.g. baseUrl dropped → endpoint goes through the wrong path).
-        // Mask the key — log only its length.
-        this.log.info(`[settings] providers.local keys=${Object.keys(providers.local).join(',')} baseUrl="${providers.local.baseUrl||''}" authHeader="${providers.local.authHeader||''}" apiKeyLen=${(providers.local.apiKey||'').length}`);
-        if (Object.prototype.hasOwnProperty.call(providers.local, 'apiKey')) {
-          assignProviderField(providers.local.apiKey, 'LOCAL_MODEL_API_KEY', 'localModelApiKey');
-        }
-        if (Object.prototype.hasOwnProperty.call(providers.local, 'baseUrl')) {
-          assignProviderField(providers.local.baseUrl, 'LOCAL_MODEL_BASE_URL', 'localModelBaseUrl');
-        }
-        if (Object.prototype.hasOwnProperty.call(providers.local, 'authHeader')) {
-          // Persist the OAI-compatible auth header (bearer / x-api-key /
-          // x-key). Read by buildLocalClient at chat time; without this,
-          // the OAI tile's auth-header dropdown selection survives the
-          // wizard's test step but vanishes on save → buildLocalClient
-          // falls back to bearer → endpoints expecting x-key 403.
-          assignProviderField(providers.local.authHeader, 'LOCAL_MODEL_AUTH_HEADER', 'localModelAuthHeader');
-        }
-      }
-
-      if (providers.zai && typeof providers.zai === 'object') {
-        // Z.ai (GLM) — z-ai-provider plugin reads the persisted slot
-        // first, falls back to legacy host-config keys (zaiApiKey /
-        // zaiBaseUrl) and ZAI_* env vars. Mirror to all three so a
-        // future plugin uninstall doesn't lose the configuration.
-        if (Object.prototype.hasOwnProperty.call(providers.zai, 'apiKey')) {
-          assignProviderField(providers.zai.apiKey, 'ZAI_API_KEY', 'zaiApiKey');
-        }
-        if (Object.prototype.hasOwnProperty.call(providers.zai, 'baseUrl')) {
-          assignProviderField(providers.zai.baseUrl, 'ZAI_BASE_URL', 'zaiBaseUrl');
-        }
-        // Also write into the plugin's own config slot so the plugin's
-        // onConfigChange fires and the OAICompatClient picks up the
-        // new key without a restart.
-        const zaiPatch = {};
-        if (typeof providers.zai.apiKey === 'string'  && providers.zai.apiKey.trim())  zaiPatch.apiKey  = providers.zai.apiKey.trim();
-        if (typeof providers.zai.baseUrl === 'string' && providers.zai.baseUrl.trim()) zaiPatch.baseUrl = providers.zai.baseUrl.trim();
-        if (Object.keys(zaiPatch).length > 0) {
-          body.plugins = body.plugins || {};
-          body.plugins['z-ai-provider'] = { ...(body.plugins['z-ai-provider'] || {}), ...zaiPatch };
-        }
-      }
-
-      if (Object.prototype.hasOwnProperty.call(providers, 'custom')) {
-        const normalizedProviders = this._normalizeSettingsCustomProviders(providers.custom);
-        const currentNames = this._currentCustomProviderNames();
-        for (const name of currentNames) {
-          const upper = name.toUpperCase();
-          envUpdates[`SPORE_PROVIDER_${upper}_URL`] = null;
-          envUpdates[`SPORE_PROVIDER_${upper}_KEY`] = null;
-          envUpdates[`SPORE_PROVIDER_${upper}_AUTH_HEADER`] = null;
-        }
-        const nextCustomProviders = {};
-        for (const provider of normalizedProviders) {
-          const upper = provider.name.toUpperCase();
-          envUpdates[`SPORE_PROVIDER_${upper}_URL`] = provider.url || null;
-          envUpdates[`SPORE_PROVIDER_${upper}_KEY`] = provider.key || null;
-          envUpdates[`SPORE_PROVIDER_${upper}_AUTH_HEADER`] = provider.authHeader || null;
-          nextCustomProviders[provider.name] = {
-            name: provider.name,
-            url: provider.url || '',
-            key: provider.key || '',
-            authHeader: provider.authHeader || 'bearer',
-          };
-        }
-        runtimePatch.customProviders = nextCustomProviders;
-        providerTouched = true;
-      }
-    }
-
-    // Invite key — accept either:
-    //   body.inviteKeyRegenerate: true → mint a fresh UUID
-    //   body.inviteKey: '<value>'      → set explicitly (empty disables)
-    // Persisted to .env (SPORE_INVITE_KEY) so it survives restarts.
-    if (body.inviteKeyRegenerate === true) {
-      const fresh = crypto.randomUUID();
-      envUpdates.SPORE_INVITE_KEY = fresh;
-      runtimePatch.inviteKey = fresh;
-    } else if (Object.prototype.hasOwnProperty.call(body, 'inviteKey')) {
-      const trimmed = String(body.inviteKey || '').trim();
-      envUpdates.SPORE_INVITE_KEY = trimmed || null;
-      runtimePatch.inviteKey = trimmed || null;
-    }
-
-    if (body.browser && typeof body.browser === 'object'
-      && Object.prototype.hasOwnProperty.call(body.browser, 'backend')) {
-      const backend = this._normalizeBrowserBackendSetting(body.browser.backend);
-      envUpdates.SPORE_BROWSER_BACKEND = backend;
-      runtimePatch.browserBackend = backend;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(body, 'publicUrl')) {
-      const raw = String(body.publicUrl || '').trim().replace(/\/+$/, '');
-      envUpdates.SPORE_PUBLIC_URL = raw || null;
-      runtimePatch.publicUrl = raw || null;
-    }
-
-    if (body.modelLimits && typeof body.modelLimits === 'object') {
-      const validEfforts = new Set(['off','minimal','low','medium','high','max']);
-      const cleaned = {};
-      for (const [model, lim] of Object.entries(body.modelLimits)) {
-        if (!model) continue;
-        const ctx = Number(lim?.contextWindow);
-        const cmp = Number(lim?.compactAt);
-        const mxo = Number(lim?.maxTokens);
-        const eff = String(lim?.reasoningEffort || '').toLowerCase();
-        const entry = {};
-        if (Number.isFinite(ctx) && ctx > 0) entry.contextWindow = Math.floor(ctx);
-        if (Number.isFinite(cmp) && cmp > 0) entry.compactAt = Math.floor(cmp);
-        if (Number.isFinite(mxo) && mxo > 0) entry.maxTokens = Math.floor(mxo);
-        if (validEfforts.has(eff)) entry.reasoningEffort = eff;
-        if (Object.keys(entry).length) cleaned[model] = entry;
-      }
-      const json = Object.keys(cleaned).length ? JSON.stringify(cleaned) : null;
-      envUpdates.SPORE_MODEL_LIMITS = json;
-      runtimePatch.modelLimits = cleaned;
-    }
-
-    if (body.budgets && typeof body.budgets === 'object') {
-      // System-prompt budget overrides — persist to spore.json +
-      // SPORE_SECTION_BUDGETS / SPORE_TOTAL_BUDGET env, AND mutate the
-      // live GraphContext so the change takes effect on the very next
-      // turn (no restart). Validation mirrors the constructor: only
-      // known keys, only positive integers; everything else dropped.
-      const G = this.graph?.constructor;
-      const knownSectionKeys = new Set(G ? Object.keys(G.SECTION_BUDGETS) : []);
-      let sectionsCleaned = null;
-      if (body.budgets.sections && typeof body.budgets.sections === 'object') {
-        sectionsCleaned = {};
-        for (const [k, v] of Object.entries(body.budgets.sections)) {
-          if (!knownSectionKeys.has(k)) continue;
-          const n = Number(v);
-          if (!Number.isFinite(n) || n <= 0) continue;
-          sectionsCleaned[k] = Math.floor(n);
-        }
-      }
-      // Headline runtime knob — merge into sectionsCleaned if provided
-      // separately. Lets the UI send just {runtime: N} without echoing
-      // the entire 18-section map back.
-      if (Object.prototype.hasOwnProperty.call(body.budgets, 'runtime')) {
-        const n = Number(body.budgets.runtime);
-        if (Number.isFinite(n) && n > 0) {
-          sectionsCleaned = sectionsCleaned || {};
-          sectionsCleaned.runtime = Math.floor(n);
-        }
-      }
-      if (sectionsCleaned !== null) {
-        const json = Object.keys(sectionsCleaned).length ? JSON.stringify(sectionsCleaned) : null;
-        envUpdates.SPORE_SECTION_BUDGETS = json;
-        nextConfig.sectionBudgets = Object.keys(sectionsCleaned).length ? sectionsCleaned : undefined;
-        runtimePatch.sectionBudgets = sectionsCleaned;
-      }
-      if (Object.prototype.hasOwnProperty.call(body.budgets, 'total')) {
-        const n = Number(body.budgets.total);
-        if (Number.isFinite(n) && n > 0) {
-          envUpdates.SPORE_TOTAL_BUDGET = String(Math.floor(n));
-          nextConfig.totalPromptBudget = Math.floor(n);
-          runtimePatch.totalPromptBudget = Math.floor(n);
-        } else {
-          envUpdates.SPORE_TOTAL_BUDGET = null;
-          delete nextConfig.totalPromptBudget;
-          runtimePatch.totalPromptBudget = null;
-        }
-      }
-    }
-
-    // Agent Effort preset — single dial that bundles ten knobs (see
-    // agent/effort.js). 'balanced' = no-op (matches historic defaults).
-    // Operator-pinned individual fields still override the preset.
-    if (body.agent && typeof body.agent === 'object'
-        && Object.prototype.hasOwnProperty.call(body.agent, 'effort')) {
-      const raw = String(body.agent.effort || '').toLowerCase();
-      if (EFFORT_TIERS.includes(raw)) {
-        nextConfig.agentEffort = raw;
-        envUpdates.SPORE_AGENT_EFFORT = raw;
-        runtimePatch.agentEffort = raw;
-      }
-    }
-
-    // Agent context budgets — absolute integer knobs the agent loop +
-    // SessionManager read directly off this.config. Each field accepts
-    // a positive integer (override) or `null` (clear → auto-scaled
-    // default kicks back in). Keys mirror config.js field names.
-    if (body.agent && typeof body.agent === 'object' && body.agent.budgets && typeof body.agent.budgets === 'object') {
-      const budgetFields = [
-        ['casualMessageBudget',   'SPORE_CASUAL_MESSAGE_BUDGET'],
-        ['complexMessageBudget',  'SPORE_COMPLEX_MESSAGE_BUDGET'],
-        ['compactTokenThreshold', 'SPORE_COMPACT_THRESHOLD'],
-        ['maxToolResultChars',    'SPORE_MAX_TOOL_RESULT_CHARS'],
-      ];
-      for (const [key, envKey] of budgetFields) {
-        if (!Object.prototype.hasOwnProperty.call(body.agent.budgets, key)) continue;
-        const raw = body.agent.budgets[key];
-        if (raw === null || raw === '' || raw === undefined) {
-          // Explicit clear → drop from spore.json + env so the next
-          // boot picks up the auto-scaled default. Live config goes to
-          // null too, which the loop treats as "use floor/scaling."
-          delete nextConfig[key];
-          envUpdates[envKey] = null;
-          runtimePatch[key] = null;
-          continue;
-        }
-        const n = Number(raw);
-        if (!Number.isFinite(n) || n <= 0) continue;
-        const floored = Math.floor(n);
-        nextConfig[key] = floored;
-        envUpdates[envKey] = String(floored);
-        runtimePatch[key] = floored;
-      }
-    }
-
-    if (body.webSearch && typeof body.webSearch === 'object') {
-      if (Object.prototype.hasOwnProperty.call(body.webSearch, 'searxngUrl')) {
-        const u = String(body.webSearch.searxngUrl || '').trim();
-        envUpdates.SEARXNG_URL = u || null;
-        runtimePatch.searxngUrl = u || '';
-      }
-      if (Object.prototype.hasOwnProperty.call(body.webSearch, 'searxngApiKey')) {
-        const k = String(body.webSearch.searxngApiKey || '').trim();
-        if (k && k !== '***hidden***') {
-          envUpdates.SEARXNG_API_KEY = k;
-          runtimePatch.searxngApiKey = k;
-        } else if (!k) {
-          envUpdates.SEARXNG_API_KEY = null;
-          runtimePatch.searxngApiKey = '';
-        }
-      }
-      if (Object.prototype.hasOwnProperty.call(body.webSearch, 'braveApiKey')) {
-        const k = String(body.webSearch.braveApiKey || '').trim();
-        if (k && k !== '***hidden***') {
-          envUpdates.BRAVE_API_KEY = k;
-          runtimePatch.braveApiKey = k;
-        } else if (!k) {
-          envUpdates.BRAVE_API_KEY = null;
-          runtimePatch.braveApiKey = '';
-        }
-      }
-    }
-
-    // Plugins config branch — body.plugins = { [pluginId]: { ...partialPatch } }.
-    // Each pluginId's patch is shallow-merged into nextConfig.plugins[id] and,
-    // after the file write, this.config.plugins[id]. We collect the list of
-    // touched plugin ids so we can fire onConfigChange callbacks AFTER the
-    // file write (so any plugin reacting to its config sees the persisted state).
-    const pluginsTouched = [];
-    if (body.plugins && typeof body.plugins === 'object' && !Array.isArray(body.plugins)) {
-      const nextPlugins = { ...(nextConfig.plugins || {}) };
-      for (const pluginId of Object.keys(body.plugins)) {
-        if (!/^[a-zA-Z0-9_-]+$/.test(pluginId)) continue;
-        const patch = body.plugins[pluginId];
-        if (!patch || typeof patch !== 'object') continue;
-        const before = { ...(nextPlugins[pluginId] || {}) };
-        const next = { ...before };
-        let changed = false;
-        for (const key of Object.keys(patch)) {
-          const v = patch[key];
-          // Empty string = "no change" (form input the user never
-          // touched). Without this, the settings UI's auto-collected
-          // payload — which includes EVERY field even unedited ones
-          // with default schema values — clobbers persisted slot
-          // values whenever the operator hits Save without changing
-          // anything. Applies only to strings; explicit null still
-          // deletes.
-          if (v === null) {
-            if (key in next) { delete next[key]; changed = true; }
-          } else if (typeof v === 'string' && v === '') {
-            // skip — preserve existing
-          } else if (next[key] !== v) {
-            next[key] = v;
-            changed = true;
-          }
-        }
-        // Only mark touched if something actually changed — prevents
-        // dispatchConfigChange firing on no-op saves and re-mirroring
-        // existing values back to env.
-        if (changed) {
-          nextPlugins[pluginId] = next;
-          pluginsTouched.push({ pluginId, before, after: next });
-        }
-      }
-      nextConfig.plugins = nextPlugins;
-    }
-
-    this._writeSettingsConfigFile(nextConfig);
-    this._applyEnvUpdates(envUpdates);
-
-    // Apply plugin config to the live config object, then dispatch onConfigChange
-    // hooks. We don't await — plugin reactors are best-effort and shouldn't block
-    // the HTTP response.
-    if (pluginsTouched.length > 0) {
-      if (!this.config.plugins) this.config.plugins = {};
-      const mgr = this.tools?._pluginManager;
-      for (const { pluginId, before, after } of pluginsTouched) {
-        this.config.plugins[pluginId] = after;
-        if (mgr?.dispatchConfigChange) {
-          mgr.dispatchConfigChange(pluginId, before, after).catch(e => {
-            this.log.warn(`[settings] plugin ${pluginId} config-change failed: ${e?.message}`);
-          });
-        }
-      }
-    }
-
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'displayName')) this.config.displayName = runtimePatch.displayName;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'nicknames')) this.config.nicknames = runtimePatch.nicknames;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'enhancedRecall')) this.config.enhancedRecall = runtimePatch.enhancedRecall;
-    if (runtimePatch.proactive) this.config.proactive = runtimePatch.proactive;
-    if (runtimePatch.voice) this.config.voice = runtimePatch.voice;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'casualModel')) this.config.casualModel = runtimePatch.casualModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'normalModel')) this.config.normalModel = runtimePatch.normalModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'plannerModel')) this.config.plannerModel = runtimePatch.plannerModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'subagentModel')) this.config.subagentModel = runtimePatch.subagentModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'learnerModel')) this.config.learnerModel = runtimePatch.learnerModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'imageVlmModel')) this.config.imageVlmModel = runtimePatch.imageVlmModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'videoVlmModel')) this.config.videoVlmModel = runtimePatch.videoVlmModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'audioVlmModel')) this.config.audioVlmModel = runtimePatch.audioVlmModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'recallModel')) this.config.recallModel = runtimePatch.recallModel;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'anthropicApiKey')) this.config.anthropicApiKey = runtimePatch.anthropicApiKey;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openaiApiKey')) this.config.openaiApiKey = runtimePatch.openaiApiKey;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openaiBaseUrl')) this.config.openaiBaseUrl = runtimePatch.openaiBaseUrl;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openrouterApiKey')) this.config.openrouterApiKey = runtimePatch.openrouterApiKey;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openrouterBaseUrl')) this.config.openrouterBaseUrl = runtimePatch.openrouterBaseUrl;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'openrouterReferer')) this.config.openrouterReferer = runtimePatch.openrouterReferer;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelApiKey')) this.config.localModelApiKey = runtimePatch.localModelApiKey;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelBaseUrl')) this.config.localModelBaseUrl = runtimePatch.localModelBaseUrl;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'localModelAuthHeader')) this.config.localModelAuthHeader = runtimePatch.localModelAuthHeader;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'customProviders')) this.config.customProviders = runtimePatch.customProviders;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'browserBackend')) this.config.browserBackend = runtimePatch.browserBackend;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'inviteKey')) this.config.inviteKey = runtimePatch.inviteKey;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'publicUrl')) this.config.publicUrl = runtimePatch.publicUrl;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngUrl')) this.config.searxngUrl = runtimePatch.searxngUrl;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'searxngApiKey')) this.config.searxngApiKey = runtimePatch.searxngApiKey;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'braveApiKey')) this.config.braveApiKey = runtimePatch.braveApiKey;
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'modelLimits')) this.config.modelLimits = runtimePatch.modelLimits;
-    // Live-apply budget overrides to the running GraphContext so the
-    // next assembled system prompt picks them up without a restart.
-    // Falls back to class defaults when the override is empty/null
-    // (matches what GraphContext's constructor does).
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'sectionBudgets')) {
-      this.config.sectionBudgets = runtimePatch.sectionBudgets || {};
-      const G = this.graph?.constructor;
-      if (this.graph && G) {
-        this.graph._sectionBudgets = { ...G.SECTION_BUDGETS, ...(runtimePatch.sectionBudgets || {}) };
-      }
-    }
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'totalPromptBudget')) {
-      this.config.totalPromptBudget = runtimePatch.totalPromptBudget;
-      const G = this.graph?.constructor;
-      if (this.graph && G) {
-        this.graph._totalBudget = runtimePatch.totalPromptBudget || G.TOTAL_BUDGET;
-      }
-    }
-    // Agent context budget overrides — apply to live config so the
-    // next agent turn (loop.js) sees the new values without a restart.
-    // SessionManager is dumb storage now; loop.js reads these on every
-    // turn so no memo to bust.
-    for (const key of ['casualMessageBudget', 'complexMessageBudget', 'compactTokenThreshold', 'maxToolResultChars']) {
-      if (!Object.prototype.hasOwnProperty.call(runtimePatch, key)) continue;
-      const v = runtimePatch[key];
-      if (v == null) delete this.config[key];
-      else this.config[key] = v;
-    }
-    if (Object.prototype.hasOwnProperty.call(runtimePatch, 'agentEffort')) {
-      this.config.agentEffort = runtimePatch.agentEffort;
-    }
-    this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
-    // _isOAuth is set by anthropic-provider's _detectOAuth (runs on
-    // register + every onConfigChange). Core no longer checks token
-    // shape directly.
-    if (voiceTouched) this._voicePipeline = null;
-    if (providerTouched || modelTouched) {
-      this.tools?.llmClient?.clearCache?.();
-      // (Re)initialize the agent loop. On a fresh install the loop boots with
-      // no model and `client` is never set; once the operator saves a real
-      // provider+model via the wizard or settings pane, we need to wire it up
-      // without forcing a container restart.
-      const agent = this.tools?._agent;
-      if (agent) {
-        try {
-          // Force a fresh MultiProvider so it picks up the new config.
-          agent.client = null;
-          if (typeof agent.init === 'function') agent.init();
-        } catch (e) { this.log.warn(`[settings] agent re-init failed: ${e.message}`); }
-      }
-    }
-
-    return this._getSettingsState();
+  _mirrorSettingsToLegacyConfig() {
+    return this._settingsService.mirrorSettingsToLegacyConfig();
   }
 
   _applyOnboardingToGraph(db, payload = {}) {
-    let agentId = this.config.agentId;
-    // If the configured agentId doesn't match a node, fall back to the first type='self' node.
-    let selfRow = agentId && db.prepare('SELECT id FROM nodes WHERE id = ?').get(agentId);
-    if (!selfRow) selfRow = db.prepare("SELECT id FROM nodes WHERE type = 'self' LIMIT 1").get();
-    if (!selfRow) { this.log.warn(`[onboarding] no self node found; skipping graph sync`); return; }
-    agentId = selfRow.id;
+    return this._settingsService.applyOnboardingToGraph(db, payload);
+  }
 
-    const run = () => {
-      const displayName = String(payload.displayName || '').trim();
-      const nicknames = Array.isArray(payload.nicknames) ? payload.nicknames.map(s => String(s).trim()).filter(Boolean) : [];
-
-      if (displayName) {
-        const pitch = nicknames.length
-          ? `${displayName} — known as ${nicknames.join(', ')}. Configured via the first-run wizard.`
-          : `${displayName}. Configured via the first-run wizard.`;
-        db.prepare("UPDATE nodes SET label = ?, description = ?, updated = datetime('now') WHERE id = ?")
-          .run(displayName, pitch, agentId);
-      }
-
-      if (nicknames.length) {
-        db.prepare('DELETE FROM aliases WHERE node_id = ?').run(agentId);
-        const ins = db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)');
-        for (const a of nicknames) ins.run(agentId, a);
-      }
-
-      const ensureAspect = (nodeId, name, weight) => {
-        const existing = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(nodeId, name);
-        if (existing) return existing.id;
-        return db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?,?,?,?)')
-          .run(nodeId, name, weight, 'onboarding').lastInsertRowid;
-      };
-      const upsertAttr = (aspectId, content, importance) => {
-        const existing = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? AND content = ?').get(aspectId, content);
-        if (existing) return;
-        db.prepare('INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?,?,?,?,?)')
-          .run(aspectId, content, importance, 'onboarding', 'onboarding');
-      };
-
-      // Providers — attach to ref-api-keys if present, else to self
-      const providers = payload.providers || {};
-      const configuredProviders = [];
-      if (providers.anthropic?.apiKey) configuredProviders.push('Anthropic (ANTHROPIC_API_KEY)');
-      if (providers.openai?.apiKey) configuredProviders.push('OpenAI (OPENAI_API_KEY)');
-      if (providers.openrouter?.apiKey) configuredProviders.push('OpenRouter (OPENROUTER_API_KEY)');
-      if (providers.local?.apiKey || providers.local?.baseUrl) configuredProviders.push('Local OAI-compatible (LOCAL_MODEL_*)');
-      if (Array.isArray(providers.custom)) {
-        for (const p of providers.custom) {
-          if (p?.name && (p.key || p.url)) configuredProviders.push(`Custom provider: ${p.name}`);
-        }
-      }
-      if (configuredProviders.length) {
-        const refApiKeys = db.prepare("SELECT id FROM nodes WHERE id = 'ref-api-keys'").get();
-        const targetNode = refApiKeys ? 'ref-api-keys' : agentId;
-        const aspId = ensureAspect(targetNode, 'configured_providers', 8);
-        for (const line of configuredProviders) upsertAttr(aspId, `${line} — configured during onboarding`, 7);
-      }
-
-      // Models
-      const models = payload.models || {};
-      const modelLines = [];
-      for (const [tier, ref] of Object.entries(models)) {
-        if (!ref) continue;
-        const provider = ref.provider || '';
-        const name = (ref.model || '').trim();
-        if (!name) continue;
-        const full = provider && provider !== 'anthropic' ? `${provider}/${name}` : name;
-        modelLines.push(`${tier}: ${full}`);
-      }
-      if (modelLines.length) {
-        const aspId = ensureAspect(agentId, 'model_routing', 7);
-        for (const line of modelLines) upsertAttr(aspId, line, 6);
-      }
-
-      // Voice
-      const voice = payload.voice || {};
-      if (voice.enabled) {
-        const aspId = ensureAspect(agentId, 'voice_pipeline', 6);
-        const parts = [];
-        if (voice.sttProvider) parts.push(`STT: ${voice.sttProvider}`);
-        if (voice.ttsProvider) parts.push(`TTS: ${voice.ttsProvider}`);
-        if (voice.ttsVoice) parts.push(`voice: ${voice.ttsVoice}`);
-        upsertAttr(aspId, `Voice enabled — ${parts.join(', ') || 'defaults'}`, 6);
-      }
-
-      // Web search
-      const ws = payload.webSearch || {};
-      if (ws.searxngUrl || ws.braveApiKey) {
-        const refApiKeys = db.prepare("SELECT id FROM nodes WHERE id = 'ref-api-keys'").get();
-        const targetNode = refApiKeys ? 'ref-api-keys' : agentId;
-        const aspId = ensureAspect(targetNode, 'web_search', 7);
-        if (ws.searxngUrl) upsertAttr(aspId, `SearXNG configured (primary): ${ws.searxngUrl}`, 7);
-        if (ws.braveApiKey && ws.braveApiKey !== '***hidden***') upsertAttr(aspId, 'Brave Search configured (fallback)', 6);
-      }
-
-      // Browser backend
-      const browserBackend = payload.browser?.backend;
-      if (browserBackend) {
-        const aspId = ensureAspect(agentId, 'tooling_preferences', 5);
-        upsertAttr(aspId, `Browser backend: ${browserBackend}`, 5);
-      }
-
-      // Theme
-      if (payload.theme) {
-        const aspId = ensureAspect(agentId, 'operator_preferences', 4);
-        upsertAttr(aspId, `UI theme: ${payload.theme}`, 4);
-      }
-    };
-
+  _currentSettingValue(key) {
     try {
-      db.exec('BEGIN');
-      run();
-      db.exec('COMMIT');
-    } catch (e) {
-      try { db.exec('ROLLBACK'); } catch {}
-      throw e;
+      const settings = require('../settings');
+      if (!settings.isBooted?.()) settings.boot({ dataDir: this.config.dataDir });
+      const value = settings.get(key);
+      if (value !== undefined) return value;
+    } catch { /* settings store may be unavailable during early boot */ }
+    return undefined;
+  }
+
+  _currentWebPort() {
+    const raw = this._currentSettingValue('webPort') ?? this.config.webPort;
+    const port = Number(raw);
+    return Number.isFinite(port) && port > 0 ? port : null;
+  }
+
+  _currentPublicBaseUrl() {
+    const publicUrl = this._currentSettingValue('publicUrl') ?? this.config.publicUrl;
+    const normalized = String(publicUrl || '').trim().replace(/\/+$/, '');
+    if (normalized) return normalized;
+
+    const ingressDomain = this._currentSettingValue('ingressDomain') ?? this.config.ingressDomain;
+    if (!ingressDomain) return null;
+    const ingressPath = String(this._currentSettingValue('ingressPath') ?? this.config.ingressPath ?? '').replace(/\/$/, '');
+    const ingressHttps = this._currentSettingValue('ingressHttps') ?? this.config.ingressHttps;
+    const proto = ingressHttps ? 'https' : 'http';
+    return `${proto}://${ingressDomain}${ingressPath}`;
+  }
+
+  _defaultServeDir() {
+    return path.join(this.config.workspacePath || process.cwd(), 'web');
+  }
+
+  _normalizeServeDir(dir) {
+    const fallback = this._defaultServeDir();
+    const resolved = path.resolve(dir || fallback);
+    const appRoot = path.resolve(__dirname, '..');
+    const workspaceRoot = path.resolve(this.config.workspacePath || process.cwd());
+    if (workspaceRoot !== appRoot && (resolved === appRoot || resolved.startsWith(appRoot + path.sep))) {
+      this.log.warn(`[web_serve] Refusing to serve app source path ${resolved}; using ${fallback}`);
+      return fallback;
     }
+    return resolved;
   }
 
   // ── Public API ──────────────────────────────────────────────────────
@@ -1771,7 +1210,7 @@ class WebGateway {
     const WebSocket = require('ws');
     for (const client of this._wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
-      if (creatorOnly && client._role !== 'admin') continue;
+      if (creatorOnly && client._role !== 'admin' && client._role !== 'creator') continue;
       try { client.send(data); } catch (e) { this.log.warn('[web] client.send failed: ' + e.message); }
     }
   }
@@ -1876,10 +1315,19 @@ class WebGateway {
     if (!sessionKey) return 0;
     const data = JSON.stringify(payload);
 
-    // Acorn + shared-channel path: `_sessionClients` is keyed by bare sessionId
-    // (e.g. "abc123"), but the agent-loop sessionKey format wraps it as
-    // "channel:abc123" via buildKey(sessionId, isDm=false). Try both keys.
-    for (const tryKey of [sessionKey, sessionKey.replace(/^(?:shared:|private:)?channel:(?:[a-z]+:)?/, '')]) {
+    // Spore Code + shared-channel path: `_sessionClients` is keyed by the
+    // client-provided sessionId (commonly "cli:user@project-..."). The agent
+    // loop stores the same turn as "channel:<sessionId>". Older clients used a
+    // bare key without the "cli:" prefix, so try all stable variants.
+    const rawKey = String(sessionKey);
+    const tryKeys = new Set([rawKey]);
+    const channelMatch = rawKey.match(/^(?:(?:shared|private):)?channel:(.+)$/);
+    if (channelMatch) {
+      tryKeys.add(channelMatch[1]);
+      const platformMatch = channelMatch[1].match(/^[a-z]+:(.+)$/i);
+      if (platformMatch) tryKeys.add(platformMatch[1]);
+    }
+    for (const tryKey of tryKeys) {
       const set = this._sessionClients?.get(tryKey);
       if (!set) continue;
       let count = 0;
@@ -2000,7 +1448,7 @@ class WebGateway {
         sessionId: sid,
         user: sess.user,
         type: sess.type,
-        cookieName: sess.type === 'webapp' ? 'anima_webapp' : 'anima_session',
+        cookieName: sess.type === 'webapp' ? 'spore_webapp' : 'spore_session',
       });
     }
     return results;
@@ -2018,7 +1466,7 @@ class WebGateway {
       if (now - sess.created >= SESSION_TTL) continue;
       if (sess.user !== username) continue;
       if (!best || (priority[sess.type] || 0) > (priority[best.type] || 0)) {
-        best = { sessionId: sid, user: sess.user, type: sess.type, cookieName: sess.type === 'webapp' ? 'anima_webapp' : 'anima_session' };
+        best = { sessionId: sid, user: sess.user, type: sess.type, cookieName: sess.type === 'webapp' ? 'spore_webapp' : 'spore_session' };
       }
     }
     return best;
@@ -2027,11 +1475,14 @@ class WebGateway {
   /** Returns info about the hosted webapp (if any) for prompt context. */
   getWebappStatus() {
     if (!this._server) return null;
-    const port = this.config.webPort;
+    const port = this._currentWebPort();
+    const publicUrl = this._currentPublicBaseUrl();
     const hasBackend = !!this._backendChild;
     return {
       active: true,
       port,
+      url: publicUrl ? `${publicUrl}/` : (port ? `http://localhost:${port}/` : null),
+      publicUrl,
       hasBackend,
       users: this.getActiveUserSessions().map(s => ({ user: s.user, type: s.type })),
     };
@@ -2067,7 +1518,7 @@ class WebGateway {
         // bubble in the CLI even though the prompt was never posted
         // to the cli session.
         this._sendToSession(sessionId, { type: 'chat:start', sessionId });
-        const result = await agent.processMessage({
+        const result = await this._submitAgentTurn({
           content: prompt,
           channelId: sessionId,
           channelName: 'control-panel',
@@ -2095,6 +1546,11 @@ class WebGateway {
               }
             } catch (e) { this.log.warn('[web] startsWith failed: ' + e.message); }
           },
+        }, {
+          lane: 'deferred',
+          priority: 55,
+          route: 'web.proactive',
+          allowInterjection: false,
         });
 
         const text = result?.text;
@@ -2139,7 +1595,7 @@ class WebGateway {
         }
       } catch (e) {
         this.log.warn(`[proactive:web] Failed: ${e.message}`);
-        this.broadcast({ type: 'chat:done', text: '' });
+        this._sendToSession(sessionId, { type: 'chat:done', text: '' });
       }
     }).catch(e => {
       this.log.warn(`[proactive:web] Queue error: ${e.message}`);
@@ -2169,13 +1625,8 @@ class WebGateway {
   // ── Status / Stop ──────────────────────────────────────────────────
 
   _status() {
-    const webPort = this.config.webPort;
-    let pub = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
-    if (!pub && this.config.ingressDomain) {
-      const iP = (this.config.ingressPath || '').replace(/\/$/, '');
-      const pr = this.config.ingressHttps ? 'https' : 'http';
-      pub = `${pr}://${this.config.ingressDomain}${iP}`;
-    }
+    const webPort = this._currentWebPort();
+    const pub = this._currentPublicBaseUrl();
     if (this._server) {
       const result = { running: true, port: webPort, dir: this._serverDir, url: pub ? `${pub}/` : `http://localhost:${webPort}/`, graphEditor: pub ? `${pub}/graph` : `http://localhost:${webPort}/graph`, publicUrl: pub || null };
       if (this._backendChild) {
@@ -2233,7 +1684,7 @@ class WebGateway {
   }
 
   _allocateBackendPort() {
-    const webPort = this.config.webPort || 18815;
+    const webPort = this._currentWebPort() || 18815;
     return webPort + 100;
   }
 
@@ -2270,10 +1721,10 @@ class WebGateway {
     if (!command) return { error: 'command is required for action:"backend". Provide the command to start your backend (e.g. "node server.js").' };
 
     // Start the web server for static files
-    const startResult = this._start(dir);
+    const serveDir = this._normalizeServeDir(dir);
+    const startResult = this._start(serveDir);
     if (startResult.error) return startResult;
 
-    const serveDir = dir || path.join(this.config.workspacePath || process.cwd(), 'web');
     const backendPort = this._allocateBackendPort();
     const workDir = commandDir || serveDir;
 
@@ -2345,19 +1796,15 @@ class WebGateway {
       }));
     } catch (e) { this.log.warn('[web] fs.writeFileSync failed: ' + e.message); }
 
-    let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
-    if (!pubUrl && this.config.ingressDomain) {
-      const iPath = (this.config.ingressPath || '').replace(/\/$/, '');
-      const proto = this.config.ingressHttps ? 'https' : 'http';
-      pubUrl = `${proto}://${this.config.ingressDomain}${iPath}`;
-    }
-    const displayUrl = pubUrl || `http://localhost:${this.config.webPort}`;
+    const webPort = this._currentWebPort();
+    const pubUrl = this._currentPublicBaseUrl();
+    const displayUrl = pubUrl || `http://localhost:${webPort}`;
 
     this.log.info(`[backend] Started (pid=${childPid}, port=${backendPort}), ${vaultKeyNames.length} vault key(s) injected${vaultKeyNames.length ? ': ' + vaultKeyNames.join(', ') : ''}`);
 
     return {
       started: true,
-      port: this.config.webPort,
+      port: webPort,
       backendPort,
       pid: childPid,
       dir: serveDir,
@@ -2380,20 +1827,20 @@ class WebGateway {
   // ── Start (HTTP server + all routes) ───────────────────────────────
 
   _start(dir) {
-    const webPort = this.config.webPort;
+    const webPort = this._currentWebPort();
     if (!webPort) return { error: 'No web port configured. Set SPORE_WEB_PORT in .env and re-deploy the container.' };
-    const serveDir_ = dir || path.join(this.config.workspacePath || process.cwd(), 'web');
+    const serveDir_ = this._normalizeServeDir(dir);
     if (this._server) {
       if (this._serverDir === serveDir_) {
         this.log.info('[web_serve] Server already running for same dir, keeping connections alive');
-        return { running: true, port: webPort, dir: this._serverDir, note: 'Server already active — kept existing connections.' };
+        return { ...this._status(), started: false, note: 'Server already active — kept existing connections.' };
       }
       if (this._wss) { this._wss.close(); this._wss = null; }
       this._server.close();
       this._server = null;
     }
 
-    const serveDir = dir || path.join(this.config.workspacePath || process.cwd(), 'web');
+    const serveDir = serveDir_;
     try { fs.mkdirSync(serveDir, { recursive: true }); } catch (e) { this.log.warn('[web] fs.mkdirSync failed: ' + e.message); }
 
     const indexPath = path.join(serveDir, 'index.html');
@@ -2495,10 +1942,23 @@ class WebGateway {
       });
       return obj;
     };
+    const isLocalRequest = (req) => {
+      const addr = String(req.socket?.remoteAddress || '');
+      return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+    };
 
     const managerUrl = process.env.MANAGER_URL;
     const managerKey = process.env.MANAGER_SERVICE_KEY;
     const animaId = this.config.agentId;
+    const cookieSecureAttr = (req) => {
+      if (process.env.SPORE_INSECURE_COOKIES === 'true') return '';
+      if (process.env.SPORE_SECURE_COOKIES === 'true') return '; Secure';
+      const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+        .split(',')[0]
+        .trim()
+        .toLowerCase();
+      return (req.socket?.encrypted || forwardedProto === 'https') ? '; Secure' : '';
+    };
 
     const tryManagerSSO = async (req, res, { webappOnly = false } = {}) => {
       if (!managerUrl || !managerKey) return false;
@@ -2524,14 +1984,14 @@ class WebGateway {
           const sid = crypto.randomBytes(32).toString('hex');
           if (webappOnly) {
             _sessions.set(sid, { type: 'webapp', created: Date.now(), user: result.username, viaSSO: true });
-            const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
-            res.setHeader('Set-Cookie', `anima_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
+            const secure = cookieSecureAttr(req);
+            res.setHeader('Set-Cookie', `spore_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
             return 'webapp';
           }
           const mgrRole = result.role === 'super' ? 'admin' : 'creator';
           _sessions.set(sid, { type: mgrRole, created: Date.now(), user: result.username, viaSSO: true });
-          const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
-          res.setHeader('Set-Cookie', `anima_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
+          const secure = cookieSecureAttr(req);
+          res.setHeader('Set-Cookie', `spore_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
           return mgrRole;
         }
       } catch (err) {
@@ -2543,7 +2003,7 @@ class WebGateway {
     const checkCreatorAuth = (req, res) => {
       if (managerKey && req.headers['x-service-key'] === managerKey) return true;
       const cookies = parseCookies(req);
-      const sid = cookies['anima_session'];
+      const sid = cookies['spore_session'];
       if (sid && _sessions.has(sid)) {
         const sess = _sessions.get(sid);
         if ((sess.type === 'creator' || sess.type === 'admin') && Date.now() - sess.created < SESSION_TTL) {
@@ -2555,10 +2015,10 @@ class WebGateway {
         }
         if (sess.type === 'creator' || sess.type === 'admin') _sessions.delete(sid);
       }
-      // Also accept an anima_webapp session whose user record is role=creator
+      // Also accept an spore_webapp session whose user record is role=creator
       // (covers the case where a browser has the webapp-cookie naming scheme
       // but the user was created as a creator during onboarding).
-      const wsid = cookies['anima_webapp'];
+      const wsid = cookies['spore_webapp'];
       if (wsid && _sessions.has(wsid)) {
         const sess = _sessions.get(wsid);
         if (sess && Date.now() - sess.created < SESSION_TTL && sess.user) {
@@ -2598,12 +2058,12 @@ class WebGateway {
 
     const checkWebappAuthSync = (req) => {
       const cookies = parseCookies(req);
-      const csid = cookies['anima_session'];
+      const csid = cookies['spore_session'];
       if (csid && _sessions.has(csid)) {
         const sess = _sessions.get(csid);
         if (sess.type === 'creator' && Date.now() - sess.created < SESSION_TTL) return true;
       }
-      const wsid = cookies['anima_webapp'];
+      const wsid = cookies['spore_webapp'];
       if (wsid && _sessions.has(wsid)) {
         const sess = _sessions.get(wsid);
         if (sess.type === 'webapp' && Date.now() - sess.created < SESSION_TTL) return true;
@@ -2625,13 +2085,13 @@ class WebGateway {
 
     const isAnyAuth = (req) => {
       const cookies = parseCookies(req);
-      const csid = cookies['anima_session'];
+      const csid = cookies['spore_session'];
       if (csid && _sessions.has(csid)) {
         const sess = _sessions.get(csid);
         if (sess.viaSSO && !cookies['manager_session']) { _sessions.delete(csid); }
         else if (Date.now() - sess.created < SESSION_TTL) return sess.type;
       }
-      const wsid = cookies['anima_webapp'];
+      const wsid = cookies['spore_webapp'];
       if (wsid && _sessions.has(wsid)) {
         const sess = _sessions.get(wsid);
         if (Date.now() - sess.created < SESSION_TTL) return sess.type;
@@ -2641,8 +2101,8 @@ class WebGateway {
 
     const getSessionFromReq = (req) => {
       const cookies = parseCookies(req);
-      const sid = cookies['anima_session'];
-      const wsid = cookies['anima_webapp'];
+      const sid = cookies['spore_session'];
+      const wsid = cookies['spore_webapp'];
       const sidValid = sid && _sessions.has(sid);
       const wsidValid = wsid && _sessions.has(wsid);
       // When both cookies exist and both are valid, prefer whichever was created
@@ -2656,6 +2116,77 @@ class WebGateway {
       }
       if (sidValid) return sid;
       if (wsidValid) return wsid;
+      return null;
+    };
+
+    const authContextFromReq = (req) => {
+      if (managerKey && req.headers['x-service-key'] === managerKey) {
+        return { type: 'admin', role: 'admin', user: 'service', username: 'service', creator: true, viaServiceKey: true };
+      }
+      const authHeader = req.headers.authorization || '';
+      if (authUser && authPass && authHeader.startsWith('Basic ')) {
+        const decoded = Buffer.from(authHeader.slice(6), 'base64').toString();
+        const [u, ...pParts] = decoded.split(':');
+        if (u === authUser && pParts.join(':') === authPass) {
+          return { type: 'creator', role: 'creator', user: authUser, username: authUser, creator: true, viaBasic: true };
+        }
+      }
+      const cookies = parseCookies(req);
+      const sessionId = getSessionFromReq(req);
+      const sess = sessionId && _sessions.get(sessionId);
+      if (!sess) return null;
+      if (Date.now() - sess.created >= SESSION_TTL) {
+        _sessions.delete(sessionId);
+        return null;
+      }
+      if (sess.viaSSO && !cookies['manager_session']) {
+        _sessions.delete(sessionId);
+        return null;
+      }
+      const userRecord = sess.user ? loadWebappUsers().find(u => u.username === sess.user) : null;
+      if (userRecord?.blocked) {
+        _sessions.delete(sessionId);
+        return null;
+      }
+      const storedRole = String(userRecord?.role || '').toLowerCase();
+      let role = sess.type || 'webapp';
+      if (storedRole === 'creator' || storedRole === 'admin') role = storedRole;
+      const creator = role === 'creator' || role === 'admin';
+      return {
+        type: role,
+        role,
+        user: sess.user || null,
+        username: sess.user || null,
+        sessionId,
+        cookieName: cookies['spore_webapp'] === sessionId ? 'spore_webapp' : 'spore_session',
+        userRecord,
+        creator,
+      };
+    };
+
+    const requireGraphApiAuth = async (req, res) => {
+      let authContext = authContextFromReq(req);
+      if (authContext) return authContext;
+      const ssoRole = await tryManagerSSO(req, res).catch(() => false);
+      if (ssoRole) {
+        authContext = authContextFromReq(req);
+        if (authContext) return authContext;
+        return {
+          type: ssoRole,
+          role: ssoRole,
+          user: null,
+          username: null,
+          creator: ssoRole === 'creator' || ssoRole === 'admin',
+        };
+      }
+      const webappSsoRole = await tryManagerSSO(req, res, { webappOnly: true }).catch(() => false);
+      if (webappSsoRole) {
+        authContext = authContextFromReq(req);
+        if (authContext) return authContext;
+        return { type: 'webapp', role: 'webapp', user: null, username: null, creator: false };
+      }
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Authentication required' }));
       return null;
     };
 
@@ -2784,9 +2315,9 @@ class WebGateway {
               let loginRole;
               if (req._loginRoleHint === 'webapp') loginRole = 'webapp';
               else loginRole = req._mgrRole === 'super' ? 'admin' : 'creator';
-              const cookieName = loginRole === 'webapp' ? 'anima_webapp' : 'anima_session';
+              const cookieName = loginRole === 'webapp' ? 'spore_webapp' : 'spore_session';
               _sessions.set(sid, { user: verifiedUser, created: Date.now(), type: loginRole });
-              const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+              const secure = cookieSecureAttr(req);
               // Webapp users haven't run the user wizard yet → flag it.
               let wizardNeeded = false;
               if (loginRole === 'webapp') {
@@ -2811,7 +2342,7 @@ class WebGateway {
         if (sid) _sessions.delete(sid);
         res.writeHead(200, {
           'Content-Type': 'application/json',
-          'Set-Cookie': 'anima_session=; Path=/; HttpOnly; Max-Age=0',
+          'Set-Cookie': 'spore_session=; Path=/; HttpOnly; Max-Age=0',
         });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -2822,7 +2353,7 @@ class WebGateway {
         let role = null;
         let username = null;
         const cookies = parseCookies(req);
-        const sid = cookies['anima_session'];
+        const sid = cookies['spore_session'];
         const sess = sid && _sessions.get(sid);
         if (sess && (sess.type === 'creator' || sess.type === 'admin') && (Date.now() - sess.created < SESSION_TTL)) {
           valid = true;
@@ -2830,7 +2361,7 @@ class WebGateway {
           username = sess.user || null;
         }
         if (!valid) {
-          const wsid = cookies['anima_webapp'];
+          const wsid = cookies['spore_webapp'];
           const wsess = wsid && _sessions.get(wsid);
           if (wsess && wsess.type === 'webapp' && (Date.now() - wsess.created < SESSION_TTL)) {
             valid = true;
@@ -2843,7 +2374,7 @@ class WebGateway {
           if (ssoRole) { valid = true; role = ssoRole; }
         }
         const hasWebappUsers = loadWebappUsers().length > 0;
-        const needsAuth = !!(managerUrl || (authUser && authPass));
+        const needsAuth = !!(managerUrl || (authUser && authPass) || hasWebappUsers);
         // wizardNeeded: true if the authenticated user hasn't completed the
         // per-user onboarding wizard yet. Drives the slim post-login wizard
         // that the SPA runs when a fresh webapp user first lands on /graph.
@@ -2888,8 +2419,8 @@ class WebGateway {
             }
             const sid = crypto.randomBytes(32).toString('hex');
             const role = user.role === 'creator' ? 'creator' : 'webapp';
-            const cookieName = role === 'creator' ? 'anima_session' : 'anima_webapp';
-            const otherCookieName = cookieName === 'anima_session' ? 'anima_webapp' : 'anima_session';
+            const cookieName = role === 'creator' ? 'spore_session' : 'spore_webapp';
+            const otherCookieName = cookieName === 'spore_session' ? 'spore_webapp' : 'spore_session';
             // Invalidate any lingering session under the other cookie so a user
             // logging in as webapp can't inherit a previous creator identity
             // (which would route chats into the wrong dm:<user> session and
@@ -2898,7 +2429,7 @@ class WebGateway {
             const otherSid = otherCookies[otherCookieName];
             if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
             _sessions.set(sid, { user: username, created: Date.now(), type: role });
-            const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+            const secure = cookieSecureAttr(req);
             res.writeHead(200, {
               'Content-Type': 'application/json',
               'Set-Cookie': [
@@ -2914,11 +2445,11 @@ class WebGateway {
 
       if (urlPath === '/api/webapp/logout' && req.method === 'POST') {
         const cookies = parseCookies(req);
-        const wsid = cookies['anima_webapp'];
+        const wsid = cookies['spore_webapp'];
         if (wsid && _sessions.has(wsid)) _sessions.delete(wsid);
         res.writeHead(200, {
           'Content-Type': 'application/json',
-          'Set-Cookie': 'anima_webapp=; Path=/; HttpOnly; Max-Age=0',
+          'Set-Cookie': 'spore_webapp=; Path=/; HttpOnly; Max-Age=0',
         });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -2971,7 +2502,19 @@ class WebGateway {
         const providers = mgr.getProviders?.() || [];
         const providerByPluginId = new Map();
         for (const pr of providers) providerByPluginId.set(pr.pluginId, pr);
-        const RECOMMENDED_ON = new Set(['session-graph', 'spore-code', 'embedder-gemma', 'whisper']);
+        // Plugins preselected in the onboarding wizard. The operator
+        // can still toggle off, but the defaults reflect "what most
+        // people want": persistent agent memory, code support, local
+        // semantic search, and a working browser tool. STT (whisper)
+        // is dropped from recommended — it's a niche capability and
+        // adds the model-download cost on first launch; operators
+        // who want voice input can opt in. Browser-core + zendriver
+        // are recommended together so the browser tool is wired and
+        // routes to a stealth backend by default.
+        const RECOMMENDED_ON = new Set([
+          'session-graph', 'spore-code', 'embedder-gemma',
+          'browser-core', 'zendriver',
+        ]);
         const enriched = available.map(p => {
           const pr = providerByPluginId.get(p.id);
           return {
@@ -2983,11 +2526,29 @@ class WebGateway {
               label: pr.label || pr.name,
               defaultBaseUrl: pr.defaultBaseUrl || null,
               capabilities: pr.capabilities || {},
+              modelsPlaceholder: pr.modelsPlaceholder || '',
             } : null,
           };
         });
+        // Model tier list, registry-driven so adding a tier is a
+        // one-line change in defs.core.js. The wizard groups by
+        // tierKind ('main' = casual/normal/planner/etc.; 'vlm' =
+        // imageVlm/videoVlm/audioVlm).
+        const settings = require('../settings');
+        const modelTiers = { main: [], vlm: [] };
+        for (const def of settings.listByGroup('models')) {
+          if (!def.scope.includes('wizard')) continue;
+          const kind = def.tierKind || 'main';
+          // Strip the 'models.' prefix so the wizard sees plain tier
+          // ids ('casual', 'imageVlm', …) — matches the existing
+          // payload shape (body.models[<tier>]).
+          const id = def.key.replace(/^models\./, '');
+          (modelTiers[kind] || (modelTiers[kind] = [])).push({
+            id, label: def.label || id,
+          });
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ plugins: enriched }));
+        res.end(JSON.stringify({ plugins: enriched, modelTiers }));
         return;
       }
 
@@ -3009,6 +2570,7 @@ class WebGateway {
               custom: s.providers.custom.map(p => ({ name: p.name, url: p.url })),
             },
             models: s.models,
+            embeddings: s.embeddings,
             voice: s.voice,
             webSearch: { searxngUrl: s.webSearch?.searxngUrl || '', braveApiKeySet: !!s.webSearch?.braveApiKeySet },
             browser: s.browser,
@@ -3055,13 +2617,13 @@ class WebGateway {
         const isFirstUser = !onboardingDone;
         const sid = crypto.randomBytes(32).toString('hex');
         const sessType = isFirstUser ? 'creator' : 'webapp';
-        const cookieName = isFirstUser ? 'anima_session' : 'anima_webapp';
-        const otherCookieName = cookieName === 'anima_session' ? 'anima_webapp' : 'anima_session';
+        const cookieName = isFirstUser ? 'spore_session' : 'spore_webapp';
+        const otherCookieName = cookieName === 'spore_session' ? 'spore_webapp' : 'spore_session';
         const otherCookies = parseCookies(req);
         const otherSid = otherCookies[otherCookieName];
         if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
         _sessions.set(sid, { user: username, created: Date.now(), type: sessType });
-        const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+        const secure = cookieSecureAttr(req);
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Set-Cookie': [
@@ -3118,14 +2680,14 @@ class WebGateway {
           }
           const sid = crypto.randomBytes(32).toString('hex');
           const otherCookies = parseCookies(req);
-          if (otherCookies['anima_session'] && _sessions.has(otherCookies['anima_session'])) _sessions.delete(otherCookies['anima_session']);
+          if (otherCookies['spore_session'] && _sessions.has(otherCookies['spore_session'])) _sessions.delete(otherCookies['spore_session']);
           _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
-          const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+          const secure = cookieSecureAttr(req);
           res.writeHead(200, {
             'Content-Type': 'application/json',
             'Set-Cookie': [
-              `anima_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
-              `anima_session=; Path=/; HttpOnly; Max-Age=0`,
+              `spore_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+              `spore_session=; Path=/; HttpOnly; Max-Age=0`,
             ],
           });
           // Re-show wizard only if it wasn't already completed.
@@ -3143,14 +2705,14 @@ class WebGateway {
         _writeJsonAtomic(WEBAPP_USERS_PATH, existing);
         const sid = crypto.randomBytes(32).toString('hex');
         const otherCookies = parseCookies(req);
-        if (otherCookies['anima_session'] && _sessions.has(otherCookies['anima_session'])) _sessions.delete(otherCookies['anima_session']);
+        if (otherCookies['spore_session'] && _sessions.has(otherCookies['spore_session'])) _sessions.delete(otherCookies['spore_session']);
         _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
-        const secure = process.env.SPORE_INSECURE_COOKIES === 'true' ? '' : '; Secure';
+        const secure = cookieSecureAttr(req);
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Set-Cookie': [
-            `anima_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
-            `anima_session=; Path=/; HttpOnly; Max-Age=0`,
+            `spore_webapp=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+            `spore_session=; Path=/; HttpOnly; Max-Age=0`,
           ],
         });
         res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded: true }));
@@ -3177,7 +2739,7 @@ class WebGateway {
         if (!(await checkAuth(req, res))) return;
         // Find requesting user (so we can prevent self-demotion / self-delete).
         const cookies = parseCookies(req);
-        const sid = cookies['anima_session'];
+        const sid = cookies['spore_session'];
         const sess = sid && _sessions.get(sid);
         const meUsername = sess?.user || null;
         const target = decodeURIComponent(urlPath.slice('/api/webapp/users/'.length));
@@ -3234,7 +2796,7 @@ class WebGateway {
         const sessType = isAnyAuth(req);
         if (!sessType) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"Authentication required"}'); return; }
         const cookies = parseCookies(req);
-        const sid = cookies['anima_session'] || cookies['anima_webapp'];
+        const sid = cookies['spore_session'] || cookies['spore_webapp'];
         const sess = sid && _sessions.get(sid);
         if (!sess?.user) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"No session user"}'); return; }
         let body = '';
@@ -3263,16 +2825,26 @@ class WebGateway {
       }
 
       if (urlPath === '/api/onboarding/complete' && req.method === 'POST') {
+        // Read body up front — we may need parsed.account to create
+        // the webapp user as part of "complete" (the wizard now defers
+        // account creation to this endpoint instead of writing
+        // mid-flow at step 4).
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (body.length > 64 * 1024) { req.destroy(); return; } }
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
+
         const cookies = parseCookies(req);
-        const sid = cookies['anima_session'] || cookies['anima_webapp'];
+        const sid = cookies['spore_session'] || cookies['spore_webapp'];
         let sess = sid && _sessions.get(sid);
+        // Outgoing Set-Cookie header (only set when we just bootstrapped
+        // the operator's account here in this request).
+        let pendingSetCookie = null;
         // Onboarding-flow recovery: container restarts during the wizard
         // wipe the in-memory _sessions map. The operator's cookie still
         // exists client-side but doesn't resolve. If we're still in the
-        // onboarding window AND exactly one webapp user exists (the one
-        // they just created at step 4), trust that user as the session.
-        // This is safe because /api/onboarding/complete writes prefs +
-        // optional plugin config — no privilege-elevation surface.
+        // onboarding window AND exactly one webapp user exists, trust
+        // that user as the session.
         if (!sess && _isOnboardingNeeded(this.config.dataDir, this.config)) {
           try {
             const users = loadWebappUsers();
@@ -3280,18 +2852,87 @@ class WebGateway {
               sess = { user: users[0].username, created: Date.now(), type: 'creator' };
               this.log.info(`[onboarding] No live session; treating sole webapp user "${users[0].username}" as the onboarding operator`);
             }
-          } catch { /* silent: no webapp-users.json yet → fall through to 401 */ }
+          } catch { /* silent: no webapp-users.json yet → fall through */ }
         }
-        if (!sess) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"No session — your wizard cookie expired (likely a server restart mid-setup). Refresh the page and log in to continue."}'); return; }
-        let body = '';
-        for await (const chunk of req) { body += chunk; if (body.length > 64 * 1024) { req.destroy(); return; } }
-        let parsed;
-        try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
+
+        // Bootstrap path: no session AND we're in the onboarding window
+        // AND the wizard included {account: {username, password}}.
+        // Creates (or, if onboarding is being re-done with the same
+        // username, REPLACES) the operator account + session inline.
+        //
+        // Re-do semantics: previously this short-circuited when any
+        // webapp users existed, which silently dropped the new
+        // password the operator typed during the second onboarding
+        // run. The wizard reported success but login still expected
+        // the original password. The fix below upserts by username
+        // when we're still in the onboarding window so re-running the
+        // wizard rotates the password as expected.
+        if (!sess && _isOnboardingNeeded(this.config.dataDir, this.config)
+            && parsed.account && typeof parsed.account === 'object') {
+          const username = String(parsed.account.username || '').trim();
+          const password = String(parsed.account.password || '');
+          if (!username || username.length > 64) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'account.username must be 1–64 chars' }));
+            return;
+          }
+          if (password.length < 8) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'account.password must be at least 8 characters' }));
+            return;
+          }
+          const existing = loadWebappUsers();
+          const conflictWithOther = existing.some(u => u.username !== username && u.role === 'creator');
+          if (conflictWithOther) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Cannot re-onboard as "${username}" — a different creator account ("${existing.find(u => u.role === 'creator').username}") already exists. Delete it first or log in as that user.` }));
+            return;
+          }
+          const salt = crypto.randomBytes(16).toString('hex');
+          const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+          // Upsert: replace the existing record for this username
+          // (preserves any non-creator users that may have
+          // self-registered in the meantime).
+          const filtered = existing.filter(u => u.username !== username);
+          const createdAt = existing.find(u => u.username === username)?.created || Date.now();
+          _writeJsonAtomic(WEBAPP_USERS_PATH, [
+            ...filtered,
+            { username, hash, salt, created: createdAt, role: 'creator' },
+          ]);
+          const newSid = crypto.randomBytes(32).toString('hex');
+          _sessions.set(newSid, { user: username, created: Date.now(), type: 'creator' });
+          const secure = cookieSecureAttr(req);
+          pendingSetCookie = [
+            `spore_session=${newSid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+            `spore_webapp=; Path=/; HttpOnly; Max-Age=0`,
+          ];
+          sess = _sessions.get(newSid);
+          const action = existing.some(u => u.username === username) ? 'Reset password for' : 'Created';
+          this.log.info(`[onboarding] ${action} operator account "${username}" inline at /api/onboarding/complete`);
+        }
+
+        if (!sess) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":"No session — refresh the page and re-enter the wizard."}'); return; }
         try {
           // 0. Auto-fill any missing per-model ctx by probing the configured providers' /models endpoints.
-          parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers, this.tools?._pluginManager);
+          parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers, this.tools?._pluginManager, this.config);
           // 1. Persist settings through the existing pipeline
-          const newState = this._persistSettingsPatch(parsed);
+          const persistedSettings = this._persistSettingsPatch(parsed, { returnGeneratedSecrets: true });
+          const newState = persistedSettings.settings || persistedSettings;
+          const generatedSecrets = persistedSettings.generatedSecrets || {};
+          // 1a. Provider plugin configs must land before the configured-provider
+          // gate below, otherwise dynamic provider plugins fail the finish step
+          // even though their keys are present in the same wizard payload.
+          const pluginActions = parsed.pluginActions;
+          const mgr = this.tools?._pluginManager;
+          if (pluginActions && typeof pluginActions === 'object' && mgr) {
+            const configs = pluginActions.configs || {};
+            for (const [pluginId, partial] of Object.entries(configs)) {
+              if (!partial || typeof partial !== 'object') continue;
+              try { await mgr.persistPluginConfig(pluginId, partial); } catch (e) {
+                this.log.warn(`[onboarding] plugin config (${pluginId}) failed: ${e.message}`);
+              }
+            }
+          }
           // 1b. Belt-and-suspenders for the wizard's client-side finish
           // gate: refuse to complete onboarding unless at least one
           // provider plugin is registered AND configured. Runs AFTER
@@ -3314,31 +2955,91 @@ class WebGateway {
           // The key is intentionally `pluginActions`, NOT `plugins` — the latter would land
           // in _persistSettingsPatch's body.plugins branch, which treats every top-level key
           // as a plugin id and writes `disabled` and `configs` as synthetic plugin slots.
-          const pluginActions = parsed.pluginActions;
           if (pluginActions && typeof pluginActions === 'object') {
-            const mgr = this.tools?._pluginManager;
             if (mgr) {
-              const configs = pluginActions.configs || {};
-              for (const [pluginId, partial] of Object.entries(configs)) {
-                if (!partial || typeof partial !== 'object') continue;
-                try { await mgr.persistPluginConfig(pluginId, partial); } catch (e) {
-                  this.log.warn(`[onboarding] plugin config (${pluginId}) failed: ${e.message}`);
+              const disabledIds = Array.isArray(pluginActions.disabled) ? pluginActions.disabled : [];
+              // Refuse to uninstall any provider plugin whose provider
+              // is configured in this same payload — the wizard's plugin
+              // picker (step 'p') runs BEFORE the providers step, so
+              // any provider plugin not pre-checked there ends up in
+              // disabled[] even though the operator later configured
+              // its API key. Without this guard the agent boots with
+              // zero providers and silently refuses every chat.
+              const protectedPluginIds = new Set();
+              const pluginMetaById = new Map();
+              for (const p of mgr.listAvailable?.() || []) if (p?.id) pluginMetaById.set(p.id, p);
+              for (const p of mgr.listInstalled?.() || []) if (p?.id && !pluginMetaById.has(p.id)) pluginMetaById.set(p.id, p);
+              const depsOf = (pluginId) => {
+                const raw = pluginMetaById.get(pluginId)?.depends || pluginMetaById.get(pluginId)?.dependencies || [];
+                return Array.isArray(raw) ? raw.filter(Boolean) : [];
+              };
+              const protectWithDeps = (pluginId, seen = new Set()) => {
+                if (!pluginId || seen.has(pluginId)) return;
+                seen.add(pluginId);
+                protectedPluginIds.add(pluginId);
+                for (const dep of depsOf(pluginId)) protectWithDeps(dep, seen);
+              };
+              const providerPluginByName = new Map();
+              for (const provider of mgr.getProviders?.() || []) {
+                if (provider?.name && provider?.pluginId) providerPluginByName.set(provider.name, provider.pluginId);
+                for (const prefix of provider?.prefixes || []) {
+                  if (prefix && provider?.pluginId) providerPluginByName.set(String(prefix).toLowerCase(), provider.pluginId);
                 }
               }
-              const disabledIds = Array.isArray(pluginActions.disabled) ? pluginActions.disabled : [];
-              for (const pluginId of disabledIds) {
+              for (const pluginId of Object.keys(pluginActions.configs || {})) {
+                protectWithDeps(pluginId);
+              }
+              const providerKeys = parsed.providers || {};
+              for (const provName of Object.keys(providerKeys)) {
+                const v = providerKeys[provName];
+                const hasConfig = Array.isArray(v)
+                  ? v.some(entry => entry && (entry.apiKey || entry.key || entry.url || entry.baseUrl))
+                  : !!(v && typeof v === 'object' && (v.apiKey || v.baseUrl));
+                if (!hasConfig) continue;
+                if (providerPluginByName.has(provName)) {
+                  protectWithDeps(providerPluginByName.get(provName));
+                }
+                // Provider plugin convention: `<name>-provider` (e.g.
+                // anthropic-provider, openai-provider, …). Local-OAI
+                // is an exception (local-oai-provider).
+                const candidates = [
+                  `${provName}-provider`,
+                  provName === 'local' ? 'local-oai-provider' : null,
+                  provName === 'custom' ? 'local-oai-provider' : null,
+                ].filter(Boolean);
+                for (const id of candidates) protectWithDeps(id);
+              }
+              const disabledSet = new Set(disabledIds);
+              const uninstallDepth = (pluginId, seen = new Set()) => {
+                if (seen.has(pluginId)) return 0;
+                seen.add(pluginId);
+                let max = 0;
+                for (const dep of depsOf(pluginId)) {
+                  if (disabledSet.has(dep)) max = Math.max(max, uninstallDepth(dep, seen));
+                }
+                return max + 1;
+              };
+              const sortedDisabledIds = [...disabledIds].sort((a, b) => uninstallDepth(b) - uninstallDepth(a));
+              for (const pluginId of sortedDisabledIds) {
+                if (protectedPluginIds.has(pluginId)) {
+                  this.log.info(`[onboarding] keeping ${pluginId} active — selected provider/plugin depends on it`);
+                  continue;
+                }
                 try { await mgr.uninstallPlugin(pluginId); } catch (e) {
                   this.log.warn(`[onboarding] plugin uninstall (${pluginId}) failed: ${e.message}`);
                 }
               }
             }
           }
-          // 2. Theme preference
+          // 2. Theme preference — valid values + default come from the
+          // settings registry's appearance.theme def. Adding a theme is
+          // a one-line change in defs.core.js; no list to keep in sync.
           const PREFS_PATH = path.join(this.config.dataDir, 'preferences.json');
-          const VALID_THEMES = ['midnight', 'dark', 'paper', 'terminal', 'ember', 'arctic', 'neon', 'forest'];
+          const themeDef = require('../settings').getDef('appearance.theme');
+          const VALID_THEMES = themeDef?.enum || ['dark'];
           let prefs = {};
           try { prefs = JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch { /* silent: malformed JSON → fallback */ }
-          const theme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : 'midnight';
+          const theme = VALID_THEMES.includes(parsed.theme) ? parsed.theme : (themeDef?.default || 'dark');
           if (!prefs[sess.user]) prefs[sess.user] = {};
           prefs[sess.user].theme = theme;
           // The operator just completed the full wizard — that subsumes
@@ -3356,12 +3057,25 @@ class WebGateway {
             const graphDb = this.graph?.db;
             if (graphDb) this._applyOnboardingToGraph(graphDb, parsed);
           } catch (e) { this.log.warn(`[onboarding] graph sync skipped: ${e.message}`); }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, theme }));
+          const headers = { 'Content-Type': 'application/json' };
+          if (pendingSetCookie) headers['Set-Cookie'] = pendingSetCookie;
+          res.writeHead(200, headers);
+          res.end(JSON.stringify({
+            ok: true,
+            theme,
+            account: pendingSetCookie ? { username: sess.user, role: sess.type } : undefined,
+            secrets: Object.keys(generatedSecrets).length ? generatedSecrets : undefined,
+          }));
         } catch (e) {
-          this.log.warn(`[onboarding] complete failed: ${e.message}`);
+          // Surface per-key validation errors so the operator can see
+          // which fields the transport rejected. PatchError attaches
+          // `.errors`; plain errors fall through to the generic message.
+          const details = Array.isArray(e?.errors) && e.errors.length
+            ? ' :: ' + e.errors.map(x => `${x.key}=${x.error}`).join('; ')
+            : '';
+          this.log.warn(`[onboarding] complete failed: ${e.message}${details}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: e.message }));
+          res.end(JSON.stringify({ error: e.message + details, errors: e?.errors }));
         }
         return;
       }
@@ -3582,102 +3296,83 @@ class WebGateway {
         return;
       }
 
-      // ── LongMemEval Benchmark API ──
-      if (urlPath === '/api/benchmark/longmemeval' && req.method === 'POST') {
-        if (!(await checkAuth(req, res))) return;
-        try {
-          if (this.tools._benchmarkRunner && this.tools._benchmarkRunner.phase !== 'done' && this.tools._benchmarkRunner.phase !== 'error' && this.tools._benchmarkRunner.phase !== 'cancelled' && this.tools._benchmarkRunner.phase !== 'idle') {
-            res.writeHead(409, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Benchmark already running', phase: this.tools._benchmarkRunner.phase }));
+      // Local cron / background-process notification hook. Public callers
+      // still need creator auth; unauthenticated access is loopback-only so
+      // container cron can `curl http://127.0.0.1:$SPORE_WEB_PORT/...`.
+      if (urlPath === '/api/proactive/trigger' && req.method === 'POST') {
+        if (!isLocalRequest(req) && !(await checkAuth(req, res))) return;
+        const body = await _readJsonBody(req);
+        const message = String(body.message || body.context || body.text || '').trim();
+        const source = String(body.source || 'cron').trim().slice(0, 80) || 'cron';
+        const mode = String(body.mode || 'notify').trim().toLowerCase();
+        const explicitTarget = String(body.target || body.channelId || body.chatId || '').trim();
+        const platform = String(body.platform || '').trim().toLowerCase();
+        const channelId = explicitTarget || 'web:control-panel';
+        if (!message) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'message is required' }));
+          return;
+        }
+        if (mode === 'agent') {
+          const manager = this.tools?.platformManager || null;
+          const parsed = manager?.parseTarget?.({ target: channelId, platform });
+          if (parsed?.platform && parsed.platform !== 'web') {
+            const gateway = manager.getGateway?.(parsed.platform);
+            if (!gateway?.injectProactivePrompt) {
+              res.writeHead(501, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                ok: false,
+                error: `Gateway ${parsed.platform} does not support proactive agent turns.`,
+                mode: 'agent',
+                channelId,
+              }));
+              return;
+            }
+            gateway.injectProactivePrompt(parsed.id, message, body.topic || source);
+            res.writeHead(202, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, mode: 'agent', channelId, platform: parsed.platform }));
             return;
           }
-          let body = {};
-          try { body = await new Promise((resolve, reject) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); }); } catch (e) { this.log.warn('[web] Promise failed: ' + e.message); }
-          const { variant = 'oracle', maxQuestions = 500, skipIngestion = false, forceReeval = false, learnerModel, answerModel, questionTypes } = body;
-          const registry = this.tools._graphRegistry;
-          if (!registry) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Multi-graph registry not available' })); return; }
-
-          const prevSlug = registry.getActiveSlug();
-          let slug;
-          if (skipIngestion) {
-            slug = prevSlug;
-          } else {
-            slug = registry.create(`LongMemEval ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, `LongMemEval benchmark (${variant})`);
-            this.tools.switchGraph(slug);
-            graphEvents.emit('change', { op: 'graph:switched', slug, source: 'benchmark' });
-          }
-
-          const { LongMemEvalRunner } = require('../benchmark/longmemeval');
-          const runner = new LongMemEvalRunner({
-            config: this.config,
-            graph: this.graph,
-            learner: this.tools.learner,
-            maintainer: this.tools._maintainer || null,
-            llmClient: this.tools.llmClient,
-            log: this.log,
-            broadcast: this.broadcast.bind(this),
-            learnerModel: learnerModel || undefined,
-            answerModel: answerModel || undefined,
-          });
-          this.tools._benchmarkRunner = runner;
-          this.tools._benchmarkPrevSlug = prevSlug;
-
-          runner.run({ variant, maxQuestions, skipIngestion, forceReeval, questionTypes: questionTypes || null }).catch(e => {
-            this.log.error(`[longmemeval] Runner error: ${e.message}`);
-          });
-
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, slug, prevSlug, variant, maxQuestions }));
-        } catch (e) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: e.message }));
+          this.injectProactivePrompt(channelId, message, body.topic || source);
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, mode: 'agent', channelId }));
+          return;
         }
-        return;
-      }
-
-      if (urlPath === '/api/benchmark/longmemeval/status' && req.method === 'GET') {
-        if (!(await checkAuth(req, res))) return;
-        const status = this.tools._benchmarkRunner ? this.tools._benchmarkRunner.getStatus() : { phase: 'idle' };
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(status));
-        return;
-      }
-
-      if (urlPath === '/api/benchmark/longmemeval/results' && req.method === 'GET') {
-        if (!(await checkAuth(req, res))) return;
-        try {
-          const graphDir = path.dirname(this.config.graphDbPath);
-          const resultsPath = path.join(graphDir, 'longmemeval-results.json');
-          const data = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(data));
-        } catch {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ empty: true }));
-        }
-        return;
-      }
-
-      if (urlPath === '/api/benchmark/longmemeval/cancel' && req.method === 'POST') {
-        if (!(await checkAuth(req, res))) return;
-        if (this.tools._benchmarkRunner) {
-          this.tools._benchmarkRunner.cancel();
-          if (this.tools._benchmarkPrevSlug && this.tools._graphRegistry) {
-            try {
-              this.tools.switchGraph(this.tools._benchmarkPrevSlug);
-              graphEvents.emit('change', { op: 'graph:switched', slug: this.tools._benchmarkPrevSlug, source: 'benchmark-cancel' });
-            } catch (e) { this.log.warn(`[longmemeval] Failed to switch back: ${e.message}`); }
+        if (explicitTarget) {
+          const manager = this.tools?.platformManager || null;
+          const parsed = manager?.parseTarget?.({ target: channelId, platform });
+          if (parsed?.platform && parsed.platform !== 'web') {
+            const result = await manager.sendMessage({
+              target: channelId,
+              platform,
+              content: message,
+              notify: true,
+              urgent: !!body.urgent,
+            });
+            res.writeHead(result?.error ? 502 : 200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: !result?.error, mode: 'notify', channelId, platform: parsed.platform, result }));
+            return;
           }
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
+        const result = await this.tools._notifyUserTool({
+          message,
+          source,
+          urgent: !!body.urgent,
+        });
+        res.writeHead(result?.error ? 503 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: !result?.error, mode: 'notify', result }));
         return;
       }
+
+      // LongMemEval benchmark routes moved to plugins/longmemeval — they
+      // now serve at /api/plugins/longmemeval/{run,status,results,cancel}.
 
       // ── Multi-Graph Management API ──
       if (urlPath.startsWith('/api/graphs')) {
-        if (!(await checkAuth(req, res))) return;
-        await this._handleMultiGraphApi(req, res, urlPath);
+        const graphAuth = await requireGraphApiAuth(req, res);
+        if (!graphAuth) return;
+        req._graphApiAuthContext = graphAuth;
+        await this._handleMultiGraphApi(req, res, urlPath, graphAuth);
         return;
       }
 
@@ -3702,21 +3397,44 @@ class WebGateway {
 
       if (urlPath === '/api/settings') {
         if (req.method === 'GET') {
-          // Any authenticated session can read settings (webapp users see them
-          // read-only via the role gating in the UI).
-          if (!isAnyAuth(req)) { res.writeHead(401); res.end('{"error":"Authentication required"}'); return; }
+          // Any authenticated session can open Settings, but only creator/admin
+          // sessions receive server config. Webapp users get a safe personal-only
+          // shell so secrets and plugin configs never leave the server.
+          const authType = isAnyAuth(req) || (checkCreatorAuth(req, res) ? 'creator' : null);
+          if (!authType) { res.writeHead(401); res.end('{"error":"Authentication required"}'); return; }
+          const role = checkCreatorAuth(req, res) ? 'creator' : authType;
+          const settings = this._settingsService.getSettingsResponse({ role });
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(this._getSettingsState()));
+          res.end(JSON.stringify(settings));
           return;
         }
         if (!(await checkAuth(req, res))) return;
+        if (req.method === 'PATCH') {
+          let body = '';
+          for await (const chunk of req) body += chunk;
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const patch = parsed.patch && typeof parsed.patch === 'object'
+              ? parsed.patch
+              : Object.fromEntries(Object.entries(parsed).filter(([k]) => k !== 'actions'));
+            const actions = parsed.actions && typeof parsed.actions === 'object' ? parsed.actions : {};
+            const { result, settings, generatedSecrets } = this._settingsService.applyCanonicalPatch(patch, { actor: 'web', role: 'creator', actions });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, changed: result.changed, settings, secrets: Object.keys(generatedSecrets || {}).length ? generatedSecrets : undefined }));
+          } catch (e) {
+            const code = e?.statusCode || 400;
+            res.writeHead(code, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e?.message || 'invalid body', errors: e?.errors || undefined }));
+          }
+          return;
+        }
         if (req.method === 'PUT') {
           let body = '';
           for await (const chunk of req) body += chunk;
           try {
             const parsed = body ? JSON.parse(body) : {};
             // Auto-fill missing per-model ctx by probing the configured providers' /models endpoints.
-            parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers, this.tools?._pluginManager);
+            parsed.modelLimits = await _enrichModelLimits(parsed.modelLimits, parsed.models, parsed.providers, this.tools?._pluginManager, this.config);
             const settings = this._persistSettingsPatch(parsed);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, settings }));
@@ -3724,6 +3442,73 @@ class WebGateway {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: e?.message || 'invalid body' }));
           }
+          return;
+        }
+      }
+
+      // ── Channel pairing API ──────────────────────────────────────
+      // Browser Settings runs on the web gateway origin, while the
+      // low-level pairing store is owned by the platform manager. Mirror
+      // the pairing endpoints here so operators can approve/revoke channel
+      // pairings from Settings without routing the action through the agent.
+      if (urlPath.startsWith('/api/pairing/')) {
+        if (!(await checkAuth(req, res))) return;
+        const gatewayManager = this.tools?.platformManager;
+        const pairing = gatewayManager?.pairing;
+        const sendJson = (status, body) => {
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(body, null, 2));
+        };
+        if (!pairing) {
+          sendJson(503, { ok: false, error: 'Pairing store unavailable' });
+          return;
+        }
+        try {
+          if (urlPath === '/api/pairing/pending' && req.method === 'GET') {
+            sendJson(200, pairing.listPending());
+            return;
+          }
+          if (urlPath === '/api/pairing/approved' && req.method === 'GET') {
+            sendJson(200, pairing.listApproved());
+            return;
+          }
+          if (urlPath === '/api/pairing/approve' && req.method === 'POST') {
+            const { channel, code, notify = true, message } = await _readJsonBody(req);
+            const result = channel
+              ? pairing.approveCodeForChannel(channel, code)
+              : pairing.approveCode(code);
+            if (!result) {
+              sendJson(404, { ok: false, error: 'Code not found or expired' });
+              return;
+            }
+            const out = { ok: true, ...result };
+            if (notify !== false && result.channel === 'telegram') {
+              try {
+                const gw = gatewayManager?.getGateway?.('telegram');
+                const text = message || 'Pairing approved. You can message me now.';
+                if (gw?.sendMessage) {
+                  const sent = await gw.sendMessage(result.id, text);
+                  out.notification = sent?.error ? { ok: false, error: sent.error } : { ok: true };
+                } else {
+                  out.notification = { ok: false, error: 'Telegram gateway cannot send notifications right now.' };
+                }
+              } catch (e) {
+                out.notification = { ok: false, error: e?.message || String(e) };
+              }
+            }
+            sendJson(200, out);
+            return;
+          }
+          if (urlPath === '/api/pairing/revoke' && req.method === 'POST') {
+            const { channel, id } = await _readJsonBody(req);
+            const ok = pairing.revokeApproved(channel, id);
+            sendJson(200, { ok, channel, id });
+            return;
+          }
+          sendJson(405, { ok: false, error: 'Unsupported pairing route or method' });
+          return;
+        } catch (e) {
+          sendJson(400, { ok: false, error: e?.message || 'Pairing request failed' });
           return;
         }
       }
@@ -3827,8 +3612,8 @@ class WebGateway {
       }
 
       // Plugins API — list / install / uninstall. Creator-only.
-      // Install + uninstall are gated behind config.pluginsHotReload (default
-      // off) so an operator must explicitly opt in to runtime plugin lifecycle.
+      // Install + uninstall are gated behind config.pluginsHotReload so
+      // operators can explicitly disable runtime plugin lifecycle.
       // List is always available so the settings UI can show what's loaded.
       if (urlPath === '/api/plugins/list' && req.method === 'GET') {
         if (!(await checkAuth(req, res))) return;
@@ -3854,7 +3639,7 @@ class WebGateway {
         if (!(await checkAuth(req, res))) return;
         if (!this.config.pluginsHotReload) {
           res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Set SPORE_PLUGINS_HOT_RELOAD=true to enable.' }));
+          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Remove SPORE_PLUGINS_HOT_RELOAD=false or set it to true to enable.' }));
           return;
         }
         const mgr = this.tools?._pluginManager;
@@ -3894,7 +3679,7 @@ class WebGateway {
         if (!(await checkAuth(req, res))) return;
         if (!this.config.pluginsHotReload) {
           res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Set SPORE_PLUGINS_HOT_RELOAD=true to enable.' }));
+          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Remove SPORE_PLUGINS_HOT_RELOAD=false or set it to true to enable.' }));
           return;
         }
         const mgr = this.tools?._pluginManager;
@@ -3960,7 +3745,7 @@ class WebGateway {
         if (!(await checkAuth(req, res))) return;
         if (!this.config.pluginsHotReload) {
           res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Set SPORE_PLUGINS_HOT_RELOAD=true to enable.' }));
+          res.end(JSON.stringify({ error: 'Hot install/uninstall disabled. Remove SPORE_PLUGINS_HOT_RELOAD=false or set it to true to enable.' }));
           return;
         }
         const mgr = this.tools?._pluginManager;
@@ -4014,18 +3799,37 @@ class WebGateway {
       // read/write to the graph + chat by design. Maintainer / providers /
       // models / websearch stay creator-only.
       if (urlPath.startsWith('/api/graph')) {
-        if (!isAnyAuth(req)) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Authentication required' }));
-          return;
-        }
+        const graphAuth = await requireGraphApiAuth(req, res);
+        if (!graphAuth) return;
+        req._graphApiAuthContext = graphAuth;
         const currentDb = this.graph?.db || graphDb;
         this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
         return;
       }
 
-      if (urlPath === '/api/tokens' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch')) {
-        if (!(await checkAuth(req, res))) return;
+      if (urlPath === '/api/tokens' || urlPath === '/api/activity-log' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch') || urlPath.startsWith('/api/benchmark') || urlPath.startsWith('/api/queue')) {
+        // Wizard bootstrap: allow the wizard's read-only/test endpoints
+        // through WITHOUT auth when no webapp users exist yet AND the
+        // wizard hasn't completed. This lets us defer user-account
+        // creation to /api/onboarding/complete (instead of forcing it
+        // at step 4 just so subsequent calls pass the auth gate). Each
+        // listed endpoint takes the credential it needs in the request
+        // body — no privilege-escalation surface.
+        const isWizardBootstrap = (
+          (urlPath === '/api/providers/list-models' && req.method === 'POST') ||
+          (urlPath.startsWith('/api/providers/') && urlPath.endsWith('/test') && req.method === 'POST') ||
+          (urlPath.startsWith('/api/models/') && urlPath.endsWith('/test') && req.method === 'POST') ||
+          (urlPath === '/api/websearch/test' && req.method === 'POST')
+        );
+        let allow = false;
+        if (isWizardBootstrap) {
+          try {
+            const usersPath = path.join(this.config.dataDir, 'webapp-users.json');
+            const noUsers = !fs.existsSync(usersPath) || JSON.parse(fs.readFileSync(usersPath, 'utf8')).length === 0;
+            if (noUsers && _isOnboardingNeeded(this.config.dataDir, this.config)) allow = true;
+          } catch { /* fall through to checkAuth */ }
+        }
+        if (!allow && !(await checkAuth(req, res))) return;
         const currentDb = this.graph?.db || graphDb;
         this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
         return;
@@ -4080,21 +3884,21 @@ class WebGateway {
 
       if (urlPath === '/api/preferences') {
         const PREFS_PATH = path.join(this.config.dataDir, 'preferences.json');
-        // Two-theme system. Legacy values (paper, midnight, terminal, ember,
-        // arctic, neon, forest) are coerced via _normalizeThemeName() so an
-        // old client / saved pref doesn't reject. The PUT path always
-        // stores the normalized name; GETs always return one of {dark, light}.
+        // Two-theme system: only `dark` and `light`. Stale stored values
+        // are coerced to `dark` via _normalizeThemeName(). The PUT path
+        // always stores the normalized name; GETs always return one of
+        // {dark, light}.
         const loadPrefs = () => { try { return JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch { return {}; } };
         const authType = isAnyAuth(req);
         if (!authType) { if (!(await tryManagerSSO(req, res))) { res.writeHead(401); res.end('{}'); return; } }
         const cookies = parseCookies(req);
         let username = 'default';
-        const sid = cookies['anima_session'];
+        const sid = cookies['spore_session'];
         const sess = sid && _sessions.get(sid);
         // Sessions are stored with `user` (legacy code looked at `username`).
         if (sess?.user || sess?.username) username = sess.user || sess.username;
         else {
-          const wsid = cookies['anima_webapp'];
+          const wsid = cookies['spore_webapp'];
           const wsess = wsid && _sessions.get(wsid);
           if (wsess?.user || wsess?.username) username = wsess.user || wsess.username;
         }
@@ -4665,12 +4469,7 @@ class WebGateway {
 
     this._setupWebSocket(server, authUser, authPass);
 
-    let pubUrl = this.config.publicUrl ? this.config.publicUrl.replace(/\/+$/, '') : null;
-    if (!pubUrl && this.config.ingressDomain) {
-      const iPath = (this.config.ingressPath || '').replace(/\/$/, '');
-      const proto = this.config.ingressHttps ? 'https' : 'http';
-      pubUrl = `${proto}://${this.config.ingressDomain}${iPath}`;
-    }
+    const pubUrl = this._currentPublicBaseUrl();
     const displayUrl = pubUrl || `http://localhost:${webPort}`;
     return { started: true, port: webPort, dir: serveDir, url: `${displayUrl}/`, graphEditor: `${displayUrl}/graph`, publicUrl: pubUrl || null, note: pubUrl ? `Public URL: ${pubUrl}/ — files written here are served immediately.` : 'Files written to this directory are served immediately — no restart needed. Graph editor at /graph (auth required).' };
   }
@@ -4722,7 +4521,7 @@ class WebGateway {
             const [k, ...v] = c.trim().split('=');
             if (k) cookies[k.trim()] = v.join('=');
           });
-          const sid = cookies['anima_session'];
+          const sid = cookies['spore_session'];
           const sess = sid && _sessions.get(sid);
           if (!sess || (sess.type !== 'creator' && sess.type !== 'admin') || Date.now() - sess.created >= SESSION_TTL) {
             socket.destroy(); return;
@@ -4911,7 +4710,22 @@ class WebGateway {
       const CLI_FORWARD_OPS = new Set(['recall:start', 'recall:decompose', 'recall:empty', 'recall:fail']);
       const onGraphEvent = (evt) => {
         if (isCliClient && !CLI_FORWARD_OPS.has(String(evt?.op || ''))) return;
-        try { ws.send(JSON.stringify({ type: 'graph:event', ...evt })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
+        const out = { ...(evt || {}) };
+        try {
+          const registry = this.tools?._graphRegistry;
+          let graph = out.graph || out.graphSlug || out.slug || null;
+          if (!graph && Array.isArray(out.graphs) && out.graphs.length) {
+            graph = out.graphs.filter(Boolean).map(String).join(', ');
+          }
+          if (!graph && registry?.getActiveSlug) graph = registry.getActiveSlug();
+          if (graph && !out.graph) out.graph = String(graph);
+          if (out.graph && !out.graphName && registry?.get) {
+            const single = String(out.graph).includes(',') ? null : String(out.graph);
+            const meta = single ? registry.get(single) : null;
+            if (meta?.name) out.graphName = meta.name;
+          }
+        } catch {}
+        try { ws.send(JSON.stringify({ type: 'graph:event', ...out })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
       };
       graphEvents.on('change', onGraphEvent);
 
@@ -5265,6 +5079,42 @@ class WebGateway {
           }
           this.log.info(`[ws] chat from user=${ws._user || '(anon)'} role=${ws._role || '(none)'} displayName=${(msg.userName || '').slice(0, 40)} sessionId=${sessionId}`);
 
+          const userId = ws._user || 'operator';
+          const activeSessionKey = this.tools._sessions?.constructor?.buildKey(
+            isCli ? sessionId : 'web:control-panel',
+            !isCli,
+            userId
+          );
+          if (activeSessionKey && typeof this.tools.answerAskUserForSession === 'function') {
+            const pendingAsk = this.tools.answerAskUserForSession(activeSessionKey, msg.content || '');
+            if (pendingAsk?.ok) {
+              const ack = { type: 'ask_user_answer_ack', qid: pendingAsk.qid, ok: true, answer: pendingAsk.answer };
+              const status = { type: 'chat:status', status: 'ask_user_answered', qid: pendingAsk.qid, answer: pendingAsk.answer };
+              if (isCli) {
+                this._sendToSession(sessionId, ack);
+                this._sendToSession(sessionId, status);
+              } else {
+                try { ws.send(JSON.stringify(ack)); ws.send(JSON.stringify(status)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
+              }
+              this.log.info(`[ask_user] Answered pending question for ${activeSessionKey}: ${pendingAsk.answer}`);
+              return;
+            }
+            if (pendingAsk?.pending && this.tools._agent?.activeRuns?.has(activeSessionKey)) {
+              const labels = (pendingAsk.options || []).map((o, i) => `${i + 1}. ${o.label}`).join(' | ');
+              const status = {
+                type: 'chat:status',
+                status: 'ask_user_waiting',
+                qid: pendingAsk.qid,
+                question: pendingAsk.question,
+                message: `Pending question: ${pendingAsk.question}${labels ? ` Options: ${labels}` : ''}`,
+              };
+              if (isCli) this._sendToSession(sessionId, status);
+              else { try { ws.send(JSON.stringify(status)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
+              this.log.info(`[ask_user] Ignored non-matching chat text while ${activeSessionKey} is waiting for option pick`);
+              return;
+            }
+          }
+
           // Store the client's working directory (sent by Spore Code)
           if (msg.cwd && isCli) ws._cwd = msg.cwd;
 
@@ -5396,7 +5246,7 @@ class WebGateway {
                                    || trimmed.startsWith('[REVIEW]')   || trimmed.startsWith('[REVIEW ')
                                    || trimmed.startsWith('[BUILD_PLAN]') || trimmed.startsWith('[BUILD_PLAN ');
               if (!isStageSentinel) {
-                userContent = '[PLAN MODE — read your ## Plan Mode system prompt section. Do NOT call write_file/edit_file/exec mutating commands. Follow the phase instructions there.]\n\n' + userContent;
+                userContent = '[PLAN MODE — read your ## Plan Mode system prompt section. Do NOT call write_file/edit_file/exec. Follow the phase instructions there.]\n\n' + userContent;
               }
             }
 
@@ -5407,7 +5257,7 @@ class WebGateway {
               // userId is server-trusted (from the authenticated WS session)
               // to prevent spoofing another user's conversation. The client's
               // msg.userId is ignored — only ws._user matters.
-              userId: ws._user || 'operator',
+              userId,
               // userName is a display string only; client-chosen is fine.
               userName: msg.userName || ws._user || 'Operator',
               // Role comes from the WS session (server-trusted). The agent
@@ -5495,7 +5345,20 @@ class WebGateway {
               } : undefined,
             };
 
-            let result = await this.tools._agent.processMessage(agentOpts);
+            let result = await this._submitAgentTurn(agentOpts, {
+              lane: 'interactive',
+              priority: isCli ? 105 : 100,
+              route: isCli ? 'cli.chat' : 'web.chat',
+              allowInterjection: true,
+            });
+
+            if (result?.interjected) {
+              this.log.info(`[ws] Interjection accepted for ${sessionId}`);
+              const payload = { type: 'chat:status', status: 'interjected' };
+              if (isCli) { this._sendToSession(sessionId, payload); }
+              else { try { ws.send(JSON.stringify(payload)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
+              return;
+            }
 
             // Handle interjection: session was busy, try to inject into running loop
             if (result.skipped) {
@@ -5531,7 +5394,12 @@ class WebGateway {
                 // Re-send chat:start for the retry
                 if (isCli) { this._sendToSession(sessionId, { type: 'chat:start', sessionId }); }
                 else { try { ws.send(JSON.stringify({ type: 'chat:start', sessionId })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
-                result = await this.tools._agent.processMessage(agentOpts);
+                result = await this._submitAgentTurn(agentOpts, {
+                  lane: 'interactive',
+                  priority: isCli ? 105 : 100,
+                  route: isCli ? 'cli.chat.retry' : 'web.chat.retry',
+                  allowInterjection: false,
+                });
               } catch (waitErr) {
                 this.log.error(`[ws] Interjection wait failed: ${waitErr.message}`);
                 const errPayload = { type: 'chat:error', error: 'Session busy — try again in a moment' };
@@ -5586,7 +5454,7 @@ class WebGateway {
           try {
             ws.send(JSON.stringify({ type: 'voice:user-text', text: msg.content }));
             ws.send(JSON.stringify({ type: 'voice:thinking' }));
-            const result = await this.tools._agent.processMessage({
+            const result = await this._submitAgentTurn({
               content: msg.content,
               channelId: sessionId, channelName: 'voice-call',
               userId: ws._user || 'operator',
@@ -5599,6 +5467,11 @@ class WebGateway {
               onToolUse: (toolName) => {
                 try { ws.send(JSON.stringify({ type: 'voice:tool', tool: toolName })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
               },
+            }, {
+              lane: 'interactive',
+              priority: 100,
+              route: 'web.voice',
+              allowInterjection: true,
             });
             const resp = {
               type: 'voice:response', transcription: null, text: result?.text,
@@ -6126,7 +5999,7 @@ class WebGateway {
 
   // ── Graph API Handlers ──────────────────────────────────────────────
 
-  async _handleMultiGraphApi(req, res, urlPath) {
+  async _handleMultiGraphApi(req, res, urlPath, authContext = { type: 'creator', role: 'creator', creator: true }) {
     const registry = this.tools._graphRegistry;
     if (!registry) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -6144,13 +6017,24 @@ class WebGateway {
       res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
       res.end(body);
     };
+    const canManageGraphs = _graphAuthIsCreator(authContext);
+    const canViewGraph = (graph) => _canGraphAuthViewGraph(graph, authContext, registry);
+    const shapeGraph = (graph) => _shapeGraphForAuth(graph, authContext, registry);
+    const requireGraphManager = () => {
+      if (canManageGraphs) return true;
+      jsonRes({ error: 'Creator authentication required' }, 403);
+      return false;
+    };
 
     if (urlPath === '/api/graphs' && req.method === 'GET') {
-      const graphs = registry.list();
-      return jsonRes({ graphs });
+      const graphs = registry.list()
+        .filter(g => canViewGraph(g))
+        .map(g => shapeGraph(g));
+      return jsonRes({ graphs, readOnly: !canManageGraphs });
     }
 
     if (urlPath === '/api/graphs' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
       try {
         const { name, description } = await jsonBody();
         if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -6174,6 +6058,7 @@ class WebGateway {
     const action = match[3] || null;
 
     if (action === 'activate' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
       try {
         const result = this.tools.switchGraph(slug);
         graphEvents.emit('change', { op: 'graph:switched', slug, source: 'multi-graph' });
@@ -6183,7 +6068,131 @@ class WebGateway {
       }
     }
 
+    if (action === 'maintenance' && req.method === 'GET') {
+      if (!requireGraphManager()) return;
+      const g = registry.get(slug);
+      if (!g) return jsonRes({ error: 'Not found' }, 404);
+      registry.refreshStats(slug);
+      return jsonRes({
+        graph: registry.get(slug),
+        coordinator: this.tools?._graphMaintenance?.getStats?.() || null,
+      });
+    }
+
+    if (action === 'maintenance/run' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
+      try {
+        const coordinator = this.tools?._graphMaintenance;
+        if (!coordinator) return jsonRes({ error: 'graph maintenance coordinator not available' }, 503);
+        const body = await jsonBody().catch(() => ({}));
+        const payload = {
+          slug,
+          opts: {
+            force: body.force !== false,
+            includeActive: true,
+            reason: body.reason || 'manual',
+          },
+        };
+        const result = this.tools?._jobQueue?.submitWorkerJob
+          ? await this.tools._jobQueue.submitWorkerJob('graphMaintenance.maintainGraph', payload, {
+              lane: 'maintenance',
+              priority: 35,
+              route: 'graph.maintenance.manual',
+              graph: slug,
+            })
+          : await coordinator.maintainGraph(slug, payload.opts);
+        return jsonRes(result, result.ok ? 200 : 400);
+      } catch (e) {
+        return jsonRes({ error: e.message }, 500);
+      }
+    }
+
+    if (action === 'data' && req.method === 'GET') {
+      const g = registry.get(slug);
+      if (!g) return jsonRes({ error: 'Not found' }, 404);
+      if (!canViewGraph(g)) return jsonRes({ error: 'Forbidden' }, 403);
+      registry.refreshStats(slug);
+      const dbPath = registry.getDbPath(slug);
+      let graphDb = null;
+      try {
+        const { DatabaseSync } = require('node:sqlite');
+        graphDb = new DatabaseSync(dbPath, { readOnly: true });
+        let nodes = graphDb.prepare('SELECT * FROM nodes').all();
+        let edges = graphDb.prepare('SELECT source, target, type, weight FROM edges').all();
+        const aspects = graphDb.prepare('SELECT * FROM aspects').all();
+        const attrs = graphDb.prepare('SELECT * FROM attributes').all();
+        const aliases = graphDb.prepare('SELECT * FROM aliases').all();
+        const internalLogNodeIds = new Set(['spore-activity-log', 'spore-token-log']);
+        nodes = nodes.filter(n => !internalLogNodeIds.has(n.id));
+        const visibleIds = new Set(nodes.map(n => n.id));
+        const visibleAspects = aspects.filter(a => visibleIds.has(a.node_id));
+        const visibleAspectIds = new Set(visibleAspects.map(a => a.id));
+        edges = edges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target));
+        const visibleAttrs = attrs.filter(a => visibleAspectIds.has(a.aspect_id));
+        const visibleAliases = aliases.filter(a => visibleIds.has(a.node_id));
+        const attrsByAspect = {};
+        for (const a of visibleAttrs) {
+          (attrsByAspect[a.aspect_id] ||= []).push({
+            id: a.id,
+            content: a.content,
+            importance: a.importance,
+            eventDate: a.event_date || null,
+            source: a.source || null,
+            extracted_with: a.extracted_with || null,
+          });
+        }
+        const aspectsByNode = {};
+        for (const a of visibleAspects) {
+          (aspectsByNode[a.node_id] ||= []).push({
+            id: a.id,
+            name: a.name,
+            weight: a.weight,
+            attributes: attrsByAspect[a.id] || [],
+          });
+        }
+        const aliasesByNode = {};
+        for (const a of visibleAliases) {
+          (aliasesByNode[a.node_id] ||= []).push(a.alias);
+        }
+        const graphMeta = shapeGraph({
+          ...registry.get(slug),
+          active: slug === registry.getActiveSlug(),
+          inspectOnly: registry.isActivationLocked?.(slug) || false,
+        });
+        return jsonRes({
+          graph: graphMeta,
+          nodes: nodes.map(n => {
+            let extra = null;
+            try { if (n.extra && n.extra !== '{}') extra = JSON.parse(n.extra); } catch { /* malformed extra: keep null */ }
+            return {
+              id: n.id,
+              label: n.label,
+              type: n.type,
+              description: n.description || '',
+              importance: n.importance,
+              mentions: n.mentions || 0,
+              created: n.created || null,
+              updated: n.updated || null,
+              aliases: aliasesByNode[n.id] || [],
+              aspects: aspectsByNode[n.id] || [],
+              extra,
+            };
+          }),
+          edges: edges.map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })),
+          aspects: visibleAspects,
+          attributes: visibleAttrs,
+          aliases: visibleAliases,
+          meta: { nodeCount: nodes.length, edgeCount: edges.length },
+        });
+      } catch (e) {
+        return jsonRes({ error: e.message }, 500);
+      } finally {
+        try { graphDb?.close(); } catch {}
+      }
+    }
+
     if (action === 'duplicate' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
       try {
         const { name } = await jsonBody();
         if (!name) return jsonRes({ error: 'Name is required' }, 400);
@@ -6194,7 +6203,21 @@ class WebGateway {
       }
     }
 
+    if (action === 'reset' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
+      try {
+        const body = await jsonBody().catch(() => ({}));
+        if (body.confirm !== 'RESET') return jsonRes({ error: 'Type RESET to confirm' }, 400);
+        const result = await this._resetGeneralKnowledgeGraph(slug);
+        graphEvents.emit('change', { op: 'graph:reset', slug, source: 'multi-graph' });
+        return jsonRes({ ok: true, ...result });
+      } catch (e) {
+        return jsonRes({ error: e.message }, 400);
+      }
+    }
+
     if (!action && req.method === 'PUT') {
+      if (!requireGraphManager()) return;
       try {
         const { name, description } = await jsonBody();
         if (name) registry.rename(slug, name.trim());
@@ -6206,8 +6229,12 @@ class WebGateway {
     }
 
     if (!action && req.method === 'DELETE') {
+      if (!requireGraphManager()) return;
       try {
+        const learner = this.tools?.learner || this.tools?._agent?.learner || null;
+        learner?.closeGraphDb?.(slug);
         registry.delete(slug);
+        graphEvents.emit('change', { op: 'graph:deleted', slug, graph: slug, source: 'multi-graph' });
         return jsonRes({ ok: true });
       } catch (e) {
         return jsonRes({ error: e.message }, 400);
@@ -6217,8 +6244,9 @@ class WebGateway {
     if (!action && req.method === 'GET') {
       const g = registry.get(slug);
       if (!g) return jsonRes({ error: 'Not found' }, 404);
+      if (!canViewGraph(g)) return jsonRes({ error: 'Forbidden' }, 403);
       registry.refreshStats(slug);
-      return jsonRes({ graph: { ...registry.get(slug), active: slug === registry.getActiveSlug() } });
+      return jsonRes({ graph: shapeGraph({ ...registry.get(slug), active: slug === registry.getActiveSlug() }) });
     }
 
     res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -6226,6 +6254,54 @@ class WebGateway {
   }
 
   async _handleGraphApiOnWeb(req, res, urlPath, db) {
+    if (!req._graphApiScopeApplied) {
+      req._graphApiScopeApplied = true;
+      let scopedDb = db;
+      let graphSlug = null;
+      try {
+        const u = new URL(req.url || urlPath, 'http://localhost');
+        graphSlug = String(u.searchParams.get('scopeGraph') || u.searchParams.get('graphSlug') || '').trim() || null;
+      } catch {}
+      if (graphSlug) {
+        try {
+          const registry = this.tools?._graphRegistry;
+          const entry = registry?.get?.(graphSlug);
+          if (!entry) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Graph "${graphSlug}" not found` }));
+            return;
+          }
+          const authContext = req._graphApiAuthContext || { type: 'creator', role: 'creator', creator: true };
+          if (!_canGraphAuthViewGraph(entry, authContext, registry)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Forbidden' }));
+            return;
+          }
+          if (!_graphAuthIsCreator(authContext) && req.method !== 'GET') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Read-only graph access' }));
+            return;
+          }
+          const activeSlug = registry.getActiveSlug?.();
+          if (graphSlug !== activeSlug) {
+            const learner = this.tools?.learner || this.tools?._agent?.learner || null;
+            scopedDb = learner?.getGraphDb?.(graphSlug);
+            if (!scopedDb) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: `Graph "${graphSlug}" database unavailable` }));
+              return;
+            }
+          }
+          req._graphApiSlug = graphSlug;
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+          return;
+        }
+      }
+      return graphEvents.withGraph(graphSlug ? { graph: graphSlug } : null, () => this._handleGraphApiOnWeb(req, res, urlPath, scopedDb));
+    }
+
     if (!db) { res.writeHead(503); res.end(JSON.stringify({ error: 'Graph database not available' })); return; }
 
     const MAX_BODY = 1024 * 256;
@@ -6233,28 +6309,86 @@ class WebGateway {
 
     if (urlPath === '/api/graph' && req.method === 'GET') {
       try {
-        const nodes = db.prepare('SELECT * FROM nodes').all();
-        const edges = db.prepare('SELECT source, target, type, weight FROM edges').all();
+        let nodes = db.prepare('SELECT * FROM nodes').all();
+        let edges = db.prepare('SELECT source, target, type, weight FROM edges').all();
         const aspects = db.prepare('SELECT * FROM aspects').all();
         const attrs = db.prepare('SELECT * FROM attributes').all();
         const aliases = db.prepare('SELECT * FROM aliases').all();
+        const internalLogNodeIds = new Set(['spore-activity-log', 'spore-token-log']);
+        nodes = nodes.filter(n => !internalLogNodeIds.has(n.id));
+        const visibleNodeIds = new Set(nodes.map(n => n.id));
+        edges = edges.filter(e => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target));
         const attrsByAspect = {};
         for (const a of attrs) { (attrsByAspect[a.aspect_id] ||= []).push({ id: a.id, content: a.content, importance: a.importance, eventDate: a.event_date || null }); }
         const aspectsByNode = {};
-        for (const a of aspects) { (aspectsByNode[a.node_id] ||= []).push({ id: a.id, name: a.name, weight: a.weight, attributes: attrsByAspect[a.id] || [] }); }
+        for (const a of aspects) {
+          if (!visibleNodeIds.has(a.node_id)) continue;
+          (aspectsByNode[a.node_id] ||= []).push({ id: a.id, name: a.name, weight: a.weight, attributes: attrsByAspect[a.id] || [] });
+        }
         const aliasesByNode = {};
-        for (const a of aliases) { (aliasesByNode[a.node_id] ||= []).push(a.alias); }
+        for (const a of aliases) {
+          if (!visibleNodeIds.has(a.node_id)) continue;
+          (aliasesByNode[a.node_id] ||= []).push(a.alias);
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           nodes: nodes.map(n => {
             let extra = null;
             try { if (n.extra && n.extra !== '{}') extra = JSON.parse(n.extra); } catch { /* silent: malformed JSON → fallback */ }
-            return { id: n.id, label: n.label, type: n.type, description: n.description || '', importance: n.importance, mentions: n.mentions || 0, aliases: aliasesByNode[n.id] || [], aspects: aspectsByNode[n.id] || [], extra };
+            return { id: n.id, label: n.label, type: n.type, description: n.description || '', importance: n.importance, mentions: n.mentions || 0, created: n.created || null, updated: n.updated || null, aliases: aliasesByNode[n.id] || [], aspects: aspectsByNode[n.id] || [], extra };
           }),
           edges: edges.map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })),
           meta: { nodeCount: nodes.length, edgeCount: edges.length },
         }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Token-reduction benchmark (admin/debug) ──
+    // Compares graph-driven system-prompt size vs. a naïve baseline of
+    // top-N attributes + episodes per fixed question. Useful to confirm
+    // retrieval is actually saving tokens and to track regressions.
+    if (urlPath === '/api/benchmark/run' && req.method === 'GET') {
+      try {
+        const { runBenchmark } = require('../tools/benchmark');
+        const report = await runBenchmark(this.graph, this.log, {});
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(report, null, 2));
+      } catch (e) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // ── Graph Overview (god nodes / surprising bridges / suggested questions) ──
+    // Latest non-superseded payload computed by maintainer.runGraphOverview.
+    // Read-only, intended for the graph viewer / debug UI.
+    if (urlPath === '/api/graph-overview' && req.method === 'GET') {
+      try {
+        const row = db.prepare(
+          `SELECT run_id, computed_at, payload FROM graph_overviews
+           WHERE superseded_at IS NULL
+           ORDER BY computed_at DESC LIMIT 1`
+        ).get();
+        if (!row) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ available: false, reason: 'No overview computed yet — maintainer hasn\'t run a community-detection cycle on this graph yet.' }));
+          return;
+        }
+        let payload = null;
+        try { payload = JSON.parse(row.payload); } catch { /* corrupted row */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          available: true,
+          run_id: row.run_id,
+          computed_at: row.computed_at,
+          payload,
+        }));
+      } catch (e) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: e.message }));
+      }
       return;
     }
 
@@ -6298,8 +6432,47 @@ class WebGateway {
           running: !!maintainer?._running,
           model: maintainer?.model || null,
           stats: maintainer?.stats || {},
+          graphMaintenance: this.tools?._graphMaintenance?.getStats?.() || null,
           counts: { openGaps, dormantGaps, answeredGaps, reflections, derivedFacts: derived },
         }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    // ── Runtime queue status / control ──
+    if (urlPath === '/api/queue/status' && req.method === 'GET') {
+      try {
+        const queue = this.tools?._jobQueue;
+        if (!queue) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'runtime queue not available' })); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(queue.getStats()));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/queue/jobs' && req.method === 'GET') {
+      try {
+        const queue = this.tools?._jobQueue;
+        if (!queue) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'runtime queue not available' })); return; }
+        const queueParams = new URL(req.url, 'http://x').searchParams;
+        const status = queueParams.get('status') || null;
+        const limit = Number(queueParams.get('limit') || 100);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jobs: queue.listJobs({ status, limit }) }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    const queueControlMatch = urlPath.match(/^\/api\/queue\/jobs\/([^/]+)\/(cancel|retry)$/);
+    if (queueControlMatch && req.method === 'POST') {
+      try {
+        const queue = this.tools?._jobQueue;
+        if (!queue) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'runtime queue not available' })); return; }
+        const id = decodeURIComponent(queueControlMatch[1]);
+        const action = queueControlMatch[2];
+        const out = action === 'cancel' ? queue.cancelJob(id, 'operator cancelled') : queue.retryJob(id);
+        res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -6315,7 +6488,14 @@ class WebGateway {
           return;
         }
         this._janitorRunJob = { state: 'running', started: Date.now(), error: null, result: null };
-        janitor.runJanitor({ force: true })
+        const run = this.tools?._jobQueue?.submitWorkerJob
+          ? this.tools._jobQueue.submitWorkerJob('janitor.run', { opts: { force: true } }, {
+              lane: 'maintenance',
+              priority: 30,
+              route: 'janitor.manual',
+            })
+          : janitor.runJanitor({ force: true });
+        Promise.resolve(run)
           .then(r => { this._janitorRunJob = { state: 'done', started: this._janitorRunJob.started, completed: Date.now(), result: r }; })
           .catch(e => { this._janitorRunJob = { state: 'error', started: this._janitorRunJob.started, completed: Date.now(), error: e?.message || String(e) }; });
         res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -6423,7 +6603,7 @@ class WebGateway {
         const backup = this.tools?._backup;
         if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(backup.listBackups()));
+        res.end(JSON.stringify(backup.listBackups({ all: true })));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -6434,7 +6614,7 @@ class WebGateway {
         if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
         const body = await json().catch(() => ({}));
         const note = typeof body.note === 'string' ? body.note : null;
-        const out = await backup.runBackup({ force: true, note });
+        const out = await (backup.runBackups ? backup.runBackups({ force: true, note }) : backup.runBackup({ force: true, note }));
         res.writeHead(out.ok ? 200 : 500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
@@ -6491,8 +6671,10 @@ class WebGateway {
         if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
         const body = await json();
         const filename = String(body.file || body.filename || '').trim();
+        const slug = String(body.slug || body.graph || body.graphSlug || '').trim() || null;
         if (!filename) { res.writeHead(400); res.end(JSON.stringify({ error: 'file required' })); return; }
-        const out = await backup.restoreBackup(filename);
+        const out = await backup.restoreBackup(filename, { slug });
+        if (out.ok) graphEvents.emit('change', { op: 'graph:backup-restore', slug: out.slug || slug || null, source: 'backup' });
         res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
@@ -6502,12 +6684,47 @@ class WebGateway {
     // ── Graph / settings / providers export + import ─────────────────
     if (urlPath.startsWith('/api/graph/export') && req.method === 'GET') {
       try {
-        const { exportGraph, exportProviders, exportSettings } = require('../graph/export-import');
+        const { exportGraph, exportProviders, exportSettings, sanitizeGraphMeta } = require('../graph/export-import');
+        const { DatabaseSync } = require('node:sqlite');
         const u = new URL(req.url, 'http://x');
         const wantGraph = u.searchParams.get('graph') !== '0';
         const wantProviders = u.searchParams.get('providers') === '1';
         const wantSettings = u.searchParams.get('settings') !== '0';
         const includeSecrets = u.searchParams.get('secrets') === '1';
+        const graphScope = String(u.searchParams.get('graph_scope') || u.searchParams.get('scope') || 'current').toLowerCase();
+        const selectedSlug = String(u.searchParams.get('graph_slug') || u.searchParams.get('slug') || '').trim();
+        const authContext = req._graphApiAuthContext || { type: 'creator', role: 'creator', creator: true };
+        const creatorExport = _graphAuthIsCreator(authContext);
+        if ((wantProviders || wantSettings || graphScope === 'all') && !creatorExport) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Creator role required for settings/provider/all-graph export.' }));
+          return;
+        }
+        const registry = this.tools?._graphRegistry || null;
+        const activeSlug = registry?.getActiveSlug?.() || null;
+        const currentSlug = req._graphApiSlug || activeSlug || null;
+        const exportOneGraph = (slug, scopedDb = null) => {
+          const entry = slug && registry?.get?.(slug) ? registry.get(slug) : (slug ? { slug, name: slug } : null);
+          if (entry && !_canGraphAuthViewGraph(entry, authContext, registry)) {
+            throw new Error(`Forbidden graph "${slug}"`);
+          }
+          const dbPath = slug && registry?.getDbPath?.(slug);
+          let graphDb = scopedDb;
+          let opened = null;
+          try {
+            if (!graphDb) {
+              if (slug && slug === currentSlug) graphDb = db;
+              else {
+                if (!dbPath || !fs.existsSync(dbPath)) throw new Error(`Graph DB missing for "${slug}"`);
+                opened = new DatabaseSync(dbPath, { readOnly: true });
+                graphDb = opened;
+              }
+            }
+            return exportGraph(graphDb, { agentId: this.config.agentId || null, graphMeta: entry });
+          } finally {
+            try { opened?.close(); } catch {}
+          }
+        };
 
         const bundle = {
           version: 2,
@@ -6515,11 +6732,25 @@ class WebGateway {
           exportedAt: new Date().toISOString(),
           sourceAgent: this.config.agentId ? { id: this.config.agentId, label: this.config.displayName || this.config.agentId } : null,
           includesSecrets: wantProviders && includeSecrets,
+          graphScope: wantGraph ? graphScope : 'none',
           sections: [],
         };
         if (wantGraph) {
-          bundle.graph = exportGraph(db, { agentId: this.config.agentId || null });
-          bundle.sections.push('graph');
+          if (graphScope === 'all') {
+            if (!registry?.list) throw new Error('multi-graph registry unavailable');
+            const graphs = registry.list();
+            bundle.graphRegistry = {
+              activeSlug,
+              graphs: graphs.map(g => sanitizeGraphMeta(g)),
+            };
+            bundle.graphs = graphs.map(g => exportOneGraph(g.slug));
+            bundle.sections.push('graphs');
+          } else {
+            const slug = graphScope === 'selected' ? selectedSlug : (selectedSlug || currentSlug);
+            if (graphScope === 'selected' && !slug) throw new Error('graph_slug required for selected graph export');
+            bundle.graph = slug ? exportOneGraph(slug, slug === currentSlug ? db : null) : exportGraph(db, { agentId: this.config.agentId || null });
+            bundle.sections.push('graph');
+          }
         }
         if (wantProviders) {
           bundle.providers = exportProviders(this.config, { includeSecrets });
@@ -6530,7 +6761,8 @@ class WebGateway {
           if (bundle.settings) bundle.sections.push('settings');
         }
 
-        const filename = `spore-export-${(this.config.agentId || 'agent').replace(/[^a-zA-Z0-9-]/g, '')}-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}.json`;
+        const scopeTag = wantGraph && graphScope === 'all' ? 'allgraphs' : (wantGraph && selectedSlug ? selectedSlug : 'bundle');
+        const filename = `spore-export-${(this.config.agentId || 'agent').replace(/[^a-zA-Z0-9-]/g, '')}-${scopeTag.replace(/[^a-zA-Z0-9-]/g, '')}-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}.json`;
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Content-Disposition': `attachment; filename="${filename}"`,
@@ -6543,23 +6775,11 @@ class WebGateway {
     if (urlPath === '/api/graph/import' && req.method === 'POST') {
       // Import is destructive (inserts nodes + edges into the live graph),
       // so gate to creator only — webapp users shouldn't be able to bulk
-      // upload arbitrary knowledge. Inline cookie check against _sessions.
-      try {
-        const cookies = (function parse(h) {
-          const out = {}; if (!h) return out;
-          for (const c of h.split(';')) { const i = c.indexOf('='); if (i > 0) out[c.slice(0, i).trim()] = c.slice(i + 1).trim(); }
-          return out;
-        })(req.headers.cookie || '');
-        const sid = cookies['anima_session'];
-        const sess = sid && this._webSessions.get(sid);
-        const isCreator = sess && (sess.type === 'creator' || sess.type === 'admin');
-        if (!isCreator) {
-          res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Import requires creator role.' }));
-          return;
-        }
-      } catch (e) {
-        res.writeHead(500); res.end(JSON.stringify({ error: 'auth check failed: ' + e.message })); return;
+      // upload arbitrary knowledge.
+      if (!_graphAuthIsCreator(req._graphApiAuthContext || null)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Import requires creator role.' }));
+        return;
       }
       try {
         // Increase the body cap — exports can be multi-MB for large graphs
@@ -6577,35 +6797,100 @@ class WebGateway {
           res.end(JSON.stringify({ error: 'invalid JSON: ' + e.message }));
           return;
         }
-        // Auto pre-import backup so the operator can undo
-        try {
-          const backup = this.tools?._backup;
-          if (backup) await backup.runBackup({ force: true, note: 'pre-import' });
-        } catch (e) { this.log.warn('[import] pre-import backup failed: ' + e.message); }
-
         const { importGraph, planProviderImport, planSettingsImport } = require('../graph/export-import');
+        const { DatabaseSync } = require('node:sqlite');
         const u = new URL(req.url, 'http://x');
         const applyGraph = u.searchParams.get('apply_graph') !== '0';
         const applyProviders = u.searchParams.get('apply_providers') === '1';
         const applySettings = u.searchParams.get('apply_settings') !== '0';
+        const requestedTargetSlug = String(u.searchParams.get('graph_slug') || u.searchParams.get('target_slug') || '').trim();
+        const registry = this.tools?._graphRegistry || null;
+        const backup = this.tools?._backup || null;
+        const activeSlug = registry?.getActiveSlug?.() || null;
+        const currentSlug = req._graphApiSlug || activeSlug || null;
 
         // v2 bundle → has {graph, providers, settings}. v1 format / raw graph →
         // the graph IS the payload (backward compat).
         const isBundle = payload.format === 'spore-export';
         const graphPayload = isBundle ? payload.graph : payload;
+        const graphPayloads = isBundle && Array.isArray(payload.graphs) ? payload.graphs : null;
         const providersSection = isBundle ? payload.providers : null;
         const settingsSection = isBundle ? payload.settings : null;
 
         const report = {
           graph: null,
+          graphs: null,
           providers: null,
           settings: null,
         };
 
-        if (applyGraph && graphPayload && graphPayload.format === 'spore-graph-export') {
-          report.graph = importGraph(db, graphPayload, { log: this.log });
+        const ensureImportTarget = (gp, fallbackSlug = null, { useRequestedTarget = true } = {}) => {
+          const meta = gp?.graph || {};
+          let slug = (useRequestedTarget ? requestedTargetSlug : '') || meta.slug || fallbackSlug || currentSlug;
+          if (!slug && registry?.getActiveSlug) slug = registry.getActiveSlug();
+          let graphDb = db;
+          let opened = null;
+          let dbPath = null;
+          let created = false;
+
+          if (registry && slug) {
+            let entry = registry.get(slug);
+            if (!entry) {
+              const name = meta.name || slug;
+              slug = registry.create(name, meta.description || '', {
+                slug,
+                role: meta.role || 'custom',
+                protected: meta.protected === true,
+                managed: meta.managed === true,
+                activationLocked: meta.activationLocked === true,
+                seedProfile: meta.seedProfile || (meta.role === 'project' ? 'project' : (meta.role === 'channel' ? 'channel' : 'standard')),
+                identityKey: meta.identityKey || null,
+                platform: meta.platform || null,
+                externalUserId: meta.externalUserId || null,
+                externalChannelId: meta.externalChannelId || null,
+                source: meta.source || 'import',
+                createdBy: meta.createdBy || 'import',
+              });
+              created = true;
+              entry = registry.get(slug);
+            }
+            registry.applyImportedMetadata?.(slug, meta);
+            dbPath = registry.getDbPath(slug);
+            if (slug === currentSlug) {
+              graphDb = db;
+            } else {
+              opened = new DatabaseSync(dbPath);
+              graphDb = opened;
+            }
+          }
+
+          return { slug, db: graphDb, opened, dbPath, created };
+        };
+
+        const importIntoTarget = async (gp, fallbackSlug = null, opts = {}) => {
+          if (!gp || gp.format !== 'spore-graph-export') return { error: 'skipped — not a spore-graph-export payload' };
+          const target = ensureImportTarget(gp, fallbackSlug, opts);
+          try {
+            try {
+              if (backup?.runBackupForGraph && target.slug && target.dbPath) {
+                await backup.runBackupForGraph({ slug: target.slug, dbPath: target.dbPath, force: true, note: 'pre-import' });
+              } else if (backup) {
+                await backup.runBackup({ force: true, note: 'pre-import' });
+              }
+            } catch (e) { this.log.warn('[import] pre-import backup failed: ' + e.message); }
+            const result = importGraph(target.db, gp, { log: this.log });
+            try { registry?.refreshStats?.(target.slug); } catch {}
+            return { slug: target.slug, created: target.created, ...result };
+          } finally {
+            try { target.opened?.close(); } catch {}
+          }
+        };
+
+        if (applyGraph && graphPayloads?.length) {
+          report.graphs = await Promise.all(graphPayloads.map(gp => importIntoTarget(gp, gp?.graph?.slug || null, { useRequestedTarget: false })));
+          report.graph = { importedGraphs: report.graphs.length };
         } else if (applyGraph && graphPayload) {
-          report.graph = { error: 'skipped — not a spore-graph-export payload' };
+          report.graph = await importIntoTarget(graphPayload, requestedTargetSlug || currentSlug);
         }
 
         let providerTouched = false;
@@ -6685,7 +6970,9 @@ class WebGateway {
       try {
         const backup = this.tools?._backup;
         if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
-        const out = backup.deleteBackup(decodeURIComponent(backupDelMatch[1]));
+        const u = new URL(req.url, 'http://x');
+        const slug = String(u.searchParams.get('slug') || u.searchParams.get('graph') || '').trim() || null;
+        const out = backup.deleteBackup(decodeURIComponent(backupDelMatch[1]), { slug });
         res.writeHead(out.ok ? 200 : 404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
@@ -6721,19 +7008,33 @@ class WebGateway {
     // ── List models from a provider's /models endpoint ──
     // Plugin-aware: if a provider plugin registered listModels under the
     // requested kind, prefer that — it can augment the vendor's response
-    // with ctx/maxOutput from a vendor-specific table (e.g. Anthropic's
-    // /v1/models doesn't expose ctx, anthropic-provider's listModels
-    // augments via prefix). Falls back to core's _listModelsForProvider
+    // with ctx/maxOutput when the provider exposes or safely enriches it.
+    // Official OpenAI /v1/models doesn't expose ctx, so openai-provider
+    // leaves it unknown instead of inventing a value. Falls back to core's _listModelsForProvider
     // for legacy custom-OAI probes (`kind: 'custom'`) and providers that
     // don't implement listModels.
     if (urlPath === '/api/providers/list-models' && req.method === 'POST') {
-      const body = await _readJsonBody(req);
+      let body = await _readJsonBody(req);
       try {
+        if (body?.kind === 'custom' && body?.name) {
+          const saved = _customProviderConfig(this.config, body.name);
+          if (saved) {
+            body = {
+              ...body,
+              baseUrl: body.baseUrl || body.url || saved.url || '',
+              apiKey: body.apiKey || body.key || saved.key || '',
+              authHeader: body.authHeader || saved.authHeader || 'bearer',
+            };
+          }
+        }
         const mgr = this.tools?._pluginManager;
-        const entry = mgr?.getProviders?.().find(p => p.name === body.kind);
+        const entry = _findProviderEntry(mgr, body.kind === 'custom' && body.name ? body.name : body.kind);
         let result;
         if (entry?.listModels) {
-          result = await entry.listModels(body);
+          const providerName = body.kind === 'custom' && body.name ? body.name : body.kind;
+          result = await entry.listModels(_isCustomProviderEntry(entry, providerName, this.config)
+            ? _customProviderProbeArgs(providerName, this.config, body)
+            : body);
         } else {
           result = await _listModelsForProvider(body);
         }
@@ -6743,6 +7044,171 @@ class WebGateway {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: e.message }));
       }
+      return;
+    }
+
+    // ── Centralized model library ──
+    // GET    /api/models/library              list all entries
+    // POST   /api/models/library              add a single entry
+    // PUT    /api/models/library/<id>         update fields (tracks user overrides)
+    // DELETE /api/models/library/<id>         remove an entry
+    // POST   /api/models/library/<id>/reset   reset to vendor defaults (re-probes /models)
+    // POST   /api/models/library/discover     { provider } → returns suggested entries
+    //                                         from the plugin's listModels (no DB writes)
+    if (urlPath.startsWith('/api/models/library')) {
+      // Auth already enforced by the dispatch site before delegating
+      // to this method (see /api/* router above).
+      const lib = require('../settings/model-library');
+      const mgr = this.tools?._pluginManager;
+
+      if (urlPath === '/api/models/library' && req.method === 'GET') {
+        const query = new URL(req.url, 'http://localhost').searchParams;
+        const includeUnavailable = query.get('all') === '1' || query.get('includeUnavailable') === 'true';
+        const entries = this._visibleModelLibraryEntries(lib.list(), { includeUnavailable });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ entries }));
+        return;
+      }
+
+      if (urlPath === '/api/models/library' && req.method === 'POST') {
+        try {
+          const body = await _readJsonBody(req);
+          const out = lib.add(body, { upsert: !!body.upsert });
+          res.writeHead(out.created ? 201 : 200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(out));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
+
+      if (urlPath === '/api/models/library/discover' && req.method === 'POST') {
+        // Run the provider plugin's listModels and return suggestions —
+        // we never auto-insert; UI presents suggestions for opt-in.
+        try {
+          const body = await _readJsonBody(req);
+          const provider = String(body.provider || '').trim().toLowerCase();
+          if (!provider) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'provider required' }));
+            return;
+          }
+          const entry = _findProviderEntry(mgr, provider);
+          if (!entry?.listModels) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `provider ${provider} has no listModels probe` }));
+            return;
+          }
+          // Probe credentials: pull from settings store (preferred) or
+          // request body (when running from the wizard before save).
+          const settings = require('../settings');
+          const creds = body.credentials || {};
+          const probeArgs = _isCustomProviderEntry(entry, provider, this.config)
+            ? _customProviderProbeArgs(provider, this.config, creds)
+            : {
+                apiKey: creds.apiKey || settings.get(`providers.${provider}.apiKey`) || settings.get(`plugins.${provider}-provider.apiKey`),
+                baseUrl: creds.baseUrl || settings.get(`providers.${provider}.baseUrl`) || settings.get(`plugins.${provider}-provider.baseUrl`),
+                authHeader: creds.authHeader || settings.get(`providers.${provider}.authHeader`),
+              };
+          const probe = await entry.listModels(probeArgs);
+          if (!probe?.ok) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: probe?.error || 'discovery failed', suggestions: [] }));
+            return;
+          }
+          // Build suggestion shape — mirror what add() expects so the
+          // UI can POST suggestions back unchanged.
+          const existingIds = new Set(lib.list({ provider }).map(e => e.id));
+          const suggestions = (probe.models || []).map(m => {
+            const id = lib.composeId(provider, m.id || m.modelId || m.name);
+            return {
+              id,
+              provider,
+              modelId: m.id || m.modelId || m.name,
+              label: m.label || m.id || m.name,
+              family: m.family || null,
+              contextWindow: m.contextLength || m.contextWindow || null,
+              maxOutput: m.maxOutput || null,
+              capabilities: m.capabilities || (entry.capabilities || {}),
+              source: 'auto',
+              alreadyInLibrary: existingIds.has(id),
+            };
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, suggestions, provider }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+        return;
+      }
+
+      // Per-id ops: PUT / DELETE / POST .../reset
+      const idMatch = urlPath.match(/^\/api\/models\/library\/(.+?)(?:\/(reset))?$/);
+      if (idMatch) {
+        const id = decodeURIComponent(idMatch[1]);
+        const action = idMatch[2];
+        if (action === 'reset' && req.method === 'POST') {
+          try {
+            const cur = lib.get(id);
+            if (!cur) { res.writeHead(404); res.end(JSON.stringify({ error: 'not found' })); return; }
+            const entry = _findProviderEntry(mgr, cur.provider);
+            if (!entry?.listModels) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: `provider ${cur.provider} has no listModels probe; cannot refresh` }));
+              return;
+            }
+            const settings = require('../settings');
+            const probe = await entry.listModels(_isCustomProviderEntry(entry, cur.provider, this.config)
+              ? _customProviderProbeArgs(cur.provider, this.config)
+              : {
+                  apiKey: settings.get(`providers.${cur.provider}.apiKey`) || settings.get(`plugins.${cur.provider}-provider.apiKey`),
+                  baseUrl: settings.get(`providers.${cur.provider}.baseUrl`) || settings.get(`plugins.${cur.provider}-provider.baseUrl`),
+                });
+            const match = (probe?.models || []).find(m => (m.id || m.modelId) === cur.modelId);
+            if (!match) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'model no longer listed by vendor' }));
+              return;
+            }
+            const fresh = {
+              family: match.family || null,
+              contextWindow: match.contextLength || match.contextWindow || null,
+              maxOutput: match.maxOutput || null,
+              capabilities: match.capabilities || (entry.capabilities || {}),
+            };
+            const out = lib.resetMetadata(id, fresh);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...out, fresh }));
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+          }
+          return;
+        }
+        if (req.method === 'PUT') {
+          try {
+            const body = await _readJsonBody(req);
+            const out = lib.update(id, body);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(out));
+          } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+          return;
+        }
+        if (req.method === 'DELETE') {
+          const out = lib.remove(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(out));
+          return;
+        }
+      }
+
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
       return;
     }
 
@@ -6806,6 +7272,17 @@ class WebGateway {
         const summary = feed.readTokenSummary();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(summary || { error: 'No token data yet' }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/activity-log' && req.method === 'GET') {
+      try {
+        const feed = require('../graph/feed');
+        const maxLines = Math.min(parseInt(new URL(req.url, 'http://x').searchParams.get('lines') || '200', 10), 500);
+        const entries = feed.readActivityLog(maxLines);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ entries }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -6880,6 +7357,7 @@ class WebGateway {
 
         if (!brief) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'No matching nodes found' })); return; }
 
+        const scopedProjectArg = req._graphApiSlug ? ` Include \`project: "${req._graphApiSlug}"\` in every \`graph_update\` call so updates land in the graph currently open in the viewer.` : '';
         const prompt = [
           `Research request: bring the following node(s) up to date with the latest information from the web and your own knowledge.`,
           ``,
@@ -6887,7 +7365,7 @@ class WebGateway {
           ``,
           `Steps:`,
           `1. Use **web_search** (and **web_fetch** when you need full article context) to find recent, authoritative info about each node.`,
-          `2. Then use **graph_update** to record what you learned: add new attributes to existing aspects, create new aspects on the same node, or create entirely new connected nodes when something genuinely new comes up.`,
+          `2. Then use **graph_update** to record what you learned: add new attributes to existing aspects, create new aspects on the same node, or create entirely new connected nodes when something genuinely new comes up.${scopedProjectArg}`,
           `3. Do NOT delete anything that already exists. Be additive.`,
           `4. When you're done, post a short summary of what you changed.`,
         ].join('\n');
@@ -6895,16 +7373,25 @@ class WebGateway {
         const sessionKey = `research-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         // Fire and forget — the agent's graph_update calls will broadcast via
         // graphEvents and the viewer will pick them up over its existing WS.
-        agent.processMessage({
+        const researchRun = this._submitAgentTurn({
           content: prompt,
           channelId: sessionKey,
           channelName: 'research',
+          sessionKey,
           userId: 'operator',
           userName: 'Operator',
           trigger: 'dm',
           platform: 'web',
           isDm: true,
-        }).catch(e => this.log.warn(`[research] agent run failed: ${e.message}`));
+        }, {
+          lane: 'background',
+          priority: 15,
+          route: 'graph.research',
+          graph: req._graphApiSlug || null,
+          persistent: true,
+          allowInterjection: false,
+        });
+        Promise.resolve(researchRun).catch(e => this.log.warn(`[research] agent run failed: ${e.message}`));
 
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionKey, nodeCount: ids.length }));
@@ -6944,7 +7431,9 @@ class WebGateway {
           const [s, t] = [targetId, sourceId];
           const dup = db.prepare('SELECT id FROM edges WHERE source=? AND target=? AND type=?').get(s, t, edgeType);
           if (!dup) {
-            db.prepare('INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 1.0, ?)')
+            // User dragged target onto source in the viewer — explicit
+            // human-asserted parent_of edge.
+            db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 1.0, ?, 'extracted')")
               .run(s, t, edgeType, 'drop-menu');
           }
           try {
@@ -6977,6 +7466,7 @@ class WebGateway {
           const attrCount = db.prepare('SELECT COUNT(*) AS c FROM attributes a JOIN aspects s ON s.id=a.aspect_id WHERE s.node_id=?').get(n.id).c;
           return `- **${n.label}** (\`${n.id}\`, type=${n.type}, importance=${n.importance}, ${aspects.length} aspects / ${attrCount} attrs / ${outgoing.length + incoming.length} edges)\n  ${n.description || '_(no description)_'}\n  Aspects:\n${aspectLines || '    _(none)_'}\n  Outbound edges:\n${outLines || '    _(none)_'}\n  Inbound edges:\n${inLines || '    _(none)_'}`;
         };
+        const scopedProjectArg = req._graphApiSlug ? ` Include \`project: "${req._graphApiSlug}"\` in every \`graph_update\` and \`graph_delete\` call so the edit lands in the graph currently open in the viewer.` : '';
         let prompt;
         if (mode === 'link') {
           prompt = [
@@ -6990,7 +7480,7 @@ class WebGateway {
             ``,
             `1. Judge the relationship from the content above. Ask: is there a real, specific connection between these two? Examples of real relationships: "uses", "knows", "created_by", "part_of", "depends_on", "located_in", "works_on", "mentions", "authored".`,
             ``,
-            `2. If they ARE related, call \`graph_update\` on \`${sourceId}\` with its existing label and type, plus \`edges: [{ target: "${targetId}", type: "<your-chosen-relationship>" }]\`. Pick the tightest, most specific verb you can justify — don't fall back to \`related_to\` unless nothing else fits.`,
+            `2. If they ARE related, call \`graph_update\` on \`${sourceId}\` with its existing label and type, plus \`edges: [{ target: "${targetId}", type: "<your-chosen-relationship>" }]\`. Pick the tightest, most specific verb you can justify — don't fall back to \`related_to\` unless nothing else fits.${scopedProjectArg}`,
             ``,
             `3. If they are NOT meaningfully related, do not create any edge. Just reply with a short sentence explaining that.`,
             ``,
@@ -7011,7 +7501,7 @@ class WebGateway {
             ``,
             `1. **Pick a SURVIVOR and a LOSER.** The survivor should be whichever has richer content, more edges, higher importance, or a cleaner id. If equivalent, pick the shorter/cleaner id.`,
             ``,
-            `2. **Call \`graph_update\` on the SURVIVOR** with:`,
+            `2. **Call \`graph_update\` on the SURVIVOR**${scopedProjectArg} with:`,
             `   - Its existing \`label\` and \`type\` (required fields)`,
             `   - A merged \`description\` that incorporates any useful info from the loser`,
             `   - \`aspects\`: any aspects from the loser that add new facts. Skip aspects whose attributes already exist on the survivor (dedupe).`,
@@ -7019,7 +7509,7 @@ class WebGateway {
             ``,
             `3. **For each inbound edge where the LOSER is the target** (listed above under "Inbound edges"), call \`graph_update\` on the OTHER end (the \`source\`) and add \`edges: [{target: "<survivor-id>", type: "<same-type>"}]\` so incoming connections re-home to the survivor.`,
             ``,
-            `4. **Call \`graph_delete\` with \`{ nodeId: "<loser-id>" }\`** — this cascades the loser's aspects, attributes, and any remaining edges.`,
+            `4. **Call \`graph_delete\` with \`{ nodeId: "<loser-id>"${req._graphApiSlug ? `, project: "${req._graphApiSlug}"` : ''} }\`** — this cascades the loser's aspects, attributes, and any remaining edges.`,
             ``,
             `5. **Reply with one line** like: \`Merged \\\`loser-id\\\` into \\\`survivor-id\\\` — kept N aspects, rehomed M edges.\``,
             ``,
@@ -7032,16 +7522,25 @@ class WebGateway {
         // messages and blow the upstream context → 504 from the LLM proxy).
         // The prompt is self-contained; it doesn't need any prior turns.
         const sessionKey = `${mode}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        agent.processMessage({
+        const graphEditRun = this._submitAgentTurn({
           content: prompt,
           channelId: sessionKey,
           channelName: mode,
+          sessionKey,
           userId: 'operator',
           userName: 'Operator',
           trigger: 'channel',
           platform: 'web',
           isDm: false,
-        }).catch(e => this.log.warn(`[${mode}] agent run failed: ${e.message}`));
+        }, {
+          lane: 'background',
+          priority: 20,
+          route: `graph.${mode}`,
+          graph: req._graphApiSlug || null,
+          persistent: true,
+          allowInterjection: false,
+        });
+        Promise.resolve(graphEditRun).catch(e => this.log.warn(`[graph:${mode}] agent run failed: ${e.message}`));
 
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionKey, sourceId, targetId }));
@@ -7089,6 +7588,8 @@ class WebGateway {
         db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?,?,?,?)').run(nodeId, name, weight || 5, 'graph-viewer');
         const aspectId = db.prepare('SELECT id FROM aspects WHERE node_id=? AND name=? ORDER BY id DESC LIMIT 1').get(nodeId, name).id;
         if (attributes?.length) { const stmt = db.prepare('INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?,?,?,?,?)'); for (const a of attributes) stmt.run(aspectId, typeof a === 'string' ? a : a.content, a.importance || 5, 'graph-viewer', 'graph-viewer'); }
+        graphEvents.emit('change', { op: existing ? 'aspect:update' : 'aspect:create', nodeId, aspect: name, source: 'editor' });
+        if (attributes?.length) graphEvents.emit('change', { op: 'attribute:create', nodeId, aspect: name, source: 'editor', detail: `${attributes.length} attribute(s)` });
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true, aspectId }));
       }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
       return;
@@ -7096,14 +7597,25 @@ class WebGateway {
 
     if (urlPath.startsWith('/api/graph/aspect/') && req.method === 'DELETE') {
       const aspectId = parseInt(urlPath.split('/api/graph/aspect/')[1]);
-      try { db.prepare('DELETE FROM attributes WHERE aspect_id=?').run(aspectId); db.prepare('DELETE FROM aspects WHERE id=?').run(aspectId); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true })); }
+      try {
+        const asp = db.prepare('SELECT id, node_id, name FROM aspects WHERE id=?').get(aspectId);
+        db.prepare('DELETE FROM attributes WHERE aspect_id=?').run(aspectId);
+        db.prepare('DELETE FROM aspects WHERE id=?').run(aspectId);
+        if (asp) graphEvents.emit('change', { op: 'aspect:delete', aspectId, nodeId: asp.node_id, aspect: asp.name, source: 'editor' });
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }));
+      }
       catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
 
     if (urlPath.startsWith('/api/graph/attribute/') && req.method === 'DELETE') {
       const attrId = parseInt(urlPath.split('/api/graph/attribute/')[1]);
-      try { db.prepare('DELETE FROM attributes WHERE id = ?').run(attrId); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true })); }
+      try {
+        const attr = db.prepare('SELECT a.id, asp.node_id, asp.name FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id WHERE a.id = ?').get(attrId);
+        db.prepare('DELETE FROM attributes WHERE id = ?').run(attrId);
+        if (attr) graphEvents.emit('change', { op: 'attribute:delete', attributeId: attrId, nodeId: attr.node_id, aspect: attr.name, source: 'editor' });
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }));
+      }
       catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -7113,7 +7625,9 @@ class WebGateway {
       json().then(data => {
         const { content, importance } = data;
         if (!content) { res.writeHead(400); res.end(JSON.stringify({ error: 'content required' })); return; }
+        const attr = db.prepare('SELECT a.id, asp.node_id, asp.name FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id WHERE a.id = ?').get(attrId);
         db.prepare('UPDATE attributes SET content = ?, importance = ? WHERE id = ?').run(content, importance || 5, attrId);
+        if (attr) graphEvents.emit('change', { op: 'attribute:update', attributeId: attrId, nodeId: attr.node_id, aspect: attr.name, content, source: 'editor' });
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }));
       }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
       return;
@@ -7121,12 +7635,17 @@ class WebGateway {
 
     if (urlPath === '/api/graph/edge' && req.method === 'POST') {
       json().then(data => {
-        const { source, target, type, weight } = data;
+        const { source, target, type, weight, confidence } = data;
         if (!source || !target || !type) { res.writeHead(400); res.end(JSON.stringify({ error: 'source, target, type required' })); return; }
         const existing = db.prepare('SELECT rowid FROM edges WHERE source=? AND target=? AND type=?').get(source, target, type);
-        if (existing) db.prepare('UPDATE edges SET weight=? WHERE source=? AND target=? AND type=?').run(weight || 1, source, target, type);
-        else db.prepare('INSERT INTO edges (source, target, type, weight) VALUES (?,?,?,?)').run(source, target, type, weight || 1);
-        graphEvents.emit('change', { op: existing ? 'edge:update' : 'edge:create', edge: { source, target, type }, source: 'editor' });
+        // User-edited edges are 'extracted' by default — operator is
+        // asserting the relationship directly. Caller may override.
+        const conf = (typeof confidence === 'string' && ['extracted','inferred','ambiguous'].includes(confidence.toLowerCase()))
+          ? confidence.toLowerCase()
+          : 'extracted';
+        if (existing) db.prepare('UPDATE edges SET weight=?, confidence=? WHERE source=? AND target=? AND type=?').run(weight || 1, conf, source, target, type);
+        else db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?,?,?,?, 'editor', ?)").run(source, target, type, weight || 1, conf);
+        graphEvents.emit('change', { op: existing ? 'edge:update' : 'edge:create', edge: { source, target, type, confidence: conf }, source: 'editor' });
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }));
       }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
       return;

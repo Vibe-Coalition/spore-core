@@ -23,6 +23,41 @@
     width: 0 !important;
     border-left-color: transparent;
   }
+  @media (min-width: 769px) {
+    #chat-panel.chat-floating {
+      position: absolute;
+      order: initial;
+      flex: none;
+      max-width: none;
+      max-height: none;
+      min-width: 300px;
+      min-height: 320px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--panel) 94%, transparent);
+      box-shadow: 0 20px 60px rgba(0,0,0,.38);
+      backdrop-filter: blur(14px);
+      resize: both;
+      transition: none;
+      z-index: 60;
+    }
+    #chat-panel.chat-floating.collapsed {
+      display: none !important;
+    }
+    #chat-panel.chat-floating #chat-header {
+      cursor: move;
+      background: color-mix(in srgb, var(--surface) 85%, transparent);
+    }
+    #chat-panel.chat-floating #chat-resize-handle {
+      display: none;
+    }
+    #chat-panel.chat-floating.window-maximized {
+      resize: none !important;
+    }
+    body.chat-is-floating #desktop-dock {
+      left: 50%;
+    }
+  }
   /* Hide focusable controls inside the collapsed panel so tabbing skips them. */
   #chat-panel.collapsed > * { visibility: hidden; pointer-events: none; }
   #chat-panel.fill-remaining { flex: 1; width: auto !important; min-width: 0 !important; border-left: 1px solid var(--border); }
@@ -130,6 +165,7 @@
     #chat-header { padding: 6px 10px; flex-shrink: 0; }
     #chat-header h2 { font-size: .8rem; }
     #chat-header .chat-window-actions { display: none; }
+    #chat-float-toggle, #chat-window-maximize { display: none !important; }
     #chat-header .window-action-legacy { display: flex; }
     #util-bar { display: none; }
 
@@ -176,4 +212,3 @@
 
     #search { top: 50px; right: 6px; left: 6px; width: auto; }
   }
-

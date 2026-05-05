@@ -19,10 +19,28 @@ SPORE_UID=2000
 SPORE_GID=2000
 
 # ── Fix bind-mount ownership ────────────────────────────────────────
-chown -R "$SPORE_UID:$SPORE_GID" /data /workspace /app/tools 2>/dev/null || true
-chown -R "$SPORE_UID:$SPORE_GID" /app/plugins 2>/dev/null || true
+# Smart chown: if the top of the directory is already owned by spore,
+# skip the recursive walk (huge win on /workspace which can hold tens
+# of thousands of cached files on a slow bind-mount filesystem). Set
+# SPORE_FORCE_CHOWN=true to override and always do the full walk.
+chown_smart() {
+  local target="$1"
+  [ -e "$target" ] || return 0
+  if [ "${SPORE_FORCE_CHOWN:-false}" != "true" ]; then
+    local cur="$(stat -c '%u:%g' "$target" 2>/dev/null)"
+    if [ "$cur" = "$SPORE_UID:$SPORE_GID" ]; then
+      return 0
+    fi
+  fi
+  chown -R "$SPORE_UID:$SPORE_GID" "$target" 2>/dev/null || true
+}
+chown_smart /data
+chown_smart /workspace
+chown_smart /app/tools
+chown_smart /app/plugins
 # Group-write so the manager container (UID 1000, GID 2000 supplementary) can
-# update .env and spore.json through the shared bind mount
+# update .env and spore.json through the shared bind mount. Cheap on /data
+# (~100 files); never run on /workspace since cache files don't need it.
 chmod -R g+rw /data 2>/dev/null || true
 
 # ── Shared volumes — group-writable for all spore instances ────────
@@ -52,8 +70,43 @@ if [ ! -f "$VENV_PATH/bin/python3" ]; then
   python3 -m venv --system-site-packages "$VENV_PATH"
 fi
 
+# ── Boot-time splash on the agent's web port ────────────────────────
+# Tiny static HTTP server that holds the canvas URL while the rest of
+# entrypoint runs and Node spins up. Killed right before exec'ing node
+# so the port is free. Splash auto-refreshes every 2s, so the user
+# lands on the real /graph as soon as Node binds.
+SPORE_WEB_PORT="${SPORE_WEB_PORT:-}"
+if [ -z "$SPORE_WEB_PORT" ]; then
+  for f in /app/.env /data/.env; do
+    [ -f "$f" ] || continue
+    val="$(grep -E '^SPORE_WEB_PORT=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d ' ')"
+    if [ -n "$val" ]; then SPORE_WEB_PORT="$val"; break; fi
+  done
+fi
+SPORE_WEB_PORT="${SPORE_WEB_PORT:-18803}"
+SPLASH_PID=""
+if [ -d /app/static/booting ] && command -v python3 >/dev/null 2>&1; then
+  python3 -m http.server "$SPORE_WEB_PORT" --bind 0.0.0.0 \
+    --directory /app/static/booting > /tmp/splash.log 2>&1 &
+  SPLASH_PID=$!
+  echo "[entrypoint] booting splash on :$SPORE_WEB_PORT (pid=$SPLASH_PID)"
+fi
+
 # Generate environment manifest so the agent knows what's installed without probing.
-# Refreshed every boot to stay current with image/venv changes.
+# Cached for 1 hour — packages rarely change boot-to-boot, and the
+# pip-list + 7 cmd-version subprocesses cost ~10s on a slow filesystem.
+# Set SPORE_FORCE_MANIFEST=true to regenerate on demand.
+MANIFEST_TTL=3600
+SKIP_MANIFEST=""
+if [ -f "$MANIFEST" ] && [ "${SPORE_FORCE_MANIFEST:-false}" != "true" ]; then
+  age=$(( $(date +%s) - $(stat -c '%Y' "$MANIFEST" 2>/dev/null || echo 0) ))
+  if [ "$age" -gt 0 ] && [ "$age" -lt "$MANIFEST_TTL" ]; then
+    SKIP_MANIFEST=1
+  fi
+fi
+if [ -n "$SKIP_MANIFEST" ]; then
+  echo "[entrypoint] env manifest cached (age=${age}s, ttl=${MANIFEST_TTL}s)"
+else
 python3 -c "
 import json, sys, subprocess, os
 
@@ -93,6 +146,7 @@ for cmd, flag in [
 with open('$MANIFEST', 'w') as f:
     json.dump(manifest, f, indent=2)
 " 2>/dev/null && echo "[entrypoint] environment manifest written" || echo "[entrypoint] manifest generation failed (non-fatal)"
+fi  # SKIP_MANIFEST guard
 
 # ── Persist ALL caches and local installs to workspace volume ───────
 # Everything outside /workspace and /data is ephemeral container layer.
@@ -235,8 +289,21 @@ if [ -f "$ON_BOOT" ] && [ -s "$ON_BOOT" ]; then
   (setpriv --reuid="$SPORE_UID" --regid="$SPORE_GID" --init-groups sh "$ON_BOOT" > /workspace/.on-boot.log 2>&1 && echo "[entrypoint] on-boot script finished") &
 fi
 
-# Final ownership pass — catches files created by the setup steps above
-chown -R "$SPORE_UID:$SPORE_GID" /data /workspace 2>/dev/null || true
+# Final ownership pass — catches files created by the setup steps
+# above (manifest, .venv, /app/tools seed). Narrow targets only — a
+# full /workspace walk is what made cold boot 45s+. Smart top-of-tree
+# chown above already handled the bulk; this just sweeps the few new
+# files.
+chown "$SPORE_UID:$SPORE_GID" "$MANIFEST" 2>/dev/null || true
+[ -d "$VENV_PATH" ] && chown -R "$SPORE_UID:$SPORE_GID" "$VENV_PATH" 2>/dev/null || true
+
+# Kill the boot-splash server so its port is free. Brief gap (<1s)
+# until Node binds; the splash's 2s auto-refresh covers it.
+if [ -n "${SPLASH_PID:-}" ]; then
+  kill "$SPLASH_PID" 2>/dev/null
+  wait "$SPLASH_PID" 2>/dev/null
+  echo "[entrypoint] splash stopped — handing off to node"
+fi
 
 # Run the node process — always drop to unprivileged spore user (2000:2000).
 # Package installation is handled via restricted sudo (apt-get/apt/dpkg only).

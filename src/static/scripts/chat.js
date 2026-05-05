@@ -3,48 +3,68 @@
 // Extracted from src/static/scripts/app.js (was lines 3870-5914 of the post-Phase-2 monolith).
 
 // ── REST API helpers ──
-async function fetchGraph() {
-  const res = await fetch(API + '/api/graph');
-  return res.json();
+function graphApiUrl(path) {
+  const slug = typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug ? String(_viewedGraphSlug) : '';
+  const meta = typeof _viewedGraphMeta !== 'undefined' ? _viewedGraphMeta : null;
+  if (meta?.active === true) return API + path;
+  if (!slug) return API + path;
+  const sep = path.includes('?') ? '&' : '?';
+  return API + path + sep + 'scopeGraph=' + encodeURIComponent(slug);
+}
+
+async function fetchGraph(opts = {}) {
+  const explicitSlug = opts?.slug ? String(opts.slug) : null;
+  const preserveViewed = opts?.preserveViewed !== false;
+  const viewedSlug = preserveViewed && typeof _viewedGraphSlug !== 'undefined' ? _viewedGraphSlug : null;
+  const slug = explicitSlug || viewedSlug;
+  const url = slug
+    ? `/api/graphs/${encodeURIComponent(slug)}/data`
+    : '/api/graph';
+  const res = await fetch(API + url);
+  const data = await res.json();
+  if (data?.graph && typeof _setViewedGraph === 'function') {
+    _setViewedGraph(data, slug);
+  }
+  return data;
 }
 
 async function saveNode(data) {
-  const res = await fetch(API + '/api/graph/node', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const res = await fetch(graphApiUrl('/api/graph/node'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
   return res.json();
 }
 
 async function deleteNode(id) {
-  const res = await fetch(API + '/api/graph/node/' + encodeURIComponent(id), { method: 'DELETE' });
+  const res = await fetch(graphApiUrl('/api/graph/node/' + encodeURIComponent(id)), { method: 'DELETE' });
   return res.json();
 }
 
 async function saveAspect(data) {
-  const res = await fetch(API + '/api/graph/aspect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const res = await fetch(graphApiUrl('/api/graph/aspect'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
   return res.json();
 }
 
 async function deleteAspect(id) {
-  const res = await fetch(API + '/api/graph/aspect/' + id, { method: 'DELETE' });
+  const res = await fetch(graphApiUrl('/api/graph/aspect/' + id), { method: 'DELETE' });
   return res.json();
 }
 
 async function updateAttribute(id, data) {
-  const res = await fetch(API + '/api/graph/attribute/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const res = await fetch(graphApiUrl('/api/graph/attribute/' + id), { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
   return res.json();
 }
 
 async function deleteAttribute(id) {
-  const res = await fetch(API + '/api/graph/attribute/' + id, { method: 'DELETE' });
+  const res = await fetch(graphApiUrl('/api/graph/attribute/' + id), { method: 'DELETE' });
   return res.json();
 }
 
 async function saveEdge(data) {
-  const res = await fetch(API + '/api/graph/edge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const res = await fetch(graphApiUrl('/api/graph/edge'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
   return res.json();
 }
 
 async function deleteEdge(data) {
-  const res = await fetch(API + '/api/graph/edge', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const res = await fetch(graphApiUrl('/api/graph/edge'), { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
   return res.json();
 }
 
@@ -66,7 +86,7 @@ function setChatBusy(busy) {
   if (busy) _chatStopped = false;
   const sendBtn = document.getElementById('chat-send');
   const stopBtn = document.getElementById('chat-stop');
-  sendBtn.textContent = busy ? 'send ⏎' : 'send';
+  sendBtn.textContent = 'send';
   sendBtn.style.display = '';
   stopBtn.style.display = busy ? '' : 'none';
   if (busy) _sporeActivityStart('chat');
@@ -177,7 +197,11 @@ async function connectWs() {
       return;
     }
     if (msg.type && msg.type.startsWith('code:')) {
-      handleCodeEvent(msg);
+      try {
+        handleCodeEvent(msg);
+      } catch (e) {
+        console.warn('[code-viewer] event failed', e);
+      }
       return;
     }
     if (msg.type === 'notification') {
@@ -189,12 +213,25 @@ async function connectWs() {
 }
 
 let _chatToolCount = 0;
+let _chatToolGroupEl = null;
+let _chatToolGroupBody = null;
+let _chatToolEvents = [];
+let _chatToolActiveEvent = null;
 
 function setActivity(text) {
   const bar = document.getElementById('agent-activity');
   const label = document.getElementById('activity-text');
-  if (text) { label.textContent = text; bar.classList.add('active'); }
-  else { bar.classList.remove('active'); }
+  if (typeof window.setEventLogStatus === 'function') {
+    window.setEventLogStatus(text ? { op: 'chat', detail: text, source: 'agent' } : null);
+  }
+  // Legacy DOM node kept for older markup/mobile shell code, but the live
+  // activity now belongs in the dock event log so it never steals vertical
+  // space from the latest chat text/tool output.
+  if (!bar) return;
+  if (label) label.textContent = text || '';
+  bar.title = text || '';
+  bar.classList.remove('active');
+  bar.setAttribute('aria-hidden', 'true');
 }
 
 function chatShouldAutoScroll() {
@@ -211,16 +248,16 @@ function chatScrollToBottom() {
 function finalizeStreamingMsg() {
   if (!streamingMsgEl) return;
   streamingMsgEl.classList.remove('streaming');
-  var thinkingUseful = _thinkingDelta && _thinkingDelta.trim().length > 20;
-  if (!_streamDelta && thinkingUseful) {
-    streamingMsgEl.classList.add('thinking-done');
-    streamingMsgEl.onclick = function() { this.classList.toggle('expanded'); };
-  } else if (!_streamDelta) {
-    // Remove the bubble AND its row wrapper if present.
-    const row = streamingMsgEl.closest('.chat-row');
-    (row || streamingMsgEl).remove();
+  if (!_streamDelta) {
+    _removeChatBubble(streamingMsgEl);
   }
   streamingMsgEl = null;
+}
+
+function _removeChatBubble(el) {
+  if (!el) return;
+  const row = el.closest?.('.chat-row');
+  (row || el).remove();
 }
 
 // Lazy-create the streaming assistant bubble. Lets us avoid blank
@@ -233,46 +270,231 @@ function _ensureStreamingBubble() {
   return streamingMsgEl;
 }
 
-// Render a "tool used" card inline in the chat. Carries the tool name
-// plus a brief input snippet (when available) so the user actually
-// sees what the agent did, instead of an empty "⚙ web_search" line.
-function _renderToolCard(toolName, toolInput) {
-  const container = document.getElementById('chat-messages');
-  const card = document.createElement('div');
-  card.className = 'chat-msg tool-card';
-  // Pick the most informative-looking field from the input object.
+function _resetToolRunGroup() {
+  _chatToolGroupEl = null;
+  _chatToolGroupBody = null;
+  _chatToolEvents = [];
+  _chatToolActiveEvent = null;
+}
+
+function _summarizeToolInput(toolInput) {
   let summary = '';
+  let raw = '';
+  const pick = (value) => {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    return trimmed ? trimmed : '';
+  };
   if (toolInput && typeof toolInput === 'object') {
     const candidates = ['query', 'q', 'url', 'path', 'command', 'cmd', 'message', 'description', 'task', 'text', 'name'];
     for (const k of candidates) {
-      const v = toolInput[k];
-      if (typeof v === 'string' && v.trim()) { summary = v.trim(); break; }
+      summary = pick(toolInput[k]);
+      if (summary) break;
     }
-    if (!summary) {
-      try { summary = JSON.stringify(toolInput); } catch {}
-    }
+    try { raw = JSON.stringify(toolInput, null, 2); } catch {}
+    if (!summary) summary = raw;
   } else if (typeof toolInput === 'string') {
-    summary = toolInput;
+    summary = toolInput.trim();
+    raw = summary;
   }
-  if (summary.length > 140) summary = summary.slice(0, 137) + '…';
+  if (summary.length > 180) summary = summary.slice(0, 177) + '…';
+  return { summary, raw };
+}
+
+function _toolRunLabel() {
+  const counts = new Map();
+  for (const ev of _chatToolEvents) {
+    const name = ev.name && ev.name !== 'tool' ? ev.name : 'tool';
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  const parts = [...counts.entries()].slice(0, 4).map(([name, count]) => `${name}${count > 1 ? ' ×' + count : ''}`);
+  const extra = counts.size > 4 ? ` +${counts.size - 4}` : '';
+  return parts.join(' · ') + extra;
+}
+
+function _ensureToolRunGroup() {
+  const container = document.getElementById('chat-messages');
+  if (!container) return null;
+  if (_chatToolGroupEl && _chatToolGroupEl.isConnected) return _chatToolGroupEl;
+
+  const details = document.createElement('details');
+  details.className = 'chat-tool-run';
+  // New assistant runs should expose tool activity by default, but once
+  // the user collapses this <details>, later tool events in the same run
+  // must not force it open again.
+  details.open = true;
+  const summary = document.createElement('summary');
+  summary.className = 'chat-tool-run-summary';
+  summary.innerHTML = `
+    <span class="tool-run-kicker">tools</span>
+    <span class="tool-run-count">0 calls</span>
+    <span class="tool-run-names"></span>
+    <span class="tool-run-hint">details</span>
+  `;
+  const body = document.createElement('div');
+  body.className = 'chat-tool-run-body';
+  details.appendChild(summary);
+  details.appendChild(body);
+  container.appendChild(details);
+  _chatToolGroupEl = details;
+  _chatToolGroupBody = body;
+  return details;
+}
+
+function _updateToolRunSummary() {
+  if (!_chatToolGroupEl) return;
+  const total = _chatToolEvents.length;
+  const count = _chatToolGroupEl.querySelector('.tool-run-count');
+  const names = _chatToolGroupEl.querySelector('.tool-run-names');
+  if (count) count.textContent = `${total} call${total === 1 ? '' : 's'}`;
+  if (names) names.textContent = _toolRunLabel();
+}
+
+function _formatToolStatus(state, meta = {}) {
+  if (state === 'running') return 'running';
+  if (state === 'done') {
+    const ms = Number(meta.durationMs);
+    if (Number.isFinite(ms) && ms >= 0) return ms >= 1000 ? `done ${(ms / 1000).toFixed(1)}s` : `done ${ms}ms`;
+    return 'done';
+  }
+  if (state === 'progress') {
+    const bytes = Number(meta.bytes) || 0;
+    return bytes >= 1024 ? `writing ${Math.round(bytes / 1024)}KB` : `writing ${bytes}B`;
+  }
+  return 'calling';
+}
+
+function _findPendingToolEvent(toolName) {
+  const wanted = (toolName || '').trim();
+  for (let i = _chatToolEvents.length - 1; i >= 0; i--) {
+    const ev = _chatToolEvents[i];
+    if (ev.done) continue;
+    if (!wanted || !ev.name || ev.name === 'tool' || ev.name === wanted) return ev;
+  }
+  return null;
+}
+
+function _renderToolEvent(ev) {
+  if (!ev?.row) return;
+  const displayName = ev.name || 'tool';
+  const displaySummary = ev.summary || 'preparing arguments...';
+  ev.row.classList.toggle('pending', !ev.summary && !ev.done);
+  ev.row.classList.toggle('running', ev.state === 'running' || ev.state === 'progress');
+  ev.row.classList.toggle('done', !!ev.done);
+  if (ev.nameEl) ev.nameEl.textContent = displayName;
+  if (ev.inputEl) ev.inputEl.textContent = displaySummary;
+  if (ev.statusEl) ev.statusEl.textContent = _formatToolStatus(ev.state, ev);
+  if (ev.rawEl) {
+    if (ev.raw && ev.raw !== ev.summary && ev.raw.length < 4000) {
+      ev.rawEl.textContent = ev.raw;
+      ev.rawEl.style.display = '';
+    } else {
+      ev.rawEl.textContent = '';
+      ev.rawEl.style.display = 'none';
+    }
+  }
+}
+
+// Condensed tool run: one collapsible event per assistant run instead of
+// one speech-bubble-like card per tool call.
+function _recordToolEvent(toolName, toolInput, opts = {}) {
+  const container = document.getElementById('chat-messages');
+  const group = _ensureToolRunGroup();
+  if (!group || !_chatToolGroupBody) return null;
+
+  const state = opts.state || 'calling';
+  const name = (toolName || '').trim() || 'tool';
+  const { summary, raw } = _summarizeToolInput(toolInput);
+  const shouldUpdate = opts.updateLast !== false;
+  let ev = shouldUpdate ? _findPendingToolEvent(name) : null;
+  if (ev) {
+    if (name && name !== 'tool') ev.name = name;
+    if (summary) ev.summary = summary;
+    if (raw) ev.raw = raw;
+    ev.state = state;
+    ev.bytes = opts.bytes;
+    ev.durationMs = opts.durationMs;
+    ev.done = state === 'done';
+    _renderToolEvent(ev);
+    _chatToolActiveEvent = ev.done ? null : ev;
+    _updateToolRunSummary();
+    if (chatShouldAutoScroll()) container.scrollTop = container.scrollHeight;
+    return group;
+  }
+
+  const row = document.createElement('div');
+  row.className = 'chat-tool-event';
+  const title = document.createElement('div');
+  title.className = 'chat-tool-event-title';
+  const index = document.createElement('span');
+  index.className = 'chat-tool-event-index';
+  index.textContent = String(_chatToolEvents.length + 1).padStart(2, '0');
   const nameEl = document.createElement('span');
-  nameEl.className = 'tool-card-name';
-  nameEl.textContent = toolName || 'tool';
-  card.appendChild(document.createTextNode('⚙ '));
-  card.appendChild(nameEl);
-  if (summary) {
-    const sep = document.createElement('span');
-    sep.className = 'tool-card-sep';
-    sep.textContent = ' · ';
-    card.appendChild(sep);
-    const sumEl = document.createElement('span');
-    sumEl.className = 'tool-card-input';
-    sumEl.textContent = summary;
-    card.appendChild(sumEl);
-  }
-  container.appendChild(card);
+  nameEl.className = 'chat-tool-event-name';
+  nameEl.textContent = name;
+  const statusEl = document.createElement('span');
+  statusEl.className = 'chat-tool-event-status';
+  title.appendChild(index);
+  title.appendChild(nameEl);
+  title.appendChild(statusEl);
+  row.appendChild(title);
+
+  const input = document.createElement('div');
+  input.className = 'chat-tool-event-input';
+  row.appendChild(input);
+
+  const pre = document.createElement('pre');
+  pre.className = 'chat-tool-event-raw';
+  row.appendChild(pre);
+
+  ev = {
+    name,
+    summary,
+    raw,
+    state,
+    bytes: opts.bytes,
+    durationMs: opts.durationMs,
+    done: state === 'done',
+    row,
+    nameEl,
+    statusEl,
+    inputEl: input,
+    rawEl: pre,
+  };
+  _chatToolEvents.push(ev);
+  _chatToolActiveEvent = ev.done ? null : ev;
+  _renderToolEvent(ev);
+
+  _chatToolGroupBody.appendChild(row);
+  _updateToolRunSummary();
   if (chatShouldAutoScroll()) container.scrollTop = container.scrollHeight;
-  return card;
+  return group;
+}
+
+function _updateCurrentToolEvent(toolName, opts = {}) {
+  const name = (toolName || '').trim();
+  const target = _findPendingToolEvent(name) || _chatToolActiveEvent;
+  if (!target) {
+    return _recordToolEvent(name || 'tool', opts.input || opts.detail || '', opts);
+  }
+  if (name && name !== 'tool') target.name = name;
+  if (opts.input !== undefined) {
+    const { summary, raw } = _summarizeToolInput(opts.input);
+    if (summary) target.summary = summary;
+    if (raw) target.raw = raw;
+  } else if (opts.detail) {
+    target.summary = String(opts.detail);
+  }
+  target.state = opts.state || target.state || 'calling';
+  target.bytes = opts.bytes;
+  target.durationMs = opts.durationMs;
+  target.done = target.state === 'done';
+  _renderToolEvent(target);
+  _chatToolActiveEvent = target.done ? null : target;
+  _updateToolRunSummary();
+  const container = document.getElementById('chat-messages');
+  if (container && chatShouldAutoScroll()) container.scrollTop = container.scrollHeight;
+  return target.row;
 }
 
 function handleWsMessage(msg) {
@@ -317,11 +539,13 @@ function handleWsMessage(msg) {
     setActivity('thinking...');
     streamChunks = [];
     _streamDelta = '';
+    _resetToolRunGroup();
     finalizeStreamingMsg();
     streamingMsgEl = null;
   } else if (msg.type === 'chat:start') {
     setChatBusy(true);
     _chatToolCount = 0;
+    _resetToolRunGroup();
     streamChunks = [];
     _streamDelta = '';
     _userWasAtBottom = chatShouldAutoScroll();
@@ -336,12 +560,7 @@ function handleWsMessage(msg) {
     _thinkingDelta = '';
   } else if (msg.type === 'chat:thinking') {
     _thinkingDelta += msg.text;
-    if (!_streamDelta) {
-      _ensureStreamingBubble();
-      streamingMsgEl.textContent = _thinkingDelta;
-      streamingMsgEl.classList.add('thinking-stream');
-      if (_userWasAtBottom) chatScrollToBottom();
-    }
+    if (!_streamDelta && msg.text) setActivity('thinking...');
   } else if (msg.type === 'chat:delta') {
     if (_thinkingDelta && !_streamDelta) {
       if (streamingMsgEl) streamingMsgEl.classList.remove('thinking-stream');
@@ -360,8 +579,8 @@ function handleWsMessage(msg) {
     } else {
       finalizeStreamingMsg();
     }
-    _renderToolCard(msg.tool, msg.input);
-    setActivity('using ' + msg.tool + (_chatToolCount > 1 ? '  (' + _chatToolCount + ' tools)' : ''));
+    _recordToolEvent(msg.tool, msg.input, { state: msg.input ? 'running' : 'calling', updateLast: false });
+    setActivity('using ' + (msg.tool || 'tool') + (_chatToolCount > 1 ? '  (' + _chatToolCount + ' tools)' : ''));
     _streamDelta = '';
     // Don't immediately create a new empty bubble for the next iteration.
     // The next chat:thinking/delta/chunk will create one if needed.
@@ -379,13 +598,16 @@ function handleWsMessage(msg) {
     } else if (s === 'tool_progress') {
       const kb = Math.round((msg.bytes || 0) / 1024);
       const label = kb > 0 ? kb + 'KB' : (msg.bytes || 0) + 'B';
+      _updateCurrentToolEvent(msg.tool, { state: 'progress', bytes: msg.bytes });
       setActivity('writing ' + (msg.tool || '') + ' ' + label + '...');
     } else if (s === 'tool_exec_start') {
       const d = msg.detail ? ': ' + msg.detail.substring(0, 60) : '';
+      _updateCurrentToolEvent(msg.tool, { state: 'running', detail: msg.detail, input: msg.input });
       setActivity('running ' + msg.tool + d + '...');
     } else if (s === 'tool_exec_done') {
       const sec = msg.durationMs >= 1000 ? (msg.durationMs / 1000).toFixed(1) + 's' : msg.durationMs + 'ms';
       const d = msg.detail ? ' — ' + msg.detail.substring(0, 40) : '';
+      _updateCurrentToolEvent(msg.tool, { state: 'done', detail: msg.detail, durationMs: msg.durationMs });
       setActivity(msg.tool + ' done (' + sec + ')' + d);
     } else if (s === 'truncated') {
       setActivity('output truncated — retrying with smaller output...');
@@ -413,16 +635,14 @@ function handleWsMessage(msg) {
     if (_userWasAtBottom) chatScrollToBottom();
   } else if (msg.type === 'chat:done') {
     setActivity(null);
+    if (_chatToolGroupEl) _chatToolGroupEl.classList.add('complete');
     if (streamingMsgEl) {
       streamingMsgEl.classList.remove('streaming', 'thinking-stream');
       const content = _streamDelta || '';
       if (content.trim()) {
         streamingMsgEl.innerHTML = formatAssistantMsg(content, msg);
-      } else if (_thinkingDelta) {
-        streamingMsgEl.classList.add('thinking-done');
-        streamingMsgEl.onclick = function() { this.classList.toggle('expanded'); };
       } else {
-        streamingMsgEl.remove();
+        _removeChatBubble(streamingMsgEl);
         // Append tool tags and usage to the last assistant bubble
         if (msg.toolUsage || msg.usage) {
           const allAssistant = document.getElementById('chat-messages').querySelectorAll('.chat-msg.assistant');
@@ -502,6 +722,8 @@ function handleWsMessage(msg) {
     renderAskUserCard(msg);
   } else if (msg.type === 'ask_user_answer_ack') {
     // ack landed — picker already disabled; nothing to do
+  } else if (msg.type === 'ask_user_cancelled') {
+    markAskUserCancelled(msg);
   } else if (msg.type === 'plan_proposal' || msg.type === 'plan_applied'
              || msg.type === 'plan_rejected' || msg.type === 'plan_mode') {
     handlePlanModeMessage(msg);
@@ -541,6 +763,16 @@ function renderAskUserCard(msg) {
       card.querySelector('.au-status').textContent = 'Failed to send — reconnect?';
     }
   });
+}
+
+function markAskUserCancelled(msg) {
+  const qid = String(msg.qid || '');
+  const card = [...document.querySelectorAll('.chat-ask-user')].find(el => el.dataset.qid === qid);
+  if (!card) return;
+  card.classList.add('is-cancelled');
+  card.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+  const status = card.querySelector('.au-status');
+  if (status) status.textContent = 'Cancelled';
 }
 
 // Tiny HTML escaper for the picker (the chat otherwise renders markdown).
@@ -844,6 +1076,11 @@ function _saResetStaleTimer(taskId) {
 // ── Browser Live Preview ──
 let _browserFrameUrl = null;
 let _browserFrameCount = 0;
+// User-dismissed flag: when the operator clicks ✕ on the preview
+// panel we hide it AND set this. Incoming `browser:frame` packets
+// then update img silently without re-popping the panel. Cleared on
+// the next `browser:open` (= next browser tool launch).
+let _browserPanelDismissed = false;
 let _browserLastFrameTime = 0;
 
 function _clampBrowserPanel(panel) {
@@ -885,7 +1122,7 @@ function handleBrowserFrame(arrayBuf) {
   _browserFrameUrl = url;
   img.src = url;
 
-  if (!panel.classList.contains('active')) {
+  if (!panel.classList.contains('active') && !_browserPanelDismissed) {
     panel.classList.add('active');
     _clampBrowserPanel(panel);
   }
@@ -936,6 +1173,10 @@ function dismissToast(el) {
 function handleBrowserControl(msg) {
   const panel = document.getElementById('browser-preview');
   if (msg.type === 'browser:open') {
+    // New browser session — clear any prior user-dismissed state so
+    // the panel actually shows. Without this, an operator who closed
+    // the panel during a previous session would never see the new one.
+    _browserPanelDismissed = false;
     panel.classList.add('active');
     _clampBrowserPanel(panel);
     _browserFrameCount = 0;
@@ -972,7 +1213,13 @@ function _initBrowserPreview() {
     } catch {}
   }
 
-  closeBtn.addEventListener('click', () => { panel.classList.remove('active'); });
+  closeBtn.addEventListener('click', () => {
+    panel.classList.remove('active');
+    // Mark the panel as user-dismissed so subsequent frame packets
+    // don't silently re-open it. Cleared on the next browser:open
+    // (= next time the agent calls browser({action:"launch"})).
+    _browserPanelDismissed = true;
+  });
 
   // Drag from header
   let mode = null, startX, startY, startLeft, startTop, startW, startH;
@@ -1035,7 +1282,9 @@ let _cvActiveTabId = null;
 let _cvAutoHideTimer = null;
 const CV_MAX_TABS = 8;
 const CV_AUTO_HIDE_MS = 120000;
-let _cvMode = localStorage.getItem('cv-mode') || 'on-request';
+const _cvSavedMode = localStorage.getItem('cv-mode');
+let _cvMode = _cvSavedMode === 'off' ? 'off' : 'on-request';
+if (_cvSavedMode === 'auto') localStorage.setItem('cv-mode', 'on-request');
 let _cvPendingCount = 0;
 let _cvDocked = localStorage.getItem('cv-docked') !== 'false'; // default docked
 
@@ -1043,10 +1292,13 @@ let _cvDocked = localStorage.getItem('cv-docked') !== 'false'; // default docked
 function _ctSetActiveTab(tabName) {
   const canvas = document.getElementById('canvas');
   const tabBar = document.getElementById('canvas-tabs');
-  if (!tabBar) return;
-  tabBar.querySelectorAll('.canvas-tab').forEach(t => {
-    t.classList.toggle('active', t.dataset.ct === tabName);
-  });
+  if (tabBar) {
+    tabBar.classList.remove('active');
+    tabBar.querySelectorAll('.canvas-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.ct === tabName);
+    });
+  }
+  if (!canvas) return;
   if (tabName === 'code') {
     canvas.classList.add('cv-tab-active');
     const cv = document.getElementById('code-viewer');
@@ -1064,7 +1316,7 @@ function _ctSetActiveTab(tabName) {
 
 function _ctShowTabBar() {
   const tabBar = document.getElementById('canvas-tabs');
-  if (tabBar) tabBar.classList.add('active');
+  if (tabBar) tabBar.classList.remove('active');
 }
 
 function _ctHideTabBar() {
@@ -1102,7 +1354,6 @@ function _cvSetDocked(docked) {
     panel.style.left = ''; panel.style.top = '';
     panel.style.width = ''; panel.style.height = '';
     if (_cvTabs.length > 0 && panel.classList.contains('active')) {
-      _ctShowTabBar();
       _ctSetActiveTab('code');
     }
   } else {
@@ -1131,7 +1382,7 @@ function _initCanvasTabs() {
       // Close the code tab — hide the code viewer
       const panel = document.getElementById('code-viewer');
       if (_cvEditing) _cvExitEditMode(false);
-      panel.classList.remove('active');
+      if (panel) panel.classList.remove('active');
       _ctSetActiveTab('graph');
       if (_cvTabs.length === 0) _ctHideTabBar();
       return;
@@ -1276,6 +1527,31 @@ function _cvRenderLineNumbers(lineCount) {
   el.innerHTML = html;
 }
 
+function _cvClearLineNumbers() {
+  const el = document.querySelector('#code-viewer .cv-line-numbers');
+  if (el) el.innerHTML = '';
+}
+
+function _cvOpenPanel(panel = document.getElementById('code-viewer')) {
+  if (!panel) return;
+  panel.classList.add('active');
+  _cvPendingCount = 0;
+  _cvUpdatePendingBadge();
+  _ctUpdateCodeBadge();
+  if (_cvDocked) _ctSetActiveTab('code');
+  if (_cvAceEditor) setTimeout(() => _cvAceEditor.resize(), 50);
+}
+
+function _cvClosePanel(panel = document.getElementById('code-viewer')) {
+  if (!panel) return;
+  if (_cvEditing) _cvExitEditMode(false);
+  panel.classList.remove('active');
+  panel.classList.remove('editing');
+  _ctSetActiveTab('graph');
+  _ctHideTabBar();
+  _cvUpdatePendingBadge();
+}
+
 function _cvRenderTab(tab) {
   const panel = document.getElementById('code-viewer');
   const pathEl = document.getElementById('code-viewer-path');
@@ -1284,20 +1560,24 @@ function _cvRenderTab(tab) {
   const langEl = document.getElementById('code-viewer-lang');
   const infoEl = document.getElementById('code-viewer-info');
   const contentEl = document.getElementById('code-viewer-content');
+  const toolbar = document.getElementById('code-viewer-toolbar');
+  const editBtn = document.getElementById('code-viewer-edit-btn');
+  const saveBtn = document.getElementById('code-viewer-save-btn');
+  const discardBtn = document.getElementById('code-viewer-discard-btn');
+  const saveStatus = document.getElementById('code-viewer-save-status');
+
+  if (!panel || !pathEl || !badgeEl || !codeEl || !langEl || !infoEl || !contentEl) return;
 
   pathEl.textContent = _cvShortPath(tab.path);
   pathEl.title = tab.path;
 
   if (tab.badge === 'new') {
-    badgeEl.textContent = 'NEW'; badgeEl.className = 'cv-badge cv-badge-new';
+    badgeEl.textContent = 'new'; badgeEl.className = 'cv-badge cv-badge-new';
   } else if (tab.badge === 'edit') {
-    badgeEl.textContent = 'EDIT'; badgeEl.className = 'cv-badge cv-badge-edit';
+    badgeEl.textContent = 'edit'; badgeEl.className = 'cv-badge cv-badge-edit';
   } else {
-    badgeEl.textContent = 'READ'; badgeEl.className = 'cv-badge cv-badge-read';
+    badgeEl.textContent = 'read'; badgeEl.className = 'cv-badge cv-badge-read';
   }
-
-  const toolbar = document.getElementById('code-viewer-toolbar');
-  const editBtn = document.getElementById('code-viewer-edit-btn');
 
   // Media branch: if the tab's path has a known media extension, render an
   // <img>/<video>/<audio> instead of the code+line-numbers view. No edit UI.
@@ -1311,7 +1591,7 @@ function _cvRenderTab(tab) {
   }
   if (mediaType && tab.mode !== 'diff') {
     contentEl.classList.remove('has-lines');
-    document.querySelector('#code-viewer .cv-line-numbers').innerHTML = '';
+    _cvClearLineNumbers();
     const workspacePath = tab.path.startsWith('/workspace/') ? tab.path : `/workspace/${tab.path.replace(/^\/+/, '')}`;
     const mediaUrl = resolveAnimaMediaUrl(workspacePath);
     const escUrl = esc(mediaUrl);
@@ -1324,16 +1604,13 @@ function _cvRenderTab(tab) {
     }
     langEl.textContent = mediaType;
     infoEl.textContent = mediaExt.toUpperCase();
-    toolbar.classList.remove('active');
+    if (toolbar) toolbar.classList.remove('active');
     panel.classList.remove('editing');
     contentEl.scrollTop = 0;
     _cvRenderTabBar();
-    if (_cvMode === 'auto' || panel.classList.contains('active')) {
-      panel.classList.add('active');
-      _cvPendingCount = 0;
-      _cvUpdatePendingBadge();
-      if (_cvDocked) { _ctShowTabBar(); _ctSetActiveTab('code'); }
-    } else if (_cvMode === 'on-request') {
+    if (panel.classList.contains('active')) {
+      _cvOpenPanel(panel);
+    } else if (_cvMode !== 'off') {
       _cvPendingCount++;
       _cvUpdatePendingBadge();
       _ctUpdateCodeBadge();
@@ -1343,11 +1620,11 @@ function _cvRenderTab(tab) {
 
   if (tab.mode === 'diff') {
     contentEl.classList.remove('has-lines');
-    document.querySelector('#code-viewer .cv-line-numbers').innerHTML = '';
+    _cvClearLineNumbers();
     codeEl.innerHTML = tab.content;
     langEl.textContent = _cvLangAlias(tab.language);
     infoEl.textContent = 'diff';
-    toolbar.classList.remove('active');
+    if (toolbar) toolbar.classList.remove('active');
   } else {
     contentEl.classList.add('has-lines');
     codeEl.innerHTML = _cvHighlight(tab.content, tab.language);
@@ -1356,11 +1633,11 @@ function _cvRenderTab(tab) {
     langEl.textContent = _cvLangAlias(tab.language);
     infoEl.textContent = `${lineCount} lines`;
     // Show toolbar with Edit button for viewable files
-    toolbar.classList.add('active');
-    editBtn.style.display = '';
-    document.getElementById('code-viewer-save-btn').style.display = 'none';
-    document.getElementById('code-viewer-discard-btn').style.display = 'none';
-    document.getElementById('code-viewer-save-status').textContent = '';
+    if (toolbar) toolbar.classList.add('active');
+    if (editBtn) editBtn.style.display = '';
+    if (saveBtn) saveBtn.style.display = 'none';
+    if (discardBtn) discardBtn.style.display = 'none';
+    if (saveStatus) saveStatus.textContent = '';
   }
 
   panel.classList.remove('editing');
@@ -1371,15 +1648,9 @@ function _cvRenderTab(tab) {
   // Update tab bar
   _cvRenderTabBar();
 
-  if (_cvMode === 'auto' || panel.classList.contains('active')) {
-    panel.classList.add('active');
-    _cvPendingCount = 0;
-    _cvUpdatePendingBadge();
-    if (_cvDocked) {
-      _ctShowTabBar();
-      _ctSetActiveTab('code');
-    }
-  } else if (_cvMode === 'on-request') {
+  if (panel.classList.contains('active')) {
+    _cvOpenPanel(panel);
+  } else if (_cvMode !== 'off') {
     _cvPendingCount++;
     _cvUpdatePendingBadge();
     _ctUpdateCodeBadge();
@@ -1428,7 +1699,10 @@ function _cvCloseTab(tabId) {
   if (idx === -1) return;
   _cvTabs.splice(idx, 1);
   if (_cvTabs.length === 0) {
-    document.getElementById('code-viewer').classList.remove('active');
+    const panel = document.getElementById('code-viewer');
+    if (panel) panel.classList.remove('active');
+    _cvPendingCount = 0;
+    _cvUpdatePendingBadge();
     if (_cvDocked) { _ctSetActiveTab('graph'); _ctHideTabBar(); }
     return;
   }
@@ -1438,6 +1712,7 @@ function _cvCloseTab(tabId) {
   } else {
     _cvRenderTabBar();
   }
+  _cvUpdatePendingBadge();
 }
 
 function _cvResetAutoHide() {
@@ -1450,11 +1725,24 @@ function _cvResetAutoHide() {
 function _cvUpdatePendingBadge() {
   const badge = document.getElementById('cv-pending-badge');
   if (!badge) return;
-  if (_cvPendingCount > 0 && _cvMode === 'on-request' && !document.getElementById('code-viewer').classList.contains('active')) {
-    badge.textContent = '{ } ' + _cvPendingCount + ' file' + (_cvPendingCount === 1 ? '' : 's');
-    badge.style.display = 'block';
-  } else {
-    badge.style.display = 'none';
+  const panel = document.getElementById('code-viewer');
+  const isActive = !!panel?.classList.contains('active');
+  const shouldShow = _cvMode !== 'off' && _cvTabs.length > 0;
+  const label = _cvPendingCount > 0
+    ? `code ${_cvPendingCount}`
+    : 'code';
+  badge.textContent = label;
+  badge.classList.toggle('cv-ready', shouldShow);
+  badge.classList.toggle('cv-attention', shouldShow && _cvPendingCount > 0 && !isActive);
+  badge.classList.toggle('cv-open', shouldShow && isActive);
+  badge.hidden = !shouldShow;
+  badge.title = isActive
+    ? 'Code viewer is open'
+    : _cvPendingCount > 0
+    ? `Open ${_cvPendingCount} pending code ${_cvPendingCount === 1 ? 'view' : 'views'}`
+    : 'Open code viewer';
+  if (typeof window._updateViewModePill === 'function') {
+    requestAnimationFrame(window._updateViewModePill);
   }
 }
 
@@ -1463,11 +1751,12 @@ function _cvShowFromBadge() {
   _cvUpdatePendingBadge();
   _ctUpdateCodeBadge();
   const panel = document.getElementById('code-viewer');
+  if (!panel) return;
   if (_cvTabs.length > 0) {
-    panel.classList.add('active');
     const tab = _cvTabs.find(t => t.id === _cvActiveTabId) || _cvTabs[_cvTabs.length - 1];
+    panel.classList.add('active');
     if (tab) _cvRenderTab(tab);
-    if (_cvDocked) { _ctShowTabBar(); _ctSetActiveTab('code'); }
+    _cvOpenPanel(panel);
   }
 }
 
@@ -1534,7 +1823,7 @@ function _cvEnsureAce() {
 function _cvEnterEditMode() {
   const panel = document.getElementById('code-viewer');
   const tab = _cvTabs.find(t => t.id === _cvActiveTabId);
-  if (!tab || tab.mode === 'diff') return;
+  if (!panel || !tab || tab.mode === 'diff') return;
 
   const editor = _cvEnsureAce();
   if (!editor) return;
@@ -1553,17 +1842,24 @@ function _cvEnterEditMode() {
   // Resize ace to fit the container
   setTimeout(() => editor.resize(), 50);
 
-  document.getElementById('code-viewer-toolbar').classList.add('active');
-  document.getElementById('code-viewer-edit-btn').style.display = 'none';
-  document.getElementById('code-viewer-save-btn').style.display = '';
-  document.getElementById('code-viewer-discard-btn').style.display = '';
-  document.getElementById('code-viewer-save-status').textContent = '';
+  const toolbar = document.getElementById('code-viewer-toolbar');
+  const editBtn = document.getElementById('code-viewer-edit-btn');
+  const saveBtn = document.getElementById('code-viewer-save-btn');
+  const discardBtn = document.getElementById('code-viewer-discard-btn');
+  const saveStatus = document.getElementById('code-viewer-save-status');
+  if (toolbar) toolbar.classList.add('active');
+  if (editBtn) editBtn.style.display = 'none';
+  if (saveBtn) saveBtn.style.display = '';
+  if (discardBtn) discardBtn.style.display = '';
+  if (saveStatus) saveStatus.textContent = '';
 
-  document.getElementById('code-viewer-info').textContent = 'editing';
+  const infoEl = document.getElementById('code-viewer-info');
+  if (infoEl) infoEl.textContent = 'editing';
 }
 
 function _cvExitEditMode(keepChanges) {
   const panel = document.getElementById('code-viewer');
+  if (!panel) return;
 
   if (keepChanges && _cvAceEditor) {
     const tab = _cvTabs.find(t => t.id === _cvActiveTabId);
@@ -1575,9 +1871,12 @@ function _cvExitEditMode(keepChanges) {
 
   _cvEditing = false;
   panel.classList.remove('editing');
-  document.getElementById('code-viewer-edit-btn').style.display = '';
-  document.getElementById('code-viewer-save-btn').style.display = 'none';
-  document.getElementById('code-viewer-discard-btn').style.display = 'none';
+  const editBtn = document.getElementById('code-viewer-edit-btn');
+  const saveBtn = document.getElementById('code-viewer-save-btn');
+  const discardBtn = document.getElementById('code-viewer-discard-btn');
+  if (editBtn) editBtn.style.display = '';
+  if (saveBtn) saveBtn.style.display = 'none';
+  if (discardBtn) discardBtn.style.display = 'none';
 }
 
 function _cvSave() {
@@ -1587,6 +1886,7 @@ function _cvSave() {
   const newContent = _cvAceEditor.getValue();
   const saveBtn = document.getElementById('code-viewer-save-btn');
   const statusEl = document.getElementById('code-viewer-save-status');
+  if (!saveBtn || !statusEl) return;
 
   saveBtn.disabled = true;
   statusEl.textContent = 'Saving...';
@@ -1604,7 +1904,9 @@ function _cvSave() {
 }
 
 function handleCodeEvent(msg) {
-  if (_cvMode === 'off') return;
+  if (_cvMode === 'off' && msg.type !== 'code:saved') return;
+  const panel = document.getElementById('code-viewer');
+  if (!panel) return;
 
   if (msg.type === 'code:view') {
     if (_cvEditing) _cvExitEditMode(false);
@@ -1617,11 +1919,11 @@ function handleCodeEvent(msg) {
     _cvAddTab(msg.path, 'diff', diffHtml, msg.language, 'edit');
   } else if (msg.type === 'code:close') {
     if (_cvEditing) _cvExitEditMode(false);
-    document.getElementById('code-viewer').classList.remove('active');
-    if (_cvDocked) { _ctSetActiveTab('graph'); }
+    _cvClosePanel(panel);
   } else if (msg.type === 'code:saved') {
     const statusEl = document.getElementById('code-viewer-save-status');
     const saveBtn = document.getElementById('code-viewer-save-btn');
+    if (!statusEl || !saveBtn) return;
     if (msg.error) {
       statusEl.textContent = 'Error: ' + msg.error;
       saveBtn.disabled = false;
@@ -1667,10 +1969,11 @@ function _initCodeViewer() {
       _cvMode = modeSelect.value;
       localStorage.setItem('cv-mode', _cvMode);
       if (_cvMode === 'off') {
-        panel.classList.remove('active');
+        _cvClosePanel(panel);
         _cvPendingCount = 0;
         _cvUpdatePendingBadge();
-        if (_cvDocked) { _ctSetActiveTab('graph'); _ctHideTabBar(); }
+      } else {
+        _cvUpdatePendingBadge();
       }
     });
     modeSelect.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -1740,11 +2043,7 @@ function _initCodeViewer() {
     });
   }
 
-  closeBtn.addEventListener('click', () => {
-    if (_cvEditing) _cvExitEditMode(false);
-    panel.classList.remove('active');
-    if (_cvDocked) { _ctSetActiveTab('graph'); if (_cvTabs.length === 0) _ctHideTabBar(); }
-  });
+  if (closeBtn) closeBtn.addEventListener('click', () => _cvClosePanel(panel));
 
   // Dock button (only visible when floating)
   if (dockBtn) {
@@ -1752,12 +2051,12 @@ function _initCodeViewer() {
   }
 
   // Edit / Save / Discard buttons
-  editBtn.addEventListener('click', _cvEnterEditMode);
-  saveBtn.addEventListener('click', _cvSave);
-  discardBtn.addEventListener('click', () => _cvExitEditMode(false));
+  if (editBtn) editBtn.addEventListener('click', _cvEnterEditMode);
+  if (saveBtn) saveBtn.addEventListener('click', _cvSave);
+  if (discardBtn) discardBtn.addEventListener('click', () => _cvExitEditMode(false));
 
   // Tab clicks
-  tabBar.addEventListener('click', (e) => {
+  if (tabBar) tabBar.addEventListener('click', (e) => {
     const closeEl = e.target.closest('[data-cv-close]');
     if (closeEl) {
       if (_cvEditing) _cvExitEditMode(false);
@@ -1771,7 +2070,16 @@ function _initCodeViewer() {
     }
   });
 
+  const pendingBtn = document.getElementById('cv-pending-badge');
+  if (pendingBtn) {
+    pendingBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      _cvShowFromBadge();
+    });
+  }
+
   _initCanvasTabs();
+  _cvUpdatePendingBadge();
 }
 
 if (document.readyState === 'loading') {
@@ -2045,5 +2353,3 @@ function showTyping(show) {
     el.remove();
   }
 }
-
-

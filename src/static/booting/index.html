@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Spore — starting up…</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Auto-reload until the agent's HTTP server takes over the port.
+       Once Node binds, the next request lands on the real /graph and
+       this splash is gone. -->
+  <meta http-equiv="refresh" content="2" />
+  <style>
+    :root {
+      --bg: #0d100b;
+      --bg-panel: #1a1d17;
+      --ink: #ece7d5;
+      --ink-muted: #b5b0a0;
+      --ink-dim: #706c62;
+      --accent: #c8762c;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Inter", sans-serif;
+      overflow: hidden;
+    }
+    body {
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(circle at 22% 32%, rgba(227,139,95,0.13) 0%, transparent 42%),
+        radial-gradient(circle at 78% 68%, rgba(142,183,124,0.15) 0%, transparent 48%),
+        radial-gradient(circle at 55% 85%, rgba(58,106,163,0.12) 0%, transparent 40%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 28px;
+      animation: fade-in 0.5s ease-out;
+    }
+    @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+
+    .mark { display: block; }
+    .mark .spoke { stroke: var(--ink); stroke-width: 0.04; stroke-linecap: round; }
+    .mark .petal { fill: var(--accent); }
+    .mark .center { fill: var(--ink); }
+
+    .label {
+      font-size: 16px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      color: var(--ink-muted);
+      text-align: center;
+    }
+    .label .accent { color: var(--accent); font-weight: 700; }
+    .sub {
+      font-size: 12px;
+      color: var(--ink-dim);
+      letter-spacing: 0.05em;
+    }
+    .pulse {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-right: 8px;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; transform: scale(0.7); }
+      50%      { opacity: 1.0; transform: scale(1.0); }
+    }
+  </style>
+</head>
+<body>
+  <!-- 6-petal Spore mark with a JS-driven wobble matching the live app. -->
+  <svg class="mark" id="mark" width="120" height="120" viewBox="-1 -1 2 2" fill="none" aria-hidden="true">
+    <g id="spokes"></g>
+    <g id="petals"></g>
+    <circle class="center" cx="0" cy="0" r="0.18" />
+  </svg>
+
+  <div class="label">
+    <span class="pulse"></span><span class="accent">Spore</span> is starting up…
+  </div>
+  <div class="sub">This page will refresh when ready.</div>
+
+  <script>
+    // Wobble — perpendicular drift per petal, drives the same visual as
+    // anima-new/src/static/scripts/effects.js _FLOWER_ANIMS.wobble.
+    const PETALS = 6;
+    const ANGLES = Array.from({ length: PETALS }, (_, i) => -Math.PI / 2 + (i / PETALS) * Math.PI * 2);
+    const RING = 0.62, R = 0.16, AMP = 0.04, FREQ = 1.8, PHASE = 1.1;
+
+    const spokesG = document.getElementById('spokes');
+    const petalsG = document.getElementById('petals');
+    const lines = [], circles = [];
+    for (let i = 0; i < PETALS; i++) {
+      const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      ln.setAttribute('class', 'spoke');
+      ln.setAttribute('x1', 0); ln.setAttribute('y1', 0);
+      spokesG.appendChild(ln); lines.push(ln);
+      const ci = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ci.setAttribute('class', 'petal');
+      ci.setAttribute('r', R);
+      petalsG.appendChild(ci); circles.push(ci);
+    }
+    let start = 0;
+    function tick(now) {
+      if (!start) start = now;
+      const t = (now - start) / 1000;
+      for (let i = 0; i < PETALS; i++) {
+        const a = ANGLES[i];
+        const off = Math.sin(t * FREQ + i * PHASE) * AMP;
+        const x = RING * Math.cos(a) + Math.cos(a + Math.PI / 2) * off;
+        const y = RING * Math.sin(a) + Math.sin(a + Math.PI / 2) * off;
+        lines[i].setAttribute('x2', x); lines[i].setAttribute('y2', y);
+        circles[i].setAttribute('cx', x); circles[i].setAttribute('cy', y);
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

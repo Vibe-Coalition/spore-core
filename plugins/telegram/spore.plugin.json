@@ -1,0 +1,14 @@
+{
+  "id": "telegram",
+  "name": "Telegram Channel",
+  "version": "1.0.0",
+  "kind": "gateway",
+  "entry": "./index.js",
+  "depends": [],
+  "category": "channels",
+  "channel": {
+    "platform": "telegram",
+    "sessionModes": ["topic", "chat"]
+  },
+  "description": "Telegram bot gateway with DMs, groups, forum topics, polling or webhook delivery, recent-message recall, reactions, attachments, and voice-note transcription."
+}

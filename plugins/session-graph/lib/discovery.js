@@ -9,6 +9,9 @@
 // prepared statements).
 
 const crypto = require('crypto');
+const { coreRequire } = require('../../core-require');
+const projects = require('./projects');
+const graphEvents = coreRequire('graph/events');
 
 function noteDiscovery(api, input, ctx) {
   const learner = api._appContext?.learner;
@@ -27,8 +30,16 @@ function noteDiscovery(api, input, ctx) {
   const sessionId = platform === 'cli' ? (ctx?.channelId || null) : null;
   const userId = ctx?.userId || ctx?.userName || 'anon';
   const cwd = ctx?.projectContext?.cwd || ctx?.projectContext?.clientCwd || null;
+  const projectIdentityKey = ctx?.memoryEnvelope?.projectKey
+    || ctx?.memoryEnvelope?.projectIdentityKey
+    || null;
 
   const db = learner.db;
+  const emitChange = (payload) => {
+    try {
+      graphEvents.emit('change', learner._graphSlug && !payload.graph ? { ...payload, graph: learner._graphSlug } : payload);
+    } catch {}
+  };
 
   // Slugify the label to a node id, suffix with a short hash of the
   // text so two distinct discoveries with the same label don't collapse.
@@ -66,8 +77,10 @@ function noteDiscovery(api, input, ctx) {
       'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
       'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
     ).run(id, label, 'discovery', text, 7, 'session-graph', 'note_discovery', new Date().toISOString(), extraJson);
+    emitChange({ op: 'node:create', node: { id, label, type: 'discovery', description: text }, source: 'note_discovery' });
   } else {
     db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+    emitChange({ op: 'node:update', nodeId: id, source: 'note_discovery' });
   }
 
   // details aspect — text goes here
@@ -75,12 +88,14 @@ function noteDiscovery(api, input, ctx) {
   if (!detAsp) {
     db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'details', 8, 'session-graph')").run(id);
     detAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+    emitChange({ op: 'aspect:create', nodeId: id, aspect: 'details', source: 'note_discovery' });
   }
   const dup = db.prepare('SELECT id FROM attributes WHERE aspect_id = ? AND content = ?').get(detAsp.id, text);
   if (!dup) {
     db.prepare(
       "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 8, 'note_discovery', 'session-graph')"
     ).run(detAsp.id, text);
+    emitChange({ op: 'attribute:create', nodeId: id, aspect: 'details', content: text, source: 'note_discovery' });
   }
 
   // kind aspect — single attribute
@@ -88,9 +103,11 @@ function noteDiscovery(api, input, ctx) {
   if (!kAsp) {
     db.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'kind', 6, 'session-graph')").run(id);
     kAsp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+    emitChange({ op: 'aspect:create', nodeId: id, aspect: 'kind', source: 'note_discovery' });
     db.prepare(
       "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 6, 'note_discovery', 'session-graph')"
     ).run(kAsp.id, kind);
+    emitChange({ op: 'attribute:create', nodeId: id, aspect: 'kind', content: kind, source: 'note_discovery' });
   }
 
   // Edges: discovery → session + discovery → project + relatedTo
@@ -103,20 +120,26 @@ function noteDiscovery(api, input, ctx) {
   if (sessionId) {
     const sessId = 'session-' + String(sessionId);
     if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessId)) {
-      if (!checkE.get(id, sessId, 'recorded_in')) insE.run(id, sessId, 'recorded_in');
+      if (!checkE.get(id, sessId, 'recorded_in')) {
+        insE.run(id, sessId, 'recorded_in');
+        emitChange({ op: 'edge:create', edge: { source: id, target: sessId, type: 'recorded_in' }, source: 'note_discovery' });
+      }
       linkedSession = sessId;
     }
   }
 
   let linkedProject = null;
   if (sessionId && userId && cwd) {
-    // Compute the project node id using projects.js's convention
-    // (kept inline to avoid a circular require; both are stable).
-    const u = String(userId).toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 32);
-    const h = crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 8);
-    const projId = `project-${u}-${h}`;
+    const projId = projects.projectNodeIdFromContext(userId, {
+      ...(ctx.projectContext || {}),
+      cwd,
+      projectIdentityKey,
+    });
     if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(projId)) {
-      if (!checkE.get(id, projId, 'learned_about')) insE.run(id, projId, 'learned_about');
+      if (!checkE.get(id, projId, 'learned_about')) {
+        insE.run(id, projId, 'learned_about');
+        emitChange({ op: 'edge:create', edge: { source: id, target: projId, type: 'learned_about' }, source: 'note_discovery' });
+      }
       linkedProject = projId;
     }
   }
@@ -128,12 +151,13 @@ function noteDiscovery(api, input, ctx) {
     if (db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(rid)) {
       if (!checkE.get(id, rid, 'relates_to')) {
         insE.run(id, rid, 'relates_to');
+        emitChange({ op: 'edge:create', edge: { source: id, target: rid, type: 'relates_to' }, source: 'note_discovery' });
         linkedRelated++;
       }
     }
   }
 
-  return { ok: true, nodeId: id, isNew, kind, linkedSession, linkedProject, linkedRelated };
+  return { ok: true, nodeId: id, isNew, kind, linkedSession, linkedProject, linkedRelated, ...(learner._graphSlug ? { graph: learner._graphSlug } : {}) };
 }
 
 module.exports = { noteDiscovery };

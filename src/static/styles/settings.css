@@ -9,7 +9,7 @@
     box-shadow: 0 20px 60px rgba(0,0,0,.45);
     backdrop-filter: blur(14px);
     resize: both; overflow: hidden;
-    z-index: 60;
+    z-index: 85;
   }
   #settings-pane.settings-pane-open { display: flex; }
   #settings-pane .floating-pane-body {
@@ -30,13 +30,65 @@
     border: 1px solid var(--border); border-radius: 6px; background: rgba(var(--hl-rgb),.02);
     font-family: var(--font-body); font-size: .72rem; cursor: pointer;
   }
-  .settings-graph-row:hover { border-color: var(--accent2); }
-  .settings-graph-row.active { border-color: var(--accent2); background: color-mix(in srgb, var(--accent2) 10%, transparent); color: var(--accent2); }
-  .settings-graph-row .sg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	  .settings-graph-row:hover { border-color: var(--accent2); }
+	  .settings-graph-row.active { border-color: var(--accent2); background: color-mix(in srgb, var(--accent2) 10%, transparent); color: var(--accent2); }
+	  .settings-graph-row.viewing {
+	    border-color: var(--accent);
+	    background: color-mix(in srgb, var(--accent) 10%, transparent);
+	    color: var(--accent);
+	  }
+	  .settings-graph-row.protected {
+	    border-color: color-mix(in srgb, var(--accent2) 34%, var(--border));
+	    background: color-mix(in srgb, var(--accent2) 7%, transparent);
+	  }
+	  .settings-graph-row.viewing.protected {
+	    border-color: var(--accent);
+	    background: color-mix(in srgb, var(--accent) 10%, transparent);
+	  }
+  .settings-graph-row .sg-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+	  .settings-graph-row .sg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .settings-graph-row .sg-count { opacity: .55; font-size: .6rem; flex-shrink: 0; }
-  .settings-graph-row .sg-badge {
-    font-size: .58rem; padding: 1px 6px; border-radius: 8px;
-    background: color-mix(in srgb, var(--accent2) 16%, transparent); color: var(--accent2); flex-shrink: 0;
+  .settings-graph-row .sg-maintenance {
+    font-size: .56rem; padding: 1px 6px; border-radius: 999px;
+    color: var(--text-dim); border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+    background: color-mix(in srgb, var(--surface) 80%, transparent); flex-shrink: 0;
+  }
+  .settings-graph-row .sg-maintenance.ok {
+    color: var(--ok, #3fa36b); border-color: color-mix(in srgb, var(--ok, #3fa36b) 34%, transparent);
+    background: color-mix(in srgb, var(--ok, #3fa36b) 9%, transparent);
+  }
+  .settings-graph-row .sg-maintenance.stale {
+    color: var(--accent); border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+  }
+  .settings-graph-row .sg-maintenance.running {
+    color: var(--accent2); border-color: color-mix(in srgb, var(--accent2) 38%, transparent);
+    background: color-mix(in srgb, var(--accent2) 10%, transparent);
+  }
+  .settings-graph-row .sg-maintenance.error {
+    color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+	  .settings-graph-row .sg-badge {
+	    font-size: .58rem; padding: 1px 6px; border-radius: 8px;
+	    background: color-mix(in srgb, var(--accent2) 16%, transparent); color: var(--accent2); flex-shrink: 0;
+	  }
+	  .settings-graph-row.protected .sg-badge {
+	    border: 1px solid color-mix(in srgb, var(--accent2) 30%, transparent);
+	  }
+  .settings-graph-row .sg-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .settings-graph-row .sg-action {
+    border: 1px solid var(--border); border-radius: 999px;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    color: var(--text-dim); padding: 3px 8px;
+    font-family: var(--font-body); font-size: .58rem;
+    cursor: pointer; line-height: 1.1;
+  }
+  .settings-graph-row .sg-action:hover { border-color: var(--accent2); color: var(--accent2); }
+  .settings-graph-row .sg-action.danger:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
   }
   .settings-btn-secondary {
     background: var(--surface); border: 1px solid var(--border); color: var(--text);
@@ -134,17 +186,104 @@
   .settings-status-line.warn { color: var(--accent2); }
   .settings-status-line.err { color: var(--danger); }
   .settings-export-options {
-    margin-top: 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px;
+    position: relative;
+    z-index: 1;
+    margin-top: 8px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+    gap: 8px;
   }
   @media (max-width: 560px) { .settings-export-options { grid-template-columns: 1fr; } }
-  .settings-check-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
-    background: color-mix(in srgb, var(--surface) 60%, transparent);
-    font-size: .72rem; color: var(--text);
+  .settings-portability-card {
+    position: relative;
+    justify-self: start;
+    width: min(100%, 700px);
+    overflow: visible;
+    padding: 16px;
+    background: color-mix(in srgb, var(--surface) 88%, var(--panel));
+    border-color: color-mix(in srgb, var(--accent2) 18%, var(--border));
   }
-  .settings-check-row input[type=checkbox] { flex-shrink: 0; accent-color: var(--accent); }
-  .settings-check-row span { flex: 1; line-height: 1.3; }
+  .settings-portability-card::after {
+    display: none;
+  }
+  .settings-portability-head {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+  }
+  .settings-portability-head h4 { margin-bottom: 4px; }
+  .settings-portability-tag {
+    flex-shrink: 0;
+    padding: 2px 7px;
+    border: 1px solid color-mix(in srgb, var(--accent2) 22%, var(--border));
+    border-radius: 6px;
+    color: var(--accent2);
+    background: color-mix(in srgb, var(--accent2) 6%, transparent);
+    font-family: var(--font-mono);
+    font-size: .54rem;
+    letter-spacing: .04em;
+    text-transform: lowercase;
+  }
+  .settings-portability-callout {
+    position: relative;
+    z-index: 1;
+    margin-top: 12px;
+    padding: 8px 10px;
+    border-left: 2px solid color-mix(in srgb, var(--accent3) 48%, var(--border));
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent3) 5%, transparent);
+    font-size: .66rem;
+    line-height: 1.45;
+  }
+  .settings-export-actions {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 12px;
+  }
+  .settings-export-actions .settings-btn-secondary {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    font-size: .68rem;
+  }
+  .settings-export-primary {
+    border-color: color-mix(in srgb, var(--accent2) 48%, var(--border));
+    color: var(--accent2);
+    background: color-mix(in srgb, var(--accent2) 8%, var(--surface));
+  }
+  .settings-port-status {
+    position: relative;
+    z-index: 1;
+    margin-top: 8px;
+    min-height: 1em;
+    font-family: var(--font-body);
+    font-size: .64rem;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+  }
+  .settings-section .settings-check-row {
+    display: flex; align-items: center; gap: 8px;
+    min-height: 34px;
+    margin: 0;
+    padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px;
+    background: color-mix(in srgb, var(--panel) 58%, transparent);
+    font-size: .7rem; color: var(--text);
+    text-transform: none;
+    letter-spacing: 0;
+    transition: border-color .12s, background .12s, color .12s;
+  }
+  .settings-section .settings-check-row:hover {
+    border-color: color-mix(in srgb, var(--accent2) 38%, var(--border));
+    background: color-mix(in srgb, var(--accent2) 6%, var(--surface));
+  }
+  .settings-section .settings-check-row input[type=checkbox] { flex-shrink: 0; width: auto; accent-color: var(--accent); }
+  .settings-section .settings-check-row span { flex: 1; line-height: 1.3; }
   .settings-hint-inline { color: var(--text-dim); font-size: .64rem; }
   .settings-danger-inline { color: var(--danger); font-size: .64rem; }
   .settings-section {
@@ -452,3 +591,583 @@
   .chat-msg.thinking-done.expanded { max-height: none; }
   .chat-msg.thinking-done.expanded::after { content: '▾ hide thinking'; }
 
+  /* ── Model library pane (Settings → Models) ─────────────────────── */
+  .settings-model-library { display: block; }
+  .ml-pane { display: flex; flex-direction: column; gap: 12px; }
+  .ml-pane-summary {
+    font-size: .62rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .08em;
+    font-family: var(--font-body);
+  }
+  .ml-discover-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 14px;
+    background: rgba(var(--hl-rgb),.025);
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  .ml-discover-label {
+    font-size: .68rem; color: var(--text-dim);
+    font-family: var(--font-body);
+    width: 100%; line-height: 1.4;
+    margin-bottom: 2px;
+  }
+  .ml-pane-empty, .ml-pane-empty-inline {
+    color: var(--text-dim); font-size: .72rem;
+  }
+  .ml-pane-empty {
+    padding: 20px; text-align: center;
+    border: 1px dashed var(--border); border-radius: 10px;
+    background: rgba(var(--hl-rgb),.015);
+    line-height: 1.5;
+  }
+  .ml-pane-empty-inline { font-style: italic; flex: 1; }
+
+  /* Collapsible provider group — uses native <details> so the
+     summary row is the click target with its own focus ring. */
+  details.ml-provider-group {
+    border: 1px solid var(--border); border-radius: 10px;
+    background: rgba(var(--hl-rgb),.025);
+    overflow: hidden;
+    transition: border-color .12s;
+  }
+  details.ml-provider-group:hover { border-color: var(--border-active); }
+  details.ml-provider-group[open] { background: rgba(var(--hl-rgb),.015); }
+  .ml-provider-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    font-family: var(--font-body);
+  }
+  .ml-provider-header::-webkit-details-marker { display: none; }
+  .ml-provider-header:hover { background: rgba(var(--hl-rgb),.03); }
+  .ml-provider-name {
+    flex-shrink: 0;
+    font-size: .78rem; color: var(--text-bright); font-weight: 600;
+    text-transform: lowercase; letter-spacing: .02em;
+  }
+  .ml-provider-count {
+    flex: 1;
+    font-size: .62rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .08em;
+  }
+  .ml-provider-caret {
+    flex-shrink: 0;
+    color: var(--text-dim); font-size: .8rem;
+    transition: transform .15s;
+  }
+  details.ml-provider-group[open] .ml-provider-caret { transform: rotate(180deg); }
+  details.ml-provider-group .ml-cards {
+    padding: 0 14px 14px;
+    border-top: 1px solid var(--border-subtle);
+  }
+  details.ml-provider-group .ml-cards { padding-top: 14px; }
+  .ml-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+  .ml-card {
+    border: 1px solid var(--border); border-radius: 10px;
+    background: rgba(var(--hl-rgb),.025);
+    padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 8px;
+    transition: border-color .12s;
+  }
+  .ml-card:hover { border-color: var(--border-active); }
+  .ml-card-favorite {
+    border-color: color-mix(in srgb, var(--accent3) 34%, var(--border));
+    background:
+      linear-gradient(135deg, color-mix(in srgb, var(--accent3) 9%, transparent), transparent 52%),
+      rgba(var(--hl-rgb),.025);
+  }
+  .ml-card-head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 8px;
+  }
+  .ml-card-title {
+    font-weight: 600; color: var(--text-bright);
+    font-size: .82rem; word-break: break-word;
+    font-family: var(--font-body);
+  }
+  .ml-card-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+  .ml-card-meta {
+    font-size: .68rem; color: var(--text-dim);
+    font-family: var(--font-body); line-height: 1.4;
+  }
+  .ml-card-meta span { white-space: nowrap; }
+  .ml-card-actions {
+    display: flex; gap: 6px; justify-content: flex-end;
+    margin-top: 2px; padding-top: 8px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .ml-tag {
+    display: inline-block; padding: 2px 7px; border-radius: 999px;
+    font-size: .58rem;
+    background: rgba(var(--hl-rgb),.08); color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .08em;
+    font-family: var(--font-body);
+  }
+  .ml-tag-warn  { background: rgba(184,84,42,.16); color: var(--accent3, #b8542a); }
+  .ml-tag-info  { background: rgba(58,106,163,.16); color: var(--info, #3a6aa3); }
+  .ml-tag-fav   { background: color-mix(in srgb, var(--accent3) 16%, transparent); color: var(--accent3); }
+
+  /* Buttons styled like .settings-test-btn / .settings-btn-secondary so
+     the pane visually fits in with the rest of Settings. */
+  .ml-btn {
+    background: transparent; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 12px; cursor: pointer;
+    font-family: var(--font-body); font-size: .68rem;
+    text-transform: uppercase; letter-spacing: .06em;
+    transition: border-color .12s, color .12s, background .12s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .ml-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+  .ml-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .ml-btn:disabled:hover { border-color: var(--border); color: var(--text); }
+
+  /* Primary "Discover from <X>" action — solid accent2 background with
+     accent3 highlight on hover. Reads as an obvious clickable affordance,
+     matching the app's primary buttons (settings-btns button.primary). */
+  .ml-btn-primary {
+    background: var(--accent2);
+    color: var(--bg);
+    border-color: var(--accent2);
+    font-weight: 600;
+  }
+  .ml-btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+    opacity: 1;
+  }
+  .ml-btn-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: rgba(255,255,255,.18);
+    font-size: .8rem; line-height: 1; font-weight: 700;
+  }
+
+  .ml-btn-tiny {
+    padding: 3px 9px; font-size: .58rem;
+  }
+  .ml-btn-danger {
+    border-color: rgba(184,52,28,.35); color: var(--danger);
+  }
+  .ml-btn-danger:hover {
+    border-color: var(--danger); color: var(--danger);
+    background: rgba(184,52,28,.08);
+  }
+  .ml-btn-fav {
+    border-color: color-mix(in srgb, var(--accent3) 28%, var(--border));
+    color: var(--text-dim);
+  }
+  .ml-btn-fav:hover,
+  .ml-btn-fav.active {
+    border-color: var(--accent3);
+    color: var(--accent3);
+    background: color-mix(in srgb, var(--accent3) 9%, transparent);
+  }
+
+  /* ── Modal (edit + discover) — mirrors #ssh-modal pattern ──────── */
+  .ml-modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 9999;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+    font-family: var(--font-body);
+  }
+  .ml-modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    width: 100%; max-width: 560px; max-height: 86vh; overflow: hidden;
+    display: flex; flex-direction: column;
+    font-family: var(--font-body); font-size: .75rem;
+    box-shadow: 0 16px 48px rgba(0,0,0,.5);
+  }
+  .ml-modal-head, .ml-modal-foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 14px 18px; border-bottom: 1px solid var(--border-subtle);
+  }
+  .ml-modal-foot {
+    border-bottom: 0;
+    border-top: 1px solid var(--border-subtle);
+    justify-content: flex-end;
+  }
+  .ml-modal-head h4 {
+    margin: 0; color: var(--accent2); font-size: .85rem;
+    font-family: var(--font-body); font-weight: 600;
+  }
+  .ml-modal-close {
+    background: transparent; border: 0; color: var(--text-dim);
+    font-size: 1.4rem; cursor: pointer; line-height: 1; padding: 0 6px;
+    transition: color .12s;
+  }
+  .ml-modal-close:hover { color: var(--text-bright); }
+  .ml-modal-body {
+    padding: 16px 18px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .ml-modal-body > label {
+    display: flex; flex-direction: column; gap: 4px;
+    font-size: .65rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .06em;
+    font-family: var(--font-body);
+  }
+  .ml-modal-body input[type="text"],
+  .ml-modal-body input[type="number"],
+  .ml-modal-body select {
+    padding: 6px 8px; font-size: .75rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--font-body); text-transform: none; letter-spacing: 0;
+  }
+  .ml-modal-body input:focus,
+  .ml-modal-body select:focus {
+    border-color: var(--accent2); outline: none;
+  }
+  .ml-modal-body input[readonly] {
+    opacity: .55; cursor: not-allowed; background: var(--surface);
+  }
+  .ml-edit-row2 {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
+  }
+  .ml-edit-caps {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 8px 14px;
+    align-items: center;
+  }
+  .ml-edit-caps legend {
+    font-size: .6rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .08em;
+    padding: 0 6px;
+  }
+  .ml-edit-caps label {
+    display: inline-flex; flex-direction: row !important; align-items: center;
+    gap: 6px; font-size: .75rem; color: var(--text);
+    text-transform: none !important; letter-spacing: 0 !important;
+    margin: 0 !important;
+  }
+  .ml-edit-caps input[type="checkbox"] {
+    accent-color: var(--accent2);
+  }
+
+  .ml-discover-status,
+  .ml-discover-empty,
+  .ml-discover-error {
+    padding: 18px; text-align: center; color: var(--text-dim);
+    font-size: .75rem; font-family: var(--font-body);
+  }
+  .ml-discover-error { color: var(--danger); }
+  .ml-discover-help {
+    font-size: .68rem; color: var(--text-dim);
+    margin-bottom: 4px; font-family: var(--font-body);
+  }
+  .ml-discover-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 52vh; overflow-y: auto;
+    border: 1px solid var(--border-subtle); border-radius: 6px;
+    background: var(--bg); padding: 4px;
+  }
+  .ml-discover-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid transparent; border-radius: 4px;
+    cursor: pointer; transition: background .12s, border-color .12s;
+    font-family: var(--font-body);
+  }
+  .ml-discover-item:hover {
+    background: rgba(var(--hl-rgb),.04);
+    border-color: var(--border-subtle);
+  }
+  .ml-discover-item input[type="checkbox"] {
+    accent-color: var(--accent2);
+    flex-shrink: 0;
+  }
+  .ml-discover-existing {
+    opacity: .45; cursor: not-allowed;
+  }
+  .ml-discover-existing:hover {
+    background: transparent; border-color: transparent;
+  }
+  .ml-discover-meta {
+    display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px;
+  }
+  .ml-discover-name {
+    font-size: .76rem; color: var(--text-bright);
+    font-weight: 500; word-break: break-word;
+  }
+  .ml-discover-sub {
+    font-size: .6rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  /* Modal action buttons — match #ssh-modal .modal-actions pattern. */
+  .ml-modal-foot .ml-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); border-radius: 4px;
+    padding: 6px 14px; font-size: .7rem; cursor: pointer;
+    font-family: var(--font-body);
+    text-transform: none; letter-spacing: 0;
+    transition: opacity .15s, background .15s;
+  }
+  .ml-modal-foot .ml-btn:hover { opacity: .85; }
+  .ml-modal-foot .ml-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .ml-modal-foot .ml-btn:not(.ml-btn-soft) {
+    background: var(--text-bright); color: var(--bg); border-color: transparent;
+    font-weight: 600;
+  }
+  .ml-modal-foot .ml-btn:not(.ml-btn-soft):hover { opacity: .85; }
+
+  /* ── Tier combobox (replaces provider+model selects in tier rows) ── */
+  .ml-combobox { position: relative; display: block; min-width: 0; }
+  .ml-combobox-trigger {
+    width: 100%; padding: 6px 10px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    cursor: pointer; color: var(--text-bright); font-size: .82rem;
+    text-align: left; min-height: 32px;
+  }
+  .ml-combobox-trigger:hover { border-color: var(--border-active); }
+  .ml-combobox-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ml-combobox-value {
+    display: flex; align-items: center; gap: 8px; overflow: hidden;
+    white-space: nowrap; text-overflow: ellipsis; min-width: 0; flex: 1;
+  }
+  .ml-combobox-empty { color: var(--text-dim); font-style: italic; }
+  .ml-combobox-provtag {
+    font-size: .62rem; text-transform: uppercase; letter-spacing: .08em;
+    background: rgba(var(--hl-rgb),.08); color: var(--text-dim);
+    padding: 1px 6px; border-radius: 999px; flex-shrink: 0;
+  }
+  .ml-combobox-label { color: var(--text-bright); font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+  .ml-combobox-meta { font-size: .7rem; color: var(--text-dim); flex-shrink: 0; }
+  .ml-combobox-favtag {
+    font-size: .56rem; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--accent3);
+    background: color-mix(in srgb, var(--accent3) 14%, transparent);
+    border-radius: 999px;
+    padding: 1px 6px;
+    flex-shrink: 0;
+  }
+  .ml-combobox-caret { color: var(--text-dim); font-size: .7rem; flex-shrink: 0; }
+
+  .ml-combobox-dropdown {
+    position: absolute; top: calc(100% + 4px); left: 0;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    /* Sit above the wizard overlay (z-index 9000-ish) and any modal
+       backdrops. The dropdown is rendered inside its trigger's row,
+       so it inherits that stacking context — high z-index keeps it
+       on top of sibling rows when multiple comboboxes are visible. */
+    z-index: 10000;
+    min-width: 320px; width: max-content; max-width: min(480px, 90vw);
+    flex-direction: column; max-height: 360px;
+  }
+  /* The `hidden` attribute toggle in JS controls visibility — render
+     `display: flex` only when not hidden so we don't fight the
+     browser's [hidden] { display: none } default with author CSS. */
+  .ml-combobox-dropdown:not([hidden]) { display: flex; }
+  .ml-combobox-dropdown[hidden] { display: none !important; }
+  .ml-combobox-flip { top: auto; bottom: calc(100% + 4px); }
+  .ml-combobox-search {
+    padding: 8px; border-bottom: 1px solid var(--border-subtle);
+  }
+  .ml-combobox-search-input {
+    width: 100%; padding: 6px 8px; font-size: .8rem;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text-bright);
+  }
+  .ml-combobox-list { overflow-y: auto; padding: 4px 0; }
+  .ml-combobox-group-head {
+    font-size: .62rem; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--text-dim); padding: 6px 12px 2px; font-weight: 600;
+  }
+  .ml-combobox-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+    cursor: pointer; font-size: .82rem; color: var(--text-bright);
+  }
+  .ml-combobox-item:hover, .ml-combobox-active {
+    background: rgba(var(--hl-rgb),.06);
+  }
+  .ml-combobox-active {
+    background: rgba(var(--hl-rgb),.1);
+  }
+  .ml-combobox-favorite {
+    background: color-mix(in srgb, var(--accent3) 5%, transparent);
+  }
+  .ml-combobox-favorite:hover,
+  .ml-combobox-favorite.ml-combobox-active {
+    background: color-mix(in srgb, var(--accent3) 10%, transparent);
+  }
+  .ml-combobox-item .ml-combobox-label { flex: 1; min-width: 0; }
+  .ml-combobox-custom {
+    border-top: 1px solid var(--border-subtle); margin-top: 4px;
+    padding-top: 8px; padding-bottom: 8px;
+  }
+  .ml-combobox-custom code {
+    background: rgba(var(--hl-rgb),.08); padding: 1px 4px;
+    border-radius: 4px; font-size: .78rem;
+  }
+  .ml-combobox-empty-list {
+    padding: 16px 12px; text-align: center; color: var(--text-dim);
+    font-size: .8rem; font-style: italic;
+  }
+
+  .ml-combobox-cap {
+    font-size: .58rem; text-transform: uppercase; letter-spacing: .06em;
+    padding: 1px 5px; border-radius: 999px; flex-shrink: 0;
+    background: rgba(var(--hl-rgb),.08); color: var(--text-dim);
+  }
+  .ml-combobox-cap-tools  { background: rgba(90,122,74,.15); color: var(--accent2, #5a7a4a); }
+  .ml-combobox-cap-vision { background: rgba(58,106,163,.15); color: var(--info, #3a6aa3); }
+  .ml-combobox-cap-audio  { background: rgba(184,84,42,.15); color: var(--accent3, #b8542a); }
+  .ml-combobox-cap-video  { background: rgba(184,52,28,.12); color: var(--danger, #b8341c); }
+
+  /* Hide the legacy provider+model cells once the combobox is mounted.
+     The underlying <select>/<input> stay in the DOM for payload
+     collection but are visually replaced by the combobox slot. */
+  .settings-model-row .settings-model-legacy-cell { display: none; }
+  .settings-model-row .settings-model-combobox {
+    grid-column: span 2;        /* takes the space the legacy provider+model cells used */
+    min-width: 0;
+  }
+
+  .settings-channels-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .settings-channel-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background:
+      linear-gradient(135deg, rgba(var(--hl-rgb), .055), transparent 62%),
+      var(--surface);
+  }
+  .settings-channel-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .settings-channel-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .settings-channel-id {
+    font-size: .62rem;
+    color: var(--text-dim);
+    border: 1px solid var(--border-subtle, var(--border));
+    border-radius: 999px;
+    padding: 1px 6px;
+  }
+  .settings-channel-status {
+    font-size: .6rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--text-dim);
+    background: rgba(var(--hl-rgb), .08);
+    border-radius: 999px;
+    padding: 2px 7px;
+  }
+  .settings-channel-status.ok {
+    color: var(--accent2, var(--accent));
+    background: color-mix(in srgb, var(--accent2, var(--accent)) 12%, transparent);
+  }
+  .settings-channel-status.warn {
+    color: var(--accent3, var(--accent));
+    background: color-mix(in srgb, var(--accent3, var(--accent)) 12%, transparent);
+  }
+
+  .settings-channel-pairing {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .settings-channel-pairing-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .settings-channel-pairing-head h6 {
+    margin: 0;
+    color: var(--text-bright);
+    font-family: var(--font-body);
+    font-size: .78rem;
+    font-weight: 700;
+  }
+  .settings-channel-pairing-status {
+    min-height: 1em;
+    margin: 0 0 8px;
+    color: var(--text-dim);
+    font-size: .68rem;
+  }
+  .settings-channel-pairing-status[data-kind="ok"] {
+    color: var(--accent2, var(--accent));
+  }
+  .settings-channel-pairing-status[data-kind="err"] {
+    color: var(--danger);
+  }
+  .settings-channel-pairing-group {
+    margin-top: 12px;
+  }
+  .settings-channel-pairing-label {
+    margin-bottom: 4px;
+    color: var(--text-dim);
+    font-size: .62rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .settings-channel-pairing-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .settings-channel-pairing-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 0;
+    border-top: 1px solid var(--border-subtle, var(--border));
+  }
+  .settings-channel-pairing-main {
+    min-width: 0;
+  }
+  .settings-channel-pairing-title {
+    overflow: hidden;
+    color: var(--text);
+    font-size: .72rem;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .settings-channel-pairing-code {
+    margin-top: 3px;
+    overflow: hidden;
+    color: var(--text-dim);
+    font-family: var(--font-mono, monospace);
+    font-size: .68rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 560px) {
+    .settings-channel-pairing-head,
+    .settings-channel-pairing-row {
+      grid-template-columns: 1fr;
+    }
+    .settings-channel-pairing-head {
+      display: grid;
+    }
+    .settings-channel-pairing-row .settings-btn-secondary,
+    .settings-channel-pairing-head .settings-btn-secondary {
+      justify-self: start;
+    }
+  }

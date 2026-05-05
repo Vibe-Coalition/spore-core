@@ -23,6 +23,7 @@ const { parseInstallCommand, vetPackages, RISK_LEVEL } = require('./package-vet'
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
+const { buildBuiltinToolHandlers } = require('./builtin-registry');
 
 // Per-tool-call async context. Replaces any notion of a "global current
 // session" — carries sessionKey + userId + channelId + platform through the
@@ -38,30 +39,57 @@ const MUTATING_TOOLS = new Set([
   'graph_update', 'graph_delete',
   'web_serve', 'exec', 'remote_exec',
   'write_file', 'edit_file', 'remote_write_file',
+  'patch_file', 'run_tests', 'bg_kill',
   'email_send', 'message_send', 'message_edit', 'message_react',
   'notify_user', 'env_manage', 'save_tool',
+]);
+
+// Spore Code plan mode is intentionally read-only. These tools must not
+// be advertised or executed while the CLI client says projectContext.mode
+// is "plan"; otherwise a model can bypass the plan approval flow by
+// starting processes or writing files directly on the user's machine.
+const CLI_PLAN_BLOCKED_TOOLS = new Set([
+  'exec', 'remote_exec',
+  'write_file', 'edit_file', 'remote_write_file',
+  'web_serve', 'env_manage', 'save_tool',
+  'patch_file', 'run_tests', 'bg_kill',
+]);
+
+// Built-in tools that must execute on the user's machine during Spore Code
+// sessions. Older clients predate localTools capability reporting, so only
+// newly-added names are hidden when the client did not advertise support.
+const CLI_LOCAL_TOOL_NAMES = new Set([
+  'exec', 'read_file', 'write_file', 'edit_file', 'grep', 'glob',
+  'list_dir', 'read_many_files', 'git_status', 'git_diff',
+  'patch_file', 'run_tests', 'bg_list', 'bg_tail', 'bg_kill',
+]);
+
+const CLI_NEW_LOCAL_TOOL_NAMES = new Set([
+  'list_dir', 'read_many_files', 'git_status', 'git_diff',
+  'patch_file', 'run_tests', 'bg_list', 'bg_tail', 'bg_kill',
 ]);
 
 // Tools that are meaningless for cli (acorn) sessions and should NOT be
 // advertised to the model when platform === 'cli'. Stripping them from the
 // catalog reclaims ~1800 tokens per prompt and prevents the agent from
 // reaching for tools it can't usefully invoke (web_serve is refused locally
-// by the Go binary; anima_*/spore_message target the multi-agent mesh;
-// remote_*/ssh_tunnel are for sidecar-machine flows; browser is a
-// container-side puppeteer; message_* are Discord/Telegram surfaces
-// distinct from the cli TUI; env_manage / startup_tasks / data_poller /
-// list_custom_tools are SPORE-server admin). Keep graph_*, query_about,
+// by the Go binary; spore_*/spore_message target the multi-agent mesh;
+// remote_*/ssh_tunnel are for sidecar-machine flows; message_* are
+// Discord/Telegram surfaces distinct from the cli TUI; env_manage /
+// startup_tasks / data_poller / list_custom_tools are SPORE-server admin).
+// Keep useful server-side capabilities such as browser, graph_*, query_about,
 // delegate_task, task_*, schedule_*, web_search, web_fetch, ask_user,
 // notify_user, save_tool, sleep, skill_*, session_*, log_watch_*, plus
-// every plugin-contributed tool — those all work cleanly from a cli turn.
+// plugin-contributed tools — those can route through SPORE while local file
+// tools route through the CLI.
 const TOOLS_EXCLUDED_FROM_CLI = new Set([
-  'web_serve', 'browser',
+  'web_serve',
   'message_send', 'message_react', 'message_edit', 'message_read',
   'env_manage',
   'remote_exec', 'remote_tail', 'remote_tmux_kill',
   'remote_read_file', 'remote_write_file', 'ssh_tunnel',
   'startup_tasks', 'data_poller',
-  'anima_list', 'spore_message', 'anima_graph', 'anima_manage',
+  'spore_list', 'spore_message', 'spore_graph', 'spore_manage',
   'list_custom_tools',
 ]);
 
@@ -76,6 +104,7 @@ class ToolSystem {
     this.platformManager = null;
     this.skills = new SkillsManager(logger, config.sharedSkillsDir);
     this.gateway = null;
+    this._builtinToolHandlers = null;
 
     // Credential guard mode for write tools — 'block' (default) | 'warn' | 'off'
     const rawGuard = (config.credentialGuard || 'block').toLowerCase();
@@ -178,7 +207,8 @@ class ToolSystem {
     if (!channelId) return null;
     const raw = String(channelId);
     if (/^[a-z]+:/i.test(raw)) return raw;
-    const platform = String(ctx.platform ?? this._currentPlatform ?? 'discord').toLowerCase();
+    const platform = String(ctx.platform ?? this._currentPlatform ?? '').toLowerCase();
+    if (!platform) return raw;
     return `${platform}:${raw}`;
   }
 
@@ -189,7 +219,7 @@ class ToolSystem {
   _resolveMessageTargetMeta(input = {}) {
     const target = this._resolveMessageTargetInput(input);
     const ctx = this._ctx?.() || {};
-    let platform = String(input.platform || ctx.platform || this._currentPlatform || 'discord').toLowerCase();
+    let platform = String(input.platform || ctx.platform || this._currentPlatform || '').toLowerCase();
     if (this.platformManager) {
       const parsed = this.platformManager.parseTarget({ target, platform });
       return { target, platform: parsed.platform, id: parsed.id };
@@ -209,7 +239,7 @@ class ToolSystem {
    * filtered through TOOLS_EXCLUDED_FROM_CLI so the model only sees tools
    * it can actually use on the user's machine + via SPORE. Significantly
    * shrinks the prompt and stops the agent from reaching for things like
-   * web_serve (refused locally) or anima_* (multi-agent mesh).
+   * web_serve (refused locally) or spore_* (multi-agent mesh).
    *
    * Platform resolution order (most → least specific):
    *   1. explicit `opts.platform` arg — caller knows the session
@@ -220,8 +250,21 @@ class ToolSystem {
    *      together (e.g. web + cli at once). DO NOT rely on this fallback
    *      for new code; the explicit-arg or AsyncLocalStorage paths are
    *      session-safe.
-   */
+  */
   getToolDefinitions(opts = {}) {
+    const platform = opts.platform
+      || _execContext.getStore()?.platform
+      || this._currentPlatform;
+    const projectContext = opts.projectContext
+      || _execContext.getStore()?.projectContext
+      || this._currentProjectContext
+      || null;
+    const toolCtx = {
+      ...opts,
+      platform,
+      projectContext,
+      clientTools: opts.clientTools || projectContext?.localTools || null,
+    };
     const all = [
       {
         name: 'exec',
@@ -247,13 +290,13 @@ class ToolSystem {
       },
       {
         name: 'message_send',
-        description: 'Send a message to a chat target. Supports Discord and Telegram. If `target`/`channelId` is omitted, the current conversation is used. For cross-chat sends, use `target` like `discord:123` or `telegram:456`. For backward compatibility, `channelId` also works.',
+        description: 'Send a message through an installed chat channel plugin. If `target`/`channelId` is omitted, the current conversation is used when its platform supports routed messages. For cross-chat sends, use `target` like `discord:123`, `telegram:456`, or `slack:C123`. For backward compatibility, `channelId` also works.',
         input_schema: {
           type: 'object',
           properties: {
             target: {
               type: 'string',
-              description: 'Platform target, e.g. discord:1234567890, telegram:-100123456',
+              description: 'Platform target, e.g. discord:1234567890, telegram:-100123456, slack:C123456',
             },
             channelId: {
               type: 'string',
@@ -273,11 +316,11 @@ class ToolSystem {
       },
       {
         name: 'message_react',
-        description: 'React to a message with an emoji when supported by the target platform. If `target`/`channelId` is omitted, the current conversation is used. For cross-chat actions, use `target` like `discord:123` or `telegram:456`. Legacy `channelId` also works.',
+        description: 'React to a message with an emoji when supported by the installed target channel plugin. If `target`/`channelId` is omitted, the current conversation is used.',
         input_schema: {
           type: 'object',
           properties: {
-            target: { type: 'string', description: 'Platform target, e.g. discord:1234567890, telegram:-100123456' },
+            target: { type: 'string', description: 'Platform target, e.g. discord:1234567890, telegram:-100123456, slack:C123456' },
             channelId: { type: 'string', description: 'Legacy target field; treated the same as `target`' },
             messageId: { type: 'string', description: 'Platform message ID to react to' },
             emoji: { type: 'string', description: 'Emoji to react with (Unicode emoji like 👍 or custom emoji name)' },
@@ -287,11 +330,11 @@ class ToolSystem {
       },
       {
         name: 'message_edit',
-        description: 'Edit a message you previously sent when supported by the platform. If `target`/`channelId` is omitted, the current conversation is used. For cross-chat edits, use `target` like `discord:123` or `telegram:456`. Legacy `channelId` also works.',
+        description: 'Edit a message you previously sent when supported by the installed target channel plugin. If `target`/`channelId` is omitted, the current conversation is used.',
         input_schema: {
           type: 'object',
           properties: {
-            target: { type: 'string', description: 'Platform target, e.g. discord:1234567890 or telegram:-100123456' },
+            target: { type: 'string', description: 'Platform target, e.g. discord:1234567890, telegram:-100123456, slack:C123456' },
             channelId: { type: 'string', description: 'Legacy target field; treated the same as `target`' },
             messageId: { type: 'string', description: 'Message ID to edit' },
             content: { type: 'string', description: 'New message content' },
@@ -301,13 +344,13 @@ class ToolSystem {
       },
       {
         name: 'message_read',
-        description: 'Read recent messages from a chat target. If `target`/`channelId` is omitted, the current conversation is used. Discord reads live platform history; Telegram reads recent in-memory history seen by the agent.',
+        description: 'Read recent messages from a chat target when the installed channel plugin supports history. If `target`/`channelId` is omitted, the current conversation is used.',
         input_schema: {
           type: 'object',
           properties: {
             target: {
               type: 'string',
-              description: 'Platform target, e.g. discord:1234567890, telegram:-100123456',
+              description: 'Platform target, e.g. discord:1234567890, telegram:-100123456, slack:C123456',
             },
             channelId: {
               type: 'string',
@@ -323,21 +366,61 @@ class ToolSystem {
       },
       {
         name: 'graph_query',
-        description: 'Query the knowledge graph. Search for nodes by label, ID, or content. Use to look up information about people, projects, channels, rules, etc. When a shared project graph is available, use the "project" parameter to search that graph instead of the local one.',
+        description: 'Query the knowledge graph. Default behavior (no `mode`): get a node by ID (use `nodeId` — preferred when you already know the id/label), search by content (use `query` — for fuzzy/topic lookup), or list by type (use `type`). When `query` exactly matches a node\'s id/label/alias, the response is the matching node only; otherwise it\'s a hybrid (vector + keyword) search returning up to 10 hits.\n\n' +
+          'Advanced modes for navigating graph structure:\n' +
+          '- `mode:"neighbors"` — list 1-hop neighbors of a node with relation type, weight, and confidence. Optional `relation_filter` narrows by relation. Use to explore who/what a node connects to.\n' +
+          '- `mode:"walk"` — depth-bounded BFS from a seed node (or top hits of `query`). Returns a token-budgeted text rendering of the subgraph (nodes + edges with labels/relations/confidence). Use when you need structural context around a topic without dumping the whole graph.\n' +
+          '- `mode:"path"` — shortest path between two nodes (`source_id` → `target_id`). Returns the chain of edges with relation labels. Use to answer "how is X connected to Y" questions structurally instead of guessing.\n' +
+          '- `mode:"community"` — list all nodes in a community group (Louvain-clustered by the maintainer). Pass `group_id` (integer). Use to enumerate everything the graph thinks belongs together with a topic.\n' +
+          '- `mode:"hyperedges"` — list n-ary relationships touching a node. Pass `nodeId`. Use when you suspect group facts ("the kickoff meeting") are stored as hyperedges rather than star-shaped binary edges.\n\n' +
+          'When a shared project graph is available, set `project` to query that graph instead of the local one.',
         input_schema: {
           type: 'object',
           properties: {
+            mode: {
+              type: 'string',
+              enum: ['neighbors', 'walk', 'path', 'community', 'hyperedges'],
+              description: 'Optional traversal mode. Omit for default search/lookup behavior.',
+            },
             query: {
               type: 'string',
-              description: 'Search query — matches against node labels, descriptions, IDs, and aliases',
+              description: 'Search query — matches against node labels, descriptions, IDs, and aliases. Also seeds `mode:"walk"` when no nodeId is given.',
             },
             nodeId: {
               type: 'string',
-              description: 'Get a specific node by exact ID',
+              description: 'Get a specific node by exact ID. Used by default mode and as the seed for `mode:"neighbors"` and `mode:"walk"`.',
             },
             type: {
               type: 'string',
               description: 'Filter by node type (person, channel, rule, concept, project, etc.)',
+            },
+            relation_filter: {
+              type: 'string',
+              description: '(mode:"neighbors") Narrow to edges with this relation type (e.g. "knows", "depends_on").',
+            },
+            depth: {
+              type: 'integer',
+              description: '(mode:"walk") BFS depth, 1–4. Default 2.',
+            },
+            token_budget: {
+              type: 'integer',
+              description: '(mode:"walk") Approximate cap on rendered output, in tokens. Default 2000.',
+            },
+            source_id: {
+              type: 'string',
+              description: '(mode:"path") Source node ID. Required.',
+            },
+            target_id: {
+              type: 'string',
+              description: '(mode:"path") Target node ID. Required.',
+            },
+            max_hops: {
+              type: 'integer',
+              description: '(mode:"path") Maximum path length to consider. Default 8.',
+            },
+            group_id: {
+              type: 'integer',
+              description: '(mode:"community") Community group ID. Use the integer from a previous overview/community result.',
             },
             project: {
               type: 'string',
@@ -359,6 +442,10 @@ class ToolSystem {
             question: {
               type: 'string',
               description: 'Natural language question about the entity (e.g. "What are their main interests?", "How has their mood changed recently?")',
+            },
+            project: {
+              type: 'string',
+              description: 'Graph/project slug to reason against. Omit to use this session\'s scoped graph or the active graph.',
             },
           },
           required: ['question'],
@@ -405,8 +492,34 @@ class ToolSystem {
                 properties: {
                   target: { type: 'string', description: 'Target node ID' },
                   type: { type: 'string', description: 'Relationship type (knows, uses, created, etc.)' },
+                  confidence: { type: 'string', enum: ['extracted', 'inferred', 'ambiguous'], description: 'Optional. extracted = directly stated; inferred = reasonable deduction; ambiguous = uncertain (default: extracted).' },
                 },
                 required: ['target', 'type'],
+              },
+            },
+            hyperedges: {
+              type: 'array',
+              description: 'N-ary relationships among 3+ nodes (group meetings, multi-party agreements, shared events). Each hyperedge has a type, optional label, and a list of member node IDs with optional roles. Prefer this over a star of binary edges when the relationship is genuinely group-shaped.',
+              items: {
+                type: 'object',
+                properties: {
+                  type: { type: 'string', description: 'Hyperedge type (attended, collaborated_on, shared_concept, agreed_to, etc.)' },
+                  label: { type: 'string', description: 'Human-readable label (e.g. "2026 kickoff", "Q3 OKR review")' },
+                  confidence: { type: 'string', enum: ['extracted', 'inferred', 'ambiguous'] },
+                  members: {
+                    type: 'array',
+                    description: 'Node IDs participating in the hyperedge. At least 2; 3+ is the typical case.',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        node_id: { type: 'string' },
+                        role: { type: 'string', description: 'Optional role (organizer, participant, parent, child, etc.)' },
+                      },
+                      required: ['node_id'],
+                    },
+                  },
+                },
+                required: ['type', 'members'],
               },
             },
             project: {
@@ -418,6 +531,24 @@ class ToolSystem {
         },
       },
       // note_discovery moved to plugins/spore-code/ in phase 2.3c-2.
+      {
+        name: 'graph_diff',
+        description: 'Compare two graph snapshots and return what changed (added/removed nodes, added/removed edges). Useful for "what did I learn this week" digests, audit trails, and answering "what changed since the last session" without scanning every episode. Inputs are backup file shorthands or filenames; outputs are structured.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            from: {
+              type: 'string',
+              description: 'Older snapshot. Shorthands: "latest" (most recent backup), "yesterday" (oldest backup within ~24h), "first" (oldest). Or pass a literal backup filename returned by listBackups().',
+            },
+            to: {
+              type: 'string',
+              description: 'Newer snapshot, same shorthands as `from`, plus "current" to diff against the live graph (default).',
+            },
+          },
+          required: ['from'],
+        },
+      },
       {
         name: 'graph_delete',
         description: 'Delete a node, aspect, attribute, or edge from the knowledge graph. The deletion is reflected in real-time on the graph viewer.',
@@ -723,6 +854,109 @@ class ToolSystem {
         },
       },
       {
+        name: 'list_dir',
+        description: 'List one directory with structured file metadata. Prefer this over exec+ls/find when you need to inspect immediate children, sizes, mtimes, or directory/file split.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory to list. Defaults to the current workspace/project root.' },
+            include_hidden: { type: 'boolean', description: 'Include dotfiles and dot-directories. Default false.' },
+            max_entries: { type: 'number', description: 'Maximum entries to return. Default 200, max 1000.' },
+          },
+        },
+      },
+      {
+        name: 'read_many_files',
+        description: 'Read several small text files in one call. Prefer this over many read_file calls for configs, package manifests, tests, or related source files.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            paths: { type: 'array', items: { type: 'string' }, description: 'File paths to read. Max 20.' },
+            limit: { type: 'number', description: 'Per-file max line count. Default 400.' },
+            offset: { type: 'number', description: 'Per-file start line, 0-based. Default 0.' },
+          },
+          required: ['paths'],
+        },
+      },
+      {
+        name: 'git_status',
+        description: 'Return structured git branch/status/diff-stat for the current project. Prefer this over exec git status.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Repository directory. Defaults to current workspace/project root.' },
+          },
+        },
+      },
+      {
+        name: 'git_diff',
+        description: 'Return a bounded git diff or diff-stat. Prefer this over exec git diff because output is capped and path/staged options are explicit.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Repository directory. Defaults to current workspace/project root.' },
+            file: { type: 'string', description: 'Optional single file/pathspec to diff.' },
+            ref: { type: 'string', description: 'Optional ref/range, e.g. HEAD~1 or main...HEAD.' },
+            staged: { type: 'boolean', description: 'Diff staged changes. Default false.' },
+            stat: { type: 'boolean', description: 'Return --stat instead of full patch. Default false.' },
+            limit: { type: 'number', description: 'Max output characters. Default 20000.' },
+          },
+        },
+      },
+      {
+        name: 'patch_file',
+        description: 'Apply a unified diff to files under the current workspace/project. Runs a dry check first. Use this for multi-file edits when edit_file would be brittle.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            patch: { type: 'string', description: 'Unified diff content.' },
+            path: { type: 'string', description: 'Repository/workspace directory where the patch should apply. Defaults to current workspace/project root.' },
+            dry_run: { type: 'boolean', description: 'Only validate the patch; do not modify files. Default false.' },
+          },
+          required: ['patch'],
+        },
+      },
+      {
+        name: 'run_tests',
+        description: 'Run the project test command with bounded output. If command is omitted, detects a standard test command from package.json/go.mod/pyproject/Cargo.toml.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Project directory. Defaults to current workspace/project root.' },
+            command: { type: 'string', description: 'Explicit test/check command to run.' },
+            timeout: { type: 'number', description: 'Timeout in milliseconds. Default 120000, max 600000.' },
+          },
+        },
+      },
+      {
+        name: 'bg_list',
+        description: 'List background processes spawned by prior exec/run commands in this session.',
+        input_schema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'bg_tail',
+        description: 'Read recent output from a background process by id.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'number', description: 'Background process id.' },
+            lines: { type: 'number', description: 'Number of recent lines. Default 80, max 500.' },
+          },
+          required: ['id'],
+        },
+      },
+      {
+        name: 'bg_kill',
+        description: 'Terminate a background process by id.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'number', description: 'Background process id.' },
+          },
+          required: ['id'],
+        },
+      },
+      {
         name: 'session_status',
         description: 'Get current session information: message count, uptime, active sessions, learner stats, model info.',
         input_schema: {
@@ -736,6 +970,21 @@ class ToolSystem {
         input_schema: {
           type: 'object',
           properties: {},
+        },
+      },
+      {
+        name: 'settings_read',
+        description: 'Read the current Spore settings registry/database snapshot. Use this instead of env_manage, .env, or spore.json when checking runtime settings such as publicUrl, webPort, model routing, plugin hot reload, browser backend, providers, and plugin config. Secrets are redacted.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['summary', 'get', 'list'], description: 'summary: compact runtime/config overview. get: read one setting key. list: list settings filtered by prefix/group/scope.' },
+            key: { type: 'string', description: 'Flat setting key for action:get, e.g. publicUrl or providers.openai.apiKey.' },
+            prefix: { type: 'string', description: 'Optional flat-key prefix for action:list, e.g. providers. or plugins.' },
+            group: { type: 'string', description: 'Optional registry group filter for action:list, e.g. web, providers, models, plugins.' },
+            scope: { type: 'string', description: 'Optional registry scope filter for action:list, e.g. settings, server, plugin.' },
+          },
+          required: ['action'],
         },
       },
       {
@@ -754,22 +1003,9 @@ class ToolSystem {
       {
         name: 'web_serve',
         description: (() => {
-          const d = this.config.ingressDomain;
-          const p = (this.config.ingressPath || '').replace(/\/$/, '');
-          const pr = this.config.ingressHttps ? 'https' : 'http';
-          const pub = d ? `${pr}://${d}${p}` : null;
-          return `Start, stop, or check your web server. ${pub ? `Public URL: ${pub}/` : `Internal port: ${this.config.webPort || '<SPORE_WEB_PORT>'}.`}
-
-For apps with a backend API, use action:"backend" — it:
-- Starts the web server for static files from the directory
-- Launches your backend process with APP_PORT env var
-- AUTO-INJECTS all vault keys as env vars (process.env.REPLICATE_API_TOKEN etc.) — no vault_get needed
-- Proxies /api/* and any non-file routes to your backend automatically
-- Manages process lifecycle (kills stale, restarts clean)
-- PERSISTS across container restarts — backend auto-restores on boot with fresh vault keys
-
-CRITICAL ROUTING: Traefik strips the path prefix (${p || '/spores/<name>'}) before requests reach your server. Your backend receives paths relative to root.
-CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/endpoint') or fetch('./api/endpoint') with credentials:'include'. NEVER use absolute paths like fetch('/api/endpoint') — they bypass the proxy entirely.`;
+          const pub = this._currentPublicBaseUrl();
+          const webPort = this._currentWebPort() || this.config.webPort || '<SPORE_WEB_PORT>';
+          return `Start, stop, or check your web server. ${pub ? `Public URL: ${pub}/` : `Internal port: ${webPort}.`} Use action:"backend" for API apps; it launches the backend with APP_PORT, injects vault keys, proxies routes, and persists across restarts. Frontends should use relative fetch paths. Detailed routing rules live in ref-web-architecture.`;
         })(),
         input_schema: {
           type: 'object',
@@ -782,26 +1018,10 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
           required: ['action'],
         },
       },
-      {
-        name: 'browser',
-        description: `Control a persistent Chromium browser for web scraping, testing, form automation, or visual verification. Backends: zendriver (continuous frame preview via repeated screenshots) and playwright (live screencast preview). Default backend follows this instance's browser setting (${this.config.browserBackend || 'zendriver'}) unless another backend is already active. Actions: launch (opens browser, optionally with a URL), navigate (go to URL), click (CSS selector), type (fill input), screenshot (high-quality capture that also saves a JPG and returns filePath for message_send), scroll (up/down), evaluate (run JS), close (stop browser), status (inspect current backend/session). The browser persists across tool calls — launch once, then navigate/interact as needed.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            action: { type: 'string', enum: ['launch', 'navigate', 'click', 'type', 'screenshot', 'scroll', 'evaluate', 'close', 'status'], description: 'Browser action to perform' },
-            backend: { type: 'string', enum: ['playwright', 'zendriver'], description: 'Browser backend to use. If omitted, the instance default is used unless another backend is already active.' },
-            url: { type: 'string', description: 'URL to open (for launch/navigate)' },
-            selector: { type: 'string', description: 'CSS selector (for click/type)' },
-            text: { type: 'string', description: 'Text to type (for type action)' },
-            direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default: down)' },
-            amount: { type: 'number', description: 'Scroll pixels (default: 500)' },
-            expression: { type: 'string', description: 'JavaScript expression to evaluate in page context' },
-            width: { type: 'number', description: 'Viewport width (default: 1280, for launch only)' },
-            height: { type: 'number', description: 'Viewport height (default: 720, for launch only)' },
-          },
-          required: ['action'],
-        },
-      },
+      // The `browser` tool is now provided by the browser-core plugin
+      // (plugins/browser-core/), which dispatches to backend plugins
+      // (zendriver, playwright). The plugin manager merges its tool
+      // definition into this list at boot — no inline definition needed.
       {
         name: 'analyze_media',
         description: 'Generic media analysis tool. Prefer `analyze_media` for uploaded attachments because it auto-detects image/video/audio from the file path or latest upload, then uses the matching dedicated VLM tier internally. Use `kind` only to force a modality when the file extension is ambiguous (for example .webm). You still write the final answer yourself.',
@@ -883,7 +1103,7 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       },
       {
         name: 'notify_user',
-        description: 'Send a notification to YOUR user across all active channels (web panel, Discord, Telegram). Use this when another spore asks you to relay a message, when you have an important update to deliver proactively, or when a background process produces a result the user should see immediately. The message is delivered as-is — write it as you want the user to read it.',
+        description: 'Send a notification to YOUR user across the web panel and any installed channel plugins with active targets. Use this when another spore asks you to relay a message, when you have an important update to deliver proactively, or when a background process produces a result the user should see immediately. The message is delivered as-is — write it as you want the user to read it.',
         input_schema: {
           type: 'object',
           properties: {
@@ -897,18 +1117,30 @@ CRITICAL FRONTEND: Your frontend MUST use relative fetch paths — fetch('api/en
       ...this._getCustomToolDefinitions(),
       ...this._getWebappRequestDefinitions(),
 
-      ...(this._pluginManager ? this._pluginManager.getToolDefinitions() : []),
+      ...(this._pluginManager ? this._pluginManager.getToolDefinitions(toolCtx) : []),
 
       ...this._getCommunicationToolDefinitions(),
       ...(this.config.superAgent ? this._getSuperAgentToolDefinitions() : []),
       ...this._getRemoteToolDefinitions(),
       ...this._getSkillToolDefinitions(),
     ];
-    const platform = opts.platform
-      || _execContext.getStore()?.platform
-      || this._currentPlatform;
+    const projectMode = projectContext?.mode
+      || _execContext.getStore()?.projectContext?.mode
+      || this._currentProjectContext?.mode;
     if (platform === 'cli') {
-      return all.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
+      let filtered = all.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
+      const advertised = Array.isArray(toolCtx.clientTools) && toolCtx.clientTools.length > 0
+        ? new Set(toolCtx.clientTools)
+        : null;
+      if (advertised) {
+        filtered = filtered.filter(t => !CLI_LOCAL_TOOL_NAMES.has(t.name) || advertised.has(t.name));
+      } else {
+        filtered = filtered.filter(t => !CLI_NEW_LOCAL_TOOL_NAMES.has(t.name));
+      }
+      if (projectMode === 'plan') {
+        filtered = filtered.filter(t => !CLI_PLAN_BLOCKED_TOOLS.has(t.name));
+      }
+      return filtered;
     }
     return all;
   }
@@ -1008,7 +1240,7 @@ Set wait:false when you've submitted a long background job and just want to retu
       },
       {
         name: 'startup_tasks',
-        description: 'Manage persistent background tasks that automatically restart when the container reboots. Use this for long-running processes like collectors, watchers, servers, or any nohup/background job that should survive restarts. Tasks are stored in /data/.startup-tasks.json and executed after the app boots. For cron-based scheduling inside this container, use plain `cron` plus `crontab` — do not use `/etc/init.d/cron start`, `service cron start`, or `/usr/sbin/cron` directly.',
+        description: 'Manage persistent background tasks that automatically restart when the container reboots. Use this for long-running collectors, watchers, servers, or background jobs that should survive restarts. Detailed cron/startup guidance lives in ref-cron-runtime and ref-tool-workflows.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1100,7 +1332,7 @@ Set wait:false when you've submitted a long background job and just want to retu
   }
 
   getChatToolDefinitions() {
-    const chatTools = ['message_send', 'message_read', 'graph_query', 'query_about', 'graph_update', 'graph_delete', 'task_status', 'web_search', 'web_fetch'];
+    const chatTools = ['message_send', 'message_read', 'graph_query', 'query_about', 'graph_update', 'graph_diff', 'graph_delete', 'task_status', 'web_search', 'web_fetch'];
     const all = this.getToolDefinitions();
     return all.filter(t => chatTools.includes(t.name));
   }
@@ -1109,7 +1341,7 @@ Set wait:false when you've submitted a long background job and just want to retu
     if (!this.config.managerUrl) return [];
     return [
       {
-        name: 'anima_list',
+        name: 'spore_list',
         description: 'List all spore instances on this server with their status and model. Use to discover who else is around before messaging.',
         input_schema: {
           type: 'object',
@@ -1120,7 +1352,7 @@ Set wait:false when you've submitted a long background job and just want to retu
       },
       {
         name: 'spore_message',
-        description: 'Send a message to another spore and get its response. The target spore processes it through its full agent loop with its own personality, tools, and knowledge graph. Use for asking questions, collaborating on tasks, or just chatting with other animas. To relay a message to another spore\'s user, be explicit: "Please tell your user [message]" — the target spore will use notify_user to deliver it.',
+        description: 'Send a message to another spore and get its response. The target spore processes it through its full agent loop with its own personality, tools, and knowledge graph. Use for asking questions, collaborating on tasks, or just chatting with other Spores. To relay a message to another spore\'s user, be explicit: "Please tell your user [message]" — the target spore will use notify_user to deliver it.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1138,7 +1370,7 @@ Set wait:false when you've submitted a long background job and just want to retu
   _getSuperAgentToolDefinitions() {
     return [
       {
-        name: 'anima_graph',
+        name: 'spore_graph',
         description: 'Read or write to another spore\'s knowledge graph. Requires super agent privileges. Use "read" to search/query nodes, or "write" to add/update nodes, aspects, attributes, and edges.',
         input_schema: {
           type: 'object',
@@ -1180,7 +1412,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         },
       },
       {
-        name: 'anima_manage',
+        name: 'spore_manage',
         description: 'Administrative control over another spore. Requires super agent privileges. Can restart, update environment variables, update config, or check token usage and logs.',
         input_schema: {
           type: 'object',
@@ -1217,11 +1449,12 @@ Set wait:false when you've submitted a long background job and just want to retu
     return await _execContext.run(resolvedCtx || {}, async () => {
       const sessionKey = resolvedCtx?.sessionKey || null;
       const platform = resolvedCtx?.platform;
-      // Plan-mode gate only applies to web sessions. Spore Code has its own
-      // PLAN_READY/plan:decided prose-based plan-approval flow (see
-      // spore-code internal plan handlers + plan_approval). Routing Spore Code's
-      // tool calls through the queue would break that flow by swallowing the
-      // tool calls the agent would otherwise execute under acorn's plan mode.
+      const cliPlanBlock = this.planModeBlockForTool(normalizedName, input, resolvedCtx);
+      if (cliPlanBlock) return cliPlanBlock;
+      // Web plan mode queues proposals for approval. Spore Code plan mode
+      // is handled above by hard-blocking local execution/write tools; it
+      // should not use the web proposal queue because the CLI has its own
+      // PLAN_READY / execute-mode handoff.
       if (sessionKey && MUTATING_TOOLS.has(normalizedName) && platform !== 'cli') {
         try {
           const row = this._sessions?.db?.prepare('SELECT plan_mode FROM sessions WHERE key=?').get(sessionKey);
@@ -1232,6 +1465,36 @@ Set wait:false when you've submitted a long background job and just want to retu
       }
       return await this._executeToolDirect(normalizedName, input);
     });
+  }
+
+  planModeBlockForTool(name, input, ctx = null) {
+    const normalizedName = name === 'graph'
+      ? 'graph_update'
+      : name === 'analyze'
+        ? 'analyze_media'
+        : name;
+    const resolvedCtx = ctx || _execContext.getStore() || this._resolveFallbackCtx() || {};
+    const sessionKey = resolvedCtx.sessionKey || null;
+    const sessionCtx = (sessionKey && this._sessionContexts?.get(sessionKey)) || {};
+    const platform = resolvedCtx.platform ?? sessionCtx.platform ?? this._currentPlatform ?? null;
+    const projectMode = resolvedCtx.projectContext?.mode
+      ?? sessionCtx.projectContext?.mode
+      ?? this._currentProjectContext?.mode
+      ?? null;
+
+    if (platform !== 'cli' || projectMode !== 'plan') return null;
+    if (!CLI_PLAN_BLOCKED_TOOLS.has(normalizedName)) return null;
+
+    const detail = normalizedName === 'exec'
+      ? ` command=${JSON.stringify(String(input?.command || '').slice(0, 160))}`
+      : '';
+    this.log?.warn?.(`[plan-mode] blocked ${normalizedName} in Spore Code plan mode${detail}`);
+    return {
+      error: `BLOCKED: Spore Code plan mode is read-only. The ${normalizedName} tool is unavailable until the user approves the plan and the session switches to execute mode.`,
+      planMode: true,
+      blocked: true,
+      tool: normalizedName,
+    };
   }
 
   _resolveFallbackCtx() {
@@ -1250,14 +1513,78 @@ Set wait:false when you've submitted a long background job and just want to retu
   _ctx() { return _execContext.getStore() || {}; }
   _ctxSessionKey() { return _execContext.getStore()?.sessionKey || null; }
 
+  _resolveGraphSlugForTool(project, opts = {}) {
+    const registry = this._graphRegistry;
+    if (project && registry?.get?.(project)) return project;
+    if (project) return null;
+    const env = this._ctx()?.memoryEnvelope;
+    const slug = opts.write
+      ? env?.writeScopes?.defaultSlug
+      : (env?.primarySlug || env?.readScopes?.[0]?.slug);
+    if (!slug || !registry?.get?.(slug)) return null;
+    const active = registry.getActiveSlug?.();
+    if (slug === active && !opts.force) return null;
+    return slug;
+  }
+
+  _getScopedToolDb(slug) {
+    if (!slug) return null;
+    if (this.learner?.getGraphDb) return this.learner.getGraphDb(slug);
+    return null;
+  }
+
+  _activeGraphSlug() {
+    return this._graphRegistry?.getActiveSlug?.() || null;
+  }
+
+  _graphResultMeta(slug = null) {
+    const graph = slug || this._activeGraphSlug();
+    if (!graph) return {};
+    const entry = this._graphRegistry?.get?.(graph);
+    return { graph, ...(entry?.name ? { graphName: entry.name } : {}) };
+  }
+
+  async _withScopedGraphForTool(slug, fn) {
+    const registry = this._graphRegistry;
+    const entry = registry?.get?.(slug);
+    const dbPath = registry?.getDbPath?.(slug);
+    if (!dbPath) return { error: `Graph "${slug}" not found` };
+    const { GraphContext } = require('../graph/context');
+    const originalGraph = this.graph;
+    const scopedGraph = new GraphContext({ ...this.config, graphDbPath: dbPath }, this.log);
+    try {
+      if (!scopedGraph.init()) return { error: `Could not open graph "${slug}"` };
+      this.graph = scopedGraph;
+      const result = await graphEvents.withGraph({ graph: slug }, () => fn(entry, scopedGraph));
+      if (result && typeof result === 'object' && !result.error) {
+        result.graph = slug;
+        if (entry?.name) result.graphName = entry.name;
+      }
+      return result;
+    } finally {
+      this.graph = originalGraph;
+      try { scopedGraph.close(); } catch {}
+    }
+  }
+
+  _getBuiltinToolHandlers() {
+    if (!this._builtinToolHandlers) {
+      this._builtinToolHandlers = buildBuiltinToolHandlers(this);
+    }
+    return this._builtinToolHandlers;
+  }
+
   async _executeToolDirect(normalizedName, input) {
     this.log.debug(`Executing tool: ${normalizedName}`, JSON.stringify(input).substring(0, 200));
     // Abort guard: refuse destructive tools if the user already hit stop.
-    const DESTRUCTIVE = new Set(['write_file', 'edit_file', 'exec', 'save_tool', 'web_serve']);
+    const DESTRUCTIVE = new Set(['write_file', 'edit_file', 'exec', 'save_tool', 'web_serve', 'patch_file', 'run_tests', 'bg_kill']);
     if (DESTRUCTIVE.has(normalizedName) && this._abortSignal?.aborted) {
       return { error: 'Aborted by user — tool execution skipped.' };
     }
     try {
+      const builtinHandler = this._getBuiltinToolHandlers()[normalizedName];
+      if (builtinHandler) return await builtinHandler(input || {});
+
       switch (normalizedName) {
         case 'exec':
           return await this._execTool(input);
@@ -1275,6 +1602,8 @@ Set wait:false when you've submitted a long background job and just want to retu
           return await this._queryAboutTool(input);
         case 'graph_update':
           return this._graphUpdateTool(input);
+        case 'graph_diff':
+          return this._graphDiffTool(input);
         // note_discovery → falls through to plugin dispatch (spore-code).
         case 'graph_delete':
           return this._graphDeleteTool(input);
@@ -1300,16 +1629,38 @@ Set wait:false when you've submitted a long background job and just want to retu
           return this._grepTool(input);
         case 'glob':
           return this._globTool(input);
+        case 'list_dir':
+          return this._listDirTool(input);
+        case 'read_many_files':
+          return this._readManyFilesTool(input);
+        case 'git_status':
+          return await this._gitStatusTool(input);
+        case 'git_diff':
+          return await this._gitDiffTool(input);
+        case 'patch_file':
+          return await this._patchFileTool(input);
+        case 'run_tests':
+          return await this._runTestsTool(input);
+        case 'bg_list':
+          return this._bgListTool();
+        case 'bg_tail':
+          return this._bgTailTool(input);
+        case 'bg_kill':
+          return this._bgKillTool(input);
         case 'session_status':
           return this._sessionStatusTool();
         case 'sessions_list':
           return this._sessionsListTool();
+        case 'settings_read':
+          return this._settingsReadTool(input);
         case 'env_manage':
           return await this._envManageTool(input);
         case 'web_serve':
           return this._webServeTool(input);
-        case 'browser':
-          return await this._browserTool(input);
+        // `browser` is provided by the browser-core plugin
+        // (plugins/browser-core/), which routes to backend plugins
+        // (zendriver, playwright). The plugin manager dispatches it
+        // automatically — no in-core case needed.
         case 'analyze_media':
           return await this._analyzeTool(input);
         case 'analyze_image':
@@ -1361,13 +1712,13 @@ Set wait:false when you've submitted a long background job and just want to retu
         case 'ask_user':
           return await this._askUserTool(input);
 
-        case 'anima_list':
+        case 'spore_list':
           return await this._animaListTool(input);
         case 'spore_message':
           return await this._animaMessageTool(input);
-        case 'anima_graph':
+        case 'spore_graph':
           return await this._animaGraphTool(input);
-        case 'anima_manage':
+        case 'spore_manage':
           return await this._animaManageTool(input);
 
         case 'remote_exec':
@@ -1418,6 +1769,7 @@ Set wait:false when you've submitted a long background job and just want to retu
               userMessage:    sessionCtx.userMessage    ?? this._currentUserMessage ?? null,
               sessionToken:   sessionCtx.sessionToken   ?? this._currentSessionToken ?? null,
               projectContext: sessionCtx.projectContext ?? this._currentProjectContext ?? null,
+              memoryEnvelope: sessionCtx.memoryEnvelope ?? this._currentMemoryEnvelope ?? null,
               abortSignal:    sessionCtx.abortSignal    ?? this._abortSignal ?? null,
             });
             if (pluginResult !== null) return pluginResult;
@@ -1456,7 +1808,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           {
             const ctx = this._ctx?.() || {};
             const channelId = ctx.channelId ?? this._currentChannelId;
-            const platform = ctx.platform ?? this._currentPlatform ?? 'discord';
+            const platform = ctx.platform ?? this._currentPlatform ?? null;
             if (this._agent && channelId) {
               try {
                 const gateway = this.platformManager?.getGateway(platform);
@@ -1476,7 +1828,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           this.log.warn(`[package-vet] Install warnings: ${vetResult.summary}`);
           const ctx = this._ctx?.() || {};
           const channelId = ctx.channelId ?? this._currentChannelId;
-          const platform = ctx.platform ?? this._currentPlatform ?? 'discord';
+          const platform = ctx.platform ?? this._currentPlatform ?? null;
           if (this._agent && channelId) {
             try {
               const gateway = this.platformManager?.getGateway(platform);
@@ -1595,7 +1947,7 @@ Set wait:false when you've submitted a long background job and just want to retu
   }
 
   /**
-   * Send a message to a Discord channel
+   * Send a message through an installed channel gateway.
    */
   async _messageSendTool(input) {
     const { content, filePath } = input;
@@ -1617,7 +1969,7 @@ Set wait:false when you've submitted a long background job and just want to retu
     if (this.platformManager) {
       const result = await this.platformManager.sendMessage({ target: resolvedTarget, content, filePath, platform: targetMeta.platform });
       if (!result?.error) return result;
-      if (targetMeta.platform !== 'discord') return result;
+      return result;
     }
 
     if (!this.discord) {
@@ -1702,63 +2054,22 @@ Set wait:false when you've submitted a long background job and just want to retu
       }
     }
 
-    // 2. Discord — send to the most recently active DM channel, or first known channel
+    // 2. Plugin channel gateways — each channel plugin decides which recent
+    // targets are appropriate for notifications.
     if (this.platformManager) {
-      const discord = this.platformManager.getGateway('discord');
-      if (discord?.client) {
-        try {
-          const channels = discord.getActiveChannelIds();
-          const dmChannel = channels.find(c => {
-            const ch = discord.client.channels.cache.get(c.id);
-            return ch?.isDMBased?.();
-          });
-          const target = dmChannel || channels[0];
-          if (target) {
-            await discord.sendMessage(target.id, fullMessage);
-            delivered.push(`discord:${target.id}`);
-          }
-        } catch (e) {
-          this.log.warn(`[notify_user] Discord delivery failed: ${e.message}`);
-        }
-      }
-
-      // 3. Telegram — send to first approved chat
-      const telegram = this.platformManager.getGateway('telegram');
-      if (telegram) {
-        try {
-          const approved = this.platformManager.pairing?.listApproved?.('telegram') || [];
-          if (approved.length > 0) {
-            await telegram.sendMessage(approved[0], fullMessage);
-            delivered.push(`telegram:${approved[0]}`);
-          }
-        } catch (e) {
-          this.log.warn(`[notify_user] Telegram delivery failed: ${e.message}`);
-        }
-      }
-
-      // 4. Slack — send to first known channel
-      const slack = this.platformManager.getGateway('slack');
-      if (slack?.getActiveChannelIds) {
-        try {
-          const channels = slack.getActiveChannelIds();
-          if (channels.length > 0) {
-            await slack.sendMessage(channels[0].id, fullMessage);
-            delivered.push(`slack:${channels[0].id}`);
-          }
-        } catch (e) {
-          this.log.warn(`[notify_user] Slack delivery failed: ${e.message}`);
-        }
-      }
+      const channelDeliveries = await this.platformManager.notifyUser(fullMessage, { source, urgent });
+      delivered.push(...channelDeliveries);
     }
 
     if (delivered.length === 0) {
-      return { error: 'No delivery channels available — no connected web panel, Discord, Telegram, or Slack channels found.' };
+      return { error: 'No delivery channels available — no connected web panel or plugin channel targets found.' };
     }
 
     // Persist to web session history so notifications survive page refresh
     if (this._sessions) {
       try {
-        const sessionKey = this._sessions.constructor.buildKey('web:control-panel', true, 'operator');
+        const webUser = this.gateway?._getActiveWebUser?.() || 'operator';
+        const sessionKey = this._sessions.constructor.buildKey('web:control-panel', true, webUser);
         const notifText = `[NOTIFICATION${source ? ` from ${source}` : ''}] ${message}`;
         this._sessions.addMessage(sessionKey, 'notification', notifText);
       } catch (e) {
@@ -1779,9 +2090,9 @@ Set wait:false when you've submitted a long background job and just want to retu
     if (this.platformManager) {
       const result = await this.platformManager.reactToMessage({ target: targetMeta.target, messageId, emoji, platform: targetMeta.platform });
       if (!result?.error) return result;
-      if (targetMeta.platform !== 'discord') return result;
+      return result;
     }
-    if (!this.discordGateway) return { error: 'Discord gateway not available' };
+    if (!this.discordGateway) return { error: 'No channel gateway available for reactions' };
     if (!targetMeta.id) return { error: 'No target specified and no current conversation available' };
     return await this.discordGateway.reactToMessage(targetMeta.id, messageId, emoji);
   }
@@ -1795,15 +2106,15 @@ Set wait:false when you've submitted a long background job and just want to retu
     if (this.platformManager) {
       const result = await this.platformManager.editMessage({ target: targetMeta.target, messageId, content, platform: targetMeta.platform });
       if (!result?.error) return result;
-      if (targetMeta.platform !== 'discord') return result;
+      return result;
     }
-    if (!this.discordGateway) return { error: 'Discord gateway not available' };
+    if (!this.discordGateway) return { error: 'No channel gateway available for message edits' };
     if (!targetMeta.id) return { error: 'No target specified and no current conversation available' };
     return await this.discordGateway.editMessage(targetMeta.id, messageId, content);
   }
 
   /**
-   * Read messages from a Discord channel
+   * Read messages from a channel plugin
    */
   async _messageReadTool(input) {
     const { limit = 10 } = input;
@@ -1812,7 +2123,7 @@ Set wait:false when you've submitted a long background job and just want to retu
     if (this.platformManager) {
       const result = await this.platformManager.readMessages({ target: targetMeta.target, limit, platform: targetMeta.platform });
       if (!result?.error) return result;
-      if (targetMeta.platform !== 'discord') return result;
+      return result;
     }
 
     if (!this.discord) {
@@ -1851,10 +2162,74 @@ Set wait:false when you've submitted a long background job and just want to retu
    * Query the knowledge graph
    */
   async _graphQueryTool(input) {
-    const { query, nodeId, type, project } = input;
+    const { query, nodeId, type, project, mode } = input;
 
-    if (!this.graph) {
-      return { error: 'Graph context not available' };
+	    if (!this.graph) {
+	      return { error: 'Graph context not available' };
+	    }
+
+	    const scopedSlug = this._resolveGraphSlugForTool(project, { force: !!project });
+    const activeGraphMeta = this._graphResultMeta();
+
+	    // Mode dispatcher — runs before the default search/lookup path.
+	    // When a memory envelope is active, run graph modes against the
+	    // scoped graph rather than silently falling back to the active graph.
+	    if (mode && scopedSlug) {
+	      const registry = this._graphRegistry;
+	      const entry = registry?.get?.(scopedSlug);
+	      const dbPath = registry?.getDbPath?.(scopedSlug);
+	      if (!dbPath) return { error: `Graph "${scopedSlug}" not found` };
+	      const { GraphContext } = require('../graph/context');
+	      const originalGraph = this.graph;
+	      const scopedGraph = new GraphContext({ ...this.config, graphDbPath: dbPath }, this.log);
+	      try {
+	        if (!scopedGraph.init()) return { error: `Could not open graph "${scopedSlug}"` };
+	        this.graph = scopedGraph;
+	        let result;
+	        switch (mode) {
+	          case 'neighbors':  result = this._graphQueryNeighbors(input); break;
+	          case 'walk':       result = await this._graphQueryWalk(input); break;
+	          case 'path':       result = this._graphQueryPath(input); break;
+	          case 'community':  result = this._graphQueryCommunity(input); break;
+	          case 'hyperedges': result = this._graphQueryHyperedges(input); break;
+	          default:
+	            return { error: `Unknown mode "${mode}". Valid: neighbors, walk, path, community, hyperedges.` };
+	        }
+	        if (result && typeof result === 'object' && !result.error) {
+	          result.graph = scopedSlug;
+	          result.graphName = entry?.name;
+	        }
+	        return result;
+	      } catch (e) {
+	        return { error: `mode="${mode}" failed on graph "${scopedSlug}": ${e.message}` };
+	      } finally {
+	        this.graph = originalGraph;
+	        try { scopedGraph.close(); } catch {}
+	      }
+	    }
+
+	    if (mode && !project) {
+	      try {
+          const runMode = async () => {
+            switch (mode) {
+              case 'neighbors':  return this._graphQueryNeighbors(input);
+              case 'walk':       return this._graphQueryWalk(input);
+              case 'path':       return this._graphQueryPath(input);
+              case 'community':  return this._graphQueryCommunity(input);
+              case 'hyperedges': return this._graphQueryHyperedges(input);
+              default:
+                return { error: `Unknown mode "${mode}". Valid: neighbors, walk, path, community, hyperedges.` };
+            }
+          };
+          const result = await graphEvents.withGraph(activeGraphMeta.graph ? { graph: activeGraphMeta.graph } : null, runMode);
+          if (result && typeof result === 'object' && !result.error) Object.assign(result, activeGraphMeta);
+          return result;
+      } catch (e) {
+        return { error: `mode="${mode}" failed: ${e.message}` };
+      }
+    }
+    if (mode && project) {
+      return { error: `mode="${mode}" is not supported on shared project graphs — only on the local graph. Drop the project parameter to use ${mode}.` };
     }
 
     // Query a shared project graph via ATTACH alias
@@ -1892,41 +2267,122 @@ Set wait:false when you've submitted a long background job and just want to retu
       }
     }
 
+	    if (scopedSlug) {
+      const registry = this._graphRegistry;
+      const entry = registry?.get?.(scopedSlug);
+      const dbPath = registry?.getDbPath?.(scopedSlug);
+      if (!dbPath) return { error: `Graph "${scopedSlug}" not found` };
+      const { GraphContext } = require('../graph/context');
+      const scopedGraph = new GraphContext({ ...this.config, graphDbPath: dbPath }, this.log);
+      try {
+        if (!scopedGraph.init()) return { error: `Could not open graph "${scopedSlug}"` };
+        if (nodeId) {
+          const node = scopedGraph.getNode(nodeId);
+          if (!node) return { error: `Node '${nodeId}' not found in graph "${scopedSlug}"` };
+          node.edges = scopedGraph.getEdges(nodeId);
+          graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId], source: 'graph_query', graph: scopedSlug });
+          return { node: this._formatNodeForTool(node), graph: scopedSlug, graphName: entry?.name };
+        }
+        if (type && !query) {
+          const nodes = scopedGraph.getNodesByType(type);
+          const shown = nodes.slice(0, 20);
+          if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: scopedSlug });
+          return { nodes: shown.map(n => this._formatNodeBrief(n)), total: nodes.length, graph: scopedSlug, graphName: entry?.name };
+        }
+        if (query) {
+          const q = String(query).trim();
+          const qLower = q.toLowerCase();
+          const exactRows = scopedGraph.db.prepare(`
+            SELECT DISTINCT n.id FROM nodes n
+            LEFT JOIN aliases a ON a.node_id = n.id
+            WHERE LOWER(n.id) = ? OR LOWER(n.label) = ? OR LOWER(a.alias) = ?
+            LIMIT 5
+          `).all(qLower, qLower, qLower);
+          if (exactRows.length > 0) {
+            const exactNodes = exactRows.map(r => scopedGraph.getNode(r.id)).filter(Boolean);
+            for (const n of exactNodes) n.edges = scopedGraph.getEdges(n.id);
+            graphEvents.emit('change', { op: 'node:accessed', nodeIds: exactNodes.map(n => n.id), source: 'graph_query', graph: scopedSlug });
+            return { nodes: exactNodes.map(n => this._formatNodeForTool(n)), total: exactNodes.length, shown: exactNodes.length, search: 'exact', graph: scopedSlug, graphName: entry?.name };
+          }
+          const results = await scopedGraph.hybridSearch(query);
+          const shown = results.slice(0, 10);
+          for (const node of shown) node.edges = scopedGraph.getEdges(node.id);
+          if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: scopedSlug });
+          return { nodes: shown.map(n => this._formatNodeForTool(n)), total: results.length, shown: shown.length, search: 'hybrid', graph: scopedSlug, graphName: entry?.name };
+        }
+      } catch (e) {
+        return { error: `Graph "${scopedSlug}" query failed: ${e.message}` };
+      } finally {
+        try { scopedGraph.close(); } catch {}
+      }
+    }
+
     try {
       // Direct node lookup
       if (nodeId) {
         const node = this.graph.getNode(nodeId);
         if (!node) return { error: `Node '${nodeId}' not found` };
         node.edges = this.graph.getEdges(nodeId);
-        graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId], source: 'graph_query' });
-        return { node: this._formatNodeForTool(node) };
+        graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId], source: 'graph_query', graph: activeGraphMeta.graph });
+        return { node: this._formatNodeForTool(node), ...activeGraphMeta };
       }
 
       // Type filter
       if (type && !query) {
         const nodes = this.graph.getNodesByType(type);
         const shown = nodes.slice(0, 20);
-        if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query' });
+        if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: activeGraphMeta.graph });
         return {
           nodes: shown.map(n => this._formatNodeBrief(n)),
           total: nodes.length,
+          ...activeGraphMeta,
         };
       }
 
       // Hybrid search: vector similarity + keyword LIKE merged, across all nodes
       if (query) {
+        // Exact-match fast-path: if the query matches a node id, label, or
+        // alias verbatim (case-insensitive), short-circuit to that node
+        // alone. Without this, hybrid search on a short query like "yam3"
+        // pulls in 10 results — including vector-similarity noise on small
+        // graphs (e.g. a "react" node ranking high on a username query).
+        const db = this.graph.db;
+        const q = String(query).trim();
+        const qLower = q.toLowerCase();
+        const exactRows = db.prepare(`
+          SELECT DISTINCT n.id FROM nodes n
+          LEFT JOIN aliases a ON a.node_id = n.id
+          WHERE LOWER(n.id) = ? OR LOWER(n.label) = ? OR LOWER(a.alias) = ?
+          LIMIT 5
+        `).all(qLower, qLower, qLower);
+        if (exactRows.length > 0) {
+          const exactNodes = exactRows
+            .map(r => this.graph.getNode(r.id))
+            .filter(Boolean);
+          for (const n of exactNodes) n.edges = this.graph.getEdges(n.id);
+          graphEvents.emit('change', { op: 'node:accessed', nodeIds: exactNodes.map(n => n.id), source: 'graph_query', graph: activeGraphMeta.graph });
+          return {
+            nodes: exactNodes.map(n => this._formatNodeForTool(n)),
+            total: exactNodes.length,
+            shown: exactNodes.length,
+            search: 'exact',
+            ...activeGraphMeta,
+          };
+        }
+
         const results = await this.graph.hybridSearch(query);
         const cap = 10;
         const shown = results.slice(0, cap);
         for (const node of shown) {
           node.edges = this.graph.getEdges(node.id);
         }
-        if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query' });
+        if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: activeGraphMeta.graph });
         return {
           nodes: shown.map(n => this._formatNodeForTool(n)),
           total: results.length,
           shown: shown.length,
           search: 'hybrid',
+          ...activeGraphMeta,
         };
       }
 
@@ -1936,14 +2392,438 @@ Set wait:false when you've submitted a long background job and just want to retu
     }
   }
 
+  // ── graph_query mode handlers ────────────────────────────────────────────
+
+  /**
+   * Resolve a "node identifier" given by the agent — accepts an exact ID,
+   * a label match, or the top hit of a hybrid search. Used by walk/path
+   * modes so the agent doesn't have to know the exact ID format.
+   */
+  async _resolveNodeForQuery(input, key) {
+    const direct = input[key];
+    if (!direct) return null;
+    const db = this.graph.db;
+    const exact = db.prepare('SELECT id FROM nodes WHERE id = ?').get(direct);
+    if (exact) return exact.id;
+    const byLabel = db.prepare('SELECT id FROM nodes WHERE LOWER(label) = ? LIMIT 1').get(String(direct).toLowerCase());
+    if (byLabel) return byLabel.id;
+    return null;
+  }
+
+  /**
+   * mode:'neighbors' — 1-hop edges from a node.
+   */
+  _graphQueryNeighbors(input) {
+    const { nodeId, relation_filter } = input;
+    if (!nodeId) return { error: 'mode:"neighbors" requires nodeId.' };
+    const db = this.graph.db;
+    const nodeRow = db.prepare('SELECT id, label, type FROM nodes WHERE id = ?').get(nodeId);
+    if (!nodeRow) return { error: `Node "${nodeId}" not found.` };
+
+    const rows = db.prepare(
+      'SELECT source, target, type, weight, confidence FROM edges WHERE source = ? OR target = ?'
+    ).all(nodeId, nodeId);
+
+    const filter = relation_filter ? String(relation_filter).toLowerCase() : null;
+    const labelOf = (id) => {
+      const r = db.prepare('SELECT label FROM nodes WHERE id = ?').get(id);
+      return r ? r.label : null;
+    };
+
+    const neighbors = [];
+    for (const e of rows) {
+      const otherId = e.source === nodeId ? e.target : e.source;
+      const direction = e.source === nodeId ? 'out' : 'in';
+      if (filter && !String(e.type || '').toLowerCase().includes(filter)) continue;
+      neighbors.push({
+        node_id: otherId,
+        label: labelOf(otherId) || otherId,
+        relation: e.type,
+        direction,
+        weight: e.weight ?? 1,
+        confidence: e.confidence || null,
+      });
+    }
+
+    graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId, ...neighbors.map(n => n.node_id)], source: 'graph_query:neighbors' });
+    return {
+      mode: 'neighbors',
+      node: { id: nodeRow.id, label: nodeRow.label, type: nodeRow.type },
+      neighbors,
+      total: neighbors.length,
+    };
+  }
+
+  /**
+   * mode:'walk' — depth-bounded BFS from one or more seeds, rendered as
+   * token-budgeted text. Seeds are derived from nodeId or top hits of `query`.
+   */
+  async _graphQueryWalk(input) {
+    const { nodeId, query } = input;
+    const depth = Math.max(1, Math.min(4, parseInt(input.depth, 10) || 2));
+    const tokenBudget = Math.max(200, Math.min(8000, parseInt(input.token_budget, 10) || 2000));
+
+    let seeds = [];
+    if (nodeId) {
+      const db = this.graph.db;
+      const exact = db.prepare('SELECT id FROM nodes WHERE id = ?').get(nodeId);
+      if (!exact) return { error: `Seed nodeId "${nodeId}" not found.` };
+      seeds = [exact.id];
+    } else if (query) {
+      const results = await this.graph.hybridSearch(query);
+      seeds = results.slice(0, 3).map(n => n.id);
+      if (seeds.length === 0) return { error: `No nodes matched query "${query}".` };
+    } else {
+      return { error: 'mode:"walk" requires nodeId or query.' };
+    }
+
+    const maxNodes = Math.max(20, Math.floor(tokenBudget / 80));
+    const { nodes, edges } = this.graph._graphWalkWithEdges(new Set(seeds), depth, maxNodes);
+
+    const text = this._renderSubgraphText(nodes, edges, tokenBudget, new Set(seeds));
+    graphEvents.emit('change', { op: 'node:accessed', nodeIds: nodes.map(n => n.id), source: 'graph_query:walk' });
+    return {
+      mode: 'walk',
+      seeds,
+      depth,
+      token_budget: tokenBudget,
+      node_count: nodes.length,
+      edge_count: edges.length,
+      text,
+    };
+  }
+
+  /**
+   * mode:'path' — bidirectional BFS over edges to find the shortest path
+   * between two nodes. Returns an ordered list of hops with relation labels.
+   */
+  _graphQueryPath(input) {
+    const { source_id, target_id } = input;
+    const maxHops = Math.max(1, Math.min(20, parseInt(input.max_hops, 10) || 8));
+    if (!source_id || !target_id) return { error: 'mode:"path" requires source_id and target_id.' };
+    if (source_id === target_id) return { error: 'source_id and target_id are the same node.' };
+
+    const db = this.graph.db;
+    const src = db.prepare('SELECT id, label FROM nodes WHERE id = ?').get(source_id);
+    const tgt = db.prepare('SELECT id, label FROM nodes WHERE id = ?').get(target_id);
+    if (!src) return { error: `source_id "${source_id}" not found.` };
+    if (!tgt) return { error: `target_id "${target_id}" not found.` };
+
+    // Bidirectional BFS. Maintain parent pointers from each side; stop
+    // when frontiers meet.
+    const fromSrc = new Map([[source_id, null]]);  // node -> {parent, edge}
+    const fromTgt = new Map([[target_id, null]]);
+    let frontierSrc = [source_id];
+    let frontierTgt = [target_id];
+    let meet = null;
+
+    const expand = (frontier, parents, otherParents) => {
+      const next = [];
+      for (const n of frontier) {
+        const rows = db.prepare(
+          'SELECT source, target, type, confidence FROM edges WHERE source = ? OR target = ?'
+        ).all(n, n);
+        for (const e of rows) {
+          const nb = e.source === n ? e.target : e.source;
+          if (parents.has(nb)) continue;
+          parents.set(nb, { parent: n, edge: { source: e.source, target: e.target, type: e.type, confidence: e.confidence || null } });
+          if (otherParents.has(nb)) {
+            meet = nb;
+            return next;
+          }
+          next.push(nb);
+        }
+      }
+      return next;
+    };
+
+    for (let hop = 0; hop < maxHops && !meet; hop++) {
+      // Always expand the smaller frontier first to keep the search balanced.
+      if (frontierSrc.length <= frontierTgt.length) {
+        frontierSrc = expand(frontierSrc, fromSrc, fromTgt);
+      } else {
+        frontierTgt = expand(frontierTgt, fromTgt, fromSrc);
+      }
+      if (meet) break;
+      if (frontierSrc.length === 0 && frontierTgt.length === 0) break;
+    }
+
+    if (!meet) {
+      return {
+        mode: 'path',
+        source: { id: src.id, label: src.label },
+        target: { id: tgt.id, label: tgt.label },
+        found: false,
+        reason: `No path within ${maxHops} hops.`,
+      };
+    }
+
+    // Reconstruct: source -> meet via fromSrc, meet -> target via fromTgt.
+    const labelOf = (id) => {
+      const r = db.prepare('SELECT label FROM nodes WHERE id = ?').get(id);
+      return r ? r.label : id;
+    };
+    const path = [];
+    // Walk backward from meet to source.
+    let cur = meet;
+    while (cur !== source_id) {
+      const info = fromSrc.get(cur);
+      if (!info) break;
+      path.unshift({
+        from: info.parent,
+        from_label: labelOf(info.parent),
+        relation: info.edge.type,
+        confidence: info.edge.confidence,
+        to: cur,
+        to_label: labelOf(cur),
+      });
+      cur = info.parent;
+    }
+    // Walk forward from meet to target.
+    cur = meet;
+    while (cur !== target_id) {
+      const info = fromTgt.get(cur);
+      if (!info) break;
+      // info.parent is the node closer to target; cur is closer to source.
+      path.push({
+        from: cur,
+        from_label: labelOf(cur),
+        relation: info.edge.type,
+        confidence: info.edge.confidence,
+        to: info.parent,
+        to_label: labelOf(info.parent),
+      });
+      cur = info.parent;
+    }
+
+    graphEvents.emit('change', { op: 'node:accessed', nodeIds: [source_id, ...path.map(p => p.to), target_id], source: 'graph_query:path' });
+    return {
+      mode: 'path',
+      source: { id: src.id, label: src.label },
+      target: { id: tgt.id, label: tgt.label },
+      found: true,
+      hops: path.length,
+      path,
+    };
+  }
+
+  /**
+   * mode:'community' — list all members of a community group. Group IDs
+   * are produced by maintainer.runCommunityDetection (Louvain).
+   */
+  _graphQueryCommunity(input) {
+    const { group_id } = input;
+    if (group_id === undefined || group_id === null) {
+      const available = this._listCommunityGroups();
+      return {
+        mode: 'community',
+        ok: false,
+        error: 'mode:"community" requires group_id (integer).',
+        available_groups: available.groups,
+        hint: available.groups.length
+          ? 'Pass one of the available group ids as group_id.'
+          : available.hint,
+      };
+    }
+    const gid = parseInt(group_id, 10);
+    if (!Number.isFinite(gid)) return { error: 'group_id must be an integer.' };
+
+    const db = this.graph.db;
+    const group = db.prepare(
+      'SELECT id, run_id, name, description, member_count, superseded_at FROM node_groups WHERE id = ?'
+    ).get(gid);
+    if (!group) {
+      const available = this._listCommunityGroups();
+      return {
+        mode: 'community',
+        ok: false,
+        error: `Community group ${gid} not found.`,
+        available_groups: available.groups,
+        hint: available.groups.length
+          ? 'Use one of the available active group ids.'
+          : available.hint,
+      };
+    }
+    if (group.superseded_at) {
+      // Stale groups are inspectable but we flag them.
+      // Continue so the agent can still see the listing.
+    }
+
+    const rows = db.prepare(`
+      SELECT n.id, n.label, n.type, n.importance,
+             (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) AS degree
+      FROM node_group_members m
+      JOIN nodes n ON n.id = m.node_id
+      WHERE m.group_id = ?
+      ORDER BY degree DESC, n.importance DESC
+    `).all(gid);
+
+    return {
+      mode: 'community',
+      group: { id: group.id, name: group.name, description: group.description, member_count: group.member_count, superseded: !!group.superseded_at },
+      members: rows.map(r => ({ id: r.id, label: r.label, type: r.type, importance: r.importance, degree: r.degree })),
+    };
+  }
+
+  _listCommunityGroups(limit = 20) {
+    const db = this.graph?.db;
+    if (!db) return { groups: [], hint: 'Graph context is not available.' };
+    try {
+      const counts = {
+        nodes: db.prepare('SELECT COUNT(*) AS c FROM nodes').get()?.c || 0,
+        edges: db.prepare('SELECT COUNT(*) AS c FROM edges').get()?.c || 0,
+      };
+      const groups = db.prepare(`
+        SELECT id, run_id, name, description, member_count, created
+        FROM node_groups
+        WHERE superseded_at IS NULL
+        ORDER BY member_count DESC, created DESC
+        LIMIT ?
+      `).all(limit);
+      return {
+        groups,
+        hint: counts.nodes < 20 || counts.edges < 10
+          ? `This graph is too small for clustering yet (${counts.nodes} nodes / ${counts.edges} edges).`
+          : 'This graph has no active community groups yet. Run graph maintenance to compute Louvain communities.',
+      };
+    } catch (e) {
+      return {
+        groups: [],
+        hint: `Community metadata is unavailable: ${e.message}. Run graph maintenance to migrate and cluster this graph.`,
+      };
+    }
+  }
+
+  /**
+   * mode:'hyperedges' — list all hyperedges touching a node, with member
+   * roster and roles. Useful when group facts ("the kickoff meeting")
+   * are persisted as n-ary hyperedges rather than star-shaped binary edges.
+   */
+  _graphQueryHyperedges(input) {
+    const { nodeId } = input;
+    if (!nodeId) return { error: 'mode:"hyperedges" requires nodeId.' };
+    const db = this.graph.db;
+
+    const nodeRow = db.prepare('SELECT id, label FROM nodes WHERE id = ?').get(nodeId);
+    if (!nodeRow) return { error: `Node "${nodeId}" not found.` };
+
+    let hypIds;
+    try {
+      hypIds = db.prepare('SELECT hyperedge_id FROM hyperedge_members WHERE node_id = ?').all(nodeId).map(r => r.hyperedge_id);
+    } catch (e) {
+      return { error: `hyperedges table unavailable: ${e.message}` };
+    }
+    if (hypIds.length === 0) {
+      return { mode: 'hyperedges', node: { id: nodeRow.id, label: nodeRow.label }, hyperedges: [], total: 0 };
+    }
+
+    const placeholders = hypIds.map(() => '?').join(',');
+    const heRows = db.prepare(
+      `SELECT id, label, type, confidence, weight, extracted_with, extracted_at
+       FROM hyperedges WHERE id IN (${placeholders}) ORDER BY extracted_at DESC`
+    ).all(...hypIds);
+
+    const memberRows = db.prepare(
+      `SELECT m.hyperedge_id, m.node_id, m.role, n.label
+       FROM hyperedge_members m
+       LEFT JOIN nodes n ON n.id = m.node_id
+       WHERE m.hyperedge_id IN (${placeholders})`
+    ).all(...hypIds);
+
+    const membersByHyper = new Map();
+    for (const r of memberRows) {
+      if (!membersByHyper.has(r.hyperedge_id)) membersByHyper.set(r.hyperedge_id, []);
+      membersByHyper.get(r.hyperedge_id).push({ node_id: r.node_id, label: r.label || r.node_id, role: r.role || null });
+    }
+
+    return {
+      mode: 'hyperedges',
+      node: { id: nodeRow.id, label: nodeRow.label },
+      hyperedges: heRows.map(h => ({
+        id: h.id,
+        type: h.type,
+        label: h.label,
+        confidence: h.confidence,
+        weight: h.weight,
+        extracted_at: h.extracted_at,
+        members: membersByHyper.get(h.id) || [],
+      })),
+      total: heRows.length,
+    };
+  }
+
+  /**
+   * Render a subgraph (nodes + edges) as text within a token budget.
+   * Seeds are pinned at the top, others are sorted by degree (most
+   * connected first), and the output is truncated to roughly tokenBudget
+   * tokens (chars / 4). Mirrors graphify/serve.py:_subgraph_to_text.
+   */
+  _renderSubgraphText(nodes, edges, tokenBudget, seedSet) {
+    const charBudget = tokenBudget * 4;
+    const db = this.graph.db;
+
+    // Pre-fetch labels + types for all nodes in one shot.
+    if (nodes.length === 0) return '(empty subgraph)';
+    const placeholders = nodes.map(() => '?').join(',');
+    const nodeRows = db.prepare(
+      `SELECT id, label, type FROM nodes WHERE id IN (${placeholders})`
+    ).all(...nodes.map(n => n.id));
+    const meta = new Map(nodeRows.map(r => [r.id, r]));
+
+    // Compute degree from the edges in this subgraph.
+    const degree = new Map();
+    for (const n of nodes) degree.set(n.id, 0);
+    for (const e of edges) {
+      if (degree.has(e.source)) degree.set(e.source, degree.get(e.source) + 1);
+      if (degree.has(e.target)) degree.set(e.target, degree.get(e.target) + 1);
+    }
+
+    const seeds = nodes.filter(n => seedSet.has(n.id));
+    const others = nodes
+      .filter(n => !seedSet.has(n.id))
+      .sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0));
+
+    const lines = [];
+    lines.push('# Subgraph');
+    for (const n of [...seeds, ...others]) {
+      const m = meta.get(n.id) || { label: n.id, type: '' };
+      const seedTag = seedSet.has(n.id) ? ' [SEED]' : '';
+      lines.push(`NODE ${m.label || n.id} (${m.type || 'entity'}, depth=${n.depth}, deg=${degree.get(n.id) || 0})${seedTag}`);
+    }
+    lines.push('');
+    for (const e of edges) {
+      const src = meta.get(e.source);
+      const tgt = meta.get(e.target);
+      if (!src || !tgt) continue;
+      const conf = e.confidence ? ` ${e.confidence}` : '';
+      const w = e.weight && e.weight !== 1 ? ` w=${e.weight}` : '';
+      lines.push(`EDGE ${src.label || e.source} --${e.type}${conf}${w}--> ${tgt.label || e.target}`);
+    }
+
+    let out = lines.join('\n');
+    if (out.length > charBudget) {
+      out = out.slice(0, charBudget) + `\n... (truncated to ~${tokenBudget} tokens; rerun with a smaller depth or higher token_budget for more)`;
+    }
+    return out;
+  }
+
   /**
    * Dialectic-style natural language entity query. Gathers all graph context
    * about an entity and uses LLM reasoning to synthesize an answer.
    */
   async _queryAboutTool(input) {
-    const { entity, question } = input;
+    const { entity, question, project } = input;
     if (!question) return { error: 'question is required' };
     if (!this.graph) return { error: 'Graph context not available' };
+
+    const scopedSlug = !input?._scopedQueryAbout
+      ? this._resolveGraphSlugForTool(project, { force: !!project })
+      : null;
+    if (scopedSlug) {
+      return this._withScopedGraphForTool(scopedSlug, () => this._queryAboutTool({ ...input, project: null, _scopedQueryAbout: true, _eventGraphSlug: scopedSlug }));
+    }
+
+    const activeGraphMeta = this._graphResultMeta(input?._eventGraphSlug || null);
 
     const db = this.graph.db;
     if (!db) return { error: 'Graph database not available' };
@@ -2078,12 +2958,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       });
 
       const answer = response.content.find(b => b.type === 'text')?.text || 'No answer generated.';
-      graphEvents.emit('change', { op: 'node:accessed', nodeIds: targetNodes.map(n => n.id), source: 'query_about' });
+      graphEvents.emit('change', { op: 'node:accessed', nodeIds: targetNodes.map(n => n.id), source: 'query_about', graph: activeGraphMeta.graph });
 
       return {
         answer,
         entities_consulted: targetNodes.map(n => ({ id: n.id, label: n.label, type: n.type })),
         tokens_used: { input: response.usage?.input_tokens || 0, output: response.usage?.output_tokens || 0 },
+        ...activeGraphMeta,
       };
     } catch (e) {
       return { error: `Query failed: ${e.message}` };
@@ -2178,14 +3059,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   // _noteDiscoveryTool moved to plugins/spore-code/index.js (phase 2.3c-2).
 
   _graphUpdateTool(input) {
-    const { nodeId, label, type, description, aspects, edges, project, temp } = input;
+    const { nodeId, label, type, description, aspects, edges, hyperedges, project, temp } = input;
     if (!this.learner?.db) return { error: 'Graph writer not available' };
 
     try {
-      const db = (project && this.learner._sharedDbs?.[project]) || this.learner.db;
-      if (project && !this.learner._sharedDbs?.[project]) {
+      const scopedSlug = this._resolveGraphSlugForTool(project, { write: true, force: !!project });
+      const scopedDb = scopedSlug ? this._getScopedToolDb(scopedSlug) : null;
+      const db = scopedDb || (project && this.learner._sharedDbs?.[project]) || this.learner.db;
+      if (project && !scopedDb && !this.learner._sharedDbs?.[project]) {
         return { error: `Project "${project}" not found or not a member` };
       }
+      const eventGraph = scopedSlug || (project && this.learner._sharedDbs?.[project] ? project : this._activeGraphSlug());
+      const eventMeta = this._graphResultMeta(eventGraph);
       let id = this._normalizeNodeId(nodeId);
       if (!id) return { error: 'Invalid nodeId — must contain at least one alphanumeric character' };
 
@@ -2304,25 +3189,78 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           if (!tgtExists) continue;
           const exists = db.prepare('SELECT rowid FROM edges WHERE source = ? AND target = ? AND type = ?').get(id, tgt, edge.type);
           if (!exists) {
-            db.prepare('INSERT INTO edges (source, target, type, weight) VALUES (?, ?, ?, 1)').run(id, tgt, edge.type);
+            // Agent-driven graph_update: caller can pass confidence; default
+            // 'extracted' (the agent is asserting the relationship as fact).
+            const conf = (typeof edge.confidence === 'string' && ['extracted','inferred','ambiguous'].includes(edge.confidence.toLowerCase()))
+              ? edge.confidence.toLowerCase()
+              : 'extracted';
+            db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 1, 'graph_update', ?)").run(id, tgt, edge.type, conf);
             edgeCount++;
           }
         }
       }
 
+      // Hyperedges: n-ary relationships across 3+ nodes. Insert atomically
+      // (BEGIN/COMMIT) so a partial member list doesn't leave a dangling
+      // hyperedge with zero members. Skips silently if any member node
+      // doesn't exist — agent should resolve members via graph_query before
+      // calling, but be forgiving if one slips through.
+      let hyperCount = 0;
+      const hyperResults = [];
+      if (Array.isArray(hyperedges) && hyperedges.length > 0) {
+        for (const h of hyperedges) {
+          if (!h || !h.type || !Array.isArray(h.members) || h.members.length < 2) continue;
+          const validMembers = [];
+          for (const m of h.members) {
+            const mid = m && m.node_id ? this._normalizeNodeId(m.node_id) : null;
+            if (!mid) continue;
+            const exists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(mid);
+            if (!exists) continue;
+            validMembers.push({ id: mid, role: m.role || null });
+          }
+          if (validMembers.length < 2) continue;
+          const conf = (typeof h.confidence === 'string' && ['extracted','inferred','ambiguous'].includes(h.confidence.toLowerCase()))
+            ? h.confidence.toLowerCase()
+            : 'extracted';
+          db.exec('BEGIN IMMEDIATE');
+          let hid;
+          try {
+            const r = db.prepare(
+              "INSERT INTO hyperedges (label, type, confidence, weight, extracted_with) VALUES (?, ?, ?, 1.0, 'graph_update')"
+            ).run(h.label || null, h.type, conf);
+            hid = Number(r.lastInsertRowid);
+            const insMember = db.prepare('INSERT OR IGNORE INTO hyperedge_members (hyperedge_id, node_id, role) VALUES (?, ?, ?)');
+            for (const vm of validMembers) insMember.run(hid, vm.id, vm.role);
+            db.exec('COMMIT');
+          } catch (e) {
+            try { db.exec('ROLLBACK'); } catch (_) { /* swallow — already in error path */ }
+            this.log.warn(`[graph_update] hyperedge insert failed: ${e.message}`);
+            continue;
+          }
+          hyperCount++;
+          hyperResults.push({ id: hid, type: h.type, members: validMembers.length });
+          graphEvents.emit('change', { op: 'hyperedge:create', hyperedge: { id: hid, type: h.type, label: h.label || null, members: validMembers.map(m => m.id) }, source: 'graph_update', graph: eventGraph });
+        }
+      }
+
       embedNodeAsync(id, db);
 
-      graphEvents.emit('change', { op: existing ? 'node:update' : 'node:create', node: { id, label: label || id, type: type || 'concept', description: description || '' }, source: 'graph_update' });
-      if (aspCount > 0) graphEvents.emit('change', { op: 'aspect:create', nodeId: id, source: 'graph_update' });
+      graphEvents.emit('change', { op: existing ? 'node:update' : 'node:create', node: { id, label: label || id, type: type || 'concept', description: description || '' }, source: 'graph_update', graph: eventGraph });
+      if (aspCount > 0) graphEvents.emit('change', { op: 'aspect:create', nodeId: id, source: 'graph_update', graph: eventGraph });
       if (edgeCount > 0) {
         for (const edge of (edges || [])) {
           if (edge.target && edge.type) {
-            graphEvents.emit('change', { op: 'edge:create', edge: { source: id, target: this._normalizeNodeId(edge.target), type: edge.type }, source: 'graph_update' });
+            graphEvents.emit('change', { op: 'edge:create', edge: { source: id, target: this._normalizeNodeId(edge.target), type: edge.type }, source: 'graph_update', graph: eventGraph });
           }
         }
       }
 
       const result = { success: true, nodeId: id, created: !existing, aspectsAdded: aspCount, edgesAdded: edgeCount };
+      Object.assign(result, eventMeta);
+      if (hyperCount > 0) {
+        result.hyperedgesAdded = hyperCount;
+        result.hyperedges = hyperResults;
+      }
       if (personalitySkipped > 0) {
         result.warning = `${personalitySkipped} personality aspect(s) skipped — personality editing is disabled. Knowledge can be stored on separate nodes.`;
       }
@@ -2332,13 +3270,181 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
   }
 
+  /**
+   * Compare two graph snapshots (or one snapshot vs. the live graph) and
+   * return a structured diff: added/removed nodes + edges, with labels
+   * and confidence preserved. Read-only — opens DBs in URI mode with
+   * mode=ro so a corrupt or in-flight snapshot can't break the live graph.
+   *
+   * Shorthands:
+   *   from: 'latest' | 'yesterday' | 'first' | <filename>
+   *   to:   'current' (default) | 'latest' | 'yesterday' | <filename>
+   *
+   * Implementation note: backups are produced by BackupWorker via
+   * VACUUM INTO. Filenames live in <data>/backups/ (or graphBackupDir).
+   * We resolve via the BackupWorker's listBackups() result to avoid
+   * duplicating filename-glob logic.
+   */
+  _graphDiffTool(input) {
+    const { from, to } = input;
+    if (!from) return { error: 'graph_diff requires `from`.' };
+
+    const backup = this._backup;
+    if (!backup) return { error: 'BackupWorker not available — graph_diff needs at least one backup snapshot to compare against.' };
+
+    const list = backup.listBackups();
+    if (!list || !Array.isArray(list.files)) {
+      return { error: `Could not list backups: ${list?.error || 'unknown'}` };
+    }
+    if (list.files.length === 0 && from !== 'current') {
+      return { error: 'No backup snapshots available yet — wait for the first BackupWorker tick (~2 min after boot) or run /api/backup/run to take one now.' };
+    }
+
+    const path = require('path');
+    const fs = require('fs');
+    const dir = list.dir;
+
+    // Resolve a shorthand or literal filename to an absolute path. Returns
+    // { path: string, label: string } or { error }.
+    const resolve = (token) => {
+      if (token === 'current') return { path: this.graph?.config?.graphDbPath || backup.graphDbPath, label: 'current (live graph)' };
+      if (token === 'latest') {
+        if (list.files.length === 0) return { error: 'no backups available' };
+        return { path: path.join(dir, list.files[0].file), label: list.files[0].file };
+      }
+      if (token === 'first') {
+        if (list.files.length === 0) return { error: 'no backups available' };
+        const last = list.files[list.files.length - 1];
+        return { path: path.join(dir, last.file), label: last.file };
+      }
+      if (token === 'yesterday') {
+        // Oldest file with mtime in the last ~32 hours (or oldest within 7 days).
+        const cutoff = Date.now() - 32 * 3600 * 1000;
+        const recent = list.files.filter(f => f.mtime >= cutoff);
+        const pick = recent.length > 0 ? recent[recent.length - 1] : list.files[list.files.length - 1];
+        return { path: path.join(dir, pick.file), label: pick.file };
+      }
+      // Literal filename — must live in the backup dir.
+      if (typeof token !== 'string' || token.includes('/') || token.includes('..')) {
+        return { error: `Invalid backup token "${token}".` };
+      }
+      const full = path.join(dir, token);
+      if (!fs.existsSync(full)) return { error: `Backup "${token}" not found in ${dir}.` };
+      return { path: full, label: token };
+    };
+
+    const fromR = resolve(from);
+    if (fromR.error) return { error: `from: ${fromR.error}` };
+    const toR = resolve(to || 'current');
+    if (toR.error) return { error: `to: ${toR.error}` };
+    if (fromR.path === toR.path) return { error: 'from and to resolve to the same snapshot.' };
+
+    // Open both databases read-only via node:sqlite. A second handle to
+    // the live graph DB is fine — node:sqlite respects WAL — and this
+    // way we don't have to reach into GraphContext's connection.
+    const { DatabaseSync } = require('node:sqlite');
+    let dbFrom, dbTo;
+    try {
+      dbFrom = new DatabaseSync(fromR.path, { readOnly: true });
+      dbTo = new DatabaseSync(toR.path, { readOnly: true });
+    } catch (e) {
+      try { dbFrom?.close(); } catch (_) { /* swallow */ }
+      try { dbTo?.close(); } catch (_) { /* swallow */ }
+      return { error: `Failed to open snapshot: ${e.message}` };
+    }
+
+    try {
+      const collectNodes = (db) => {
+        const map = new Map();
+        for (const r of db.prepare('SELECT id, label, type FROM nodes').all()) {
+          map.set(r.id, { id: r.id, label: r.label || r.id, type: r.type || '' });
+        }
+        return map;
+      };
+      const collectEdges = (db) => {
+        const set = new Map();
+        let hasConf = true;
+        try {
+          db.prepare('SELECT confidence FROM edges LIMIT 1').get();
+        } catch { hasConf = false; }
+        const sql = hasConf
+          ? 'SELECT source, target, type, confidence FROM edges'
+          : 'SELECT source, target, type FROM edges';
+        for (const r of db.prepare(sql).all()) {
+          if (!r.source || !r.target || !r.type) continue;
+          const key = `${r.source}|${r.target}|${r.type}`;
+          set.set(key, {
+            source: r.source,
+            target: r.target,
+            type: r.type,
+            confidence: hasConf ? (r.confidence || null) : null,
+          });
+        }
+        return set;
+      };
+      const countAttrs = (db) => {
+        try { return db.prepare('SELECT COUNT(*) AS c FROM attributes').get()?.c || 0; }
+        catch { return 0; }
+      };
+
+      const nodesFrom = collectNodes(dbFrom);
+      const nodesTo = collectNodes(dbTo);
+      const edgesFrom = collectEdges(dbFrom);
+      const edgesTo = collectEdges(dbTo);
+
+      const addedNodes = [];
+      for (const [id, n] of nodesTo) if (!nodesFrom.has(id)) addedNodes.push(n);
+      const removedNodes = [];
+      for (const [id, n] of nodesFrom) if (!nodesTo.has(id)) removedNodes.push(n);
+
+      const labelOfFrom = (id) => nodesFrom.get(id)?.label || id;
+      const labelOfTo = (id) => nodesTo.get(id)?.label || id;
+
+      const addedEdges = [];
+      for (const [k, e] of edgesTo) {
+        if (!edgesFrom.has(k)) {
+          addedEdges.push({ ...e, source_label: labelOfTo(e.source), target_label: labelOfTo(e.target) });
+        }
+      }
+      const removedEdges = [];
+      for (const [k, e] of edgesFrom) {
+        if (!edgesTo.has(k)) {
+          removedEdges.push({ ...e, source_label: labelOfFrom(e.source), target_label: labelOfFrom(e.target) });
+        }
+      }
+
+      const attrFrom = countAttrs(dbFrom);
+      const attrTo = countAttrs(dbTo);
+
+      return {
+        from: fromR.label,
+        to: toR.label,
+        summary: `${addedNodes.length} new node(s), ${removedNodes.length} removed; ${addedEdges.length} new edge(s), ${removedEdges.length} removed`,
+        added_nodes: addedNodes,
+        removed_nodes: removedNodes,
+        added_edges: addedEdges,
+        removed_edges: removedEdges,
+        attribute_count_delta: attrTo - attrFrom,
+        attribute_count_from: attrFrom,
+        attribute_count_to: attrTo,
+      };
+    } finally {
+      try { dbFrom.close(); } catch (e) { /* swallow */ }
+      try { dbTo.close(); } catch (e) { /* swallow */ }
+    }
+  }
+
   _graphDeleteTool(input) {
     const { nodeId, aspectId, attributeId, edge, project } = input;
     if (!this.learner?.db) return { error: 'Graph writer not available' };
-    if (project && !this.learner._sharedDbs?.[project]) {
+    const scopedSlug = this._resolveGraphSlugForTool(project, { write: true, force: !!project });
+    const scopedDb = scopedSlug ? this._getScopedToolDb(scopedSlug) : null;
+    if (project && !scopedDb && !this.learner._sharedDbs?.[project]) {
       return { error: `Project "${project}" not found or not a member` };
     }
-    const db = (project && this.learner._sharedDbs?.[project]) || this.learner.db;
+    const db = scopedDb || (project && this.learner._sharedDbs?.[project]) || this.learner.db;
+    const eventGraph = scopedSlug || (project && this.learner._sharedDbs?.[project] ? project : this._activeGraphSlug());
+    const eventMeta = this._graphResultMeta(eventGraph);
 
     try {
       if (nodeId) {
@@ -2367,10 +3473,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(id, id);
         db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         for (const e of edges) {
-          graphEvents.emit('change', { op: 'edge:delete', edge: e, source: 'graph_delete' });
+          graphEvents.emit('change', { op: 'edge:delete', edge: e, source: 'graph_delete', graph: eventGraph });
         }
-        graphEvents.emit('change', { op: 'node:delete', nodeId: id, node: existing, source: 'graph_delete' });
-        return { success: true, deleted: 'node', nodeId: id };
+        graphEvents.emit('change', { op: 'node:delete', nodeId: id, node: existing, source: 'graph_delete', graph: eventGraph });
+        return { success: true, deleted: 'node', nodeId: id, ...eventMeta };
       }
 
       if (aspectId) {
@@ -2378,16 +3484,16 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         if (!asp) return { error: `Aspect not found: ${aspectId}` };
         db.prepare('DELETE FROM attributes WHERE aspect_id = ?').run(aspectId);
         db.prepare('DELETE FROM aspects WHERE id = ?').run(aspectId);
-        graphEvents.emit('change', { op: 'aspect:delete', aspectId, nodeId: asp.node_id, source: 'graph_delete' });
-        return { success: true, deleted: 'aspect', aspectId, nodeId: asp.node_id };
+        graphEvents.emit('change', { op: 'aspect:delete', aspectId, nodeId: asp.node_id, source: 'graph_delete', graph: eventGraph });
+        return { success: true, deleted: 'aspect', aspectId, nodeId: asp.node_id, ...eventMeta };
       }
 
       if (attributeId) {
         const attr = db.prepare('SELECT a.id, a.aspect_id, asp.node_id FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE a.id = ?').get(attributeId);
         if (!attr) return { error: `Attribute not found: ${attributeId}` };
         db.prepare('DELETE FROM attributes WHERE id = ?').run(attributeId);
-        graphEvents.emit('change', { op: 'attribute:delete', attributeId, nodeId: attr.node_id, source: 'graph_delete' });
-        return { success: true, deleted: 'attribute', attributeId };
+        graphEvents.emit('change', { op: 'attribute:delete', attributeId, nodeId: attr.node_id, source: 'graph_delete', graph: eventGraph });
+        return { success: true, deleted: 'attribute', attributeId, ...eventMeta };
       }
 
       if (edge) {
@@ -2397,8 +3503,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const existing = db.prepare('SELECT rowid FROM edges WHERE source = ? AND target = ? AND type = ?').get(src, tgt, typ);
         if (!existing) return { error: 'Edge not found' };
         db.prepare('DELETE FROM edges WHERE source = ? AND target = ? AND type = ?').run(src, tgt, typ);
-        graphEvents.emit('change', { op: 'edge:delete', edge: { source: src, target: tgt, type: typ }, source: 'graph_delete' });
-        return { success: true, deleted: 'edge', edge: { source: src, target: tgt, type: typ } };
+        graphEvents.emit('change', { op: 'edge:delete', edge: { source: src, target: tgt, type: typ }, source: 'graph_delete', graph: eventGraph });
+        return { success: true, deleted: 'edge', edge: { source: src, target: tgt, type: typ }, ...eventMeta };
       }
 
       return { error: 'Specify nodeId, aspectId, attributeId, or edge to delete' };
@@ -2489,6 +3595,74 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     this.log.info(`[subagent:${taskId}] Queued user update: ${message.substring(0, 100)}`);
     return { status: 'update_queued', taskId, message: 'Instructions queued — the sub-agent will see them on its next step.' };
+  }
+
+  _isCliRoute(route = {}) {
+    return route.platform === 'cli'
+      || String(route.sessionKey || '').startsWith('channel:cli:')
+      || String(route.channelId || '').startsWith('cli:');
+  }
+
+  _sessionRouteKeys(route = {}) {
+    const keys = [];
+    const add = (v) => { if (v && !keys.includes(v)) keys.push(v); };
+    add(route.sessionKey);
+    if (route.channelId) {
+      add(route.channelId);
+      add(`channel:${route.channelId}`);
+      if (route.platform) add(`shared:channel:${route.platform}:${route.channelId}`);
+    }
+    if (route.userId && !this._isCliRoute(route)) {
+      add(`dm:${route.userId}`);
+      if (route.platform) add(`shared:dm:${route.platform}:${route.userId}`);
+    }
+    return keys;
+  }
+
+  _taskRouteKeys(taskEntry = {}) {
+    return this._sessionRouteKeys(taskEntry);
+  }
+
+  _broadcastSessionEvent(route, payload, opts = {}) {
+    const msg = route?.channelId && !payload.sessionId
+      ? { ...payload, sessionId: route.channelId }
+      : payload;
+    const broadcaster = this._getSessionBroadcaster();
+    if (typeof broadcaster === 'function') {
+      for (const key of this._sessionRouteKeys(route)) {
+        try {
+          const delivered = broadcaster(key, msg);
+          if (delivered > 0) return delivered;
+        } catch (e) {
+          this.log.warn(`[${opts.logPrefix || 'session-event'}] session broadcast failed for ${key}: ${e.message}`);
+        }
+      }
+    }
+
+    // Never global-broadcast CLI/project frames: that leaks project-session
+    // progress/results into the generic web app. Web/non-channel flows retain
+    // the old global fallback so existing browser-only flows keep working.
+    if (opts.fallbackGlobal !== false && !this._isCliRoute(route)) {
+      this.broadcast(msg);
+      return -1;
+    }
+    return 0;
+  }
+
+  _broadcastTaskEvent(taskEntry, payload, opts = {}) {
+    return this._broadcastSessionEvent(taskEntry, payload, {
+      ...opts,
+      logPrefix: `subagent:${taskEntry?.taskId || '?'}`,
+    });
+  }
+
+  _deliverySessionKey(taskEntry, isCli, deliveryUserId) {
+    if (taskEntry?.sessionKey) return taskEntry.sessionKey;
+    return this._agent?.sessions?.constructor?.buildKey?.(
+      taskEntry?.channelId,
+      !isCli,
+      deliveryUserId,
+    ) || (isCli && taskEntry?.channelId ? `channel:${taskEntry.channelId}` : `dm:${deliveryUserId}`);
   }
 
   /**
@@ -2646,10 +3820,15 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     // channel + B's projectContext.
     const _dctx = this._ctx?.() || {};
     this._delegatedTasks.set(taskId, {
+      taskId,
       status: 'running',
       startedAt: Date.now(),
+      sessionKey:          _dctx.sessionKey          ?? this._ctxSessionKey?.()     ?? null,
       channelId:           _dctx.channelId           ?? this._currentChannelId       ?? null,
-      platform:            _dctx.platform            ?? this._currentPlatform        ?? 'discord',
+      channelName:         _dctx.channelName         ?? null,
+      platform:            _dctx.platform            ?? this._currentPlatform        ?? null,
+      platformMeta:        _dctx.platformMeta        ?? null,
+      isDm:                _dctx.isDm                ?? null,
       userId:              _dctx.userId              ?? this._currentUserId          ?? 'operator',
       originalUserMessage: _dctx.userMessage         ?? this._currentUserMessage     ?? task,
       originalUserName:    _dctx.userName            ?? this._currentUserName        ?? null,
@@ -2658,6 +3837,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       // context to processMessage. Without this the wake-up turn
       // wouldn't know the cwd/tools/tree the user was working in.
       projectContext:      _dctx.projectContext      ?? this._currentProjectContext  ?? null,
+      memoryEnvelope:      _dctx.memoryEnvelope      ?? this._currentMemoryEnvelope  ?? null,
       abortCtrl,
     });
 
@@ -2667,7 +3847,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     abortTimer.unref?.();
 
     const taskEntry = this._delegatedTasks.get(taskId);
-    this.broadcast({ type: 'subagent:start', taskId, model: subModel, task: task.substring(0, 300), timeout: maxTimeoutSec });
+    this._broadcastTaskEvent(taskEntry, { type: 'subagent:start', taskId, model: subModel, task: task.substring(0, 300), timeout: maxTimeoutSec });
 
     (async () => {
       try {
@@ -2697,7 +3877,6 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           '',
           'RULES:',
           '- Use read_file/write_file/edit_file for file operations — not exec with cat/sed/grep.',
-          '- For cron inside this container, use plain `cron` to ensure the daemon is running and `crontab` to manage jobs. Do NOT use `/etc/init.d/cron start`, `service cron start`, or `/usr/sbin/cron` directly — those bypass the wrapper and can fail with pidfile permission errors.',
           '- Use graph_update to persist knowledge and graph_delete to remove nodes/aspects/attributes/edges. Do NOT write SQL directly against graph.db.',
           '- For code/content: write to files using write_file, not inline text.',
           '- For reusable scripts: use save_tool instead of write_file.',
@@ -2779,7 +3958,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const sendProgress = (extraLine) => {
           try {
             if (!taskEntry.channelId || !this.platformManager) return;
-            const gateway = this.platformManager.getGateway(taskEntry.platform || 'discord');
+            const gateway = this.platformManager.getGateway(taskEntry.platform);
             if (!gateway?.sendProgressUpdate) return;
             const line = extraLine || (latestSummary.trim() ? latestSummary.trim().substring(0, 200) : null);
             if (!line) return;
@@ -2790,7 +3969,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const sendProgressDone = (error) => {
           try {
             if (!taskEntry.channelId || !this.platformManager) return;
-            const gateway = this.platformManager.getGateway(taskEntry.platform || 'discord');
+            const gateway = this.platformManager.getGateway(taskEntry.platform);
             if (gateway?.sendProgressUpdate) gateway.sendProgressUpdate(taskEntry.channelId, null, error ? { error: true } : { done: true });
           } catch (e) { this.log.warn('[tools] platformManager.getGateway failed: ' + e.message); }
         };
@@ -2896,7 +4075,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           }
 
           // Stream the response so we can broadcast deltas to the panel
-          this.broadcast({ type: 'subagent:iter', taskId, iteration: i + 1, maxIter, model: subModel });
+          this._broadcastTaskEvent(taskEntry, { type: 'subagent:iter', taskId, iteration: i + 1, maxIter, model: subModel });
           this.log.info(`[subagent:${taskId}] Iter ${i + 1} starting — model=${subModel}, max_tokens=${subMaxTokens}`);
               let streamingText = '';
               let thinkingTokens = 0;
@@ -2921,20 +4100,20 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                     const elapsed = Math.round((Date.now() - _subStreamStart) / 1000);
                     const toolInfo = _toolInputBytes > 0 ? `, ${_currentToolName} ${Math.round(_toolInputBytes / 1024)}KB` : '';
                     this.log.info(`[subagent:${taskId}] Iter ${i + 1} streaming — ${elapsed}s, ${streamingText.length} chars, ${_subStreamToolCount} tool(s), ${thinkingTokens} thinking${toolInfo}`);
-                    this.broadcast({ type: 'subagent:heartbeat', taskId, iteration: i + 1, elapsed, chars: streamingText.length, tools: _subStreamToolCount, thinking: thinkingTokens, toolBytes: _toolInputBytes, toolName: _currentToolName });
+                    this._broadcastTaskEvent(taskEntry, { type: 'subagent:heartbeat', taskId, iteration: i + 1, elapsed, chars: streamingText.length, tools: _subStreamToolCount, thinking: thinkingTokens, toolBytes: _toolInputBytes, toolName: _currentToolName });
                   }, 10000);
                   subHeartbeat.unref?.();
 
                   stream.on('text', (text) => {
                     streamingText += text;
-                    this.broadcast({ type: 'subagent:text', taskId, iteration: i + 1, text });
+                    this._broadcastTaskEvent(taskEntry, { type: 'subagent:text', taskId, iteration: i + 1, text });
                   });
 
                   let _thinkingText = '';
                   stream.on('event', (event) => {
                     if (event.type === 'content_block_start' && event.content_block?.type === 'thinking') {
                       _thinkingText = '';
-                      this.broadcast({ type: 'subagent:thinking_start', taskId, iteration: i + 1 });
+                      this._broadcastTaskEvent(taskEntry, { type: 'subagent:thinking_start', taskId, iteration: i + 1 });
                     }
                     if (event.type === 'content_block_delta' && event.delta?.type === 'thinking_delta') {
                       thinkingTokens++;
@@ -2943,21 +4122,21 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                         const snippet = _thinkingText.length > 120
                           ? _thinkingText.slice(-120).replace(/^\S*\s/, '')
                           : _thinkingText;
-                        this.broadcast({ type: 'subagent:thinking', taskId, iteration: i + 1, tokens: thinkingTokens, snippet });
+                        this._broadcastTaskEvent(taskEntry, { type: 'subagent:thinking', taskId, iteration: i + 1, tokens: thinkingTokens, snippet });
                       }
                     }
                     if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
                       _subStreamToolCount++;
                       _toolInputBytes = 0;
                       _currentToolName = event.content_block.name || '';
-                      this.broadcast({ type: 'subagent:tool_start', taskId, iteration: i + 1, tool: _currentToolName });
+                      this._broadcastTaskEvent(taskEntry, { type: 'subagent:tool_start', taskId, iteration: i + 1, tool: _currentToolName });
                     }
                     if (event.type === 'content_block_delta' && event.delta?.type === 'input_json_delta') {
                       const prevKB = Math.floor(_toolInputBytes / 2048);
                       _toolInputBytes += (event.delta.partial_json || '').length;
                       const newKB = Math.floor(_toolInputBytes / 2048);
                       if (newKB > prevKB) {
-                        this.broadcast({ type: 'subagent:tool_progress', taskId, iteration: i + 1, tool: _currentToolName, bytes: _toolInputBytes });
+                        this._broadcastTaskEvent(taskEntry, { type: 'subagent:tool_progress', taskId, iteration: i + 1, tool: _currentToolName, bytes: _toolInputBytes });
                       }
                     }
                   });
@@ -2974,7 +4153,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               if (!retryable || attempt >= MAX_API_RETRIES) throw retryErr;
               const delay = isTimeout ? 3000 : retryErr.status === 429 ? 5000 : (attempt + 1) * 5000;
               this.log.warn(`[subagent:${taskId}] ${isTimeout ? 'API call timed out (180s)' : `API error ${retryErr.status}`}, retry ${attempt + 1}/${MAX_API_RETRIES} in ${delay / 1000}s`);
-              this.broadcast({ type: 'subagent:text', taskId, iteration: i + 1, text: `\n[retrying — API returned ${retryErr.status}…]\n` });
+              this._broadcastTaskEvent(taskEntry, { type: 'subagent:text', taskId, iteration: i + 1, text: `\n[retrying — API returned ${retryErr.status}…]\n` });
               await new Promise(r => setTimeout(r, delay));
             }
           }
@@ -3001,7 +4180,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           iterStats.iterCount = i + 1;
           iterStats.textChars += newText.length;
           this.log.info(`[subagent:${taskId}] Iter ${i + 1}/${maxIter}: ${iterMs}ms, ${toolBlocks.length} tools, ${newText.length} chars text, stop=${response.stop_reason}, tokens=${iterUsage.input_tokens || 0}in/${iterUsage.output_tokens || 0}out`);
-          this.broadcast({ type: 'subagent:iter_done', taskId, iteration: i + 1, durationMs: iterMs, toolCount: toolBlocks.length, textChars: newText.length, stopReason: response.stop_reason });
+          this._broadcastTaskEvent(taskEntry, { type: 'subagent:iter_done', taskId, iteration: i + 1, durationMs: iterMs, toolCount: toolBlocks.length, textChars: newText.length, stopReason: response.stop_reason });
 
           // Mid-task nudge: if the task is about creating files and we're past 40%
           // of iterations without any writes, inject a reminder
@@ -3024,7 +4203,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             const codeBlockCount = (newText.match(/```/g) || []).length / 2;
             if (codeBlockCount >= 1 && i < maxIter - 1) {
               this.log.warn(`[subagent:${taskId}] Iter ${i + 1}: generated ${newText.length} chars with ~${Math.floor(codeBlockCount)} code blocks but NO tool calls — nudging to write files`);
-              this.broadcast({ type: 'subagent:warn', taskId, iteration: i + 1, message: `${newText.length} chars with code blocks but no write_file calls — nudging` });
+              this._broadcastTaskEvent(taskEntry, { type: 'subagent:warn', taskId, iteration: i + 1, message: `${newText.length} chars with code blocks but no write_file calls — nudging` });
               messages.push({ role: 'assistant', content: response.content });
               messages.push({ role: 'user', content: '[SYSTEM: You generated code/content in your text response but did NOT call write_file to save it. Text responses are NOT persisted — the user will not see this code. You MUST call write_file now to write the content to disk. Extract the code blocks from your previous response and write each one to the appropriate file path.]' });
               continue;
@@ -3038,7 +4217,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // the model sees it failed and can adjust (e.g. break into smaller writes).
           if (toolBlocks.length > 0 && response.stop_reason === 'max_tokens') {
             this.log.warn(`[subagent:${taskId}] Iter ${i + 1}: max_tokens hit with ${toolBlocks.length} tool call(s) — response truncated, nudging retry`);
-            this.broadcast({ type: 'subagent:warn', taskId, iteration: i + 1, message: `max_tokens truncated ${toolBlocks.length} tool call(s) — retrying with smaller output` });
+            this._broadcastTaskEvent(taskEntry, { type: 'subagent:warn', taskId, iteration: i + 1, message: `max_tokens truncated ${toolBlocks.length} tool call(s) — retrying with smaller output` });
             const textOnly = response.content.filter(b => b.type === 'text');
             if (textOnly.length > 0) {
               messages.push({ role: 'assistant', content: textOnly });
@@ -3104,9 +4283,20 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                   (m, val) => m.replace(val, val.slice(0, 4) + '***'))
                 .replace(/[A-Fa-f0-9]{32,}/g, (m) => m.slice(0, 6) + '***');
               this.log.info(`[subagent:${taskId}] Tool: ${tb.name}(${_safeSnippet.substring(0, 80)})`);
-              this.broadcast({ type: 'subagent:tool_call', taskId, iteration: i + 1, tool: tb.name, input: _safeSnippet.substring(0, 200) });
+              this._broadcastTaskEvent(taskEntry, { type: 'subagent:tool_call', taskId, iteration: i + 1, tool: tb.name, input: _safeSnippet.substring(0, 200) });
               sendProgress(`🔧 \`${tb.name}\``);
-              const result = await this.executeTool(tb.name, tb.input);
+              const result = await this.executeTool(tb.name, tb.input, {
+                sessionKey: taskEntry.sessionKey || null,
+                channelId: taskEntry.channelId || null,
+                channelName: taskEntry.channelName || null,
+                platform: taskEntry.platform || null,
+                platformMeta: taskEntry.platformMeta || null,
+                userId: taskEntry.userId || null,
+                userName: taskEntry.originalUserName || null,
+                userMessage: taskEntry.originalUserMessage || null,
+                projectContext: taskEntry.projectContext || null,
+                memoryEnvelope: taskEntry.memoryEnvelope || null,
+              });
               let resultStr = JSON.stringify(result);
               const subCap = { read_file: 80000, web_fetch: 15000 }[tb.name] || 20000;
               if (resultStr.length > subCap) {
@@ -3137,7 +4327,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               if (isWebServeSuccess) {
                 taskEntry._terminalToolReached = true;
                 this.log.info(`[subagent:${taskId}] web_serve succeeded at iter ${i + 1} — marking task complete`);
-                this.broadcast({ type: 'subagent:finishing', taskId, iteration: i + 1 });
+                this._broadcastTaskEvent(taskEntry, { type: 'subagent:finishing', taskId, iteration: i + 1 });
               }
 
               toolResults.push({ type: 'tool_result', tool_use_id: tb.id, content: resultStr });
@@ -3183,7 +4373,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         const codeBlocksInFinal = (finalText.match(/```/g) || []).length / 2;
         if (iterStats.writeFileCalls === 0 && codeBlocksInFinal >= 1 && finalText.length > 300) {
           this.log.warn(`[subagent:${taskId}] EMPTY-HAND: ${Math.floor(codeBlocksInFinal)} code blocks in ${finalText.length} chars of text but 0 write_file calls — attempting auto-extraction`);
-          this.broadcast({ type: 'subagent:warn', taskId, message: `Empty-hand: extracting ${Math.floor(codeBlocksInFinal)} stranded code blocks to disk` });
+          this._broadcastTaskEvent(taskEntry, { type: 'subagent:warn', taskId, message: `Empty-hand: extracting ${Math.floor(codeBlocksInFinal)} stranded code blocks to disk` });
 
           const codeBlockRe = /```(\w+)?\s*\n([\s\S]*?)```/g;
           let match;
@@ -3223,12 +4413,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
           if (extracted > 0) {
             this.log.info(`[subagent:${taskId}] Auto-extracted ${extracted} code blocks to disk`);
-            this.broadcast({ type: 'subagent:info', taskId, message: `Auto-extracted ${extracted} code blocks to disk` });
+            this._broadcastTaskEvent(taskEntry, { type: 'subagent:info', taskId, message: `Auto-extracted ${extracted} code blocks to disk` });
             iterStats.writeFileCalls += extracted;
           }
         }
 
-        this.broadcast({ type: 'subagent:done', taskId, elapsed: elapsedSec, usage: totalUsage, iterations: iterStats.iterCount, toolCalls: iterStats.totalToolCalls, writeFileCalls: iterStats.writeFileCalls, textChars: iterStats.textChars });
+        this._broadcastTaskEvent(taskEntry, { type: 'subagent:done', taskId, elapsed: elapsedSec, usage: totalUsage, iterations: iterStats.iterCount, toolCalls: iterStats.totalToolCalls, writeFileCalls: iterStats.writeFileCalls, textChars: iterStats.textChars });
         sendProgressDone(false);
 
         // Store subagent result as an episode so research is durably searchable
@@ -3253,7 +4443,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         taskEntry.result = { error: friendlyError };
         taskEntry.completedAt = Date.now();
         this.log.warn(`[subagent:${taskId}] Failed: ${taskEntry.result.error}`);
-        this.broadcast({ type: 'subagent:error', taskId, error: taskEntry.result.error });
+        this._broadcastTaskEvent(taskEntry, { type: 'subagent:error', taskId, error: taskEntry.result.error });
         try { if (typeof sendProgressDone === 'function') sendProgressDone(true); } catch (e) { this.log.warn('[tools] sendProgressDone failed: ' + e.message); }
       } finally {
         clearTimeout(abortTimer);
@@ -3273,20 +4463,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const { channelId, platform, userId: taskUserId } = taskEntry;
       if (!channelId) return;
 
-      // Web panel AND Spore Code both deliver via the same WebSocket
-      // gateway — channelId = sessionId (per-(user,cwd) for acorn,
-      // "web:control-panel" for web), broadcast frames go to all
-      // connected clients (acorn filters by its active sessionId).
-      // Previously CLI fell through to platformManager.getGateway('cli')
-      // which returns null (no CLI gateway exists), so the push
-      // silently dropped and the agent never got woken up.
+      // Web panel and Spore Code both deliver through the web gateway,
+      // but delivery must stay session-scoped. CLI session ids map to
+      // _sessionClients; web DMs map to the current web user. Falling
+      // back to global broadcast for CLI would leak project-task output
+      // into the generic web app.
       if (platform === 'web' || platform === 'cli') {
         const isCli = platform === 'cli';
         const deliveryUserId = taskUserId || 'operator';
         const elapsed = Math.round((taskEntry.completedAt - taskEntry.startedAt) / 1000);
         const status = taskEntry.status === 'done' ? 'completed' : 'failed';
         const resultText = taskEntry.status === 'done' ? (taskEntry.result?.result || '').substring(0, 4000) : (taskEntry.result?.error || 'unknown error');
-        this.broadcast({ type: 'subagent:result', taskId, status, elapsed, result: resultText });
+        this._broadcastTaskEvent(taskEntry, { type: 'subagent:result', taskId, status, elapsed, result: resultText });
 
         // Trigger agent to process the result and respond to the user
         if (this._agent) {
@@ -3307,49 +4495,47 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           // Queue delivery to prevent concurrent deliveries from interleaving
           if (!this._deliveryQueue) this._deliveryQueue = Promise.resolve();
           this._deliveryQueue = this._deliveryQueue.then(async () => {
-            // Wait for any active session run to finish before attempting delivery.
-            // For acorn the sessionKey uses the session:false (non-DM) branch
-            // because acorn treats each launch as its own channel — isDm for
-            // session key purposes is just "deliverable independently".
-            const sessionKey = this._agent.sessions?.constructor?.buildKey?.(channelId, true, deliveryUserId) || `dm:${deliveryUserId}`;
-            const MAX_WAIT = 120000;
-            const waitStart = Date.now();
-            let waited = false;
-            while (this._agent.activeRuns?.has(sessionKey) && Date.now() - waitStart < MAX_WAIT) {
-              if (!waited) {
-                this.log.info(`[subagent:${taskId}] Waiting for session ${sessionKey} to become free before delivering result`);
-                waited = true;
-              }
-              await new Promise(r => setTimeout(r, 1500));
-            }
+            const sessionKey = this._deliverySessionKey(taskEntry, isCli, deliveryUserId);
 
             let chatStartSent = false;
             try {
-              this.broadcast({ type: 'chat:start', sessionId: channelId });
+              this._broadcastTaskEvent(taskEntry, { type: 'chat:start', sessionId: channelId });
               chatStartSent = true;
-              const result = await this._agent.processMessage({
+              const agentOpts = {
                 content,
                 channelId,
-                channelName: isCli ? `cli:${deliveryUserId}` : 'control-panel',
+                channelName: taskEntry.channelName || (isCli ? `cli:${deliveryUserId}` : 'control-panel'),
                 userId: deliveryUserId,
                 userName: taskEntry.originalUserName || 'System',
                 trigger: 'task_complete',
                 platform: isCli ? 'cli' : 'web',
                 isDm: !isCli, // CLI sessions aren't DM — preserves per-session isolation
+                sessionKey,
                 projectContext: taskEntry.projectContext || null,
+                memoryEnvelope: taskEntry.memoryEnvelope || null,
                 onTextDelta: (delta) => {
-                  this.broadcast({ type: 'chat:delta', text: delta });
+                  this._broadcastTaskEvent(taskEntry, { type: 'chat:delta', text: delta });
                 },
                 onToolUse: (toolName) => {
-                  this.broadcast({ type: 'chat:tool', tool: toolName });
+                  this._broadcastTaskEvent(taskEntry, { type: 'chat:tool', tool: toolName });
                 },
-              });
-              if (result.skipped) {
+              };
+              const result = this._jobQueue?.submitAgentTurn
+                ? await this._jobQueue.submitAgentTurn(agentOpts, {
+                    lane: 'deferred',
+                    priority: 60,
+                    route: 'task_complete',
+                    sessionKey,
+                    graph: taskEntry.memoryEnvelope?.primarySlug || null,
+                    allowInterjection: false,
+                  })
+                : await this._agent.processMessage(agentOpts);
+              if (result.skipped || result.interjected) {
                 this._agent.sessions?.addMessage(sessionKey, 'user', content);
-                this.broadcast({ type: 'chat:done', text: `Background task finished: ${statusLabel}. Send a message to see the full summary.` });
+                this._broadcastTaskEvent(taskEntry, { type: 'chat:done', text: `Background task finished: ${statusLabel}. Send a message to see the full summary.` });
                 this.log.info(`[subagent:${taskId}] Session busy at delivery time, result injected for next turn`);
               } else {
-                this.broadcast({
+                this._broadcastTaskEvent(taskEntry, {
                   type: 'chat:done',
                   text: result.text,
                   usage: result.usage,
@@ -3360,7 +4546,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             } catch (e) {
               this.log.warn(`[subagent:${taskId}] ${isCli ? 'CLI' : 'Web'} result delivery failed: ${e.message}`);
               this._agent.sessions?.addMessage(sessionKey, 'user', content);
-              if (chatStartSent) this.broadcast({ type: 'chat:done', text: `Background task finished but delivery failed. Send a message to see results.` });
+              if (chatStartSent) this._broadcastTaskEvent(taskEntry, { type: 'chat:done', text: `Background task finished but delivery failed. Send a message to see results.` });
             }
           }).catch(e => {
             this.log.warn(`[subagent:${taskId}] Delivery queue error: ${e.message}`);
@@ -4363,6 +5549,180 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return { matches, count: matches.length };
   }
 
+  _toolWorkdir(inputPath) {
+    const safe = this._safePath(inputPath || (this.config.workspacePath || process.cwd()));
+    if (safe.error) return safe;
+    try {
+      const st = fs.statSync(safe.path);
+      if (!st.isDirectory()) return { error: `${safe.path} is not a directory` };
+    } catch (e) {
+      return { error: `Directory not found: ${safe.path}` };
+    }
+    return { path: safe.path };
+  }
+
+  _shellQuote(s) {
+    return `'${String(s).replace(/'/g, `'\\''`)}'`;
+  }
+
+  _truncateText(s, limit = 20000) {
+    s = String(s || '');
+    if (s.length <= limit) return s;
+    return s.slice(0, limit) + `\n... [truncated ${s.length - limit} chars]`;
+  }
+
+  _listDirTool(input) {
+    const safe = this._toolWorkdir(input.path);
+    if (safe.error) return safe;
+    const includeHidden = input.include_hidden === true;
+    const maxEntries = Math.min(Math.max(Number(input.max_entries || 200), 1), 1000);
+    const noise = this._searchNoiseDirs();
+    try {
+      const entries = [];
+      for (const ent of fs.readdirSync(safe.path, { withFileTypes: true })) {
+        if (!includeHidden && ent.name.startsWith('.')) continue;
+        if (!includeHidden && ent.isDirectory() && noise.has(ent.name)) continue;
+        const full = path.join(safe.path, ent.name);
+        let stat = null;
+        try { stat = fs.statSync(full); } catch { /* best effort */ }
+        entries.push({
+          name: ent.name,
+          path: path.relative(safe.path, full) || ent.name,
+          type: ent.isDirectory() ? 'dir' : ent.isFile() ? 'file' : ent.isSymbolicLink() ? 'symlink' : 'other',
+          size: stat?.size || 0,
+          mtime: stat?.mtime?.toISOString?.() || null,
+        });
+      }
+      entries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
+      const truncated = entries.length > maxEntries;
+      return { path: safe.path, entries: entries.slice(0, maxEntries), count: Math.min(entries.length, maxEntries), total: entries.length, truncated };
+    } catch (e) {
+      return { error: `list_dir failed: ${e.message}` };
+    }
+  }
+
+  _readManyFilesTool(input) {
+    const paths = Array.isArray(input.paths) ? input.paths.slice(0, 20) : [];
+    if (paths.length === 0) return { error: 'paths is required' };
+    const limit = input.limit === undefined ? 400 : Number(input.limit);
+    const offset = input.offset === undefined ? 0 : Number(input.offset);
+    const files = paths.map(p => ({ path: p, result: this._readFileTool({ path: p, limit, offset }) }));
+    return { files, count: files.length, truncated: Array.isArray(input.paths) && input.paths.length > paths.length };
+  }
+
+  async _gitStatusTool(input) {
+    const wd = this._toolWorkdir(input.path);
+    if (wd.error) return wd;
+    const result = await this._execTool({ command: 'git status --short --branch && git diff --stat', workdir: wd.path, timeout: 30000 });
+    if (result.error) return result;
+    return { ok: true, path: wd.path, output: this._truncateText(result.output, 12000) };
+  }
+
+  async _gitDiffTool(input) {
+    const wd = this._toolWorkdir(input.path);
+    if (wd.error) return wd;
+    const parts = ['git', 'diff'];
+    if (input.staged) parts.push('--staged');
+    if (input.stat) parts.push('--stat');
+    if (input.ref) parts.push(this._shellQuote(input.ref));
+    if (input.file) parts.push('--', this._shellQuote(input.file));
+    const result = await this._execTool({ command: parts.join(' '), workdir: wd.path, timeout: 60000 });
+    if (result.error) return result;
+    const limit = Math.min(Math.max(Number(input.limit || 20000), 1000), 100000);
+    return { ok: true, path: wd.path, output: this._truncateText(result.output, limit) };
+  }
+
+  _patchPaths(diff) {
+    const paths = [];
+    for (const line of String(diff || '').split('\n')) {
+      if (!/^(---|\+\+\+) /.test(line)) continue;
+      let p = line.slice(4).trim().split(/\s+/)[0];
+      if (p === '/dev/null') continue;
+      if (p.startsWith('a/') || p.startsWith('b/')) p = p.slice(2);
+      if (!p || path.isAbsolute(p) || p.split(/[\\/]+/).includes('..')) {
+        return { error: `Unsafe patch path: ${p || '(empty)'}` };
+      }
+      paths.push(p);
+    }
+    return { paths: [...new Set(paths)] };
+  }
+
+  async _patchFileTool(input) {
+    const diff = String(input.patch || input.diff || '');
+    if (!diff.trim()) return { error: 'patch is required' };
+    const pathCheck = this._patchPaths(diff);
+    if (pathCheck.error) return pathCheck;
+    const wd = this._toolWorkdir(input.path);
+    if (wd.error) return wd;
+    const tmp = path.join('/tmp', `spore-patch-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.diff`);
+    try {
+      fs.writeFileSync(tmp, diff, 'utf8');
+      const quoted = this._shellQuote(tmp);
+      const check = await this._execTool({ command: `git apply --check ${quoted}`, workdir: wd.path, timeout: 60000 });
+      if (check.error) return { ...check, checked: false };
+      if (input.dry_run === true) return { ok: true, dry_run: true, paths: pathCheck.paths, output: check.output || '' };
+      const applied = await this._execTool({ command: `git apply ${quoted}`, workdir: wd.path, timeout: 60000 });
+      if (applied.error) return applied;
+      return { ok: true, dry_run: false, paths: pathCheck.paths, output: applied.output || '' };
+    } catch (e) {
+      return { error: `patch_file failed: ${e.message}` };
+    } finally {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    }
+  }
+
+  _detectTestCommand(dir) {
+    const pkg = path.join(dir, 'package.json');
+    if (fs.existsSync(pkg)) {
+      try {
+        const json = JSON.parse(fs.readFileSync(pkg, 'utf8'));
+        if (json.scripts?.test) {
+          if (fs.existsSync(path.join(dir, 'bun.lockb'))) return 'bun test';
+          if (fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) return 'pnpm test';
+          if (fs.existsSync(path.join(dir, 'yarn.lock'))) return 'yarn test';
+          return 'npm test';
+        }
+      } catch { /* fall through */ }
+    }
+    if (fs.existsSync(path.join(dir, 'go.mod'))) return 'go test ./...';
+    if (fs.existsSync(path.join(dir, 'Cargo.toml'))) return 'cargo test';
+    if (fs.existsSync(path.join(dir, 'pyproject.toml')) || fs.existsSync(path.join(dir, 'pytest.ini'))) return 'pytest';
+    return null;
+  }
+
+  async _runTestsTool(input) {
+    const wd = this._toolWorkdir(input.path);
+    if (wd.error) return wd;
+    const command = String(input.command || this._detectTestCommand(wd.path) || '');
+    if (!command) return { error: 'No test command supplied and no standard project test command detected.' };
+    const result = await this._execTool({ command, workdir: wd.path, timeout: Math.min(Number(input.timeout || 120000), 600000) });
+    return { ok: !result.error, command, path: wd.path, ...result };
+  }
+
+  _bgListTool() {
+    return {
+      ok: true,
+      note: 'Server-side background process metadata is limited to active exec PIDs. Spore Code sessions get full bg_list/bg_tail/bg_kill from the CLI.',
+      processes: [...this._trackedPids].map(pid => ({ pid, running: true })),
+    };
+  }
+
+  _bgTailTool(input) {
+    return { ok: false, error: `No server-side log buffer is available for background id ${input.id}. Use exec output or Spore Code bg_tail for CLI-spawned processes.` };
+  }
+
+  _bgKillTool(input) {
+    const pid = Number(input.id);
+    if (!Number.isFinite(pid)) return { error: 'id is required' };
+    if (!this._trackedPids.has(pid)) return { ok: false, error: `No tracked process with pid ${pid}` };
+    try {
+      process.kill(pid, 'SIGTERM');
+      return { ok: true, killed: pid };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
   _isFrameworkFile(resolved) {
     const frameworkPattern = /^\/app\/(agent|discord|context|tools|config|sessions|learner|feed|gateway|maintainer|embedder|spore)\.(js|json)$/;
     if (frameworkPattern.test(resolved)) return true;
@@ -4487,6 +5847,22 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       this.learner.init();
     }
 
+    // Rebind workers that share the active graph DB. Without this,
+    // switchGraph closes learner.db, learner.init opens a new handle, and
+    // janitor/maintainer/backup keep pointing at the closed handle.
+    if (this._maintainer) {
+      this._maintainer.db = this.learner?.db || this.graph?.db;
+      try { this._maintainer.ensureSchema?.(); } catch (e) { this.log.warn('[multi-graph] maintainer rebind failed: ' + e.message); }
+    }
+    if (this._janitor) {
+      this._janitor.db = this.learner?.db || this.graph?.db;
+      try { this._janitor.ensureSchema?.(); } catch (e) { this.log.warn('[multi-graph] janitor rebind failed: ' + e.message); }
+    }
+    if (this._backup) {
+      this._backup.db = this.learner?.db || this.graph?.db;
+      this._backup.graphDbPath = newDbPath;
+    }
+
     this.log.info(`[multi-graph] Switched to graph "${entry.name}" (${slug}) at ${newDbPath}`);
     return { slug, name: entry.name, dbPath: newDbPath };
   }
@@ -4495,6 +5871,182 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     try {
       return this.graph?.db?.prepare('SELECT COUNT(*) as c FROM nodes').get()?.c || 0;
     } catch { return 0; }
+  }
+
+  _settingsModule() {
+    const settings = require('../settings');
+    if (!settings.isBooted?.()) settings.boot({ dataDir: this.config.dataDir });
+    return settings;
+  }
+
+  _currentSettingValue(key) {
+    try {
+      const value = this._settingsModule().get(key);
+      if (value !== undefined) return value;
+    } catch { /* settings may be unavailable in narrow test harnesses */ }
+    return undefined;
+  }
+
+  _currentWebPort() {
+    const raw = this._currentSettingValue('webPort') ?? this.config.webPort;
+    const port = Number(raw);
+    return Number.isFinite(port) && port > 0 ? port : null;
+  }
+
+  _currentPublicBaseUrl() {
+    const publicUrl = this._currentSettingValue('publicUrl') ?? this.config.publicUrl;
+    const normalized = String(publicUrl || '').trim().replace(/\/+$/, '');
+    if (normalized) return normalized;
+
+    const ingressDomain = this._currentSettingValue('ingressDomain') ?? this.config.ingressDomain;
+    if (!ingressDomain) return null;
+    const ingressPath = String(this._currentSettingValue('ingressPath') ?? this.config.ingressPath ?? '').replace(/\/$/, '');
+    const ingressHttps = this._currentSettingValue('ingressHttps') ?? this.config.ingressHttps;
+    const proto = ingressHttps ? 'https' : 'http';
+    return `${proto}://${ingressDomain}${ingressPath}`;
+  }
+
+  _settingsSummaryForTool(settings) {
+    const ui = settings.snapshotForUI();
+    const values = ui.values || {};
+    const snap = settings.snapshot();
+    const flat = settings.snapshotFlat();
+
+    const providerSummary = (id) => {
+      const apiKey = values[`providers.${id}.apiKey`];
+      const baseUrl = values[`providers.${id}.baseUrl`];
+      const extra = {};
+      if (values[`providers.${id}.authHeader`] !== undefined) extra.authHeader = values[`providers.${id}.authHeader`];
+      if (values[`providers.${id}.referer`] !== undefined) extra.referer = values[`providers.${id}.referer`];
+      return {
+        configured: !!(apiKey || baseUrl || extra.authHeader || extra.referer),
+        apiKey: apiKey || null,
+        baseUrl: baseUrl || null,
+        ...extra,
+      };
+    };
+
+    const customProviders = Array.isArray(snap.providers?.custom)
+      ? snap.providers.custom.map(p => ({
+        name: p?.name || null,
+        url: p?.url || p?.baseUrl || null,
+        authHeader: p?.authHeader || null,
+        configured: !!(p?.url || p?.baseUrl || p?.key),
+        key: p?.key ? '__set__' : null,
+      }))
+      : [];
+
+    const pluginIds = new Set();
+    if (snap.plugins && typeof snap.plugins === 'object') {
+      for (const id of Object.keys(snap.plugins)) pluginIds.add(id);
+    }
+    for (const key of Object.keys(flat)) {
+      if (!key.startsWith('plugins.')) continue;
+      const [, id] = key.split('.');
+      if (id) pluginIds.add(id);
+    }
+
+    return {
+      runtime: {
+        publicUrl: this._currentPublicBaseUrl(),
+        webPort: this._currentWebPort(),
+        workspacePath: snap.workspacePath || this.config.workspacePath || null,
+        dataDir: snap.dataDir || this.config.dataDir || null,
+      },
+      agent: {
+        agentId: snap.agentId || this.config.agentId || null,
+        displayName: snap.displayName || this.config.displayName || null,
+        agentEffort: snap.agentEffort || this.config.agentEffort || null,
+        enhancedRecall: !!(snap.enhancedRecall ?? this.config.enhancedRecall),
+        browserBackend: snap.browserBackend || this.config.browserBackend || null,
+      },
+      models: snap.models || {},
+      providers: {
+        anthropic: providerSummary('anthropic'),
+        openai: providerSummary('openai'),
+        openrouter: providerSummary('openrouter'),
+        local: providerSummary('local'),
+        gemini: providerSummary('gemini'),
+        custom: customProviders,
+      },
+      plugins: {
+        enabled: !!(snap.pluginsEnabled ?? this.config.pluginsEnabled),
+        hotReload: !!(snap.pluginsHotReload ?? this.config.pluginsHotReload),
+        configured: [...pluginIds].sort(),
+      },
+    };
+  }
+
+  _settingsReadTool(input = {}) {
+    const action = input.action || 'summary';
+    let settings;
+    try {
+      settings = this._settingsModule();
+    } catch (e) {
+      return { error: `settings registry unavailable: ${e.message}` };
+    }
+
+    if (action === 'summary') {
+      return {
+        ok: true,
+        source: 'settings.db',
+        settings: this._settingsSummaryForTool(settings),
+        note: 'settings.db is canonical for runtime settings. env_manage only shows process/.env values and may omit DB-backed settings.',
+      };
+    }
+
+    const ui = settings.snapshotForUI({ scope: input.scope || null });
+    const values = ui.values || {};
+    const meta = ui.meta || {};
+    const defsByKey = new Map(settings.allDefs().map(def => [def.key, def]));
+
+    if (action === 'get') {
+      const key = String(input.key || '').trim();
+      if (!key) return { error: 'key required for action:get' };
+      return {
+        ok: true,
+        source: 'settings.db',
+        key,
+        found: Object.prototype.hasOwnProperty.call(values, key),
+        value: Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null,
+        meta: meta[key] || null,
+      };
+    }
+
+    if (action === 'list') {
+      const prefix = input.prefix ? String(input.prefix) : '';
+      const group = input.group ? String(input.group) : '';
+      const entries = [];
+      for (const key of Object.keys(values).sort()) {
+        const def = defsByKey.get(key);
+        if (prefix && !key.startsWith(prefix)) continue;
+        if (group && def?.group !== group) continue;
+        entries.push({ key, value: values[key], meta: meta[key] || null });
+      }
+      return {
+        ok: true,
+        source: 'settings.db',
+        total: entries.length,
+        entries: entries.slice(0, 200),
+        truncated: entries.length > 200,
+      };
+    }
+
+    return { error: `Unknown action: ${action}` };
+  }
+
+  _syncEnvVarToSettings(envName, rawValue) {
+    try {
+      const settings = this._settingsModule();
+      const def = settings.allDefs().find(d => d.envVar === envName || (d.legacyAlias || []).includes(envName));
+      if (!def) return null;
+      settings.applyPatch({ [def.key]: rawValue === undefined ? null : rawValue }, { actor: 'env_manage' });
+      try { this.gateway?._mirrorSettingsToLegacyConfig?.(); } catch { /* best-effort */ }
+      return def.key;
+    } catch (e) {
+      this.log?.warn?.(`[settings] env_manage sync failed for ${envName}: ${e.message}`);
+      return null;
+    }
   }
 
   // ── Web Server ──────────────────────────────────────────────────────
@@ -4524,7 +6076,21 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         }
       }
       vars.sort((a, b) => a.key.localeCompare(b.key));
-      return { variables: vars, note: 'These are the currently loaded env vars. To change them persistently, use action "set" — changes are written to .env on disk and take effect after restart.' };
+      let settingsSummary = null;
+      try {
+        const summary = this._settingsSummaryForTool(this._settingsModule());
+        settingsSummary = {
+          runtime: summary.runtime,
+          agent: summary.agent,
+          plugins: summary.plugins,
+          models: summary.models,
+        };
+      } catch { /* settings summary is best-effort for env_manage */ }
+      return {
+        variables: vars,
+        settings: settingsSummary,
+        note: 'These are the currently loaded env vars plus a compact settings.db summary. settings.db is canonical for runtime settings; use settings_read for the full current settings snapshot.',
+      };
     }
 
     if (action === 'get') {
@@ -4558,7 +6124,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         // The manager API is the canonical way to update persistent env
         if (action === 'set') process.env[key] = value;
         else delete process.env[key];
-        return { ok: true, key, runtime_only: true, note: 'Updated in current process only. To persist: ask the operator to update the .env through the manager, or use anima_manage update_env if you have orchestrator access.' };
+        const settingUpdated = this._syncEnvVarToSettings(key, action === 'set' ? value : undefined);
+        return { ok: true, key, runtime_only: true, settingUpdated, note: settingUpdated ? `Updated current process and settings key "${settingUpdated}". To persist env specifically, ask the operator to update .env through the manager.` : 'Updated in current process only. To persist: ask the operator to update the .env through the manager, or use spore_manage update_env if you have orchestrator access.' };
       }
 
       const raw = fs.readFileSync(envPath, 'utf8');
@@ -4582,9 +6149,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
       if (action === 'set') process.env[key] = value;
       else delete process.env[key];
+      const settingUpdated = this._syncEnvVarToSettings(key, action === 'set' ? value : undefined);
 
       this.log.info(`[env] ${action === 'set' ? 'Set' : 'Deleted'} ${key}`);
-      return { ok: true, key, persisted: true, note: 'Written to .env and applied to current process. Full restart recommended for dependent services to pick up changes.' };
+      return { ok: true, key, persisted: true, settingUpdated, note: settingUpdated ? `Written to .env, applied to current process, and synced settings key "${settingUpdated}".` : 'Written to .env and applied to current process. Full restart recommended for dependent services to pick up changes.' };
     }
 
     return { error: `Unknown action: ${action}` };
@@ -4653,19 +6221,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return { error: `Unknown vault action: ${action}` };
   }
 
-  async _browserTool(input) {
-    if (!this._browserInstance) {
-      const BrowserTool = require('./browser-tool');
-      this._browserInstance = new BrowserTool(this.log, (data, isBinary) => {
-        if (isBinary) {
-          this.broadcastBinary(data);
-        } else {
-          this.broadcast(data);
-        }
-      }, this.config);
-    }
-    return await this._browserInstance.execute(input);
-  }
+  // _browserTool removed — the browser tool is now registered by the
+  // browser-core plugin (plugins/browser-core/index.js), which routes
+  // to backend plugins (zendriver, playwright).
 
   async _analyzeTool(input = {}) {
     const requestedKind = typeof input.kind === 'string' ? input.kind.trim().toLowerCase() : '';
@@ -4962,11 +6520,42 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     this.gateway?.broadcastBinary(buffer);
   }
 
+  _wireWebGatewayBroadcaster(gateway = null) {
+    const gw = gateway
+      || this.gateway
+      || this.platformManager?.getGateway?.('web')
+      || null;
+    if (gw && typeof gw._broadcastToSessionKey === 'function') {
+      this._wsBroadcast = (sessionKey, payload) => gw._broadcastToSessionKey(sessionKey, payload);
+      return true;
+    }
+    return false;
+  }
+
+  _getSessionBroadcaster() {
+    if (typeof this._wsBroadcast === 'function') return this._wsBroadcast;
+    return this._wireWebGatewayBroadcaster() && typeof this._wsBroadcast === 'function'
+      ? this._wsBroadcast
+      : null;
+  }
+
+  // Hook the plugin manager calls after install / uninstall (manager.js
+  // ~1190 / ~1268). The tool definition list is rebuilt lazily on
+  // every prompt build via getToolDefinitions(), so there's no static
+  // cache to invalidate here — but providing the method gives the
+  // manager a real handle to call (was a silent no-op before) and
+  // keeps a single place to wire any future cache. Logged at debug so
+  // operators see a breadcrumb during plugin churn.
+  reloadPluginTools(reason = 'plugin change') {
+    this.log?.debug?.(`[tools] reloadPluginTools (${reason}) — tool list will rebuild on next prompt`);
+  }
+
   _webServeTool({ action, dir, command, command_dir }) {
     if (!this.gateway) {
       const { WebGateway } = require('../gateways/web');
       this.gateway = new WebGateway(this);
     }
+    this._wireWebGatewayBroadcaster(this.gateway);
     return this.gateway.handleAction(action, dir, { command, commandDir: command_dir });
   }
 
@@ -5076,7 +6665,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       if (!edgeExists) {
         const agentExists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(agentId);
         if (agentExists) {
-          db.prepare('INSERT INTO edges (source, target, type, weight) VALUES (?, ?, ?, 1)')
+          // System-asserted edge: the agent registered this tool itself.
+          db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 1, 'save_tool', 'extracted')")
             .run(agentId, nodeId, 'has_tool');
         }
       }
@@ -5634,7 +7224,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     let cookieHeader = '';
     let authenticated = false;
     if (!as_user && sessionToken) {
-      cookieHeader = `anima_session=${sessionToken}`;
+      cookieHeader = `spore_session=${sessionToken}`;
       authenticated = true;
     } else {
       const sess = this.gateway.getSessionForUser(targetUser);
@@ -5844,16 +7434,53 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const p = String(prompt || '').trim();
     if (!p) return { error: 'prompt is required' };
     const info = sessions.db.prepare(
-      `INSERT INTO wakeups (session_key, channel_id, channel_name, user_id, user_name, platform, is_dm, fire_at, prompt, reason, created)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO wakeups (session_key, channel_id, channel_name, user_id, user_name, platform, is_dm, project_context, memory_envelope, fire_at, prompt, reason, created)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       this._ctxSessionKey(),
       ctx.channelId || null, ctx.channelName || null,
       ctx.userId || null, ctx.userName || null,
       ctx.platform || 'web',
       ctx.isDm !== false ? 1 : 0,
+      ctx.projectContext ? JSON.stringify(ctx.projectContext) : null,
+      ctx.memoryEnvelope ? JSON.stringify(ctx.memoryEnvelope) : null,
       fireAt, p, String(reason || '').slice(0, 200), now,
     );
+    if (this._jobQueue?.submitWorkerJob) {
+      try {
+        const job = this._jobQueue.submitWorkerJob('wakeup.fire', {
+          wakeupId: Number(info.lastInsertRowid),
+          opts: {
+            content: p,
+            channelId: ctx.channelId || 'web:control-panel',
+            channelName: ctx.channelName || 'wakeup',
+            userId: ctx.userId || 'operator',
+            userName: ctx.userName || 'Wakeup',
+            trigger: 'wakeup',
+            platform: ctx.platform || 'web',
+            isDm: ctx.isDm !== false,
+            sessionKey: this._ctxSessionKey(),
+            projectContext: ctx.projectContext || null,
+            memoryEnvelope: ctx.memoryEnvelope || null,
+          },
+        }, {
+          id: `wakeup-${info.lastInsertRowid}`,
+          persistent: true,
+          runAt: fireAt,
+          lane: 'deferred',
+          priority: 65,
+          route: 'wakeup',
+          sessionKey: this._ctxSessionKey(),
+          graph: ctx.memoryEnvelope?.primarySlug || ctx.memoryEnvelope?.writeScopes?.defaultSlug || null,
+        });
+        const jobId = job?.jobId || null;
+        if (jobId) {
+          sessions.db.prepare('UPDATE wakeups SET queue_job_id=? WHERE id=?').run(jobId, info.lastInsertRowid);
+        }
+      } catch (e) {
+        this.log.warn(`[wakeup] queue submit failed, legacy sweep will pick it up: ${e.message}`);
+      }
+    }
     this.log.info(`[wakeup] scheduled id=${info.lastInsertRowid} in ${secs}s for ${this._ctxSessionKey()}`);
     return { ok: true, wakeupId: info.lastInsertRowid, fireAt, delaySeconds: secs };
   }
@@ -5880,6 +7507,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (row.fired) return { ok: true, alreadyFired: true };
     sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=?, error=? WHERE id=?')
       .run(Date.now(), 'cancelled', id);
+    try {
+      const jobId = sessions.db.prepare('SELECT queue_job_id FROM wakeups WHERE id=?').get(id)?.queue_job_id;
+      if (jobId && this._jobQueue?.cancelJob) this._jobQueue.cancelJob(jobId, 'wakeup cancelled');
+    } catch {}
     return { ok: true, cancelled: id };
   }
 
@@ -5895,8 +7526,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       'SELECT * FROM wakeups WHERE fired=0 AND fire_at<=? ORDER BY fire_at ASC LIMIT 20'
     ).all(now);
     for (const row of due) {
-      sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=?').run(now, row.id);
       try {
+        if (row.queue_job_id && this._jobQueue?.submitWorkerJob) continue;
         const opts = {
           content: row.prompt,
           channelId: row.channel_id || 'web:control-panel',
@@ -5906,12 +7537,32 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           trigger: 'wakeup',
           platform: row.platform || 'web',
           isDm: row.is_dm === 1,
+          sessionKey: row.session_key,
+          projectContext: row.project_context ? JSON.parse(row.project_context) : null,
+          memoryEnvelope: row.memory_envelope ? JSON.parse(row.memory_envelope) : null,
         };
         const key = row.session_key;
-        if (agent.activeRuns?.has(key)) {
+        if (this._jobQueue?.submitWorkerJob) {
+          const job = this._jobQueue.submitWorkerJob('wakeup.fire', {
+            wakeupId: row.id,
+            opts,
+          }, {
+            id: `wakeup-${row.id}`,
+            persistent: true,
+            runAt: now,
+            lane: 'deferred',
+            priority: 65,
+            route: 'wakeup.sweep',
+            sessionKey: key,
+            graph: opts.memoryEnvelope?.primarySlug || opts.memoryEnvelope?.writeScopes?.defaultSlug || null,
+          });
+          if (job?.jobId) sessions.db.prepare('UPDATE wakeups SET queue_job_id=? WHERE id=?').run(job.jobId, row.id);
+        } else if (agent.activeRuns?.has(key)) {
+          sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=?').run(now, row.id);
           this.log.info(`[wakeup] injecting into running session ${key} (id=${row.id})`);
           agent.interject(key, row.prompt);
         } else {
+          sessions.db.prepare('UPDATE wakeups SET fired=1, fired_at=? WHERE id=?').run(now, row.id);
           this.log.info(`[wakeup] firing processMessage for ${key} (id=${row.id}, reason=${row.reason || ''})`);
           agent.processMessage(opts).catch(e => {
             sessions.db.prepare('UPDATE wakeups SET failed=1, error=? WHERE id=?')
@@ -5948,12 +7599,15 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     } catch (e) {
       return { error: `Failed to create: ${e.message}` };
     }
-    // Broadcast so clients (Spore Code in particular) can render a
-    // live task-list side panel. sessionKey lets old/unscoped clients
-    // filter — the acorn CLI listens for task:* frames and only
-    // renders rows tagged with its own session.
+    // Route so clients (Spore Code in particular) can render a live task-list
+    // side panel without leaking project task rows into other sessions.
     try {
-      this.broadcast({
+      this._broadcastSessionEvent({
+        sessionKey: this._ctxSessionKey() || null,
+        channelId: ctx.channelId || null,
+        platform: ctx.platform || null,
+        userId: ctx.userId || null,
+      }, {
         type: 'task:create',
         id: slug,
         subject: subj,
@@ -5963,7 +7617,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         blockedBy: Array.isArray(blockedBy) ? blockedBy : [],
         sessionKey: this._ctxSessionKey() || null,
         channelId: ctx.channelId || null,
-      });
+      }, { logPrefix: 'tasklist:create' });
     } catch (e) { this.log.warn('[tools] broadcast failed: ' + e.message); }
     return { ok: true, id: slug };
   }
@@ -5993,7 +7647,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     // carried from the task row (not ctx) since task_progress can be
     // called for tasks created in a different context.
     try {
-      this.broadcast({
+      this._broadcastSessionEvent({
+        sessionKey: row.session_key || this._ctxSessionKey() || null,
+        channelId: row.channel_id || null,
+        platform: (row.session_key || '').includes(':cli:') ? 'cli' : (this._ctx()?.platform || null),
+        userId: row.user_id || null,
+      }, {
         type: 'task:update',
         id,
         subject: row.subject,
@@ -6003,7 +7662,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         priority: Number.isFinite(priority) ? priority : row.priority,
         sessionKey: row.session_key || this._ctxSessionKey() || null,
         channelId: row.channel_id || null,
-      });
+      }, { logPrefix: 'tasklist:update' });
     } catch (e) { this.log.warn('[tools] broadcast failed: ' + e.message); }
     // Cascade: if status flipped to done, unblock dependents whose remaining
     // blockers are all done. Cheap even on large task tables — we filter by
@@ -6204,6 +7863,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (!question || !Array.isArray(options) || options.length < 2 || options.length > 5) {
       return { error: 'question + 2-5 options required' };
     }
+    const broadcaster = this._getSessionBroadcaster();
+    if (typeof broadcaster !== 'function') {
+      return {
+        error: 'ask_user could not be delivered: no web/Spore Code question broadcaster is available. Ask the question in normal reply text instead.',
+        question,
+        options,
+      };
+    }
     if (!this._pendingQuestions) this._pendingQuestions = new Map();
     const qid = `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const timeout = Math.max(30_000, Math.min(Number(timeoutMs) || 300_000, 3_600_000));
@@ -6216,36 +7883,131 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }, timeout);
       this._pendingQuestions.set(qid, { resolve, sessionKey, channelId: ctx.channelId, timer, options, question, createdAt: Date.now() });
       try {
-        if (typeof this._wsBroadcast === 'function') {
-          this._wsBroadcast(sessionKey, { type: 'ask_user', qid, question, options });
-        } else {
-          this.log.warn('[ask_user] no WS broadcaster wired — answer will only arrive if UI already polls');
+        const delivered = broadcaster(sessionKey, { type: 'ask_user', qid, question, options, sessionKey });
+        const deliveredCount = Number(delivered);
+        if (Number.isFinite(deliveredCount) && deliveredCount <= 0) {
+          clearTimeout(timer);
+          this._pendingQuestions.delete(qid);
+          resolve({
+            error: 'ask_user could not be delivered: no connected web/Spore Code client is registered for this session. Ask the question in normal reply text instead.',
+            question,
+            options,
+          });
         }
       } catch (e) {
+        clearTimeout(timer);
+        this._pendingQuestions.delete(qid);
         this.log.warn(`[ask_user] broadcast failed: ${e.message}`);
+        resolve({
+          error: `ask_user could not be delivered: ${e.message}`,
+          question,
+          options,
+        });
       }
     });
+  }
+
+  _normalizeAskUserAnswer(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[.,;:!?]+$/g, '')
+      .replace(/\s+/g, ' ');
+  }
+
+  _matchAskUserOption(options = [], answer) {
+    const raw = String(answer || '').trim();
+    const norm = this._normalizeAskUserAnswer(raw);
+    if (!norm) return null;
+
+    const numeric = norm.match(/^#?(\d+)$/);
+    if (numeric) {
+      const idx = Number(numeric[1]) - 1;
+      if (idx >= 0 && idx < options.length) return options[idx].label;
+    }
+
+    const normalized = options.map((opt, index) => ({
+      index,
+      label: String(opt?.label || ''),
+      labelNorm: this._normalizeAskUserAnswer(opt?.label),
+      descNorm: this._normalizeAskUserAnswer(opt?.description),
+    }));
+
+    const exact = normalized.find(o => o.labelNorm === norm);
+    if (exact) return exact.label;
+
+    const starts = normalized.filter(o => o.labelNorm.startsWith(norm));
+    if (starts.length === 1 && norm.length >= 2) return starts[0].label;
+
+    const contained = normalized.filter(o => (
+      norm.length >= 4
+      && (o.labelNorm.includes(norm) || o.descNorm.includes(norm))
+    ));
+    if (contained.length === 1) return contained[0].label;
+
+    if (['yes', 'y', 'ok', 'okay', 'confirm', 'proceed'].includes(norm)) {
+      const yes = normalized.find(o => /^(yes|ok|okay|confirm|proceed|approve|allow)\b/.test(o.labelNorm));
+      if (yes) return yes.label;
+    }
+    if (['no', 'n', 'cancel', 'stop'].includes(norm)) {
+      const no = normalized.find(o => /^(no|cancel|stop|reject|deny)\b/.test(o.labelNorm));
+      if (no) return no.label;
+    }
+
+    return null;
   }
 
   answerAskUser(qid, answer) {
     const entry = this._pendingQuestions?.get(qid);
     if (!entry) return false;
-    if (!entry.options.some(o => o.label === answer)) return false;
+    const matched = this._matchAskUserOption(entry.options, answer);
+    if (!matched) return false;
     clearTimeout(entry.timer);
     this._pendingQuestions.delete(qid);
-    entry.resolve({ answer });
+    entry.resolve({ answer: matched });
     return true;
   }
 
+  answerAskUserForSession(sessionKey, answer) {
+    if (!this._pendingQuestions || !sessionKey) return { ok: false, pending: false };
+    const entries = [...this._pendingQuestions.entries()]
+      .filter(([, entry]) => entry.sessionKey === sessionKey)
+      .sort((a, b) => (a[1].createdAt || 0) - (b[1].createdAt || 0));
+    if (!entries.length) return { ok: false, pending: false };
+    const [qid, entry] = entries[0];
+    const matched = this._matchAskUserOption(entry.options, answer);
+    if (!matched) {
+      return {
+        ok: false,
+        pending: true,
+        qid,
+        question: entry.question,
+        options: entry.options,
+      };
+    }
+    const ok = this.answerAskUser(qid, matched);
+    return { ok, pending: true, qid, answer: matched, question: entry.question };
+  }
+
   cancelSessionAskUser(sessionKey) {
-    if (!this._pendingQuestions) return;
+    if (!this._pendingQuestions) return [];
+    const cancelled = [];
     for (const [qid, entry] of this._pendingQuestions) {
       if (entry.sessionKey === sessionKey) {
         clearTimeout(entry.timer);
         this._pendingQuestions.delete(qid);
-        entry.resolve({ timedOut: true, cancelled: true });
+        const info = { qid, question: entry.question, options: entry.options, createdAt: entry.createdAt };
+        cancelled.push(info);
+        try {
+          const broadcaster = this._getSessionBroadcaster();
+          if (typeof broadcaster === 'function') {
+            broadcaster(sessionKey, { type: 'ask_user_cancelled', qid, question: entry.question });
+          }
+        } catch (e) { this.log.warn('[ask_user] cancel broadcast failed: ' + e.message); }
+        entry.resolve({ timedOut: true, cancelled: true, question: entry.question });
       }
     }
+    return cancelled;
   }
 
   listPendingQuestions(sessionKey) {

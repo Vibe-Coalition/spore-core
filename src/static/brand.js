@@ -2,7 +2,7 @@
 // This is the ONLY JS file that differs between branded branches.
 //
 // chatLogo is the F01 "Six-petal" Spore mark — see
-// /mnt/user/appdata/anima/design_stuff/spore logo and node/README.md
+// the spore logo + node design specREADME.md
 // for the design spec. Geometry uses viewBox="-1 -1 2 2" so the spec
 // coords (petal ring r=0.62, petal r=0.16, center r=0.18, spoke
 // width 0.04) drop in without scaling. Ink uses currentColor so it

@@ -107,6 +107,11 @@ function readEntries(nodeId, aspectName, maxLines) {
   }
 }
 
+function readActivityLog(maxLines = MAX_ENTRIES) {
+  const limit = Math.max(1, Math.min(Number(maxLines) || MAX_ENTRIES, MAX_ENTRIES));
+  return readEntries(ACTIVITY_NODE_ID, 'entries', limit);
+}
+
 // ── Activity feed ──────────────────────────────────────────────────────────────
 
 function write(line) {
@@ -339,4 +344,13 @@ function _closeDb() {
   if (_db) { try { _db.close(); } catch { /* silent: best-effort close */ } _db = null; }
 }
 
-module.exports = { readForContext, write, log, logTokens, readTokenSummary, _closeDb };
+module.exports = {
+  readForContext,
+  write,
+  log,
+  logTokens,
+  readTokenSummary,
+  readActivityLog,
+  INTERNAL_LOG_NODE_IDS: [ACTIVITY_NODE_ID, TOKEN_NODE_ID],
+  _closeDb,
+};

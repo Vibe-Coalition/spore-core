@@ -81,7 +81,7 @@ WHERE NOT EXISTS (
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-web-search' AND name = 'workflow_pattern'),
-       'Authenticated APIs: `web_fetch({url: "...", credential: "BFL_API_KEY", method: "POST", body: {...}})` injects the vault key server-side without exposing it. The credential parameter is the vault key NAME (see ref-api-keys for the catalog).', 8, 'seed', 'seed'
+       'Authenticated APIs: `web_fetch({url: "...", credential: "BRAVE_API_KEY", method: "POST", body: {...}})` injects the vault key server-side without exposing it. The credential parameter is the vault key NAME (see ref-api-keys for the catalog).', 8, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-web-search' AND asp.name = 'workflow_pattern' AND a.content LIKE 'Authenticated APIs:%');

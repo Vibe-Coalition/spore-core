@@ -24,10 +24,8 @@ function showApp() {
   _authenticated = true;
   document.getElementById('app').classList.remove('hidden');
   loadGraphThemePreference();
-  if (_userRole !== 'admin') {
-    document.getElementById('tmi-longmemeval')?.remove();
-    document.getElementById('lme-hud')?.remove();
-  }
+  // Plugin-contributed UI (longmemeval HUD, etc.) is gated at the
+  // plugin's own boot path — see plugins/longmemeval/static/longmemeval.js.
   // Webapp users get a stripped dock — no files / logs / terminal access.
   _applyDockRoleGate();
   // Pull the user's chosen displayName so the agent can address them properly.

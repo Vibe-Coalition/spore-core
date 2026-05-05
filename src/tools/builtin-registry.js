@@ -1,0 +1,73 @@
+'use strict';
+
+function buildBuiltinToolHandlers(tools) {
+  return {
+    exec: input => tools._execTool(input),
+    message_send: input => tools._messageSendTool(input),
+    message_react: input => tools._messageReactTool(input),
+    message_edit: input => tools._messageEditTool(input),
+    message_read: input => tools._messageReadTool(input),
+    graph_query: input => tools._graphQueryTool(input),
+    query_about: input => tools._queryAboutTool(input),
+    graph_update: input => tools._graphUpdateTool(input),
+    graph_diff: input => tools._graphDiffTool(input),
+    graph_delete: input => tools._graphDeleteTool(input),
+    delegate_task: input => tools._delegateTask(input),
+    task_status: input => tools._taskStatusTool(input),
+    task_cancel: input => tools._taskCancelTool(input),
+    task_update: input => tools._taskUpdateTool(input),
+    web_search: input => tools._webSearchTool(input),
+    web_fetch: input => tools._webFetchTool(input),
+    read_file: input => tools._readFileTool(input),
+    write_file: input => tools._writeFileTool(input),
+    edit_file: input => tools._editFileTool(input),
+    grep: input => tools._grepTool(input),
+    glob: input => tools._globTool(input),
+    session_status: () => tools._sessionStatusTool(),
+    sessions_list: () => tools._sessionsListTool(),
+    settings_read: input => tools._settingsReadTool(input),
+    env_manage: input => tools._envManageTool(input),
+    web_serve: input => tools._webServeTool(input),
+    analyze_media: input => tools._analyzeTool(input),
+    analyze_image: input => tools._analyzeMediaTool('image', input),
+    analyze_video: input => tools._analyzeMediaTool('video', input),
+    analyze_audio: input => tools._analyzeMediaTool('audio', input),
+    save_tool: input => tools._saveToolTool(input),
+    list_custom_tools: () => tools._listCustomTools(),
+    sleep: async input => {
+      const secs = Math.max(1, Math.min(input.seconds || 5, 60));
+      const reason = input.reason || 'waiting';
+      await new Promise(r => setTimeout(r, secs * 1000));
+      return { slept: secs, reason };
+    },
+    notify_user: input => tools._notifyUserTool(input),
+    schedule_wakeup: input => tools._scheduleWakeupTool(input),
+    list_wakeups: input => tools._listWakeupsTool(input),
+    cancel_wakeup: input => tools._cancelWakeupTool(input),
+    task_create: input => tools._tasklistCreateTool(input),
+    task_progress: input => tools._tasklistProgressTool(input),
+    task_list: input => tools._tasklistListTool(input),
+    task_get: input => tools._tasklistGetTool(input),
+    log_watch: input => tools._logWatchTool(input),
+    log_watch_list: () => tools._logWatchListTool(),
+    log_watch_stop: input => tools._logWatchStopTool(input),
+    ask_user: input => tools._askUserTool(input),
+    spore_list: input => tools._animaListTool(input),
+    spore_message: input => tools._animaMessageTool(input),
+    spore_graph: input => tools._animaGraphTool(input),
+    spore_manage: input => tools._animaManageTool(input),
+    remote_exec: input => tools._remoteExecTool(input),
+    remote_tail: input => tools._remoteTailTool(input),
+    remote_tmux_kill: input => tools._remoteTmuxKillTool(input),
+    remote_read_file: input => tools._remoteReadFileTool(input),
+    remote_write_file: input => tools._remoteWriteFileTool(input),
+    ssh_tunnel: input => tools._sshTunnelTool(input),
+    startup_tasks: input => tools._startupTasksTool(input),
+    data_poller: input => tools._dataPollerTool(input),
+    webapp_request: input => tools._webappRequestTool(input),
+    skill_lookup: input => tools._skillLookupTool(input),
+    skill_update: input => tools._skillUpdateTool(input),
+  };
+}
+
+module.exports = { buildBuiltinToolHandlers };

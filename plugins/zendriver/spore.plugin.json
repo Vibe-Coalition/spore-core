@@ -1,0 +1,9 @@
+{
+  "id": "zendriver",
+  "name": "Zendriver Browser Backend",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": ["browser-core"],
+  "description": "Stealth-patched Chromium driven over CDP via the zendriver Python lib. Hides navigator.webdriver, fakes chrome.runtime, and synthesizes real OS-level keyboard/mouse events through Input.dispatchKeyEvent / dispatchMouseEvent / synthesizeScrollGesture. The right backend for any site with anti-bot detection (Reddit, Cloudflare, Akamai, PerimeterX). Spawns a long-lived Python helper subprocess (./helper/browser_helper.py) for the CDP traffic — torn down on close. Registers as the 'zendriver' selector via api.registerBrowserBackend; the browser-core plugin owns the `browser` tool and routes to it."
+}

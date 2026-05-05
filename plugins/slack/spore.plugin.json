@@ -1,0 +1,14 @@
+{
+  "id": "slack",
+  "name": "Slack Channel",
+  "version": "1.0.0",
+  "kind": "gateway",
+  "entry": "./index.js",
+  "depends": [],
+  "category": "channels",
+  "channel": {
+    "platform": "slack",
+    "sessionModes": ["channel", "thread"]
+  },
+  "description": "Slack Socket Mode gateway with channels, DMs, mentions, threads, file uploads, reactions, task progress, lull responses, and configurable thread/session mapping."
+}

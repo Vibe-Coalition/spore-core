@@ -12,7 +12,7 @@ resolve_current_user() {
     id -un
     return
   fi
-  printf '%s\n' "${USER:-anima}"
+  printf '%s\n' "${USER:-spore}"
 }
 
 parse_args() {

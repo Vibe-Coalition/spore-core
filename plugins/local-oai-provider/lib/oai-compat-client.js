@@ -12,7 +12,8 @@
 //   const { OAICompatClient } = require('./lib/oai-compat-client');           // local-oai-provider
 //   const { OAICompatClient } = require('../local-oai-provider/lib/oai-compat-client'); // siblings
 
-const { stripPrefix } = require('../../../providers');
+const { coreRequire } = require('../../core-require');
+const { stripPrefix } = coreRequire('providers');
 
 // ───────────────────────────────────────────────────────────────────
 // Tool-name aliasing + JSON repair (vLLM tool parsers occasionally
@@ -111,8 +112,44 @@ function _repairToolJson(raw) {
   return repaired;
 }
 
+function _decodeXmlAttr(value) {
+  return String(value || '')
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&apos;/g, '\'')
+    .replace(/&#39;/g, '\'')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function _extractXmlStyleToolArguments(rawArgs, toolName) {
+  const raw = String(rawArgs || '').trim();
+  if (!/^<tool_call\b/i.test(raw)) return null;
+
+  const openTag = raw.match(/^<tool_call\b([^>]*)>/i) || raw.match(/^<tool_call\b([^>]*)\/>/i);
+  const attrs = openTag?.[1] || '';
+  const readAttr = (key) => {
+    const re = new RegExp(`${key}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s/>]+))`, 'i');
+    const m = re.exec(attrs);
+    return m ? _decodeXmlAttr(m[1] || m[2] || m[3] || '') : '';
+  };
+
+  const inlineName = normalizeToolName(readAttr('name'));
+  const expectedName = normalizeToolName(toolName);
+  if (inlineName && expectedName && inlineName !== expectedName) return null;
+
+  const attrArgs = readAttr('arguments') || readAttr('input') || readAttr('args');
+  if (attrArgs) return attrArgs.trim();
+
+  const body = raw.match(/^<tool_call\b[^>]*>\s*([\s\S]*?)\s*<\/tool_call>$/i);
+  return body ? body[1].trim() : null;
+}
+
 function _parseToolInput(rawArgs, toolName) {
   const raw = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {});
+  const xmlArgs = _extractXmlStyleToolArguments(raw, toolName);
+  if (xmlArgs && xmlArgs !== raw) return _parseToolInput(xmlArgs, toolName);
   try {
     return _postProcessToolInput(toolName, JSON.parse(raw || '{}'));
   } catch (e) { console.warn('[oai-compat] _postProcessToolInput failed: ' + e.message); }
@@ -125,6 +162,25 @@ function _parseToolInput(rawArgs, toolName) {
   return {
     _parse_error: `Tool arguments were malformed JSON and could not be parsed. Raw args (first 500 chars): ${(raw || '').substring(0, 500)}`,
   };
+}
+
+function _toOAIToolChoice(choice) {
+  if (!choice) return null;
+  if (typeof choice === 'string') return choice;
+  if (choice.type === 'function' && choice.function?.name) return choice;
+  if ((choice.type === 'tool' || choice.type === 'function') && choice.name) {
+    return { type: 'function', function: { name: choice.name } };
+  }
+  if (choice.name) {
+    return { type: 'function', function: { name: choice.name } };
+  }
+  return null;
+}
+
+function _isForcedOAIToolChoice(choice) {
+  if (!choice) return false;
+  if (typeof choice === 'string') return !['auto', 'none', 'required'].includes(choice);
+  return !!(choice.type === 'function' && choice.function?.name);
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -284,7 +340,7 @@ function toOAIRequest(params, opts = {}) {
   if (strippedModel) body.model = strippedModel;
   if (oaiTools) {
     body.tools = oaiTools;
-    body.tool_choice = 'auto';
+    body.tool_choice = _toOAIToolChoice(params.tool_choice || params.toolChoice) || 'auto';
   }
   return body;
 }
@@ -293,22 +349,46 @@ function toOAIRequest(params, opts = {}) {
 // Handles both Qwen-style (<function=name><parameter=k>v</parameter></function>)
 // and Hermes-style (JSON inside <tool_call> tags).
 function _extractInlineToolCalls(text) {
-  if (!text || !text.includes('<tool_call>')) return null;
+  if (!text || !/<tool_call\b/i.test(text)) return null;
   const toolBlocks = [];
-  const cleanText = text.replace(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g, (_, body) => {
-    const jsonTrimmed = body.trim();
+  const readAttr = (attrs, key) => {
+    const re = new RegExp(`${key}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s/>]+))`, 'i');
+    const m = re.exec(attrs || '');
+    return (m && (m[1] || m[2] || m[3]) || '').trim();
+  };
+  const pushJsonToolCall = (attrName, rawJson) => {
+    const jsonTrimmed = String(rawJson || '').trim();
     if (jsonTrimmed.startsWith('{')) {
       try {
         const parsed = JSON.parse(jsonTrimmed);
+        const name = normalizeToolName(parsed.name || attrName);
+        if (!name) return false;
+        const input = parsed.arguments && typeof parsed.arguments === 'object'
+          ? parsed.arguments
+          : parsed.name
+            ? (parsed.arguments || {})
+            : parsed;
         toolBlocks.push({
           type: 'tool_use',
           id: `tc_${toolBlocks.length}`,
-          name: normalizeToolName(parsed.name),
-          input: _postProcessToolInput(parsed.name, parsed.arguments || {}),
+          name,
+          input: _postProcessToolInput(name, input),
         });
-        return '';
+        return true;
       } catch { /* silent: malformed JSON → fallback */ }
     }
+    return false;
+  };
+
+  let cleanText = text.replace(/<tool_call\b([^>]*)\/>/gi, (_, attrs) => {
+    const attrName = readAttr(attrs, 'name');
+    const attrArgs = readAttr(attrs, 'arguments') || readAttr(attrs, 'input');
+    return pushJsonToolCall(attrName, attrArgs) ? '' : '';
+  });
+
+  cleanText = cleanText.replace(/<tool_call(?:\s+name=(?:"([^"]+)"|'([^']+)'|([^\s>]+)))?[^>]*>\s*([\s\S]*?)\s*<\/tool_call>/gi, (_, dqName, sqName, bareName, body) => {
+    const attrName = (dqName || sqName || bareName || '').trim();
+    if (pushJsonToolCall(attrName, body)) return '';
     const fnMatch = body.match(/<function=([^>]+)>([\s\S]*?)<\/function>/);
     if (fnMatch) {
       const name = fnMatch[1].trim();
@@ -496,6 +576,10 @@ class OAICompatClient {
 
   async _create(params, _opts) {
     const body = toOAIRequest(params, { useMaxCompletionTokens: this.useMaxCompletionTokens });
+    return this._createFromBody(body, params.model);
+  }
+
+  async _createFromBody(body, paramsModel) {
     const model = body.model || '';
     const timeout = this._timeoutFor(model);
     const maxTokenField = this._maxTokenField();
@@ -507,17 +591,17 @@ class OAICompatClient {
       if (result.stop_reason === 'tool_use'
           && body.tools?.length
           && !result.content.some(b => b.type === 'tool_use' && b.name)) {
-        if (this.onCapability) this.onCapability(params.model, 'tools', false);
+        if (this.onCapability) this.onCapability(paramsModel, 'tools', false);
         delete body.tools;
         delete body.tool_choice;
         const retry = await this._fetchJSON(body, timeout);
         return fromOAIResponse(retry);
       }
-      if (body.tools?.length && this.onCapability) this.onCapability(params.model, 'tools', true);
+      if (body.tools?.length && this.onCapability) this.onCapability(paramsModel, 'tools', true);
       return result;
     } catch (err) {
       if (err.status === 400 && body.tools?.length && !this._isContextLengthError(err)) {
-        if (this.onCapability) this.onCapability(params.model, 'tools', false);
+        if (this.onCapability) this.onCapability(paramsModel, 'tools', false);
         delete body.tools;
         delete body.tool_choice;
         const oaiResp = await this._fetchJSON(body, timeout);
@@ -559,6 +643,11 @@ class OAICompatClient {
     const done = (async () => {
       let body = origBody;
       let retried = false;
+
+      if (body.tools?.length && _isForcedOAIToolChoice(body.tool_choice)) {
+        const { stream, stream_options, ...nonStreamBody } = body;
+        return await self._createFromBody(nonStreamBody, params.model);
+      }
 
       const runStream = async (streamBody) => {
         let inactivityTimer = setTimeout(() => abortCtrl.abort(), timeout);
@@ -877,4 +966,6 @@ module.exports = {
   normalizeToolName,
   _postProcessToolInput,
   _parseToolInput,
+  _toOAIToolChoice,
+  _isForcedOAIToolChoice,
 };

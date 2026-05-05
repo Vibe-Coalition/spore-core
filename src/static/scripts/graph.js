@@ -19,10 +19,12 @@ function handleGraphEvent(evt) {
   else if (op === 'session:distill-done') _sporeActivityEnd('session-distill');
   else if (op === 'tool:call') _sporeActivityPulse('tool', 1500);
 
+  if (!_graphEventTargetsViewedGraph(evt)) return;
+
   if (evt.op === 'node:create') {
     queueGraphRefresh();
     if (evt.node?.id) pendingAnimations.newNodes.add(evt.node.id);
-  } else if (evt.op === 'node:update' || evt.op === 'attribute:create' || evt.op === 'aspect:create' || evt.op === 'reflection:upsert') {
+  } else if (evt.op === 'node:update' || evt.op === 'attribute:create' || evt.op === 'attribute:update' || evt.op === 'attribute:delete' || evt.op === 'aspect:create' || evt.op === 'aspect:update' || evt.op === 'aspect:delete' || evt.op === 'reflection:upsert') {
     const nid = evt.nodeId || evt.node?.id;
     if (nid) pendingAnimations.pulseNodes.add(nid);
     queueGraphRefresh();
@@ -61,6 +63,24 @@ function handleGraphEvent(evt) {
       }, 1300);
     }
   }
+}
+
+function _graphEventTargetsViewedGraph(evt) {
+  const eventSlugs = [];
+  if (Array.isArray(evt?.graphs)) {
+    for (const g of evt.graphs) if (g) eventSlugs.push(String(g));
+  }
+  for (const g of [evt?.graph, evt?.graphSlug, evt?.slug]) {
+    if (!g) continue;
+    for (const part of String(g).split(',')) {
+      const trimmed = part.trim();
+      if (trimmed) eventSlugs.push(trimmed);
+    }
+  }
+  if (!eventSlugs.length) return true;
+  const viewedSlug = typeof _viewedGraphSlug !== 'undefined' ? _viewedGraphSlug : null;
+  if (!viewedSlug) return true;
+  return eventSlugs.includes(String(viewedSlug));
 }
 
 const pendingAnimations = { newNodes: new Set(), pulseNodes: new Set(), newEdges: [] };
@@ -105,6 +125,48 @@ function _computeNodeRadius(n) {
   return base;
 }
 
+function _graphNodeCreatedMs(node) {
+  const raw = node?.created ?? node?.created_at ?? node?.createdAt ?? null;
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw)) return null;
+    return raw > 0 && raw < 1e12 ? raw * 1000 : raw;
+  }
+  const str = String(raw).trim();
+  if (!str) return null;
+  const norm = str.includes('T') ? str : str.replace(' ', 'T') + 'Z';
+  const t = Date.parse(norm);
+  return Number.isFinite(t) ? t : null;
+}
+
+function _refreshTypeFilterOptions(nodes = graphData?.nodes || []) {
+  const filterEl = document.getElementById('filter-type');
+  if (!filterEl) return;
+  const prior = filterEl.value || window._graphFilterState?.typeFilter || '';
+  const types = [...new Set(nodes.map(n => n.type).filter(Boolean))].sort();
+  filterEl.innerHTML = '<option value="">all types</option>';
+  types.forEach(t => {
+    const o = document.createElement('option');
+    o.value = t;
+    o.textContent = t;
+    filterEl.appendChild(o);
+  });
+  if (prior && types.includes(prior)) {
+    filterEl.value = prior;
+  } else {
+    filterEl.value = '';
+    if (window._graphFilterState) window._graphFilterState.typeFilter = '';
+  }
+}
+
+function _refreshActiveGraphFilters() {
+  if (typeof window._tlfRefresh === 'function') {
+    window._tlfRefresh();
+  } else if (typeof window._applyGraphFilters === 'function') {
+    window._applyGraphFilters();
+  }
+}
+
 function mergeGraph(newData, anims) {
   const oldIds = new Set(graphData.nodes.map(n => n.id));
   const newIds = new Set(newData.nodes.map(n => n.id));
@@ -121,6 +183,7 @@ function mergeGraph(newData, anims) {
       const fresh = newNodeMap[n.id];
       n.label = fresh.label; n.type = fresh.type; n.description = fresh.description;
       n.importance = fresh.importance; n.aspects = fresh.aspects; n.aliases = fresh.aliases;
+      n.mentions = fresh.mentions; n.created = fresh.created; n.updated = fresh.updated;
       n.extra = fresh.extra;
       n.radius = _computeNodeRadius(n);
     }
@@ -227,6 +290,11 @@ function mergeGraph(newData, anims) {
       hideGraphContextMenu();
       selectNode(d);
     })
+    .on('dblclick', (e, d) => {
+      e.stopPropagation();
+      e.preventDefault();
+      _focusGraphOnNode(d.id);
+    })
     .on('mouseenter', (_, d) => _setHoveredNode(d.id))
     .on('mouseleave', (_, d) => {
       if (hoveredNodeId === d.id) _setHoveredNode(null);
@@ -241,7 +309,9 @@ function mergeGraph(newData, anims) {
     });
   }
 
-  const allNodes = nodeEnter.merge(nodeG).classed('graph-node', true);
+  const allNodes = nodeEnter.merge(nodeG)
+    .classed('graph-node', true)
+    .attr('data-node-id', d => d.id);
   _upsertNodeVisuals(allNodes);
 
   simulation.on('tick', _scheduleTickRender);
@@ -250,7 +320,9 @@ function mergeGraph(newData, anims) {
   _applySemanticZoom(_currentZoomScale);
 
   // Update stats
+  _refreshTypeFilterOptions(graphData.nodes);
   updateStats();
+  _refreshActiveGraphFilters();
 
   if (anims) {
     setTimeout(() => {
@@ -588,7 +660,7 @@ async function _executeDropAction(action, state) {
     toast(`Merging ${source} into ${target} — agent is working`);
     _hideDropMenu(false);
     try {
-      const r = await fetch(API + '/api/graph/merge', {
+      const r = await fetch(graphApiUrl('/api/graph/merge'), {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ sourceNodeId: source, targetNodeId: target, mode: 'merge' }),
@@ -619,7 +691,7 @@ async function _executeDropAction(action, state) {
       const body = action === 'child'
         ? { sourceNodeId: source, targetNodeId: target, mode: 'child' }
         : { sourceNodeId: source, targetNodeId: target, mode: 'link' };
-      const r = await fetch(API + '/api/graph/merge', {
+      const r = await fetch(graphApiUrl('/api/graph/merge'), {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -657,9 +729,10 @@ async function _executeDropAction(action, state) {
 // signature so every existing caller works unchanged.
 const EVENT_LOG_MAX = 200;
 const EVENT_LOG_STORAGE_KEY = 'spore-event-log';
-const _eventLog = [];           // { ts, op, detail, source, html }
+const _eventLog = [];           // { ts, op, detail, source, graph, html }
 let _eventLogIdleTimer = null;
 let _eventLogSaveTimer = null;
+let _eventLogStatusTimer = null;
 
 function _eventLogPersist() {
   // Debounced — bursts of 50 events don't hammer localStorage.
@@ -667,7 +740,7 @@ function _eventLogPersist() {
   _eventLogSaveTimer = setTimeout(() => {
     _eventLogSaveTimer = null;
     try {
-      const plain = _eventLog.map(e => ({ ts: e.ts, op: e.op, detail: e.detail, source: e.source }));
+      const plain = _eventLog.map(e => ({ ts: e.ts, op: e.op, detail: e.detail, source: e.source, graph: e.graph }));
       localStorage.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(plain));
     } catch {}
   }, 400);
@@ -686,6 +759,7 @@ function _eventLogRestore() {
         op: String(e.op || 'event'),
         detail: String(e.detail || ''),
         source: String(e.source || ''),
+        graph: String(e.graph || ''),
         html: null,
       });
     }
@@ -693,17 +767,33 @@ function _eventLogRestore() {
   } catch {}
 }
 
+function _eventLogGraphLabel(evt) {
+  let graph = '';
+  if (Array.isArray(evt?.graphs) && evt.graphs.length) {
+    graph = evt.graphs.filter(Boolean).map(String).join(', ');
+  } else if (evt?.graph || evt?.graphSlug || evt?.slug) {
+    graph = String(evt.graph || evt.graphSlug || evt.slug);
+  }
+  if (!graph) return '';
+  const name = evt?.graphName ? String(evt.graphName) : '';
+  if (name && name !== graph && !graph.includes(',')) return `${name} [${graph}]`;
+  return graph;
+}
+
 function _eventLogFormat(evt) {
   const op = String(evt?.op || 'event');
   const source = String(evt?.source || '');
+  const graph = _eventLogGraphLabel(evt);
   let detail = '';
   if (evt?.node?.id) detail = evt.node.id;
   else if (evt?.nodeId) detail = evt.nodeId;
+  else if (Array.isArray(evt?.nodeIds) && evt.nodeIds.length) detail = `${evt.nodeIds.length} nodes`;
   else if (evt?.edge) detail = `${evt.edge.source} → ${evt.edge.target}`;
   else if (evt?.tool) detail = evt.tool;
   else if (evt?.attributeId) detail = `attr#${evt.attributeId}`;
+  else if (evt?.aspectId) detail = `aspect#${evt.aspectId}`;
   else if (evt?.detail) detail = String(evt.detail).slice(0, 120); // generic carrier for read-path events (recall, scan, etc.)
-  return { op, detail, source };
+  return { op, detail, source, graph };
 }
 
 // Live stack state — shows up to STACK_MAX rows when events are coming in
@@ -716,6 +806,7 @@ const _eventLogStack = []; // newest last
 function _eventLogRowHtml(entry, asIdle = false) {
   if (asIdle) return `<div class="event-log-row idle">idle</div>`;
   const bits = [`<span class="ev-op">${esc(entry.op)}</span>`];
+  if (entry.graph) bits.push(`<span class="ev-graph">graph:${esc(entry.graph)}</span>`);
   if (entry.detail) bits.push(`<span class="ev-detail">${esc(entry.detail)}</span>`);
   if (entry.source) bits.push(`<span class="ev-src">${esc(entry.source)}</span>`);
   return `<div class="event-log-row">${bits.join(' ')}</div>`;
@@ -734,6 +825,39 @@ function _eventLogRenderStack() {
   // stack grows/shrinks smoothly when events fire and when it collapses.
   stack.style.setProperty('--row-count', String(_eventLogStack.length));
 }
+
+function setEventLogStatus(status) {
+  const widget = document.getElementById('event-log');
+  if (!widget) return;
+  let row = document.getElementById('event-log-status');
+  if (!row) {
+    row = document.createElement('div');
+    row.id = 'event-log-status';
+    const stack = document.getElementById('event-log-stack');
+    widget.insertBefore(row, stack || widget.firstChild);
+  }
+
+  const text = typeof status === 'string' ? status : (status?.detail || '');
+  if (!text) {
+    widget.classList.remove('has-status');
+    row.innerHTML = '';
+    if (_eventLogStatusTimer) { clearTimeout(_eventLogStatusTimer); _eventLogStatusTimer = null; }
+    if (!_eventLogIdleTimer) widget.classList.remove('has-activity');
+    return;
+  }
+
+  const op = typeof status === 'object' && status?.op ? String(status.op) : 'chat';
+  const source = typeof status === 'object' && status?.source ? String(status.source) : '';
+  const graph = typeof status === 'object' ? _eventLogGraphLabel(status) : '';
+  row.innerHTML = _eventLogRowHtml({ op, detail: String(text).slice(0, 140), source, graph });
+  widget.classList.add('has-status', 'has-activity');
+  if (_eventLogStatusTimer) clearTimeout(_eventLogStatusTimer);
+  _eventLogStatusTimer = setTimeout(() => {
+    const w = document.getElementById('event-log');
+    if (w && !w.classList.contains('has-status')) w.classList.remove('has-activity');
+  }, EVENT_LOG_COLLAPSE_MS);
+}
+window.setEventLogStatus = setEventLogStatus;
 
 function _eventLogBumpStack(entry) {
   _eventLogStack.push(entry);
@@ -758,7 +882,7 @@ function _eventLogRenderTicker(entry) {
   // the stack to the single entry (used on initial restore from storage).
   if (!entry) { _eventLogStack.length = 0; _eventLogRenderStack(); return; }
   _eventLogStack.length = 0;
-  _eventLogStack.push({ op: entry.op, detail: entry.detail, source: entry.source });
+  _eventLogStack.push({ op: entry.op, detail: entry.detail, source: entry.source, graph: entry.graph });
   _eventLogRenderStack();
 }
 
@@ -778,6 +902,7 @@ function _eventLogRenderPanel() {
       e.html = `<div class="event-item" title="${esc(JSON.stringify(e))}">
         <span class="ev-time">${hhmmss}</span>
         <span class="ev-op">${esc(e.op)}</span>
+        ${e.graph ? `<span class="ev-graph">graph:${esc(e.graph)}</span>` : ''}
         ${esc(e.detail)}
         ${e.source ? `<span class="ev-src">${esc(e.source)}</span>` : ''}
       </div>`;
@@ -794,11 +919,12 @@ function addEventToFeed(evt) {
     op: formatted.op,
     detail: formatted.detail,
     source: formatted.source,
+    graph: formatted.graph,
     html: null,
   };
   _eventLog.push(entry);
   while (_eventLog.length > EVENT_LOG_MAX) _eventLog.shift();
-  _eventLogBumpStack({ op: formatted.op, detail: formatted.detail, source: formatted.source });
+  _eventLogBumpStack({ op: formatted.op, detail: formatted.detail, source: formatted.source, graph: formatted.graph });
   const widget = document.getElementById('event-log');
   if (widget?.classList.contains('open')) _eventLogRenderPanel();
   _eventLogPersist();
@@ -921,14 +1047,18 @@ function _updateNodeLabelVisibility(scale = _currentZoomScale) {
     labelEl: el.querySelector('text.node-label'),
     subEl:   el.querySelector('text.node-sub-label'),
   })).filter((entry) => entry.data && entry.labelEl);
+  const passesFilters = (typeof window._isNodeVisible === 'function')
+    ? window._isNodeVisible
+    : () => true;
+  const labelCandidates = nodes.filter(entry => passesFilters(entry.data));
 
   // Only show as many labels as the current zoom can support without
   // visual collision pile-up. Importance-ranked: most important nodes first,
   // hovered/selected always shown.
-  const budget = _autoLabelBudget(scale, nodes.length);
+  const budget = _autoLabelBudget(scale, labelCandidates.length);
   const opacity = _autoLabelOpacity(scale);
 
-  const ranked = nodes.slice().sort((a, b) => {
+  const ranked = labelCandidates.slice().sort((a, b) => {
     const ia = a.data.importance || 0;
     const ib = b.data.importance || 0;
     if (ib !== ia) return ib - ia;
@@ -948,6 +1078,11 @@ function _updateNodeLabelVisibility(scale = _currentZoomScale) {
   }
 
   for (const entry of nodes) {
+    if (!passesFilters(entry.data)) {
+      _setLabelHidden(entry.labelEl);
+      if (entry.subEl) entry.subEl.style.opacity = '0';
+      continue;
+    }
     if (visible.has(entry.data.id)) {
       const placement = _preferredLabelPlacement(entry.data, centerX, centerY);
       _setLabelPlacement(entry.labelEl, placement);
@@ -1156,7 +1291,12 @@ function initGraph(data) {
     const nodeEl = targetEl?.closest?.('g.graph-node');
     const node = nodeEl?.__data__ || null;
     if (node) {
-      if (!selectedNodeIds.has(node.id) || selectedNodeIds.size !== 1) {
+      // Right-clicking a node that's already part of a multi-selection
+      // KEEPS the selection — the menu's "delete/research selected nodes"
+      // then operates on all of them. Only collapse to a single-node
+      // selection when right-clicking a node OUTSIDE the current
+      // selection (treat that as "switch focus to this one").
+      if (!selectedNodeIds.has(node.id)) {
         _setGraphSelection([node.id]);
       }
     } else if (!selectedNodeIds.size) {
@@ -1222,16 +1362,15 @@ function initGraph(data) {
     clearGraphSelection();
   });
 
-  // Populate filter
-  const types = [...new Set(data.nodes.map(n => n.type))].sort();
-  const filterEl = document.getElementById('filter-type');
-  filterEl.innerHTML = '<option value="">all types</option>';
-  types.forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t; filterEl.appendChild(o); });
+  _refreshTypeFilterOptions(data.nodes);
 
   updateStats();
   _restoreGraphSelection();
   _applySemanticZoom(_currentZoomScale);
   _scheduleTickRender();
+  // Recompute timeline bounds and re-apply the unified filter state
+  // after every full graph render.
+  _refreshActiveGraphFilters();
 }
 
 // ── Node Selection / Editor Panel ──
@@ -1642,8 +1781,7 @@ async function doNewAspect(nodeId) {
 async function doAddAttr(nodeId, aspectName, inputEl, weight) {
   const content = inputEl.value.trim();
   if (!content) return;
-  const res = await fetch(API + '/api/graph');
-  const fresh = await res.json();
+  const fresh = await fetchGraph();
   const node = fresh.nodes.find(n => n.id === nodeId);
   const aspect = node?.aspects?.find(a => a.name === aspectName);
   const existingAttrs = aspect?.attributes || [];
@@ -1749,7 +1887,258 @@ document.getElementById('panel-body')?.addEventListener('keydown', (e) => {
 
 // ── Top-level Controls ──
 // panel-close handled by rp-close
-document.getElementById('btn-center').onclick = () => {
-  svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
-};
 document.getElementById('btn-new-node').onclick = showNewNodeModal;
+
+// Unified visibility predicate. Each filter (type dropdown, timeline
+// slider) writes its current state into _graphFilterState and calls
+// _applyGraphFilters(). Marquee selection consults _isNodeVisible so
+// dimmed nodes can't be picked up. Without this, multi-select silently
+// includes the very nodes the user has filtered away.
+window._graphFilterState = {
+  typeFilter: '',     // '' = no type filter
+  timeMin: null,      // ms or null
+  timeMax: null,      // ms or null
+  searchQuery: '',    // lowercased substring; '' = no search filter
+};
+window._isNodeVisible = function (node) {
+  if (!node) return true;
+  const s = window._graphFilterState;
+  if (s.typeFilter && node.type !== s.typeFilter) return false;
+  if (s.timeMin != null || s.timeMax != null) {
+    const t = _graphNodeCreatedMs(node);
+    if (t == null) return false;
+    if (s.timeMin != null && t < s.timeMin) return false;
+    if (s.timeMax != null && t > s.timeMax) return false;
+  }
+  if (s.searchQuery) {
+    const q = s.searchQuery;
+    const hit = (node.label || '').toLowerCase().includes(q)
+      || String(node.id || '').toLowerCase().includes(q)
+      || String(node.type || '').toLowerCase().includes(q)
+      || (node.description || '').toLowerCase().includes(q);
+    if (!hit) return false;
+  }
+  return true;
+};
+window._applyGraphFilters = function () {
+  if (typeof gNodes === 'undefined' || !gNodes) return;
+  if (typeof graphData === 'undefined' || !graphData?.nodes) return;
+  // We dim filtered-out nodes by setting inline `style.opacity`, with
+  // !important so it beats every existing rule (class rules like
+  // `.node-temp { opacity: 0.7 }`, `.node-faded { opacity: 0.22 }`,
+  // and any future ones we don't know about). For visible nodes we
+  // CLEAR the inline so those class rules can still apply (temp
+  // nodes should keep their 0.7 transient look while visible).
+  gNodes.selectAll('g').each(function (d) {
+    if (window._isNodeVisible(d)) {
+      this.style.removeProperty('opacity');
+      this.style.removeProperty('pointer-events');
+    } else {
+      this.style.setProperty('opacity', '0.08', 'important');
+      this.style.setProperty('pointer-events', 'none', 'important');
+    }
+  });
+  const nodeById = new Map(graphData.nodes.map(n => [n.id, n]));
+  gLinks.selectAll('line').each(function (d) {
+    const sId = d.source?.id || d.source;
+    const tId = d.target?.id || d.target;
+    const sn = nodeById.get(sId);
+    const tn = nodeById.get(tId);
+    const visible = !sn || !tn || (window._isNodeVisible(sn) && window._isNodeVisible(tn));
+    if (visible) {
+      this.style.removeProperty('opacity');
+      this.style.removeProperty('pointer-events');
+    } else {
+      this.style.setProperty('opacity', '0.04', 'important');
+      this.style.setProperty('pointer-events', 'none', 'important');
+    }
+  });
+  if (typeof _scheduleLabelLayout === 'function') _scheduleLabelLayout();
+};
+
+// ── Timeline filter ────────────────────────────────────────────────
+// Dual-range slider over [oldestNode.created, newestNode.created]. The
+// slider position is mapped onto unix-epoch ms; nodes whose `created`
+// falls outside [minMs, maxMs] are dimmed (same opacity treatment as
+// the type filter). Edges fade if either endpoint is dimmed.
+//
+// Why a dual-range and not a single threshold: dragging only the left
+// thumb to "isolate recently-added nodes" is the primary use, BUT the
+// right thumb lets you clip a window in the past too (e.g. "what got
+// added between yesterday and the day before"). The right thumb is
+// optional — leaving it at max disables that clip.
+(() => {
+  const wrap = document.getElementById('timeline-filter');
+  if (!wrap) return;
+  const minInp = document.getElementById('tlf-min');
+  const maxInp = document.getElementById('tlf-max');
+  const fill = document.getElementById('tlf-fill');
+  const readout = document.getElementById('tlf-readout');
+  const RES = 1000;  // slider granularity (matches min/max attrs)
+  const baseTitle = wrap.getAttribute('title') || '';
+
+  let _tlfMs = { oldest: null, newest: null };
+  let _tlfDegenerate = false;
+
+  function _refreshBounds() {
+    if (typeof graphData === 'undefined' || !graphData?.nodes) return;
+    let lo = Infinity, hi = -Infinity;
+    let datedCount = 0;
+    for (const n of graphData.nodes) {
+      const t = _graphNodeCreatedMs(n);
+      if (t == null) continue;
+      datedCount += 1;
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || datedCount === 0) {
+      _tlfMs = { oldest: null, newest: null };
+      _tlfDegenerate = false;
+      wrap.dataset.degenerate = 'false';
+      minInp.disabled = false;
+      maxInp.disabled = false;
+      wrap.title = baseTitle;
+      wrap.style.display = 'none';
+      return;
+    }
+    wrap.style.display = '';
+    _tlfMs = { oldest: lo, newest: hi };
+    _tlfDegenerate = hi === lo;
+    wrap.dataset.degenerate = _tlfDegenerate ? 'true' : 'false';
+    minInp.disabled = _tlfDegenerate;
+    maxInp.disabled = _tlfDegenerate;
+    wrap.title = _tlfDegenerate
+      ? 'Timeline filter is visible but disabled because every node in this graph has the same creation timestamp. It will activate after nodes are added at different times.'
+      : baseTitle;
+  }
+
+  function _clampMs(ms) {
+    const { oldest, newest } = _tlfMs;
+    return Math.max(oldest, Math.min(newest, ms));
+  }
+
+  function _slotToMs(v) {
+    const { oldest, newest } = _tlfMs;
+    if (oldest == null) return null;
+    if (newest === oldest) return oldest;
+    return oldest + (newest - oldest) * (Number(v) / RES);
+  }
+
+  function _msToSlot(ms) {
+    const { oldest, newest } = _tlfMs;
+    if (oldest == null || newest == null || newest === oldest) return 0;
+    return Math.max(0, Math.min(RES, Math.round(((ms - oldest) / (newest - oldest)) * RES)));
+  }
+
+  function _fmtRange(minMs, maxMs) {
+    const { oldest, newest } = _tlfMs;
+    if (oldest == null) return '';
+    if (_tlfDegenerate) {
+      const dt = new Date(oldest);
+      const day = dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      const time = dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return `single: ${day} ${time}`;
+    }
+    const fullDays = (newest - oldest) / 86400000;
+    const fmt = (ms) => {
+      if (fullDays < 2) {
+        return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      return new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    };
+    return `${fmt(minMs)} → ${fmt(maxMs)}`;
+  }
+
+  function _applyFilter() {
+    if (typeof graphData === 'undefined' || !graphData) return;
+    if (_tlfMs.oldest == null || _tlfDegenerate) {
+      window._graphFilterState.timeMin = null;
+      window._graphFilterState.timeMax = null;
+      readout.textContent = _tlfDegenerate ? _fmtRange(_tlfMs.oldest, _tlfMs.newest) : '';
+      fill.style.left = '0%';
+      fill.style.width = '100%';
+      wrap.dataset.active = 'false';
+    } else {
+      const minMs = _slotToMs(minInp.value);
+      const maxMs = _slotToMs(maxInp.value);
+      // If the slider is at its endpoints (full range), null out the
+      // filter state so _isNodeVisible doesn't even check timestamps.
+      const atFullRange = Number(minInp.value) === 0 && Number(maxInp.value) === RES;
+      window._graphFilterState.timeMin = atFullRange ? null : minMs;
+      window._graphFilterState.timeMax = atFullRange ? null : maxMs;
+      readout.textContent = _fmtRange(minMs, maxMs);
+      const a = (Number(minInp.value) / RES) * 100;
+      const b = (Number(maxInp.value) / RES) * 100;
+      fill.style.left = a + '%';
+      fill.style.width = Math.max(0, b - a) + '%';
+      wrap.dataset.active = atFullRange ? 'false' : 'true';
+    }
+    if (typeof window._applyGraphFilters === 'function') window._applyGraphFilters();
+  }
+
+  // Keep the min thumb < max thumb; nudge the other one if they cross.
+  function _onMinInput() {
+    if (_tlfDegenerate) return;
+    if (Number(minInp.value) > Number(maxInp.value) - 5) {
+      minInp.value = Math.max(0, Number(maxInp.value) - 5);
+    }
+    _applyFilter();
+  }
+  function _onMaxInput() {
+    if (_tlfDegenerate) return;
+    if (Number(maxInp.value) < Number(minInp.value) + 5) {
+      maxInp.value = Math.min(RES, Number(minInp.value) + 5);
+    }
+    _applyFilter();
+  }
+
+  minInp.addEventListener('input', _onMinInput);
+  maxInp.addEventListener('input', _onMaxInput);
+  wrap.addEventListener('dblclick', () => {
+    minInp.value = 0;
+    maxInp.value = RES;
+    _applyFilter();
+  });
+
+  // Refresh when the graph data changes. Preserve active windows as
+  // absolute time ranges; if a handle was pinned to either endpoint,
+  // keep it pinned so new newest nodes are not accidentally clipped.
+  window._tlfRefresh = () => {
+    const state = window._graphFilterState || {};
+    const prior = {
+      active: state.timeMin != null || state.timeMax != null,
+      min: state.timeMin,
+      max: state.timeMax,
+      leftPinned: Number(minInp.value) === 0,
+      rightPinned: Number(maxInp.value) === RES,
+    };
+    _refreshBounds();
+    if (_tlfMs.oldest != null && !_tlfDegenerate) {
+      if (prior.active) {
+        let nextMin = prior.leftPinned || prior.min == null ? _tlfMs.oldest : _clampMs(prior.min);
+        let nextMax = prior.rightPinned || prior.max == null ? _tlfMs.newest : _clampMs(prior.max);
+        if (nextMax <= nextMin) {
+          const minGap = (_tlfMs.newest - _tlfMs.oldest) * (5 / RES);
+          if (prior.rightPinned) nextMin = Math.max(_tlfMs.oldest, nextMax - minGap);
+          else nextMax = Math.min(_tlfMs.newest, nextMin + minGap);
+        }
+        minInp.value = _msToSlot(nextMin);
+        maxInp.value = _msToSlot(nextMax);
+        if (Number(minInp.value) > Number(maxInp.value) - 5) {
+          minInp.value = Math.max(0, Number(maxInp.value) - 5);
+        }
+      } else {
+        minInp.value = 0;
+        maxInp.value = RES;
+      }
+    } else {
+      minInp.value = 0;
+      maxInp.value = RES;
+    }
+    _applyFilter();
+  };
+
+  // Initial bounds (in case render fired before this script loaded).
+  _refreshBounds();
+  _applyFilter();
+})();

@@ -89,6 +89,7 @@ function captureFailureFix(api, opts, toolLog) {
               channelId: sessKey,
               userId: opts.userId || 'anon',
               projectContext: opts.projectContext || null,
+              memoryEnvelope: opts.memoryEnvelope || null,
             };
             const result = noteDiscovery(api, { text, kind: 'failure_fix' }, ctx);
             if (result?.ok) {

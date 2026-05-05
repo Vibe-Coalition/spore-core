@@ -1,0 +1,98 @@
+name: Build and publish official Docker image
+
+# Triggers:
+#   - push to main → publish `:latest` + `:sha-<short>`
+#   - tag matching v*.*.* → publish `:vMAJOR.MINOR.PATCH`, `:vMAJOR.MINOR`,
+#     `:vMAJOR`, plus `:latest`
+#   - manual dispatch (workflow_dispatch) for ad-hoc rebuilds
+#
+# Image lands at ghcr.io/<owner>/<repo>. The workflow uses the
+# repository's GITHUB_TOKEN to push — no extra secrets required as
+# long as the repository's "Workflow permissions" → "Read and write
+# permissions" is enabled (Settings → Actions → General).
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for arm64 emulation on amd64 runners)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag policy:
+          #   v1.2.3 tag → 1.2.3, 1.2, 1, latest
+          #   main branch → main, sha-<short>
+          #   PR / branch → branch name + sha
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=Spore Core
+            org.opencontainers.image.description=Spore Core — self-hosted runtime for autonomous AI agents
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://www.get-spore.com
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./src/Dockerfile
+          # Multi-arch — Spore is run on x86 servers (Unraid, NUCs, VPS)
+          # and arm64 (Raspberry Pi, M-series Macs, Graviton). amd64 is
+          # native; arm64 cross-builds via QEMU on the runner.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Print pull instructions
+        run: |
+          echo "Pushed images:"
+          echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n' | sed 's/^/  /'
+          echo ""
+          echo "Pull with:"
+          echo "  docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"

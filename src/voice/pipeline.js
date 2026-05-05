@@ -1,30 +1,62 @@
 /**
  * voice/pipeline.js — Voice pipeline orchestrator
  *
- * Coordinates: audio in → STT → agent processMessage → TTS → audio out
+ * Coordinates: audio in → STT → queued agent turn → TTS → audio out
  * Used by both Discord voice channels and Telegram voice notes.
  */
 
 const { createSTT } = require('./stt');
 const { createTTS } = require('./tts');
+const settings = require('../settings');
 
 class VoicePipeline {
   constructor(config, logger, pluginManager = null) {
     this.config = config;
     this.log = logger;
     this.pluginManager = pluginManager;
-    this.stt = createSTT(config, pluginManager);
-    this.tts = createTTS(config, pluginManager);
+    this._buildSttTts();
+
+    // Reactive: when any voice setting or any plugin's config changes
+    // (e.g. STT/TTS plugin api keys), rebuild stt/tts. Replaces the
+    // legacy `this._voicePipeline = null` cache-bust hack in web.js
+    // and keeps Discord / Telegram pipelines fresh without restart.
+    this._unsubVoice = settings.subscribe('voice.*', () => this._rebuild('voice setting changed'));
+    this._unsubPlugins = settings.subscribe('plugins.**', () => this._rebuild('plugin config changed'));
+  }
+
+  _buildSttTts() {
+    this.stt = createSTT(this.config, this.pluginManager);
+    this.tts = createTTS(this.config, this.pluginManager);
     this.enabled = !!(this.stt && this.tts);
 
     if (this.enabled) {
       const ttsName = this.tts?.constructor?.name?.replace('TTS', '') || 'unknown';
-      this.log.info(`[voice] Pipeline ready — STT: ${config.voice?.sttProvider || 'auto'}, TTS: ${ttsName}`);
-    } else {
-      if (!this.stt) {
-        this.log.info(`[voice] Pipeline disabled — no STT provider available (install whisper or deepgram plugin, or set DEEPGRAM_API_KEY / OPENAI_API_KEY)`);
-      }
+      this.log.info(`[voice] Pipeline ready — STT: ${this.config.voice?.sttProvider || 'auto'}, TTS: ${ttsName}`);
+    } else if (!this.stt) {
+      this.log.info(`[voice] Pipeline disabled — no STT provider available (install an STT plugin in Settings → Plugins).`);
     }
+  }
+
+  _rebuild(reason) {
+    try {
+      this._buildSttTts();
+      this.log.debug(`[voice] pipeline rebuilt (${reason})`);
+    } catch (e) {
+      this.log.warn(`[voice] pipeline rebuild failed: ${e?.message}`);
+    }
+  }
+
+  destroy() {
+    try { this._unsubVoice?.(); } catch { /* noop */ }
+    try { this._unsubPlugins?.(); } catch { /* noop */ }
+    this._unsubVoice = null;
+    this._unsubPlugins = null;
+  }
+
+  _submitAgentTurn(agentLoop, opts, meta = {}) {
+    const queue = agentLoop?._jobQueue;
+    if (queue?.submitAgentTurn) return queue.submitAgentTurn(opts, meta);
+    return agentLoop?.processMessage(opts);
   }
 
   /**
@@ -33,7 +65,7 @@ class VoicePipeline {
    * @param {Buffer} audioBuffer - Raw audio data (PCM, OGG, etc.)
    * @param {string} mimeType - Audio MIME type
    * @param {object} agentLoop - The AgentLoop instance
-   * @param {object} messageOpts - Options for agent.processMessage() (channelId, userId, etc.)
+   * @param {object} messageOpts - Options for an agent turn (channelId, userId, etc.)
    * @returns {Promise<{transcription: string, responseText: string, audioBuffer: Buffer|null, error: string|null}>}
    */
   async process(audioBuffer, mimeType, agentLoop, messageOpts) {
@@ -59,11 +91,17 @@ class VoicePipeline {
     // Step 2: Agent — process transcription exactly like a text message
     let responseText;
     try {
-      const result = await agentLoop.processMessage({
+      const result = await this._submitAgentTurn(agentLoop, {
         ...messageOpts,
         content: messageOpts.isDm ? transcription : `[${messageOpts.userName}]: ${transcription}`,
         messageContent: transcription,
         modality: 'voice',
+      }, {
+        lane: 'channel',
+        priority: 88,
+        route: 'voice.message',
+        sessionKey: messageOpts.channelId || messageOpts.channelName || messageOpts.userId || null,
+        allowInterjection: true,
       });
 
       if (result?.skipped) {
@@ -108,11 +146,17 @@ class VoicePipeline {
   async processFromText(transcription, agentLoop, messageOpts) {
     let responseText;
     try {
-      const result = await agentLoop.processMessage({
+      const result = await this._submitAgentTurn(agentLoop, {
         ...messageOpts,
         content: messageOpts.isDm ? transcription : `[${messageOpts.userName}]: ${transcription}`,
         messageContent: transcription,
         modality: 'voice',
+      }, {
+        lane: 'channel',
+        priority: 88,
+        route: 'voice.text',
+        sessionKey: messageOpts.channelId || messageOpts.channelName || messageOpts.userId || null,
+        allowInterjection: true,
       });
       if (result?.skipped) return { transcription, responseText: null, audioBuffer: null, error: 'Agent busy' };
       responseText = result?.text;

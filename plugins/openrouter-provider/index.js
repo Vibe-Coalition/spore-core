@@ -62,6 +62,7 @@ module.exports = function register(api) {
   }, {
     prefixes: ['openrouter'],
     label: 'OpenRouter',
+    modelsPlaceholder: 'anthropic/claude-sonnet-4-6',
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['openrouter-provider'] || {};

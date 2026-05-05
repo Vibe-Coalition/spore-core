@@ -246,7 +246,22 @@ function _parseJson(s, fallback = null) {
   try { return JSON.parse(s); } catch { return fallback; }
 }
 
-function exportGraph(db, { agentId = null } = {}) {
+function sanitizeGraphMeta(meta = {}) {
+  if (!meta || typeof meta !== 'object') return null;
+  const allowed = [
+    'slug', 'name', 'description', 'role', 'protected', 'managed', 'activationLocked',
+    'seedProfile', 'identityKey', 'platform', 'externalUserId', 'externalChannelId',
+    'source', 'createdBy', 'created', 'owner', 'collaborators', 'allowedUsers',
+    'allowedWebUsers', 'projectKey', 'projectRoot', 'projectRemote',
+  ];
+  const out = {};
+  for (const key of allowed) {
+    if (meta[key] !== undefined && meta[key] !== null) out[key] = meta[key];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function exportGraph(db, { agentId = null, graphMeta = null } = {}) {
   if (!db) throw new Error('no db');
 
   const allNodes = db.prepare('SELECT * FROM nodes').all();
@@ -374,6 +389,7 @@ function exportGraph(db, { agentId = null } = {}) {
     format: 'spore-graph-export',
     exportedAt: new Date().toISOString(),
     sourceAgent: agentId ? { id: agentId } : null,
+    graph: sanitizeGraphMeta(graphMeta),
     stats,
     nodes,
     edges,
@@ -424,7 +440,7 @@ function importGraph(db, payload, { log = console } = {}) {
     INSERT INTO attributes (aspect_id, content, importance, source, created, updated_at, extracted_with, event_date, document_date, source_excerpt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const insEdge = db.prepare('INSERT INTO edges (source, target, type, weight, created, extracted_with) VALUES (?, ?, ?, ?, ?, ?)');
+  const insEdge = db.prepare('INSERT INTO edges (source, target, type, weight, created, extracted_with, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)');
   const insAlias = db.prepare('INSERT INTO aliases (node_id, alias) VALUES (?, ?)');
   const insNodeSource = db.prepare('INSERT INTO node_sources (node_id, source) VALUES (?, ?)');
   const insReflection = db.prepare('INSERT INTO reflections (node_id, content, model, source, created) VALUES (?, ?, ?, ?, ?)');
@@ -499,7 +515,7 @@ function importGraph(db, payload, { log = console } = {}) {
         continue;
       }
       try {
-        insEdge.run(source, target, e.type || 'related_to', e.weight ?? 1.0, e.created || new Date().toISOString(), e.extracted_with || 'import');
+        insEdge.run(source, target, e.type || 'related_to', e.weight ?? 1.0, e.created || new Date().toISOString(), e.extracted_with || 'import', e.confidence || null);
         report.edgesImported++;
       } catch (err) {
         report.edgesSkipped.push({ type: e.type, source, target, reason: err.message });
@@ -547,5 +563,6 @@ module.exports = {
   exportSettings,
   planProviderImport,
   planSettingsImport,
+  sanitizeGraphMeta,
   REDACTED,
 };
