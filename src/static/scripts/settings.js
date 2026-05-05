@@ -940,6 +940,275 @@ function _settingsPositiveIntOrNull(id) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+const SETTINGS_RUNTIME_QUEUE_LANES = ['interactive', 'channel', 'deferred', 'learner', 'maintenance', 'background'];
+const SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES = {
+  interactive: 2,
+  channel: 1,
+  deferred: 1,
+  learner: 1,
+  maintenance: 1,
+  background: 1,
+};
+
+function _settingsCheckboxIfPresent(id) {
+  const el = document.getElementById(id);
+  return el ? !!el.checked : undefined;
+}
+
+function _settingsPositiveNumberIfPresent(id, fallback, opts = {}) {
+  const el = document.getElementById(id);
+  if (!el) return undefined;
+  const raw = (el.value || '').trim();
+  const parsed = raw ? Number(raw) : Number(fallback);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return opts.integer ? Math.floor(parsed) : parsed;
+}
+
+function _settingsPatchIfPresent(patch, key, value) {
+  if (value !== undefined) patch[key] = value;
+}
+
+function _settingsRuntimeLaneLimitsPayload() {
+  if (!document.getElementById('settings-runtime-lane-interactive')) return undefined;
+  const out = {};
+  for (const lane of SETTINGS_RUNTIME_QUEUE_LANES) {
+    out[lane] = _settingsPositiveNumberIfPresent(`settings-runtime-lane-${lane}`, SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1, { integer: true }) || SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1;
+  }
+  return out;
+}
+
+function _settingsEnsureGraphRuntimeStyles() {
+  if (document.getElementById('settings-graph-runtime-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'settings-graph-runtime-styles';
+  style.textContent = `
+    #settings-graph-runtime-controls {
+      margin-top: 14px;
+      margin-bottom: 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .settings-runtime-card {
+      border: 1px solid color-mix(in srgb, var(--accent2) 22%, var(--border));
+      border-radius: 11px;
+      padding: 11px;
+      background: linear-gradient(135deg,
+        color-mix(in srgb, var(--accent2) 7%, var(--panel)),
+        color-mix(in srgb, var(--surface) 72%, transparent));
+    }
+    .settings-runtime-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .settings-runtime-card-title {
+      font-size: .76rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
+    .settings-runtime-card .settings-check {
+      margin: 0;
+      white-space: nowrap;
+      color: var(--text-dim);
+      font-size: .68rem;
+    }
+    .settings-runtime-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .settings-runtime-grid label {
+      margin-top: 0;
+      font-size: .62rem;
+    }
+    .settings-runtime-grid input {
+      padding: 6px 8px;
+      font-size: .76rem;
+    }
+    .settings-runtime-note {
+      margin-top: 8px;
+      color: var(--text-dim);
+      font-size: .66rem;
+      line-height: 1.45;
+    }
+    .settings-runtime-status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.3em;
+      color: var(--text-dim);
+      font-family: var(--font-body);
+      font-size: .64rem;
+      opacity: .82;
+    }
+    @media (max-width: 760px) {
+      .settings-runtime-card-head { align-items: flex-start; flex-direction: column; }
+      .settings-runtime-grid { grid-template-columns: 1fr; }
+      .settings-runtime-card .settings-check { white-space: normal; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function _settingsEnsureGraphRuntimeControls() {
+  if (document.getElementById('settings-graph-runtime-controls')) return;
+  const section = document.getElementById('settings-maintainer-run')?.closest('.settings-section');
+  if (!section) return;
+  _settingsEnsureGraphRuntimeStyles();
+  const wrap = document.createElement('div');
+  wrap.id = 'settings-graph-runtime-controls';
+  wrap.innerHTML = `
+    <div class="settings-runtime-card">
+      <div class="settings-runtime-card-head">
+        <div class="settings-runtime-card-title">Graph maintenance</div>
+        <label class="settings-check" for="settings-graph-maintenance-enabled">
+          <input id="settings-graph-maintenance-enabled" type="checkbox">
+          <span>enabled</span>
+        </label>
+      </div>
+      <div class="settings-runtime-grid">
+        <div>
+          <label for="settings-graph-maintenance-interval">Interval minutes</label>
+          <input id="settings-graph-maintenance-interval" type="number" min="1" step="1" placeholder="120">
+        </div>
+        <div>
+          <label for="settings-graph-maintenance-batch">Batch size</label>
+          <input id="settings-graph-maintenance-batch" type="number" min="1" step="1" placeholder="4">
+        </div>
+      </div>
+      <div class="settings-runtime-note">Runs per-graph upkeep through the central queue: gap filling, sparse-node connection, dedup, reasoning, clustering, and embeddings.</div>
+    </div>
+    <div class="settings-runtime-card">
+      <div class="settings-runtime-card-head">
+        <div class="settings-runtime-card-title">General KB research</div>
+        <label class="settings-check" for="settings-general-kb-research-enabled">
+          <input id="settings-general-kb-research-enabled" type="checkbox">
+          <span>enabled</span>
+        </label>
+      </div>
+      <div class="settings-runtime-grid">
+        <div>
+          <label for="settings-general-kb-research-interval">Interval hours</label>
+          <input id="settings-general-kb-research-interval" type="number" min="0.25" step="0.25" placeholder="24">
+        </div>
+        <div>
+          <label for="settings-general-kb-research-batch">Nodes per run</label>
+          <input id="settings-general-kb-research-batch" type="number" min="1" step="1" placeholder="1">
+        </div>
+      </div>
+      <div class="settings-runtime-note">Only targets the General Knowledge Base graph. It enriches under-researched nodes with usage guidance and supporting detail.</div>
+    </div>
+    <div class="settings-runtime-card">
+      <div class="settings-runtime-card-head">
+        <div>
+          <div class="settings-runtime-card-title">Runtime job queue</div>
+          <span id="settings-runtime-queue-status" class="settings-runtime-status">status not loaded</span>
+        </div>
+        <label class="settings-check" for="settings-runtime-queue-enabled">
+          <input id="settings-runtime-queue-enabled" type="checkbox">
+          <span>enabled</span>
+        </label>
+      </div>
+      <div class="settings-runtime-grid">
+        ${SETTINGS_RUNTIME_QUEUE_LANES.map(lane => `
+          <div>
+            <label for="settings-runtime-lane-${lane}">${lane}</label>
+            <input id="settings-runtime-lane-${lane}" type="number" min="1" step="1" placeholder="${SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1}">
+          </div>
+        `).join('')}
+      </div>
+      <div class="settings-runtime-note">Coordinates web, CLI, channel, learner, wakeup, and maintenance work. Enable/disable, lane limits, and timer cadence apply after server restart.</div>
+    </div>
+  `;
+  const janitorRow = document.getElementById('settings-janitor-run')?.closest('div');
+  if (janitorRow && janitorRow.parentElement === section) section.insertBefore(wrap, janitorRow);
+  else section.appendChild(wrap);
+}
+
+function _settingsCanonicalValue(data, key, fallback) {
+  if (data?.values && Object.prototype.hasOwnProperty.call(data.values, key)) return data.values[key];
+  return fallback;
+}
+
+function _settingsNumberValue(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function _settingsJsonObjectValue(value, fallback = {}) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+  return fallback;
+}
+
+function _settingsSetRuntimeInput(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value ?? '';
+}
+
+function _settingsSetRuntimeChecked(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.checked = !!value;
+}
+
+function _populateGraphRuntimeSettings(data) {
+  _settingsEnsureGraphRuntimeControls();
+  _settingsSetRuntimeChecked('settings-graph-maintenance-enabled',
+    _settingsCanonicalValue(data, 'graphMaintenanceEnabled', true));
+  _settingsSetRuntimeInput('settings-graph-maintenance-interval',
+    _settingsNumberValue(_settingsCanonicalValue(data, 'graphMaintenanceIntervalMinutes', 120), 120));
+  _settingsSetRuntimeInput('settings-graph-maintenance-batch',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'graphMaintenanceBatchSize', 4), 4)));
+
+  _settingsSetRuntimeChecked('settings-general-kb-research-enabled',
+    _settingsCanonicalValue(data, 'generalKbResearchEnabled', true));
+  _settingsSetRuntimeInput('settings-general-kb-research-interval',
+    _settingsNumberValue(_settingsCanonicalValue(data, 'generalKbResearchIntervalHours', 24), 24));
+  _settingsSetRuntimeInput('settings-general-kb-research-batch',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'generalKbResearchBatchSize', 1), 1)));
+
+  _settingsSetRuntimeChecked('settings-runtime-queue-enabled',
+    _settingsCanonicalValue(data, 'runtimeQueueEnabled', true));
+  const lanes = {
+    ...SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES,
+    ..._settingsJsonObjectValue(_settingsCanonicalValue(data, 'runtimeQueueLaneLimits', SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES), {}),
+  };
+  for (const lane of SETTINGS_RUNTIME_QUEUE_LANES) {
+    _settingsSetRuntimeInput(`settings-runtime-lane-${lane}`, Math.floor(_settingsNumberValue(lanes[lane], SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1)));
+  }
+  _runtimeQueueRefreshStatus();
+}
+
+async function _runtimeQueueRefreshStatus() {
+  const el = document.getElementById('settings-runtime-queue-status');
+  if (!el) return;
+  el.textContent = 'loading status...';
+  try {
+    const r = await fetch(API + '/api/queue/status', { headers: authHeaders() });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+    const persistent = data.persistent || {};
+    const queued = Number(data.memoryPending || 0) + Number(persistent.queued || 0);
+    const running = Number(data.running || 0);
+    const failed = Number(persistent.failed || 0);
+    const stopped = data.stopped ? 'stopped' : 'active';
+    const lanes = Object.entries(data.lanes || {})
+      .map(([name, info]) => `${name} ${info.running || 0}/${info.limit || 0}`)
+      .join(' · ');
+    el.textContent = `${stopped} · ${running} running · ${queued} queued${failed ? ` · ${failed} failed` : ''}${lanes ? ` · ${lanes}` : ''}`;
+  } catch (e) {
+    el.textContent = `status unavailable: ${e?.message || e}`;
+  }
+}
+
 function _settingsBlankToNull(value) {
   const trimmed = String(value || '').trim();
   return trimmed ? trimmed : null;
@@ -974,6 +1243,23 @@ function _buildSettingsPatchPayload(modelLimits, models) {
       : [],
     'webSearch.searxngUrl': _settingsBlankToNull(_settingsInputValue('settings-websearch-searxng-url')),
   };
+
+  _settingsPatchIfPresent(patch, 'graphMaintenanceEnabled',
+    _settingsCheckboxIfPresent('settings-graph-maintenance-enabled'));
+  _settingsPatchIfPresent(patch, 'graphMaintenanceIntervalMinutes',
+    _settingsPositiveNumberIfPresent('settings-graph-maintenance-interval', 120, { integer: true }));
+  _settingsPatchIfPresent(patch, 'graphMaintenanceBatchSize',
+    _settingsPositiveNumberIfPresent('settings-graph-maintenance-batch', 4, { integer: true }));
+  _settingsPatchIfPresent(patch, 'generalKbResearchEnabled',
+    _settingsCheckboxIfPresent('settings-general-kb-research-enabled'));
+  _settingsPatchIfPresent(patch, 'generalKbResearchIntervalHours',
+    _settingsPositiveNumberIfPresent('settings-general-kb-research-interval', 24));
+  _settingsPatchIfPresent(patch, 'generalKbResearchBatchSize',
+    _settingsPositiveNumberIfPresent('settings-general-kb-research-batch', 1, { integer: true }));
+  _settingsPatchIfPresent(patch, 'runtimeQueueEnabled',
+    _settingsCheckboxIfPresent('settings-runtime-queue-enabled'));
+  _settingsPatchIfPresent(patch, 'runtimeQueueLaneLimits',
+    _settingsRuntimeLaneLimitsPayload());
 
   for (const [tier, value] of Object.entries(models || {})) {
     patch[`models.${tier}`] = _settingsComposeModelRef(value.provider, value.model);
@@ -1189,6 +1475,7 @@ const SETTINGS_TABS = [
 ];
 const _SETTINGS_TAB_REFRESHERS = {
   'graph-memory': () => {
+    try { if (typeof _runtimeQueueRefreshStatus === 'function') _runtimeQueueRefreshStatus(); } catch {}
     try { if (typeof _maintRefreshStatus === 'function') _maintRefreshStatus(); } catch {}
     try { if (typeof _janRefreshStatus === 'function') _janRefreshStatus(); } catch {}
     try { if (typeof _janLoadBin === 'function') _janLoadBin(); } catch {}

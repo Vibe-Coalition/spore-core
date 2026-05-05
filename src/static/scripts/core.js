@@ -1045,6 +1045,7 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-runtime-web-port').textContent = _settingsValue(data.runtime?.webPort);
   document.getElementById('settings-runtime-workspace').textContent = _settingsValue(data.runtime?.workspacePath);
   document.getElementById('settings-runtime-data-dir').textContent = _settingsValue(data.runtime?.dataDir);
+  if (typeof _populateGraphRuntimeSettings === 'function') _populateGraphRuntimeSettings(data);
 
   // System-prompt budgets — headline knobs (runtime + total) plus the
   // collapsed all-sections grid. Inputs left blank when the current
