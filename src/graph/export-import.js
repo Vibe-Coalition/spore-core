@@ -246,7 +246,22 @@ function _parseJson(s, fallback = null) {
   try { return JSON.parse(s); } catch { return fallback; }
 }
 
-function exportGraph(db, { agentId = null } = {}) {
+function sanitizeGraphMeta(meta = {}) {
+  if (!meta || typeof meta !== 'object') return null;
+  const allowed = [
+    'slug', 'name', 'description', 'role', 'protected', 'managed', 'activationLocked',
+    'seedProfile', 'identityKey', 'platform', 'externalUserId', 'externalChannelId',
+    'source', 'createdBy', 'created', 'owner', 'collaborators', 'allowedUsers',
+    'allowedWebUsers', 'projectKey', 'projectRoot', 'projectRemote',
+  ];
+  const out = {};
+  for (const key of allowed) {
+    if (meta[key] !== undefined && meta[key] !== null) out[key] = meta[key];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function exportGraph(db, { agentId = null, graphMeta = null } = {}) {
   if (!db) throw new Error('no db');
 
   const allNodes = db.prepare('SELECT * FROM nodes').all();
@@ -374,6 +389,7 @@ function exportGraph(db, { agentId = null } = {}) {
     format: 'spore-graph-export',
     exportedAt: new Date().toISOString(),
     sourceAgent: agentId ? { id: agentId } : null,
+    graph: sanitizeGraphMeta(graphMeta),
     stats,
     nodes,
     edges,
@@ -547,5 +563,6 @@ module.exports = {
   exportSettings,
   planProviderImport,
   planSettingsImport,
+  sanitizeGraphMeta,
   REDACTED,
 };

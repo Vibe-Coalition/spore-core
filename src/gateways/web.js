@@ -6603,7 +6603,7 @@ class WebGateway {
         const backup = this.tools?._backup;
         if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(backup.listBackups()));
+        res.end(JSON.stringify(backup.listBackups({ all: true })));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -6671,8 +6671,10 @@ class WebGateway {
         if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
         const body = await json();
         const filename = String(body.file || body.filename || '').trim();
+        const slug = String(body.slug || body.graph || body.graphSlug || '').trim() || null;
         if (!filename) { res.writeHead(400); res.end(JSON.stringify({ error: 'file required' })); return; }
-        const out = await backup.restoreBackup(filename);
+        const out = await backup.restoreBackup(filename, { slug });
+        if (out.ok) graphEvents.emit('change', { op: 'graph:backup-restore', slug: out.slug || slug || null, source: 'backup' });
         res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
@@ -6682,12 +6684,47 @@ class WebGateway {
     // ── Graph / settings / providers export + import ─────────────────
     if (urlPath.startsWith('/api/graph/export') && req.method === 'GET') {
       try {
-        const { exportGraph, exportProviders, exportSettings } = require('../graph/export-import');
+        const { exportGraph, exportProviders, exportSettings, sanitizeGraphMeta } = require('../graph/export-import');
+        const { DatabaseSync } = require('node:sqlite');
         const u = new URL(req.url, 'http://x');
         const wantGraph = u.searchParams.get('graph') !== '0';
         const wantProviders = u.searchParams.get('providers') === '1';
         const wantSettings = u.searchParams.get('settings') !== '0';
         const includeSecrets = u.searchParams.get('secrets') === '1';
+        const graphScope = String(u.searchParams.get('graph_scope') || u.searchParams.get('scope') || 'current').toLowerCase();
+        const selectedSlug = String(u.searchParams.get('graph_slug') || u.searchParams.get('slug') || '').trim();
+        const authContext = req._graphApiAuthContext || { type: 'creator', role: 'creator', creator: true };
+        const creatorExport = _graphAuthIsCreator(authContext);
+        if ((wantProviders || wantSettings || graphScope === 'all') && !creatorExport) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Creator role required for settings/provider/all-graph export.' }));
+          return;
+        }
+        const registry = this.tools?._graphRegistry || null;
+        const activeSlug = registry?.getActiveSlug?.() || null;
+        const currentSlug = req._graphApiSlug || activeSlug || null;
+        const exportOneGraph = (slug, scopedDb = null) => {
+          const entry = slug && registry?.get?.(slug) ? registry.get(slug) : (slug ? { slug, name: slug } : null);
+          if (entry && !_canGraphAuthViewGraph(entry, authContext, registry)) {
+            throw new Error(`Forbidden graph "${slug}"`);
+          }
+          const dbPath = slug && registry?.getDbPath?.(slug);
+          let graphDb = scopedDb;
+          let opened = null;
+          try {
+            if (!graphDb) {
+              if (slug && slug === currentSlug) graphDb = db;
+              else {
+                if (!dbPath || !fs.existsSync(dbPath)) throw new Error(`Graph DB missing for "${slug}"`);
+                opened = new DatabaseSync(dbPath, { readOnly: true });
+                graphDb = opened;
+              }
+            }
+            return exportGraph(graphDb, { agentId: this.config.agentId || null, graphMeta: entry });
+          } finally {
+            try { opened?.close(); } catch {}
+          }
+        };
 
         const bundle = {
           version: 2,
@@ -6695,11 +6732,25 @@ class WebGateway {
           exportedAt: new Date().toISOString(),
           sourceAgent: this.config.agentId ? { id: this.config.agentId, label: this.config.displayName || this.config.agentId } : null,
           includesSecrets: wantProviders && includeSecrets,
+          graphScope: wantGraph ? graphScope : 'none',
           sections: [],
         };
         if (wantGraph) {
-          bundle.graph = exportGraph(db, { agentId: this.config.agentId || null });
-          bundle.sections.push('graph');
+          if (graphScope === 'all') {
+            if (!registry?.list) throw new Error('multi-graph registry unavailable');
+            const graphs = registry.list();
+            bundle.graphRegistry = {
+              activeSlug,
+              graphs: graphs.map(g => sanitizeGraphMeta(g)),
+            };
+            bundle.graphs = graphs.map(g => exportOneGraph(g.slug));
+            bundle.sections.push('graphs');
+          } else {
+            const slug = graphScope === 'selected' ? selectedSlug : (selectedSlug || currentSlug);
+            if (graphScope === 'selected' && !slug) throw new Error('graph_slug required for selected graph export');
+            bundle.graph = slug ? exportOneGraph(slug, slug === currentSlug ? db : null) : exportGraph(db, { agentId: this.config.agentId || null });
+            bundle.sections.push('graph');
+          }
         }
         if (wantProviders) {
           bundle.providers = exportProviders(this.config, { includeSecrets });
@@ -6710,7 +6761,8 @@ class WebGateway {
           if (bundle.settings) bundle.sections.push('settings');
         }
 
-        const filename = `spore-export-${(this.config.agentId || 'agent').replace(/[^a-zA-Z0-9-]/g, '')}-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}.json`;
+        const scopeTag = wantGraph && graphScope === 'all' ? 'allgraphs' : (wantGraph && selectedSlug ? selectedSlug : 'bundle');
+        const filename = `spore-export-${(this.config.agentId || 'agent').replace(/[^a-zA-Z0-9-]/g, '')}-${scopeTag.replace(/[^a-zA-Z0-9-]/g, '')}-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}.json`;
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Content-Disposition': `attachment; filename="${filename}"`,
@@ -6723,23 +6775,11 @@ class WebGateway {
     if (urlPath === '/api/graph/import' && req.method === 'POST') {
       // Import is destructive (inserts nodes + edges into the live graph),
       // so gate to creator only — webapp users shouldn't be able to bulk
-      // upload arbitrary knowledge. Inline cookie check against _sessions.
-      try {
-        const cookies = (function parse(h) {
-          const out = {}; if (!h) return out;
-          for (const c of h.split(';')) { const i = c.indexOf('='); if (i > 0) out[c.slice(0, i).trim()] = c.slice(i + 1).trim(); }
-          return out;
-        })(req.headers.cookie || '');
-        const sid = cookies['spore_session'];
-        const sess = sid && this._webSessions.get(sid);
-        const isCreator = sess && (sess.type === 'creator' || sess.type === 'admin');
-        if (!isCreator) {
-          res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Import requires creator role.' }));
-          return;
-        }
-      } catch (e) {
-        res.writeHead(500); res.end(JSON.stringify({ error: 'auth check failed: ' + e.message })); return;
+      // upload arbitrary knowledge.
+      if (!_graphAuthIsCreator(req._graphApiAuthContext || null)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Import requires creator role.' }));
+        return;
       }
       try {
         // Increase the body cap — exports can be multi-MB for large graphs
@@ -6757,44 +6797,100 @@ class WebGateway {
           res.end(JSON.stringify({ error: 'invalid JSON: ' + e.message }));
           return;
         }
-        // Auto pre-import backup so the operator can undo
-        try {
-          const backup = this.tools?._backup;
-          if (backup?.runBackupForGraph && req._graphApiSlug) {
-            await backup.runBackupForGraph({
-              slug: req._graphApiSlug,
-              dbPath: this.tools?._graphRegistry?.getDbPath?.(req._graphApiSlug),
-              force: true,
-              note: 'pre-import',
-            });
-          } else if (backup) {
-            await backup.runBackup({ force: true, note: 'pre-import' });
-          }
-        } catch (e) { this.log.warn('[import] pre-import backup failed: ' + e.message); }
-
         const { importGraph, planProviderImport, planSettingsImport } = require('../graph/export-import');
+        const { DatabaseSync } = require('node:sqlite');
         const u = new URL(req.url, 'http://x');
         const applyGraph = u.searchParams.get('apply_graph') !== '0';
         const applyProviders = u.searchParams.get('apply_providers') === '1';
         const applySettings = u.searchParams.get('apply_settings') !== '0';
+        const requestedTargetSlug = String(u.searchParams.get('graph_slug') || u.searchParams.get('target_slug') || '').trim();
+        const registry = this.tools?._graphRegistry || null;
+        const backup = this.tools?._backup || null;
+        const activeSlug = registry?.getActiveSlug?.() || null;
+        const currentSlug = req._graphApiSlug || activeSlug || null;
 
         // v2 bundle → has {graph, providers, settings}. v1 format / raw graph →
         // the graph IS the payload (backward compat).
         const isBundle = payload.format === 'spore-export';
         const graphPayload = isBundle ? payload.graph : payload;
+        const graphPayloads = isBundle && Array.isArray(payload.graphs) ? payload.graphs : null;
         const providersSection = isBundle ? payload.providers : null;
         const settingsSection = isBundle ? payload.settings : null;
 
         const report = {
           graph: null,
+          graphs: null,
           providers: null,
           settings: null,
         };
 
-        if (applyGraph && graphPayload && graphPayload.format === 'spore-graph-export') {
-          report.graph = importGraph(db, graphPayload, { log: this.log });
+        const ensureImportTarget = (gp, fallbackSlug = null, { useRequestedTarget = true } = {}) => {
+          const meta = gp?.graph || {};
+          let slug = (useRequestedTarget ? requestedTargetSlug : '') || meta.slug || fallbackSlug || currentSlug;
+          if (!slug && registry?.getActiveSlug) slug = registry.getActiveSlug();
+          let graphDb = db;
+          let opened = null;
+          let dbPath = null;
+          let created = false;
+
+          if (registry && slug) {
+            let entry = registry.get(slug);
+            if (!entry) {
+              const name = meta.name || slug;
+              slug = registry.create(name, meta.description || '', {
+                slug,
+                role: meta.role || 'custom',
+                protected: meta.protected === true,
+                managed: meta.managed === true,
+                activationLocked: meta.activationLocked === true,
+                seedProfile: meta.seedProfile || (meta.role === 'project' ? 'project' : (meta.role === 'channel' ? 'channel' : 'standard')),
+                identityKey: meta.identityKey || null,
+                platform: meta.platform || null,
+                externalUserId: meta.externalUserId || null,
+                externalChannelId: meta.externalChannelId || null,
+                source: meta.source || 'import',
+                createdBy: meta.createdBy || 'import',
+              });
+              created = true;
+              entry = registry.get(slug);
+            }
+            registry.applyImportedMetadata?.(slug, meta);
+            dbPath = registry.getDbPath(slug);
+            if (slug === currentSlug) {
+              graphDb = db;
+            } else {
+              opened = new DatabaseSync(dbPath);
+              graphDb = opened;
+            }
+          }
+
+          return { slug, db: graphDb, opened, dbPath, created };
+        };
+
+        const importIntoTarget = async (gp, fallbackSlug = null, opts = {}) => {
+          if (!gp || gp.format !== 'spore-graph-export') return { error: 'skipped — not a spore-graph-export payload' };
+          const target = ensureImportTarget(gp, fallbackSlug, opts);
+          try {
+            try {
+              if (backup?.runBackupForGraph && target.slug && target.dbPath) {
+                await backup.runBackupForGraph({ slug: target.slug, dbPath: target.dbPath, force: true, note: 'pre-import' });
+              } else if (backup) {
+                await backup.runBackup({ force: true, note: 'pre-import' });
+              }
+            } catch (e) { this.log.warn('[import] pre-import backup failed: ' + e.message); }
+            const result = importGraph(target.db, gp, { log: this.log });
+            try { registry?.refreshStats?.(target.slug); } catch {}
+            return { slug: target.slug, created: target.created, ...result };
+          } finally {
+            try { target.opened?.close(); } catch {}
+          }
+        };
+
+        if (applyGraph && graphPayloads?.length) {
+          report.graphs = await Promise.all(graphPayloads.map(gp => importIntoTarget(gp, gp?.graph?.slug || null, { useRequestedTarget: false })));
+          report.graph = { importedGraphs: report.graphs.length };
         } else if (applyGraph && graphPayload) {
-          report.graph = { error: 'skipped — not a spore-graph-export payload' };
+          report.graph = await importIntoTarget(graphPayload, requestedTargetSlug || currentSlug);
         }
 
         let providerTouched = false;
@@ -6874,7 +6970,9 @@ class WebGateway {
       try {
         const backup = this.tools?._backup;
         if (!backup) { res.writeHead(503); res.end(JSON.stringify({ error: 'backup worker not available' })); return; }
-        const out = backup.deleteBackup(decodeURIComponent(backupDelMatch[1]));
+        const u = new URL(req.url, 'http://x');
+        const slug = String(u.searchParams.get('slug') || u.searchParams.get('graph') || '').trim() || null;
+        const out = backup.deleteBackup(decodeURIComponent(backupDelMatch[1]), { slug });
         res.writeHead(out.ok ? 200 : 404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }

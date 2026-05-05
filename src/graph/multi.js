@@ -819,6 +819,36 @@ class GraphRegistry {
     this._save();
   }
 
+  applyImportedMetadata(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph || !meta || typeof meta !== 'object') return false;
+    const allowed = [
+      'name', 'description', 'role', 'protected', 'managed', 'activationLocked',
+      'seedProfile', 'identityKey', 'platform', 'externalUserId', 'externalChannelId',
+      'source', 'createdBy', 'owner', 'collaborators', 'allowedUsers', 'allowedWebUsers',
+      'projectKey', 'projectRoot', 'projectRemote',
+    ];
+    let changed = false;
+    for (const key of allowed) {
+      if (!Object.prototype.hasOwnProperty.call(meta, key)) continue;
+      const value = meta[key];
+      if (value === undefined) continue;
+      const next = Array.isArray(value) ? [...value] : value;
+      if (JSON.stringify(graph[key]) !== JSON.stringify(next)) {
+        graph[key] = next;
+        changed = true;
+      }
+    }
+    if (graph.role === 'project') {
+      if (this._applyProjectAccessMeta(graph, meta)) changed = true;
+    }
+    if (changed) {
+      this.refreshStats(slug);
+      this._save();
+    }
+    return changed;
+  }
+
   recordMaintenanceStart(slug, meta = {}) {
     const graph = this._registry[slug];
     if (!graph) return false;

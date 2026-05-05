@@ -852,7 +852,7 @@
 <script defer src="scripts/onboarding.js?v=260504-recallob"></script>
 <script defer src="scripts/graph.js?v=260505-viewgraphfix"></script>
 <script defer src="scripts/chat.js?v=260505-viewgraphfix"></script>
-<script defer src="scripts/panels.js?v=260504-logmenu"></script>
+<script defer src="scripts/panels.js?v=260505-multibackup"></script>
 
 <!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
 <script defer src="scripts/boot.js?v=260503-141408"></script>
@@ -1021,6 +1021,21 @@ build/
           <div class="settings-portability-tag">portable snapshot</div>
         </div>
         <div class="settings-portability-callout">Reference nodes and the agent self node are excluded from graph exports; imported edges are re-wired to the target graph.</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin:10px 0">
+          <label style="font-size:.68rem">Export graph scope
+            <select id="settings-export-graph-scope" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+              <option value="current">current view</option>
+              <option value="selected">selected graph</option>
+              <option value="all">all graphs</option>
+            </select>
+          </label>
+          <label id="settings-export-graph-select-wrap" style="font-size:.68rem">Graph
+            <select id="settings-export-graph-slug" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px"></select>
+          </label>
+          <label style="font-size:.68rem">Single-graph import target
+            <select id="settings-import-graph-slug" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px"></select>
+          </label>
+        </div>
         <div class="settings-hint">Include in export</div>
         <div class="settings-export-options">
           <label class="settings-check-row"><input type="checkbox" id="settings-export-graph" checked><span>Knowledge graph</span></label>
@@ -1038,7 +1053,7 @@ build/
 
       <div class="settings-section wide" data-target-tab="backups">
         <h4>Graph backups</h4>
-          <div class="settings-note" style="margin-top:4px">Periodic snapshots of the full graph DB via <code>VACUUM INTO</code>. Rolling retention; oldest snapshot is rotated out when the cap is hit.</div>
+          <div class="settings-note" style="margin-top:4px">Periodic snapshots of every graph DB via <code>VACUUM INTO</code>. Rolling retention is applied per graph; restores are matched to the graph slug before anything is copied back.</div>
           <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:380px">
             <label style="font-size:.7rem">Interval (minutes)
               <input id="settings-backup-interval" type="number" min="1" step="1" value="60" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">

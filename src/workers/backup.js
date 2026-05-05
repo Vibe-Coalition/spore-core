@@ -61,6 +61,105 @@ class BackupWorker {
     return path.basename(graphDbPath, path.extname(graphDbPath));
   }
 
+  _registrySnapshot() {
+    if (!this.registry) return null;
+    const entries = {};
+    try {
+      for (const graph of this.registry.list?.() || []) {
+        const { dbPath, ...meta } = graph;
+        entries[meta.slug] = meta;
+      }
+    } catch {
+      try {
+        for (const [slug, graph] of Object.entries(this.registry._registry || {})) {
+          entries[slug] = { ...graph };
+        }
+      } catch { /* best effort */ }
+    }
+    return {
+      activeSlug: this.registry.getActiveSlug?.() || null,
+      graphs: entries,
+    };
+  }
+
+  _writeManifest(file, { slug = null, graphDbPath = this.graphDbPath, note = null, size = null } = {}) {
+    try {
+      const registry = this._registrySnapshot();
+      const graph = slug && registry?.graphs ? registry.graphs[slug] : null;
+      const manifest = {
+        format: 'spore-graph-backup-manifest',
+        version: 1,
+        createdAt: new Date().toISOString(),
+        backupFile: path.basename(file),
+        graphDbFile: path.basename(graphDbPath || ''),
+        slug: slug || graph?.slug || this.registry?.getActiveSlug?.() || null,
+        note,
+        size,
+        graph,
+        activeSlug: registry?.activeSlug || null,
+        registry: registry?.graphs || null,
+      };
+      fs.writeFileSync(file + '.json', JSON.stringify(manifest, null, 2));
+      return manifest;
+    } catch (e) {
+      this.log.warn(`[backup] manifest failed for ${path.basename(file)}: ${e.message}`);
+      return null;
+    }
+  }
+
+  _readManifest(fullPath) {
+    try {
+      const manifestPath = fullPath + '.json';
+      if (!fs.existsSync(manifestPath)) return null;
+      return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  _graphsForBackups() {
+    if (!this.registry?.list) {
+      return [{
+        slug: this.registry?.getActiveSlug?.() || 'default',
+        name: 'Active graph',
+        role: 'active',
+        active: true,
+        dbPath: this.graphDbPath,
+      }];
+    }
+    return (this.registry.list() || []).map(g => ({
+      ...g,
+      dbPath: this.registry.getDbPath?.(g.slug) || g.dbPath,
+      active: g.slug === this.registry.getActiveSlug?.(),
+    }));
+  }
+
+  _inferGraphForBackup(filename, preferredSlug = null) {
+    const graphs = this._graphsForBackups();
+    if (preferredSlug) {
+      const graph = graphs.find(g => g.slug === preferredSlug);
+      if (!graph) return { error: `graph "${preferredSlug}" not found` };
+      return { graph };
+    }
+    const matches = graphs.filter(g => {
+      const dbPath = g.dbPath || this.registry?.getDbPath?.(g.slug);
+      return dbPath && filename.startsWith(this._baseName(dbPath) + '.');
+    });
+    if (matches.length === 1) return { graph: matches[0] };
+    if (matches.length > 1) return { error: 'backup filename matches multiple graphs; pass slug' };
+    const active = graphs.find(g => g.active) || graphs[0] || null;
+    return active ? { graph: active } : { error: 'no graphs available' };
+  }
+
+  _assertBackupMatchesGraph(filename, graph) {
+    const dbPath = graph?.dbPath || this.registry?.getDbPath?.(graph?.slug) || this.graphDbPath;
+    const prefix = this._baseName(dbPath) + '.';
+    if (!filename.startsWith(prefix)) {
+      return `backup "${filename}" does not belong to graph "${graph?.slug || this._baseName(dbPath)}"`;
+    }
+    return null;
+  }
+
   _currentSignature(db = this.db) {
     try {
       const counts = [];
@@ -199,6 +298,7 @@ class BackupWorker {
     if (key === 'active') this._lastHash = sig;
     this.stats.snapshots++;
     this.stats.lastSnapshotAt = new Date().toISOString();
+    this._writeManifest(file, { slug, graphDbPath, note, size: sz });
     this.log.info(`[backup] Snapshot ${path.basename(file)} (${(sz/1024).toFixed(1)} KB)${slug ? ` graph=${slug}` : ''}${note ? ` note=${note}` : ''}`);
     this._rotate(graphDbPath);
     return { slug, ok: true, file, size: sz };
@@ -215,46 +315,87 @@ class BackupWorker {
         .sort((a, b) => b.mtime - a.mtime);
       const toDelete = files.slice(keep);
       for (const f of toDelete) {
-        try { fs.unlinkSync(f.full); this.stats.rotated++; } catch (e) { this.log.warn(`[backup] rotate failed ${f.name}: ${e.message}`); }
+        try {
+          fs.unlinkSync(f.full);
+          try { if (fs.existsSync(f.full + '.json')) fs.unlinkSync(f.full + '.json'); } catch {}
+          this.stats.rotated++;
+        } catch (e) { this.log.warn(`[backup] rotate failed ${f.name}: ${e.message}`); }
       }
     } catch (e) {
       this.log.warn('[backup] rotate error:', e.message);
     }
   }
 
-  listBackups() {
+  _listBackupFilesForGraph(graph) {
+    const dbPath = graph?.dbPath || this.registry?.getDbPath?.(graph?.slug) || this.graphDbPath;
+    const dir = this._ensureDir(dbPath);
+    const prefix = this._baseName(dbPath) + '.';
+    return fs.readdirSync(dir)
+      .filter(f => f.startsWith(prefix) && f.endsWith('.bak'))
+      .map(f => {
+        const full = path.join(dir, f);
+        const st = fs.statSync(full);
+        const m = f.match(/\.(\d{8}-\d{6})(?:-([a-z0-9-]+))?\.bak$/i);
+        const manifest = this._readManifest(full);
+        return {
+          file: f,
+          slug: graph?.slug || manifest?.slug || null,
+          graphName: graph?.name || manifest?.graph?.name || null,
+          graphRole: graph?.role || manifest?.graph?.role || null,
+          size: st.size,
+          mtime: st.mtimeMs,
+          created: st.mtime.toISOString(),
+          tag: m?.[2] || manifest?.note || null,
+          manifest: manifest ? path.basename(full) + '.json' : null,
+        };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  }
+
+  listBackups({ all = false } = {}) {
     try {
       const dir = this._ensureDir();
-      const prefix = this._baseName() + '.';
-      const files = fs.readdirSync(dir)
-        .filter(f => f.startsWith(prefix) && f.endsWith('.bak'))
-        .map(f => {
-          const full = path.join(dir, f);
-          const st = fs.statSync(full);
-          const m = f.match(/\.(\d{8}-\d{6})(?:-([a-z0-9-]+))?\.bak$/i);
-          return {
-            file: f,
-            size: st.size,
-            mtime: st.mtimeMs,
-            created: st.mtime.toISOString(),
-            tag: m?.[2] || null,
-          };
-        })
+      const graphs = this._graphsForBackups().map(graph => {
+        let files = [];
+        try { files = this._listBackupFilesForGraph(graph); }
+        catch (e) { return { slug: graph.slug, name: graph.name, role: graph.role, active: !!graph.active, files: [], error: e.message }; }
+        return {
+          slug: graph.slug,
+          name: graph.name,
+          role: graph.role,
+          active: !!graph.active,
+          files,
+        };
+      });
+      const files = (all ? graphs.flatMap(g => g.files) : (graphs.find(g => g.active)?.files || []))
         .sort((a, b) => b.mtime - a.mtime);
-      return { dir, files };
+      return {
+        dir,
+        activeSlug: this.registry?.getActiveSlug?.() || null,
+        registry: this._registrySnapshot(),
+        graphs,
+        files,
+      };
     } catch (e) {
       return { dir: this._backupDir(), files: [], error: e.message };
     }
   }
 
-  deleteBackup(filename) {
+  deleteBackup(filename, { slug = null } = {}) {
     if (!filename || filename.includes('/') || filename.includes('..')) return { ok: false, error: 'invalid filename' };
     try {
-      const dir = this._ensureDir();
+      const inferred = this._inferGraphForBackup(filename, slug);
+      if (inferred.error) return { ok: false, error: inferred.error };
+      const graph = inferred.graph;
+      const graphDbPath = graph?.dbPath || this.registry?.getDbPath?.(graph?.slug) || this.graphDbPath;
+      const mismatch = this._assertBackupMatchesGraph(filename, graph);
+      if (mismatch) return { ok: false, error: mismatch };
+      const dir = this._ensureDir(graphDbPath);
       const full = path.join(dir, filename);
       if (!fs.existsSync(full)) return { ok: false, error: 'not found' };
       fs.unlinkSync(full);
-      return { ok: true };
+      try { if (fs.existsSync(full + '.json')) fs.unlinkSync(full + '.json'); } catch {}
+      return { ok: true, slug: graph?.slug || null };
     } catch (e) {
       return { ok: false, error: e.message };
     }
@@ -266,88 +407,107 @@ class BackupWorker {
    * and copy each base table's rows over. FTS virtual tables are rebuilt
    * from their base tables at the end.
    */
-  async restoreBackup(filename) {
-    if (!this.db) return { ok: false, error: 'no db' };
+  async restoreBackup(filename, { slug = null } = {}) {
+    if (!this.db && !this.registry) return { ok: false, error: 'no db' };
     if (!filename || filename.includes('/') || filename.includes('..')) return { ok: false, error: 'invalid filename' };
 
-    const dir = this._ensureDir();
+    const inferred = this._inferGraphForBackup(filename, slug);
+    if (inferred.error) return { ok: false, error: inferred.error };
+    const graph = inferred.graph;
+    const graphDbPath = graph?.dbPath || this.registry?.getDbPath?.(graph?.slug) || this.graphDbPath;
+    const mismatch = this._assertBackupMatchesGraph(filename, graph);
+    if (mismatch) return { ok: false, error: mismatch };
+
+    const dir = this._ensureDir(graphDbPath);
     const full = path.join(dir, filename);
     if (!fs.existsSync(full)) return { ok: false, error: 'backup file not found' };
 
     // Pre-restore safety snapshot
-    const pre = await this.runBackup({ force: true, note: 'pre-restore' });
+    const pre = await this.runBackupForGraph({
+      slug: graph?.slug,
+      dbPath: graphDbPath,
+      force: true,
+      note: 'pre-restore',
+    });
     if (!pre.ok && !pre.skipped) {
       return { ok: false, error: 'pre-restore snapshot failed: ' + (pre.error || 'unknown') };
     }
 
+    const targetIsActiveHandle = graphDbPath === this.graphDbPath && this.db;
+    let targetDb = null;
     let attached = false;
     try {
+      targetDb = targetIsActiveHandle ? this.db : new DatabaseSync(graphDbPath);
       const escaped = full.replace(/'/g, "''");
-      this.db.exec(`ATTACH DATABASE '${escaped}' AS bak`);
+      targetDb.exec(`ATTACH DATABASE '${escaped}' AS bak`);
       attached = true;
 
-      const baseTables = this.db.prepare(
+      const baseTables = targetDb.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND sql NOT LIKE '%VIRTUAL%' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts_%' ORDER BY name"
       ).all().map(r => r.name);
-      const bakTables = this.db.prepare(
+      const bakTables = targetDb.prepare(
         "SELECT name FROM bak.sqlite_master WHERE type='table' AND sql NOT LIKE '%VIRTUAL%' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts_%' ORDER BY name"
       ).all().map(r => r.name);
       const bakSet = new Set(bakTables);
-      const ftsTables = this.db.prepare(
+      const ftsTables = targetDb.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%VIRTUAL%' AND sql LIKE '%fts%'"
       ).all().map(r => r.name);
 
       let tablesRestored = 0, rowsRestored = 0, tablesSkipped = 0;
 
-      const prevFk = this.db.prepare('PRAGMA foreign_keys').get()?.foreign_keys ?? 0;
-      this.db.exec('PRAGMA foreign_keys = OFF');
-      this.db.exec('BEGIN IMMEDIATE');
+      const prevFk = targetDb.prepare('PRAGMA foreign_keys').get()?.foreign_keys ?? 0;
+      targetDb.exec('PRAGMA foreign_keys = OFF');
+      targetDb.exec('BEGIN IMMEDIATE');
       try {
         for (const t of baseTables) {
           if (!bakSet.has(t)) {
             tablesSkipped++;
             continue;
           }
-          const liveCols = this.db.prepare(`PRAGMA table_info("${t}")`).all().map(c => c.name);
-          const bakCols = this.db.prepare(`PRAGMA bak.table_info("${t}")`).all().map(c => c.name);
+          const liveCols = targetDb.prepare(`PRAGMA table_info("${t}")`).all().map(c => c.name);
+          const bakCols = targetDb.prepare(`PRAGMA bak.table_info("${t}")`).all().map(c => c.name);
           const shared = liveCols.filter(c => bakCols.includes(c));
           if (!shared.length) { tablesSkipped++; continue; }
 
-          this.db.exec(`DELETE FROM "${t}"`);
+          targetDb.exec(`DELETE FROM "${t}"`);
           const colList = shared.map(c => `"${c}"`).join(', ');
-          const res = this.db.exec(`INSERT INTO "${t}" (${colList}) SELECT ${colList} FROM bak."${t}"`);
+          targetDb.exec(`INSERT INTO "${t}" (${colList}) SELECT ${colList} FROM bak."${t}"`);
           // exec() doesn't return row count on node:sqlite; estimate via count
           try {
-            const c = this.db.prepare(`SELECT COUNT(*) AS c FROM "${t}"`).get().c;
+            const c = targetDb.prepare(`SELECT COUNT(*) AS c FROM "${t}"`).get().c;
             rowsRestored += c;
           } catch (e) { this.log.warn('[backup] db.prepare failed: ' + e.message); }
           tablesRestored++;
         }
-        this.db.exec('COMMIT');
+        targetDb.exec('COMMIT');
       } catch (e) {
-        this.db.exec('ROLLBACK');
+        targetDb.exec('ROLLBACK');
         throw e;
       } finally {
-        try { this.db.exec(`PRAGMA foreign_keys = ${prevFk ? 'ON' : 'OFF'}`); } catch (e) { this.log.warn('[backup] db.exec failed: ' + e.message); }
+        try { targetDb.exec(`PRAGMA foreign_keys = ${prevFk ? 'ON' : 'OFF'}`); } catch (e) { this.log.warn('[backup] db.exec failed: ' + e.message); }
       }
 
       // Rebuild FTS indices from restored base tables
       for (const f of ftsTables) {
-        try { this.db.exec(`INSERT INTO "${f}"("${f}") VALUES('rebuild')`); } catch (e) {
+        try { targetDb.exec(`INSERT INTO "${f}"("${f}") VALUES('rebuild')`); } catch (e) {
           this.log.warn(`[backup] rebuild FTS ${f}: ${e.message}`);
         }
       }
 
+      try { this.registry?.refreshStats?.(graph?.slug); } catch {}
       this.stats.restores++;
-      this.log.info(`[backup] Restored from ${filename} — ${tablesRestored} tables, ${rowsRestored} rows, ${tablesSkipped} skipped, FTS rebuilt: ${ftsTables.length}`);
-      return { ok: true, tablesRestored, rowsRestored, tablesSkipped, ftsRebuilt: ftsTables.length, preRestoreSnapshot: pre.file };
+      this.log.info(`[backup] Restored ${graph?.slug || 'graph'} from ${filename} — ${tablesRestored} tables, ${rowsRestored} rows, ${tablesSkipped} skipped, FTS rebuilt: ${ftsTables.length}`);
+      return { ok: true, slug: graph?.slug || null, tablesRestored, rowsRestored, tablesSkipped, ftsRebuilt: ftsTables.length, preRestoreSnapshot: pre.file };
     } catch (e) {
       this.stats.errors++;
       this.log.error('[backup] restore failed:', e.message);
-      return { ok: false, error: e.message, preRestoreSnapshot: pre.file };
+      return { ok: false, slug: graph?.slug || null, error: e.message, preRestoreSnapshot: pre.file };
     } finally {
       if (attached) {
-        try { this.db.exec('DETACH DATABASE bak'); } catch (e) { this.log.warn('[backup] db.exec failed: ' + e.message); }
+        try { targetDb?.exec('DETACH DATABASE bak'); } catch (e) { this.log.warn('[backup] db.exec failed: ' + e.message); }
+      }
+      if (targetDb && targetDb !== this.db) {
+        try { targetDb.close(); } catch {}
       }
     }
   }

@@ -742,9 +742,9 @@ document.addEventListener('click', (e) => {
   } else if (t.id === 'settings-backup-run') {
     _bkRunSnapshot();
   } else if (t.dataset?.backupRestore) {
-    _bkRestore(t.dataset.backupRestore);
+    _bkRestore(t.dataset.backupRestore, t.dataset.backupSlug || '');
   } else if (t.dataset?.backupDelete) {
-    _bkDelete(t.dataset.backupDelete);
+    _bkDelete(t.dataset.backupDelete, t.dataset.backupSlug || '');
   } else if (t.id === 'settings-graph-export') {
     _graphExportDownload();
   } else if (t.id === 'settings-graph-import') {
@@ -1079,6 +1079,56 @@ document.addEventListener('change', (e) => {
 });
 
 // ── Graph backups ─────────────────────────────────────────────────────
+async function _portLoadGraphs() {
+  try {
+    if (Array.isArray(_graphsList) && _graphsList.length) return _graphsList;
+  } catch {}
+  const r = await fetch(API + '/api/graphs', { headers: authHeaders() });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  try { _graphsList = d.graphs || []; } catch {}
+  return d.graphs || [];
+}
+
+function _graphOptionLabel(g) {
+  if (!g) return '';
+  const role = g.role ? ` · ${g.role}` : '';
+  return `${g.name || g.slug}${role}`;
+}
+
+async function _portRefreshGraphChoices() {
+  const exportSelect = document.getElementById('settings-export-graph-slug');
+  const importSelect = document.getElementById('settings-import-graph-slug');
+  const scope = document.getElementById('settings-export-graph-scope');
+  const wrap = document.getElementById('settings-export-graph-select-wrap');
+  if (!exportSelect && !importSelect && !scope) return;
+  try {
+    const graphs = await _portLoadGraphs();
+    const active = graphs.find(g => g.active) || graphs[0] || null;
+    const viewed = typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug
+      ? graphs.find(g => g.slug === _viewedGraphSlug)
+      : null;
+    const options = graphs.map(g => `<option value="${esc(g.slug)}">${esc(_graphOptionLabel(g))}</option>`).join('');
+    if (exportSelect) {
+      exportSelect.innerHTML = options || '<option value="">No graphs</option>';
+      exportSelect.value = viewed?.slug || active?.slug || graphs[0]?.slug || '';
+    }
+    if (importSelect) {
+      importSelect.innerHTML = `<option value="">current view (${esc(viewed?.name || active?.name || 'active graph')})</option>` + options;
+    }
+    if (scope && !scope.dataset.bound) {
+      scope.dataset.bound = '1';
+      scope.addEventListener('change', () => {
+        if (wrap) wrap.style.display = scope.value === 'selected' ? '' : 'none';
+      });
+    }
+    if (wrap && scope) wrap.style.display = scope.value === 'selected' ? '' : 'none';
+  } catch {
+    if (exportSelect) exportSelect.innerHTML = '<option value="">Unable to load graphs</option>';
+    if (importSelect) importSelect.innerHTML = '<option value="">current view</option>';
+  }
+}
+
 async function _bkLoadStatus() {
   try {
     const r = await fetch(API + '/api/backups/status', { headers: authHeaders() });
@@ -1113,24 +1163,35 @@ async function _bkLoadList() {
   try {
     const r = await fetch(API + '/api/backups', { headers: authHeaders() });
     const d = await r.json();
+    const groups = (d.graphs || []).filter(g => (g.files || []).length);
     const files = d.files || [];
-    if (!files.length) {
+    if (!groups.length && !files.length) {
       host.innerHTML = '<div style="padding:10px;color:var(--text-dim);font-size:.66rem">No snapshots yet — press "Snapshot now".</div>';
       return;
     }
-    host.innerHTML = files.map(f => {
+    const renderFile = (f, slug) => {
       const when = f.created ? new Date(f.created).toLocaleString() : '';
       const kb = (f.size / 1024).toFixed(1);
-      const tagLabel = f.tag ? ` <span style="color:var(--accent2)">[${f.tag}]</span>` : '';
-      return `<div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px">
+      const tagLabel = f.tag ? ` <span style="color:var(--accent2)">[${esc(f.tag)}]</span>` : '';
+      return `<div style="padding:8px 10px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px">
         <div style="font-size:.66rem;min-width:0;flex:1;word-break:break-all">
-          <div>${f.file}${tagLabel}</div>
-          <div style="color:var(--text-dim);margin-top:2px">${when} · ${kb} KB</div>
+          <div>${esc(f.file)}${tagLabel}</div>
+          <div style="color:var(--text-dim);margin-top:2px">${when} · ${kb} KB${f.manifest ? ' · manifest' : ''}</div>
         </div>
         <div style="display:flex;gap:4px;flex-shrink:0">
-          <button class="settings-btn-secondary" style="font-size:.62rem;padding:2px 6px" data-backup-restore="${f.file}">restore</button>
-          <button class="settings-btn-secondary" style="font-size:.62rem;padding:2px 6px;color:var(--danger)" data-backup-delete="${f.file}">delete</button>
+          <button class="settings-btn-secondary" style="font-size:.62rem;padding:2px 6px" data-backup-restore="${esc(f.file)}" data-backup-slug="${esc(slug || f.slug || '')}">restore</button>
+          <button class="settings-btn-secondary" style="font-size:.62rem;padding:2px 6px;color:var(--danger)" data-backup-delete="${esc(f.file)}" data-backup-slug="${esc(slug || f.slug || '')}">delete</button>
         </div>
+      </div>`;
+    };
+    host.innerHTML = groups.map(g => {
+      const title = `${g.name || g.slug}${g.role ? ` · ${g.role}` : ''}${g.active ? ' · active' : ''}`;
+      return `<div class="settings-backup-group" style="border-bottom:1px solid var(--border)">
+        <div style="padding:8px 10px;font-size:.68rem;font-weight:600;color:var(--text);display:flex;justify-content:space-between;gap:8px">
+          <span>${esc(title)}</span>
+          <span style="font-weight:400;color:var(--text-dim)">${(g.files || []).length} snapshots</span>
+        </div>
+        ${(g.files || []).map(f => renderFile(f, g.slug)).join('')}
       </div>`;
     }).join('');
   } catch (e) {
@@ -1147,7 +1208,17 @@ async function _bkRunSnapshot() {
     const r = await fetch(API + '/api/backups/run', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' });
     const d = await r.json();
     if (!d.ok && !d.skipped) throw new Error(d.error || 'failed');
-    if (el) { el.textContent = d.skipped ? 'skipped — unchanged' : `saved (${((d.size||0)/1024).toFixed(1)} KB)`; el.style.color = 'var(--text-dim)'; }
+    if (el) {
+      const graphs = Array.isArray(d.graphs) ? d.graphs : [];
+      if (graphs.length) {
+        const saved = graphs.filter(g => g.ok && !g.skipped).length;
+        const skipped = graphs.filter(g => g.skipped).length;
+        el.textContent = `snapshotted ${saved} graph${saved === 1 ? '' : 's'}${skipped ? ` · ${skipped} unchanged` : ''}`;
+      } else {
+        el.textContent = d.skipped ? 'skipped — unchanged' : `saved (${((d.size||0)/1024).toFixed(1)} KB)`;
+      }
+      el.style.color = 'var(--text-dim)';
+    }
     _bkLoadList();
     _bkLoadStatus();
   } catch (e) {
@@ -1174,17 +1245,18 @@ async function _bkSaveSettings() {
   } catch (e) { alert('Save error: ' + e.message); }
 }
 
-async function _bkRestore(filename) {
-  if (!confirm(`Restore graph from "${filename}"?\n\nThe current graph will be replaced. A safety snapshot is taken first, so you can undo this by restoring the auto-generated "pre-restore" snapshot.`)) return;
+async function _bkRestore(filename, slug = '') {
+  const target = slug ? `graph "${slug}"` : 'the matching graph';
+  if (!confirm(`Restore ${target} from "${filename}"?\n\nOnly the matching graph DB will be replaced. A safety snapshot is taken first, so you can undo this by restoring the auto-generated "pre-restore" snapshot.`)) return;
   try {
     const r = await fetch(API + '/api/backups/restore', {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: filename }),
+      body: JSON.stringify({ file: filename, slug }),
     });
     const d = await r.json();
     if (!d.ok) { alert('Restore failed: ' + (d.error || 'unknown')); return; }
-    alert(`Restored: ${d.tablesRestored} tables, ${d.rowsRestored} rows. Pre-restore snapshot saved at ${d.preRestoreSnapshot ? d.preRestoreSnapshot.split('/').pop() : '(none)'}. Reloading graph…`);
+    alert(`Restored ${d.slug || slug || 'graph'}: ${d.tablesRestored} tables, ${d.rowsRestored} rows. Pre-restore snapshot saved at ${d.preRestoreSnapshot ? d.preRestoreSnapshot.split('/').pop() : '(none)'}. Reloading graph…`);
     try { if (typeof loadGraph === 'function') loadGraph(); } catch {}
     _bkLoadList();
     _bkLoadStatus();
@@ -1199,35 +1271,46 @@ async function _graphExportDownload() {
   const wantSettings = document.getElementById('settings-export-settings')?.checked !== false;
   const wantProviders = !!document.getElementById('settings-export-providers')?.checked;
   const wantSecrets = wantProviders && !!document.getElementById('settings-export-secrets')?.checked;
+  const graphScope = document.getElementById('settings-export-graph-scope')?.value || 'current';
+  const selectedGraphSlug = document.getElementById('settings-export-graph-slug')?.value || '';
+  if (wantGraph && graphScope === 'selected' && !selectedGraphSlug) {
+    if (el) { el.textContent = 'pick a graph to export'; el.style.color = 'var(--danger)'; }
+    return;
+  }
   if (wantProviders && wantSecrets) {
     if (!confirm('Including API keys in the export makes the file sensitive — anyone who opens it can authenticate to your providers. Continue?')) return;
   }
   if (btn) btn.disabled = true;
   if (el) { el.textContent = 'exporting…'; el.style.color = 'var(--accent2)'; }
   try {
-    const qs = new URLSearchParams({
+    const params = new URLSearchParams({
       graph: wantGraph ? '1' : '0',
       settings: wantSettings ? '1' : '0',
       providers: wantProviders ? '1' : '0',
       secrets: wantSecrets ? '1' : '0',
-    }).toString();
-    const r = await fetch(graphApiUrl('/api/graph/export?' + qs), { headers: authHeaders() });
+      graph_scope: graphScope,
+    });
+    if (graphScope === 'selected' && selectedGraphSlug) params.set('graph_slug', selectedGraphSlug);
+    const exportPath = '/api/graph/export?' + params.toString();
+    const fetchUrl = graphScope === 'current' ? graphApiUrl(exportPath) : API + exportPath;
+    const r = await fetch(fetchUrl, { headers: authHeaders() });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const blob = await r.blob();
     let filename = 'spore-export.json';
     const cd = r.headers.get('content-disposition');
     if (cd) { const m = cd.match(/filename="?([^"]+)"?/); if (m) filename = m[1]; }
     const a = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    a.href = url; a.download = filename;
+    const blobUrl = URL.createObjectURL(blob);
+    a.href = blobUrl; a.download = filename;
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+    setTimeout(() => { URL.revokeObjectURL(blobUrl); a.remove(); }, 2000);
     try {
       const text = await blob.text();
       const data = JSON.parse(text);
       const parts = [];
-      if (data.graph?.stats) parts.push(`${data.graph.stats.exportedNodes || 0} nodes + ${data.graph.stats.exportedEdges || 0} edges`);
+      if (data.graphs?.length) parts.push(`${data.graphs.length} graphs`);
+      else if (data.graph?.stats) parts.push(`${data.graph.stats.exportedNodes || 0} nodes + ${data.graph.stats.exportedEdges || 0} edges`);
       if (data.providers) parts.push(`${Object.keys(data.providers).filter(k => k !== 'custom').length + Object.keys(data.providers.custom || {}).length} providers${data.includesSecrets ? ' (with keys)' : ' (redacted)'}`);
       if (data.settings) parts.push(`${Object.keys(data.settings).length} settings`);
       parts.push(`${(blob.size/1024).toFixed(1)} KB`);
@@ -1252,17 +1335,20 @@ async function _graphImportUpload(file) {
 
     // Detect format — v2 bundle ('spore-export') or v1 ('spore-graph-export') or raw graph
     const isBundle = preview.format === 'spore-export';
+    const hasGraphs = isBundle && Array.isArray(preview.graphs) && preview.graphs.length > 0;
     const hasGraph = isBundle ? !!preview.graph : preview.format === 'spore-graph-export';
     const hasProviders = isBundle && !!preview.providers;
     const hasSettings = isBundle && !!preview.settings;
-    if (!hasGraph && !hasProviders && !hasSettings) {
+    if (!hasGraph && !hasGraphs && !hasProviders && !hasSettings) {
       if (el) { el.textContent = `file doesn't look like a spore export (format=${preview.format || 'missing'})`; el.style.color = 'var(--danger)'; }
       return;
     }
 
     // Summarise and ask what to apply
     const parts = [];
-    if (hasGraph) {
+    if (hasGraphs) {
+      parts.push(`graphs: ${preview.graphs.length} graph${preview.graphs.length === 1 ? '' : 's'}`);
+    } else if (hasGraph) {
       const s = (isBundle ? preview.graph.stats : preview.stats) || {};
       parts.push(`graph: ${s.exportedNodes || 0} nodes + ${s.exportedEdges || 0} edges`);
     }
@@ -1276,7 +1362,8 @@ async function _graphImportUpload(file) {
     }
 
     let msg = `Import from "${file.name}"?\n\nContents:\n  ${parts.join('\n  ')}`;
-    if (hasGraph) msg += `\n\nImporting applies the knowledge graph (nodes, aspects, edges).`;
+    if (hasGraphs) msg += `\n\nImporting applies each graph to its matching slug, creating missing graph shells from the export metadata.`;
+    else if (hasGraph) msg += `\n\nImporting applies the knowledge graph (nodes, aspects, edges) to the selected target graph.`;
     if (hasProviders) msg += `\nImporting providers ${preview.includesSecrets ? 'WILL overwrite your current API keys and URLs' : 'will set URLs / model selections but NOT overwrite existing keys (values were redacted in the export)'}.`;
     if (hasSettings) msg += `\nImporting settings will update display name, model tiers, janitor/backup knobs, cluster config, etc.`;
     msg += `\n\nA pre-import backup of the graph will be taken. Continue?`;
@@ -1286,12 +1373,15 @@ async function _graphImportUpload(file) {
     }
 
     const qs = new URLSearchParams({
-      apply_graph: hasGraph ? '1' : '0',
+      apply_graph: (hasGraph || hasGraphs) ? '1' : '0',
       apply_providers: hasProviders ? '1' : '0',
       apply_settings: hasSettings ? '1' : '0',
-    }).toString();
+    });
+    const targetSlug = document.getElementById('settings-import-graph-slug')?.value || '';
+    if (targetSlug && hasGraph && !hasGraphs) qs.set('graph_slug', targetSlug);
 
-    const r = await fetch(graphApiUrl('/api/graph/import?' + qs), {
+    const importPath = '/api/graph/import?' + qs.toString();
+    const r = await fetch(targetSlug && hasGraph && !hasGraphs ? API + importPath : graphApiUrl(importPath), {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: text,
@@ -1307,6 +1397,8 @@ async function _graphImportUpload(file) {
       const g = rep.graph;
       if (g.error) {
         lines.push(`graph: ${g.error}`);
+      } else if (g.importedGraphs != null && Array.isArray(rep.graphs)) {
+        lines.push(`graphs: ${rep.graphs.length} imported/updated`);
       } else {
         lines.push(`graph: ${g.nodesImported || 0} nodes · ${g.aspectsImported || 0} aspects · ${g.attributesImported || 0} attrs · ${g.edgesImported || 0} edges · skipped ${(g.nodesSkipped || []).length} nodes + ${(g.edgesSkipped || []).length} edges`);
       }
@@ -1334,10 +1426,11 @@ document.addEventListener('change', (e) => {
   }
 });
 
-async function _bkDelete(filename) {
+async function _bkDelete(filename, slug = '') {
   if (!confirm(`Permanently delete "${filename}"?`)) return;
   try {
-    const r = await fetch(API + '/api/backups/' + encodeURIComponent(filename), { method: 'DELETE', headers: authHeaders() });
+    const qs = slug ? `?slug=${encodeURIComponent(slug)}` : '';
+    const r = await fetch(API + '/api/backups/' + encodeURIComponent(filename) + qs, { method: 'DELETE', headers: authHeaders() });
     if (!r.ok) { alert('Delete failed'); return; }
     _bkLoadList();
   } catch (e) { alert('Delete error: ' + e.message); }
@@ -1353,6 +1446,7 @@ if (_origOpenSettings && !window.__maintStatusHooked) {
     _maintRefreshStatus();
     _janRefreshStatus();
     _janLoadBin();
+    _portRefreshGraphChoices();
     _bkLoadStatus();
     _bkLoadList();
     return r;
