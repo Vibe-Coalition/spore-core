@@ -931,6 +931,7 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
           content: invokeLines,
           channelId: invokeSessionKey,
           channelName: 'invoke',
+          sessionKey: invokeSessionKey,
           userId: fromSpore || 'orchestrator',
           userName: fromSpore || 'Orchestrator',
           isDm: true,

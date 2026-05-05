@@ -220,6 +220,9 @@ class SlackGateway {
     // Resolve channel name
     let channelName = channelId;
     const ch = this._getChannel(channelId);
+    ch.isDm = isDm;
+    ch.userId = userId;
+    ch.threadTs = threadTs;
     if (ch.name === channelId) {
       try {
         const info = isDm
@@ -368,6 +371,10 @@ class SlackGateway {
         userName: last.userName,
         guildName: null,
         isDm: last.isDm,
+        platformMeta: {
+          threadTs: last.threadTs || null,
+          eventTs: last.eventTs || null,
+        },
         trigger,
         images: imageAttachments,
         platform: 'slack',
@@ -768,7 +775,7 @@ class SlackGateway {
   getActiveChannelIds() {
     const results = [];
     for (const [channelId, ch] of this._queue.entries()) {
-      results.push({ id: channelId, name: ch.name || channelId });
+      results.push({ id: channelId, name: ch.name || channelId, isDm: !!ch.isDm, userId: ch.userId || null });
     }
     return results.slice(0, 20);
   }
@@ -797,10 +804,11 @@ class SlackGateway {
     const ch = this._getChannel(channelId);
     const app = this.app;
 
+    const threadTs = taskEntry?.platformMeta?.threadTs || null;
     const fakeSay = async (text) => {
       if (!app) return;
       try {
-        await app.client.chat.postMessage({ channel: channelId, text: typeof text === 'string' ? text : text.text });
+        await app.client.chat.postMessage({ channel: channelId, text: typeof text === 'string' ? text : text.text, thread_ts: threadTs || undefined });
       } catch (e) { this.log.warn('[slack] app.client.chat.postMessage failed: ' + e.message); }
     };
 
@@ -808,10 +816,11 @@ class SlackGateway {
       content,
       channelId,
       channelName: ch.name || channelId,
-      userId: 'system',
+      sessionKey: taskEntry?.sessionKey || null,
+      userId: taskEntry?.userId || 'system',
       userName: 'System',
-      isDm: false,
-      threadTs: null,
+      isDm: taskEntry?.isDm === true,
+      threadTs,
       eventTs: `task-${taskId}`,
       trigger: 'task_complete',
       client: app?.client || null,
@@ -833,10 +842,15 @@ class SlackGateway {
     }
 
     const app = this.app;
+    const isDm = !!ch.isDm;
+    const userId = ch.userId || 'system';
+    const policy = resolveSourcePolicy(this.config, 'slack', channelId);
+    const threadTs = ch.threadTs || null;
+    const sessionKey = this._sessionKey(channelId, isDm, userId, threadTs, policy);
     const fakeSay = async (text) => {
       if (!app) return;
       try {
-        await app.client.chat.postMessage({ channel: channelId, text: typeof text === 'string' ? text : text.text });
+        await app.client.chat.postMessage({ channel: channelId, text: typeof text === 'string' ? text : text.text, thread_ts: threadTs || undefined });
       } catch (e) { this.log.warn('[slack] app.client.chat.postMessage failed: ' + e.message); }
     };
 
@@ -846,10 +860,11 @@ class SlackGateway {
       content: prompt,
       channelId,
       channelName: ch.name || channelId,
-      userId: 'system',
+      sessionKey,
+      userId,
       userName: 'System',
-      isDm: false,
-      threadTs: null,
+      isDm,
+      threadTs,
       eventTs: `proactive-${Date.now()}`,
       trigger: 'proactive',
       client: app?.client || null,

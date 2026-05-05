@@ -358,6 +358,7 @@ class GraphMaintenanceCoordinator {
       content: prompt,
       channelId: sessionKey,
       channelName: 'general-kb-research',
+      sessionKey,
       userId: 'system',
       userName: 'General KB Researcher',
       trigger: 'worker',

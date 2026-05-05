@@ -244,10 +244,15 @@ class DiscordGateway {
     // Log every message to session history so the agent sees the full conversation
     const sessionKey = this._sessionKey(channelId, isDm, userId, policy);
     const labeledContent = isDm ? content : `[${userName}]: ${content}`;
+    const ch = this._getChannel(channelId);
+    ch.name = channelName;
+    ch.isDm = isDm;
+    ch.userId = userId;
+    ch.isThread = isThread;
+    ch.parentChannelName = parentChannelName;
 
     if (trigger && policy.respond) {
       // Triggered — queue for agent processing
-      this._getChannel(channelId).name = channelName;
       this._queue.enqueueTriggered(channelId, {
         content: labeledContent,
         sessionKey,
@@ -261,7 +266,6 @@ class DiscordGateway {
 
       // If nobody triggers the bot for a while after activity, give the
       // agent a chance to chime in if it has something relevant to say.
-      this._getChannel(channelId).name = channelName;
       this._queue.scheduleLull(channelId, () => {
         this._maybeLullResponse(channelId, channelName, isDm, userId, userName, guildName, message, isThread, parentChannelName, sessionKey);
       });
@@ -374,6 +378,11 @@ class DiscordGateway {
         isDm: last.isDm,
         isThread: last.isThread || false,
         parentChannelName: last.parentChannelName || null,
+        platformMeta: {
+          isThread: last.isThread || false,
+          parentChannelName: last.parentChannelName || null,
+          messageId: last.message?.id || null,
+        },
         trigger,
         messageId: last.message?.id || null,
         images: imageAttachments,
@@ -518,12 +527,13 @@ class DiscordGateway {
       content,
       channelId,
       channelName,
-      userId: 'system',
+      sessionKey: taskEntry?.sessionKey || null,
+      userId: taskEntry?.userId || 'system',
       userName: 'System',
       guildName: null,
-      isDm: false,
-      isThread: false,
-      parentChannelName: null,
+      isDm: taskEntry?.isDm === true,
+      isThread: taskEntry?.platformMeta?.isThread === true,
+      parentChannelName: taskEntry?.platformMeta?.parentChannelName || null,
       message: fakeMessage,
       trigger: 'task_complete',
     });
@@ -605,6 +615,10 @@ class DiscordGateway {
     const prompt = `[proactive thought: ${context}${topic ? ` (topic: ${topic})` : ''}]`;
 
     const channelName = ch.name || channelId;
+    const isDm = !!ch.isDm;
+    const userId = ch.userId || 'system';
+    const policy = resolveSourcePolicy(this.config, 'discord', channelId);
+    const sessionKey = this._sessionKey(channelId, isDm, userId, policy);
 
     const fakeMessage = {
       channelId,
@@ -623,12 +637,13 @@ class DiscordGateway {
       content: prompt,
       channelId,
       channelName,
-      userId: 'system',
+      sessionKey,
+      userId,
       userName: 'System',
       guildName: null,
-      isDm: false,
-      isThread: false,
-      parentChannelName: null,
+      isDm,
+      isThread: !!ch.isThread,
+      parentChannelName: ch.parentChannelName || null,
       message: fakeMessage,
       trigger: 'proactive',
     });
@@ -645,7 +660,7 @@ class DiscordGateway {
     const results = [];
     for (const [channelId, ch] of this._queue.entries()) {
       const name = ch.name || channelId;
-      results.push({ id: channelId, name });
+      results.push({ id: channelId, name, isDm: !!ch.isDm, userId: ch.userId || null, isThread: !!ch.isThread });
     }
 
     if (results.length === 0 && this.client?.channels?.cache) {

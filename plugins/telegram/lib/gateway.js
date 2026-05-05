@@ -46,6 +46,18 @@ class TelegramGateway {
     return this._voicePipeline.enabled ? this._voicePipeline : null;
   }
 
+  _sessionKey(chatId, isDm, userId, threadId = null, policy = null) {
+    const targetId = threadId ? `${chatId}:topic:${threadId}` : chatId;
+    const sessionTargetId = (threadId && this.channelConfig.sessionMode !== 'chat') ? targetId : chatId;
+    return this.agent.sessions.constructor.buildKey({
+      platform: 'telegram',
+      channelId: sessionTargetId,
+      isDm,
+      userId,
+      private: !!policy?.private,
+    });
+  }
+
   async connect() {
     this.channelConfig = this.config.channels?.telegram || {};
     this.token = this.channelConfig.botToken || this.config.telegramBotToken;
@@ -140,14 +152,7 @@ class TelegramGateway {
     const channelName = message.chat.title || message.chat.username || (isDm ? 'telegram-dm' : `telegram:${chatId}`);
     const policy = resolveSourcePolicy(this.config, 'telegram', chatId);
     const targetId = threadId ? `${chatId}:topic:${threadId}` : chatId;
-    const sessionTargetId = (threadId && this.channelConfig.sessionMode !== 'chat') ? targetId : chatId;
-    const sessionKey = this.agent.sessions.constructor.buildKey({
-      platform: 'telegram',
-      channelId: sessionTargetId,
-      isDm,
-      userId,
-      private: !!policy.private,
-    });
+    const sessionKey = this._sessionKey(chatId, isDm, userId, threadId, policy);
 
     const cmd = content.trim().toLowerCase();
     if (cmd === '/new' || cmd === '/reset') {
@@ -431,6 +436,7 @@ class TelegramGateway {
     const isDm = !String(target.chatId).startsWith('-');
     const userId = isDm ? String(target.chatId) : 'cron';
     const channelName = isDm ? 'telegram-dm' : `telegram:${target.chatId}`;
+    const policy = resolveSourcePolicy(this.config, 'telegram', String(target.chatId));
     const prompt = `[proactive thought: ${context}${topic ? ` (topic: ${topic})` : ''}]`;
 
     setImmediate(async () => {
@@ -441,12 +447,7 @@ class TelegramGateway {
           messageContent: prompt,
           channelId: targetId,
           channelName,
-          sessionKey: this.agent.sessions.constructor.buildKey({
-            platform: 'telegram',
-            channelId: targetId,
-            isDm,
-            userId,
-          }),
+          sessionKey: this._sessionKey(target.chatId, isDm, userId, target.threadId, policy),
           userId,
           userName: 'Cron',
           guildName: 'Telegram',
@@ -521,13 +522,7 @@ class TelegramGateway {
           messageContent: content,
           channelId: targetId,
           channelName,
-          sessionKey: taskEntry?.sessionKey || this.agent.sessions.constructor.buildKey({
-            platform: 'telegram',
-            channelId: targetId,
-            isDm,
-            userId,
-            private: !!policy.private,
-          }),
+          sessionKey: taskEntry?.sessionKey || this._sessionKey(target.chatId, isDm, userId, target.threadId, policy),
           userId,
           userName: taskEntry?.originalUserName || 'System',
           guildName: 'Telegram',
@@ -788,11 +783,13 @@ class TelegramGateway {
     this.log.info(`[telegram] Voice note from ${userName} (${audioBuffer.length} bytes, ${voiceObj.duration}s)`);
 
     const targetId = threadId ? `${chatId}:topic:${threadId}` : chatId;
+    const sessionKey = this._sessionKey(chatId, isDm, userId, threadId, policy);
 
     // Run the full voice pipeline: STT → agent → TTS
     const result = await pipeline.process(audioBuffer, mimeType, this.agent, {
       channelId: targetId,
       channelName,
+      sessionKey,
       userId,
       userName,
       guildName: 'Telegram',
