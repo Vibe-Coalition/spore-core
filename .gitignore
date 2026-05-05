@@ -25,8 +25,9 @@ animas/cleanup-graph.sh
 !animas/.gitkeep
 
 # Per-spore instances (runtime data, secrets, DBs)
-spores/*/
+spores/*
 !spores/.template/
+!spores/.template/**
 spores/.auth-config.json
 spores/.spore-users.json
 spores/.vault-key
