@@ -1,0 +1,1172 @@
+[
+  {
+    "id": "342c3702-22d5-80d8-81e2-c0e92ebffff6",
+    "title": "[External] Virtual Try-On (VTO)",
+    "url": "342c370222d580d881e2c0e92ebffff6",
+    "type": "page"
+  },
+  {
+    "id": "286c3702-22d5-80b8-a9bd-e188fde6f7d3",
+    "title": "[Klein] Training",
+    "url": "286c370222d580b8a9bde188fde6f7d3",
+    "type": "page"
+  },
+  {
+    "id": "26cc3702-22d5-8016-88aa-d3f676a3262e",
+    "title": "[Marketing Agencies] Our Partnership Strategy",
+    "url": "26cc370222d5801688aad3f676a3262e",
+    "type": "page"
+  },
+  {
+    "id": "321c3702-22d5-819d-8cfc-d10f572da3f5",
+    "title": "[not-a-shop] Shop Compute Needs",
+    "url": "321c370222d5819d8cfcd10f572da3f5",
+    "type": "page"
+  },
+  {
+    "id": "32ec3702-22d5-80cd-a806-c600a8e064ad",
+    "title": "[Product Shop] Standard User Interface for Video Models",
+    "url": "32ec370222d580cda806c600a8e064ad",
+    "type": "page"
+  },
+  {
+    "id": "336c3702-22d5-80c6-af9d-e408d1adeb0a",
+    "title": "[WIP] BFL Data Strategy 2026",
+    "url": "336c370222d580c6af9de408d1adeb0a",
+    "type": "page"
+  },
+  {
+    "id": "9919a16b-3939-4394-be50-b43fa564cbc2",
+    "title": "💡 Use Cases",
+    "url": "9919a16b39394394be50b43fa564cbc2",
+    "type": "database"
+  },
+  {
+    "id": "329c3702-22d5-8136-b517-c9c5eb4941bf",
+    "title": "📊 Finance Projects",
+    "url": "329c370222d58136b517c9c5eb4941bf",
+    "type": "page"
+  },
+  {
+    "id": "9937a3e3-1079-4769-ab0a-d7b17531961e",
+    "title": "🗳️ Model Selection Vote",
+    "url": "9937a3e310794769ab0ad7b17531961e",
+    "type": "database"
+  },
+  {
+    "id": "21bc3702-22d5-805c-89bb-d9c743740a13",
+    "title": "2025-Q2 Backend Engineer",
+    "url": "21bc370222d5805c89bbd9c743740a13",
+    "type": "page"
+  },
+  {
+    "id": "2ccc3702-22d5-802a-a87e-d5e5b2c21abb",
+    "title": "2026 Data Planning",
+    "url": "2ccc370222d5802aa87ed5e5b2c21abb",
+    "type": "page"
+  },
+  {
+    "id": "286c3702-22d5-80db-9138-eab17e0e1c29",
+    "title": "2026 Marketing Initiatives DB",
+    "url": "286c370222d580db9138eab17e0e1c29",
+    "type": "page"
+  },
+  {
+    "id": "2b5c3702-22d5-8092-9d6c-c8052da09ca5",
+    "title": "2026 Planning",
+    "url": "2b5c370222d580929d6cc8052da09ca5",
+    "type": "page"
+  },
+  {
+    "id": "26dc3702-22d5-8006-b734-ff07a00f5d17",
+    "title": "Account & Partner Notes",
+    "url": "26dc370222d58006b734ff07a00f5d17",
+    "type": "page"
+  },
+  {
+    "id": "27bc3702-22d5-80a1-b5e3-de9a80603653",
+    "title": "Account & Partner Notes ",
+    "url": "27bc370222d580a1b5e3de9a80603653",
+    "type": "database"
+  },
+  {
+    "id": "26dc3702-22d5-8006-b922-e7aef2642f15",
+    "title": "Adobe",
+    "url": "26dc370222d58006b922e7aef2642f15",
+    "type": "page"
+  },
+  {
+    "id": "27ac3702-22d5-80c6-b018-eaa04ea2b29c",
+    "title": "Adobe Creative Cloud product analysis",
+    "url": "27ac370222d580c6b018eaa04ea2b29c",
+    "type": "page"
+  },
+  {
+    "id": "2bcc3702-22d5-805d-869b-e207d7bbd022",
+    "title": "Adobe Pro Proposal",
+    "url": "2bcc370222d5805d869be207d7bbd022",
+    "type": "page"
+  },
+  {
+    "id": "33cc3702-22d5-804e-8c13-cff90b54d958",
+    "title": "AI Powered Design Workflows",
+    "url": "33cc370222d5804e8c13cff90b54d958",
+    "type": "page"
+  },
+  {
+    "id": "2b4c3702-22d5-8085-b88a-df9d67fc9756",
+    "title": "AI Solutions Onboarding",
+    "url": "2b4c370222d58085b88adf9d67fc9756",
+    "type": "page"
+  },
+  {
+    "id": "27dc3702-22d5-8013-a4f4-f91150b2e240",
+    "title": "Amazon",
+    "url": "27dc370222d58013a4f4f91150b2e240",
+    "type": "page"
+  },
+  {
+    "id": "16fc3702-22d5-801e-ade4-cb0ceee1caa8",
+    "title": "An Introduction to Generative Models via the BFL API, our Playground and forestlabs.black",
+    "url": "16fc370222d5801eade4cb0ceee1caa8",
+    "type": "page"
+  },
+  {
+    "id": "26fc3702-22d5-80be-b7a0-db2115860fc5",
+    "title": "API Customers with special data handling",
+    "url": "26fc370222d580beb7a0db2115860fc5",
+    "type": "page"
+  },
+  {
+    "id": "2fec3702-22d5-804c-95a8-e8fef4796f87",
+    "title": "API/Compute Infra Roadmap",
+    "url": "2fec370222d5804c95a8e8fef4796f87",
+    "type": "page"
+  },
+  {
+    "id": "329c3702-22d5-80e6-b3f1-c1729fc33519",
+    "title": "AWS debug",
+    "url": "329c370222d580e6b3f1c1729fc33519",
+    "type": "page"
+  },
+  {
+    "id": "176c3702-22d5-803c-934a-dcd0a808503d",
+    "title": "Backend",
+    "url": "176c370222d5803c934adcd0a808503d",
+    "type": "database"
+  },
+  {
+    "id": "17cc3702-22d5-803b-af51-c8acc31ba788",
+    "title": "Backend Sync",
+    "url": "17cc370222d5803baf51c8acc31ba788",
+    "type": "database"
+  },
+  {
+    "id": "335c3702-22d5-8065-b8e9-c59c47491763",
+    "title": "Backend Sync 01-04-2026",
+    "url": "335c370222d58065b8e9c59c47491763",
+    "type": "page"
+  },
+  {
+    "id": "33cc3702-22d5-80ed-8599-eab64d933a97",
+    "title": "Backend Sync 08-04-2026",
+    "url": "33cc370222d580ed8599eab64d933a97",
+    "type": "page"
+  },
+  {
+    "id": "344c3702-22d5-8087-8c27-e736532bd14e",
+    "title": "Backend Sync 16-04-2026 ",
+    "url": "344c370222d580878c27e736532bd14e",
+    "type": "page"
+  },
+  {
+    "id": "e04c3702-22d5-82fa-b162-811138da8ed1",
+    "title": "Backend Sync 18-03-2026",
+    "url": "e04c370222d582fab162811138da8ed1",
+    "type": "page"
+  },
+  {
+    "id": "32dc3702-22d5-80c5-8338-e6529fac2173",
+    "title": "Backend Sync 25-03-2026",
+    "url": "32dc370222d580c58338e6529fac2173",
+    "type": "page"
+  },
+  {
+    "id": "11ec3702-22d5-8020-ad93-e98fe0cc4607",
+    "title": "BFL Home",
+    "url": "11ec370222d58020ad93e98fe0cc4607",
+    "type": "database"
+  },
+  {
+    "id": "31dc3702-22d5-81d5-9a0b-eccfbec79002",
+    "title": "BFL Marketing Plan 2026 [condensed] ",
+    "url": "31dc370222d581d59a0beccfbec79002",
+    "type": "page"
+  },
+  {
+    "id": "33dc3702-22d5-8035-bb35-e4c79b5ad481",
+    "title": "BFL MCP Feedback",
+    "url": "33dc370222d58035bb35e4c79b5ad481",
+    "type": "page"
+  },
+  {
+    "id": "27ec3702-22d5-802e-acd7-d29555096d46",
+    "title": "BFL Narrative ",
+    "url": "27ec370222d5802eacd7d29555096d46",
+    "type": "page"
+  },
+  {
+    "id": "2c3c3702-22d5-8037-b54f-d3eda2b939d9",
+    "title": "BFL Operating Model",
+    "url": "2c3c370222d58037b54fd3eda2b939d9",
+    "type": "page"
+  },
+  {
+    "id": "25cc3702-22d5-80fb-809f-f914b63fa22a",
+    "title": "Bi-annual reviews ",
+    "url": "25cc370222d580fb809ff914b63fa22a",
+    "type": "page"
+  },
+  {
+    "id": "32ec3702-22d5-8080-a662-eed3ef76a16c",
+    "title": "Booking Meeting Rooms",
+    "url": "32ec370222d58080a662eed3ef76a16c",
+    "type": "page"
+  },
+  {
+    "id": "29ac3702-22d5-8099-8764-c08bea880e33",
+    "title": "Brand Guide",
+    "url": "29ac370222d580998764c08bea880e33",
+    "type": "page"
+  },
+  {
+    "id": "29dc3702-22d5-8094-9e78-f41d9e754b74",
+    "title": "Brand Voice Guide [for Claude]",
+    "url": "29dc370222d580949e78f41d9e754b74",
+    "type": "page"
+  },
+  {
+    "id": "27ec3702-22d5-805d-9ff3-c92da8a2ac98",
+    "title": "Cloudflare",
+    "url": "27ec370222d5805d9ff3c92da8a2ac98",
+    "type": "page"
+  },
+  {
+    "id": "32fc3702-22d5-8080-97d5-ef38f990116c",
+    "title": "Coding — Interview Guide (Data Infra)",
+    "url": "32fc370222d5808097d5ef38f990116c",
+    "type": "page"
+  },
+  {
+    "id": "26ec3702-22d5-80f8-843f-d8fcfa132522",
+    "title": "Coffee Chat",
+    "url": "26ec370222d580f8843fd8fcfa132522",
+    "type": "page"
+  },
+  {
+    "id": "2bcc3702-22d5-80c0-a01b-c684dfc661d5",
+    "title": "Collecting FLUX Use Cases Questionnaire",
+    "url": "2bcc370222d580c0a01bc684dfc661d5",
+    "type": "page"
+  },
+  {
+    "id": "231c3702-22d5-8051-95be-fb0313b331e5",
+    "title": "Commercial onboarding plan - WIP",
+    "url": "231c370222d5805195befb0313b331e5",
+    "type": "page"
+  },
+  {
+    "id": "2c4c3702-22d5-80c2-b8c6-c9ed65eb1f1a",
+    "title": "Compute and Data tracker",
+    "url": "2c4c370222d580c2b8c6c9ed65eb1f1a",
+    "type": "page"
+  },
+  {
+    "id": "2c6c3702-22d5-80c6-838e-db4205c52b45",
+    "title": "Compute Plan (deprecated)",
+    "url": "2c6c370222d580c6838edb4205c52b45",
+    "type": "page"
+  },
+  {
+    "id": "26fc3702-22d5-80bc-8347-f5b583705905",
+    "title": "Compute Requirements",
+    "url": "26fc370222d580bc8347f5b583705905",
+    "type": "page"
+  },
+  {
+    "id": "1d6c3702-22d5-80e5-89cf-d589d7290a40",
+    "title": "Corporate Info",
+    "url": "1d6c370222d580e589cfd589d7290a40",
+    "type": "page"
+  },
+  {
+    "id": "336c3702-22d5-8111-b333-e22072741bff",
+    "title": "Creative network / Beta partners",
+    "url": "336c370222d58111b333e22072741bff",
+    "type": "page"
+  },
+  {
+    "id": "317c3702-22d5-8181-9b87-f70eb21df4cf",
+    "title": "Customer Use Case Interview — Question Bank & Template",
+    "url": "317c370222d581819b87f70eb21df4cf",
+    "type": "page"
+  },
+  {
+    "id": "286c3702-22d5-80a3-befc-f1563d0e39ec",
+    "title": "Data",
+    "url": "286c370222d580a3befcf1563d0e39ec",
+    "type": "page"
+  },
+  {
+    "id": "329c3702-22d5-80f4-9005-c7180f5795b6",
+    "title": "Data Needs",
+    "url": "329c370222d580f49005c7180f5795b6",
+    "type": "database"
+  },
+  {
+    "id": "334c3702-22d5-8081-a83a-e15a1642e275",
+    "title": "Desexualization LoRA for Flux 2 Flex",
+    "url": "334c370222d58081a83ae15a1642e275",
+    "type": "page"
+  },
+  {
+    "id": "33cc3702-22d5-80d0-a0cb-cb7f3b0979f3",
+    "title": "Design Doc (if build from scratch)",
+    "url": "33cc370222d580d0a0cbcb7f3b0979f3",
+    "type": "page"
+  },
+  {
+    "id": "334c3702-22d5-80c3-92dc-dae6df887249",
+    "title": "Design Doc: Schwarzwaeldchen",
+    "url": "334c370222d580c392dcdae6df887249",
+    "type": "page"
+  },
+  {
+    "id": "2aec3702-22d5-8045-9480-ca6b0f3cd600",
+    "title": "Design Docs",
+    "url": "2aec370222d580459480ca6b0f3cd600",
+    "type": "page"
+  },
+  {
+    "id": "2bec3702-22d5-80a5-9208-eb2b1fd21a5e",
+    "title": "Design Lead",
+    "url": "2bec370222d580a59208eb2b1fd21a5e",
+    "type": "page"
+  },
+  {
+    "id": "30dc3702-22d5-8073-97a4-dd2c0cb5c343",
+    "title": "Design Lead",
+    "url": "30dc370222d5807397a4dd2c0cb5c343",
+    "type": "page"
+  },
+  {
+    "id": "2e1c3702-22d5-8069-a95d-ca87c30720f4",
+    "title": "Email for Revenue Share/Usage Reporting ",
+    "url": "2e1c370222d58069a95dca87c30720f4",
+    "type": "page"
+  },
+  {
+    "id": "21bc3702-22d5-80ae-8cb9-d4f9ca406bb2",
+    "title": "Engineering",
+    "url": "21bc370222d580ae8cb9d4f9ca406bb2",
+    "type": "page"
+  },
+  {
+    "id": "263c3702-22d5-80ab-861e-fc5b0ae49f50",
+    "title": "Engineering Dev Setup",
+    "url": "263c370222d580ab861efc5b0ae49f50",
+    "type": "page"
+  },
+  {
+    "id": "29bc3702-22d5-80c3-bd0f-ddf80d1aaeb9",
+    "title": "FDE - Hiring process",
+    "url": "29bc370222d580c3bd0fddf80d1aaeb9",
+    "type": "page"
+  },
+  {
+    "id": "33cc3702-22d5-807e-9d7f-ed8e43bf58fd",
+    "title": "FDE Workflow Productisation",
+    "url": "33cc370222d5807e9d7fed8e43bf58fd",
+    "type": "page"
+  },
+  {
+    "id": "250c3702-22d5-8076-86bd-ee75a7d70b56",
+    "title": "Feedback and review cycles at BFL - Primer for Leads",
+    "url": "250c370222d5807686bdee75a7d70b56",
+    "type": "page"
+  },
+  {
+    "id": "1ddc3702-22d5-804b-bd37-cdca4e66989e",
+    "title": "Finance",
+    "url": "1ddc370222d5804bbd37cdca4e66989e",
+    "type": "page"
+  },
+  {
+    "id": "1a1c3702-22d5-800c-8537-c94031188c3c",
+    "title": "Finance case study",
+    "url": "1a1c370222d5800c8537c94031188c3c",
+    "type": "page"
+  },
+  {
+    "id": "193c3702-22d5-80d4-8f11-d1fa374d8407",
+    "title": "Finance Operations",
+    "url": "193c370222d580d48f11d1fa374d8407",
+    "type": "page"
+  },
+  {
+    "id": "21bc3702-22d5-80b3-a07b-e4d00718332a",
+    "title": "Flux 2 ",
+    "url": "21bc370222d580b3a07be4d00718332a",
+    "type": "page"
+  },
+  {
+    "id": "2fcc3702-22d5-8002-a611-d027e849fbd8",
+    "title": "FLUX 2.1",
+    "url": "2fcc370222d58002a611d027e849fbd8",
+    "type": "page"
+  },
+  {
+    "id": "334c3702-22d5-8085-8330-c6bdc698e225",
+    "title": "FLUX 2.1 meeting",
+    "url": "334c370222d580858330c6bdc698e225",
+    "type": "page"
+  },
+  {
+    "id": "33ac3702-22d5-8006-842a-dc3f7e38f039",
+    "title": "FLUX 3 - Nailing Hero Use Cases",
+    "url": "33ac370222d58006842adc3f7e38f039",
+    "type": "page"
+  },
+  {
+    "id": "320c3702-22d5-8020-9169-c0ee9c936186",
+    "title": "FLUX Transparent Generation Into Public API",
+    "url": "320c370222d580209169c0ee9c936186",
+    "type": "page"
+  },
+  {
+    "id": "2e9c3702-22d5-805a-be1f-f9955ca9a94e",
+    "title": "FLUX.2 [klein] - Private API integration",
+    "url": "2e9c370222d5805abe1ff9955ca9a94e",
+    "type": "page"
+  },
+  {
+    "id": "2c6c3702-22d5-8069-b787-c98cce2fd640",
+    "title": "FLUX.2 [max] - Top-Tier-Quality Image Generation and Editing",
+    "url": "2c6c370222d58069b787c98cce2fd640",
+    "type": "page"
+  },
+  {
+    "id": "2fcc3702-22d5-80df-82d2-f83862248d97",
+    "title": "FLUX.2 Ultra",
+    "url": "2fcc370222d580df82d2f83862248d97",
+    "type": "page"
+  },
+  {
+    "id": "286c3702-22d5-8001-9979-c0e9e023a5d7",
+    "title": "FLUX.3",
+    "url": "286c370222d580019979c0e9e023a5d7",
+    "type": "page"
+  },
+  {
+    "id": "ead7b974-67bf-450e-889a-bcf3af7dc4d0",
+    "title": "FLUX.3 Co-Development Partner Candidates",
+    "url": "ead7b97467bf450e889abcf3af7dc4d0",
+    "type": "database"
+  },
+  {
+    "id": "336c3702-22d5-801f-8eb9-d59c038c05ed",
+    "title": "FLUX.3 Launch",
+    "url": "336c370222d5801f8eb9d59c038c05ed",
+    "type": "page"
+  },
+  {
+    "id": "314c3702-22d5-8041-9c94-f6900de02437",
+    "title": "FLUX.3 Midtraining Goals",
+    "url": "314c370222d580419c94f6900de02437",
+    "type": "page"
+  },
+  {
+    "id": "30fc3702-22d5-80ba-8b75-fa15a9536678",
+    "title": "FLUX.3 tracker",
+    "url": "30fc370222d580ba8b75fa15a9536678",
+    "type": "database"
+  },
+  {
+    "id": "314c3702-22d5-8096-b4c2-f6a0b31e4488",
+    "title": "Flux3 Video Data ",
+    "url": "314c370222d58096b4c2f6a0b31e4488",
+    "type": "page"
+  },
+  {
+    "id": "fe9db704-44c7-4503-9151-b879bb1db603",
+    "title": "Global Expense & Travel Policy",
+    "url": "fe9db70444c745039151b879bb1db603",
+    "type": "page"
+  },
+  {
+    "id": "252c3702-22d5-80bd-a20d-da595dabb585",
+    "title": "Growth/Marketing ",
+    "url": "252c370222d580bda20dda595dabb585",
+    "type": "page"
+  },
+  {
+    "id": "26bc3702-22d5-8060-9794-fac1fa01d8d9",
+    "title": "GTM",
+    "url": "26bc370222d580609794fac1fa01d8d9",
+    "type": "database"
+  },
+  {
+    "id": "311c3702-22d5-81fa-b2cb-cc446435cdad",
+    "title": "GTM Team Meeting Notes",
+    "url": "311c370222d581fab2cbcc446435cdad",
+    "type": "page"
+  },
+  {
+    "id": "313c3702-22d5-80e9-aefb-eb22524aa031",
+    "title": "Head of Revenue",
+    "url": "313c370222d580e9aefbeb22524aa031",
+    "type": "page"
+  },
+  {
+    "id": "2cdc3702-22d5-8022-9bdf-d868771462bc",
+    "title": "Hiring",
+    "url": "2cdc370222d580229bdfd868771462bc",
+    "type": "page"
+  },
+  {
+    "id": "28fc3702-22d5-80f8-8cb1-c691cf2f5dc4",
+    "title": "Hiring Tracker",
+    "url": "28fc370222d580f88cb1c691cf2f5dc4",
+    "type": "database"
+  },
+  {
+    "id": "30bc3702-22d5-80c6-887a-fc9eec5bec26",
+    "title": "How marketing is prioritizing",
+    "url": "30bc370222d580c6887afc9eec5bec26",
+    "type": "page"
+  },
+  {
+    "id": "2eac3702-22d5-800b-adf3-ebc8d71876bc",
+    "title": "How to create review Deployments in Hoellental?",
+    "url": "2eac370222d5800badf3ebc8d71876bc",
+    "type": "page"
+  },
+  {
+    "id": "1fcc3702-22d5-80b7-85ca-e3c4ff5c92ea",
+    "title": "HR Ops ",
+    "url": "1fcc370222d580b785cae3c4ff5c92ea",
+    "type": "page"
+  },
+  {
+    "id": "31ac3702-22d5-8012-b9c9-dffe108a1271",
+    "title": "Hybrid Models (rough draft)",
+    "url": "31ac370222d58012b9c9dffe108a1271",
+    "type": "page"
+  },
+  {
+    "id": "270c3702-22d5-8017-93bc-ebe2f3c38f27",
+    "title": "ICP Mapping",
+    "url": "270c370222d5801793bcebe2f3c38f27",
+    "type": "page"
+  },
+  {
+    "id": "1bbc3702-22d5-8099-8543-f5bfa5286d85",
+    "title": "Image-Datasets",
+    "url": "1bbc370222d580998543f5bfa5286d85",
+    "type": "database"
+  },
+  {
+    "id": "29bc3702-22d5-809e-9377-c476d48b9269",
+    "title": "Inference optimisation - Hiring process",
+    "url": "29bc370222d5809e9377c476d48b9269",
+    "type": "page"
+  },
+  {
+    "id": "2c4c3702-22d5-8029-9532-ffc5042a1ec2",
+    "title": "Infra engineer",
+    "url": "2c4c370222d580299532ffc5042a1ec2",
+    "type": "page"
+  },
+  {
+    "id": "314c3702-22d5-80e7-860e-e0585512c4d7",
+    "title": "Infra Engineer JD",
+    "url": "314c370222d580e7860ee0585512c4d7",
+    "type": "page"
+  },
+  {
+    "id": "28dc3702-22d5-802f-bdff-f121daa44e19",
+    "title": "Infra Runbook",
+    "url": "28dc370222d5802fbdfff121daa44e19",
+    "type": "page"
+  },
+  {
+    "id": "1c7c3702-22d5-80dd-9167-d7307f100abd",
+    "title": "Infra/Security & compliance",
+    "url": "1c7c370222d580dd9167d7307f100abd",
+    "type": "page"
+  },
+  {
+    "id": "30ac3702-22d5-80a5-8e20-e697f506c23d",
+    "title": "Infrastructure Engineer — Hiring Guide\n",
+    "url": "30ac370222d580a58e20e697f506c23d",
+    "type": "page"
+  },
+  {
+    "id": "29bc3702-22d5-8071-b241-c96e2644846c",
+    "title": "Interview prep docs for candidates",
+    "url": "29bc370222d58071b241c96e2644846c",
+    "type": "page"
+  },
+  {
+    "id": "1a1c3702-22d5-807d-b2ed-f4324f3c7723",
+    "title": "JDs, SCORECARDS AND PROCESSES",
+    "url": "1a1c370222d5807db2edf4324f3c7723",
+    "type": "page"
+  },
+  {
+    "id": "30cc3702-22d5-801b-95cf-fbb6b335210c",
+    "title": "Klein Training Datasets",
+    "url": "30cc370222d5801b95cffbb6b335210c",
+    "type": "page"
+  },
+  {
+    "id": "2b1c3702-22d5-8046-a04d-ea40a9b77d26",
+    "title": "Large-scale Video Data Project",
+    "url": "2b1c370222d58046a04dea40a9b77d26",
+    "type": "page"
+  },
+  {
+    "id": "2edc3702-22d5-80c9-b71c-cf97990818ce",
+    "title": "Launch doc template",
+    "url": "2edc370222d580c9b71ccf97990818ce",
+    "type": "page"
+  },
+  {
+    "id": "343c3702-22d5-8159-8bf2-e0c9ec6fdea4",
+    "title": "Lead Scoring Guide",
+    "url": "343c370222d581598bf2e0c9ec6fdea4",
+    "type": "page"
+  },
+  {
+    "id": "256c3702-22d5-80af-aa86-d74eb7c65c15",
+    "title": "Legal / commercial / backend ops",
+    "url": "256c370222d580afaa86d74eb7c65c15",
+    "type": "page"
+  },
+  {
+    "id": "282c3702-22d5-80cc-b57a-efb2c89a7b1f",
+    "title": "Legal & Paperwork",
+    "url": "282c370222d580ccb57aefb2c89a7b1f",
+    "type": "page"
+  },
+  {
+    "id": "181c3702-22d5-8060-bbfc-fcd025443e22",
+    "title": "Legal Directory",
+    "url": "181c370222d58060bbfcfcd025443e22",
+    "type": "page"
+  },
+  {
+    "id": "2c7c3702-22d5-80a5-9133-c8e324b67b20",
+    "title": "Legal Wiki",
+    "url": "2c7c370222d580a59133c8e324b67b20",
+    "type": "page"
+  },
+  {
+    "id": "225c3702-22d5-8010-b536-d89c051ae37a",
+    "title": "Links to dashboards, tools & pages for commercial folks",
+    "url": "225c370222d58010b536d89c051ae37a",
+    "type": "page"
+  },
+  {
+    "id": "32cc3702-22d5-8060-8c23-f516af040ad5",
+    "title": "List Datasets",
+    "url": "32cc370222d580608c23f516af040ad5",
+    "type": "database"
+  },
+  {
+    "id": "313c3702-22d5-80ca-96d8-e30fdcbfacad",
+    "title": "LoRA inference in API",
+    "url": "313c370222d580ca96d8e30fdcbfacad",
+    "type": "page"
+  },
+  {
+    "id": "329c3702-22d5-8024-a4fc-dda2cc12979d",
+    "title": "Lost Datasets - Who did what?",
+    "url": "329c370222d58024a4fcdda2cc12979d",
+    "type": "page"
+  },
+  {
+    "id": "32ec3702-22d5-8083-a9c2-d452545dea73",
+    "title": "Marketing <> LS Content Calendar",
+    "url": "32ec370222d58083a9c2d452545dea73",
+    "type": "database"
+  },
+  {
+    "id": "300c3702-22d5-8086-9bf1-c4f2043244de",
+    "title": "Marketing Strategy H1 2026",
+    "url": "300c370222d580869bf1c4f2043244de",
+    "type": "page"
+  },
+  {
+    "id": "32fc3702-22d5-8095-b3fa-c9f27f6142ee",
+    "title": "Martin Scorsese launch date decision doc",
+    "url": "32fc370222d58095b3fac9f27f6142ee",
+    "type": "page"
+  },
+  {
+    "id": "26dc3702-22d5-8055-a917-d7d406b6951c",
+    "title": "Microsoft",
+    "url": "26dc370222d58055a917d7d406b6951c",
+    "type": "page"
+  },
+  {
+    "id": "326c3702-22d5-8012-87df-c12e8e0b85eb",
+    "title": "Model versioning strategy ",
+    "url": "326c370222d5801287dfc12e8e0b85eb",
+    "type": "page"
+  },
+  {
+    "id": "31ec3702-22d5-8091-8a5c-dc52df565035",
+    "title": "Neural Glue: Joint Multi-Modal Generation via Lightweight Latent Bridging",
+    "url": "31ec370222d580918a5cdc52df565035",
+    "type": "page"
+  },
+  {
+    "id": "275c3702-22d5-80ee-9fcc-dc96ebf1160b",
+    "title": "New Joiner Onboarding Checklist",
+    "url": "275c370222d580ee9fccdc96ebf1160b",
+    "type": "page"
+  },
+  {
+    "id": "30ac3702-22d5-8025-a8db-c33d86b06828",
+    "title": "Office Visit: Calendar Process",
+    "url": "30ac370222d58025a8dbc33d86b06828",
+    "type": "page"
+  },
+  {
+    "id": "30cc3702-22d5-8072-a2c0-c04416fab0bc",
+    "title": "Onboarding",
+    "url": "30cc370222d58072a2c0c04416fab0bc",
+    "type": "page"
+  },
+  {
+    "id": "2c5c3702-22d5-80a3-8eb2-cb2204c737ca",
+    "title": "Onboarding",
+    "url": "2c5c370222d580a38eb2cb2204c737ca",
+    "type": "page"
+  },
+  {
+    "id": "288c3702-22d5-808a-afb8-e3795924e00c",
+    "title": "Onboarding",
+    "url": "288c370222d5808aafb8e3795924e00c",
+    "type": "page"
+  },
+  {
+    "id": "225c3702-22d5-80f0-a1a4-f84df8910ac3",
+    "title": "Onboarding Cheat Sheet",
+    "url": "225c370222d580f0a1a4f84df8910ac3",
+    "type": "page"
+  },
+  {
+    "id": "123c3702-22d5-80fc-a8c9-eb9a533ee205",
+    "title": "Onboarding Guide - Welcome to the Forest ",
+    "url": "123c370222d580fca8c9eb9a533ee205",
+    "type": "page"
+  },
+  {
+    "id": "275c3702-22d5-8093-a784-dba95f65a8d0",
+    "title": "Onboarding Tasks ",
+    "url": "275c370222d58093a784dba95f65a8d0",
+    "type": "database"
+  },
+  {
+    "id": "275c3702-22d5-80f7-b0f0-f06316b98e21",
+    "title": "Onboarding Template ",
+    "url": "275c370222d580f7b0f0f06316b98e21",
+    "type": "page"
+  },
+  {
+    "id": "1a4c3702-22d5-80e5-8e9e-e47d18260bd3",
+    "title": "Org Chart",
+    "url": "1a4c370222d580e58e9ee47d18260bd3",
+    "type": "page"
+  },
+  {
+    "id": "27ec3702-22d5-806e-9fb6-f4cc95055d8e",
+    "title": "Our Offices",
+    "url": "27ec370222d5806e9fb6f4cc95055d8e",
+    "type": "page"
+  },
+  {
+    "id": "304c3702-22d5-802f-b407-da495ea60413",
+    "title": "Our Open Weights Opportunity",
+    "url": "304c370222d5802fb407da495ea60413",
+    "type": "page"
+  },
+  {
+    "id": "2bec3702-22d5-806e-acfc-d17b7a0e137f",
+    "title": "Outbound Sales (Dec 2025)",
+    "url": "2bec370222d5806eacfcd17b7a0e137f",
+    "type": "page"
+  },
+  {
+    "id": "2f5c3702-22d5-8020-a47c-e260b9d35f33",
+    "title": "Pipeline GTM review ",
+    "url": "2f5c370222d58020a47ce260b9d35f33",
+    "type": "page"
+  },
+  {
+    "id": "1acc3702-22d5-8069-83b0-c86569f11707",
+    "title": "Product",
+    "url": "1acc370222d5806983b0c86569f11707",
+    "type": "database"
+  },
+  {
+    "id": "32ec3702-22d5-80b5-9b66-d055163a2d18",
+    "title": "Product <> FDE Weekly",
+    "url": "32ec370222d580b59b66d055163a2d18",
+    "type": "database"
+  },
+  {
+    "id": "27ec3702-22d5-80cb-98d2-d86d4e8b7995",
+    "title": "Product Eng Weekly",
+    "url": "27ec370222d580cb98d2d86d4e8b7995",
+    "type": "database"
+  },
+  {
+    "id": "334c3702-22d5-80f3-af53-ec86a80a608e",
+    "title": "Product Eng Weekly Sync - April 14",
+    "url": "334c370222d580f3af53ec86a80a608e",
+    "type": "page"
+  },
+  {
+    "id": "343c3702-22d5-8066-a8cb-e3e46f048c47",
+    "title": "Product Photography",
+    "url": "343c370222d58066a8cbe3e46f048c47",
+    "type": "page"
+  },
+  {
+    "id": "334c3702-22d5-811e-a092-d9c7dc7aa631",
+    "title": "Product Photography @ Amazon",
+    "url": "334c370222d5811ea092d9c7dc7aa631",
+    "type": "page"
+  },
+  {
+    "id": "2a3c3702-22d5-8097-a7b2-c4c07dfde711",
+    "title": "Product Weekly",
+    "url": "2a3c370222d58097a7b2c4c07dfde711",
+    "type": "database"
+  },
+  {
+    "id": "32ec3702-22d5-8095-8b1e-f86f2b50a828",
+    "title": "Production Compute Needs",
+    "url": "32ec370222d580958b1ef86f2b50a828",
+    "type": "page"
+  },
+  {
+    "id": "4d0765c9-a7f1-49a7-aacc-4124cf502eef",
+    "title": "Project Tracker",
+    "url": "4d0765c9a7f149a7aacc4124cf502eef",
+    "type": "database"
+  },
+  {
+    "id": "25bc3702-22d5-8078-a774-c2b3a405e44c",
+    "title": "Prompt Moderation (Safety)",
+    "url": "25bc370222d58078a774c2b3a405e44c",
+    "type": "page"
+  },
+  {
+    "id": "2a3c3702-22d5-8073-8f14-e2abd7d4f5cc",
+    "title": "Proposal: Recruitment ops hire",
+    "url": "2a3c370222d580738f14e2abd7d4f5cc",
+    "type": "page"
+  },
+  {
+    "id": "313c3702-22d5-81ac-89de-eab10b6a5fd9",
+    "title": "Reasoning Flux",
+    "url": "313c370222d581ac89deeab10b6a5fd9",
+    "type": "page"
+  },
+  {
+    "id": "13ec3702-22d5-801f-82e4-e449987adf58",
+    "title": "Research",
+    "url": "13ec370222d5801f82e4e449987adf58",
+    "type": "page"
+  },
+  {
+    "id": "29bc3702-22d5-8067-a5a3-f1db1b08658e",
+    "title": "Research - Hiring process",
+    "url": "29bc370222d58067a5a3f1db1b08658e",
+    "type": "page"
+  },
+  {
+    "id": "329c3702-22d5-80e8-b37f-c360fc2b191f",
+    "title": "Research Data Requests",
+    "url": "329c370222d580e8b37fc360fc2b191f",
+    "type": "page"
+  },
+  {
+    "id": "2b1c3702-22d5-8024-ac2b-c4efba011a5c",
+    "title": "Research Infra",
+    "url": "2b1c370222d58024ac2bc4efba011a5c",
+    "type": "page"
+  },
+  {
+    "id": "334c3702-22d5-80d3-8cff-da9474ba375d",
+    "title": "Research Shops",
+    "url": "334c370222d580d38cffda9474ba375d",
+    "type": "page"
+  },
+  {
+    "id": "32dc3702-22d5-8077-91fb-f7fb59336923",
+    "title": "Researcher Landing Page",
+    "url": "32dc370222d5807791fbf7fb59336923",
+    "type": "page"
+  },
+  {
+    "id": "292c3702-22d5-80a5-9527-cb5b4b01ca14",
+    "title": "Rev Ops",
+    "url": "292c370222d580a59527cb5b4b01ca14",
+    "type": "page"
+  },
+  {
+    "id": "2bdc3702-22d5-80e7-b1f6-c80ab1447a2e",
+    "title": "Rev Ops",
+    "url": "2bdc370222d580e7b1f6c80ab1447a2e",
+    "type": "page"
+  },
+  {
+    "id": "329c3702-22d5-8104-99c4-c374d6b7f6e2",
+    "title": "Rev Ops Onboarding & Alignment",
+    "url": "329c370222d5810499c4c374d6b7f6e2",
+    "type": "page"
+  },
+  {
+    "id": "15dc3702-22d5-80b3-9ad8-c587d2fc9747",
+    "title": "Review Approach and Guide ",
+    "url": "15dc370222d580b39ad8c587d2fc9747",
+    "type": "page"
+  },
+  {
+    "id": "285c3702-22d5-8022-bd06-fc738013f47f",
+    "title": "Review cycle",
+    "url": "285c370222d58022bd06fc738013f47f",
+    "type": "page"
+  },
+  {
+    "id": "30cc3702-22d5-8009-8383-e7a554f9cbe7",
+    "title": "Review cycles ",
+    "url": "30cc370222d580098383e7a554f9cbe7",
+    "type": "page"
+  },
+  {
+    "id": "316c3702-22d5-80ab-8761-e9ca36fb3f83",
+    "title": "RL Post-Training",
+    "url": "316c370222d580ab8761e9ca36fb3f83",
+    "type": "page"
+  },
+  {
+    "id": "32fc3702-22d5-8129-b551-c778b6e620a3",
+    "title": "RLHF Plan",
+    "url": "32fc370222d58129b551c778b6e620a3",
+    "type": "page"
+  },
+  {
+    "id": "327c3702-22d5-80bb-9741-ed8d504f84cd",
+    "title": "Robin Snap meeting brief - April 19, 2026",
+    "url": "327c370222d580bb9741ed8d504f84cd",
+    "type": "page"
+  },
+  {
+    "id": "28bc3702-22d5-800f-ba8a-e9db15b9c499",
+    "title": "Safety/Harm Policy Definitions and Severity Thresholds",
+    "url": "28bc370222d5800fba8ae9db15b9c499",
+    "type": "page"
+  },
+  {
+    "id": "309c3702-22d5-815b-afbb-e7d0159b95f5",
+    "title": "Sales × Partnerships — Definition & Account Ownership Framework",
+    "url": "309c370222d5815bafbbe7d0159b95f5",
+    "type": "page"
+  },
+  {
+    "id": "30bc3702-22d5-8179-9fe2-cd8b15815783",
+    "title": "Sales × Partnerships — Definition & Transition Plan (v2)",
+    "url": "30bc370222d581799fe2cd8b15815783",
+    "type": "page"
+  },
+  {
+    "id": "30ac3702-22d5-815f-8325-d59a36f8c96a",
+    "title": "Sales Hiring Plan — Q1/Q2 2026",
+    "url": "30ac370222d5815f8325d59a36f8c96a",
+    "type": "page"
+  },
+  {
+    "id": "1eac3702-22d5-800d-8a73-f01b9c21e7b3",
+    "title": "Sales process",
+    "url": "1eac370222d5800d8a73f01b9c21e7b3",
+    "type": "page"
+  },
+  {
+    "id": "26dc3702-22d5-802d-be6c-cbb897d09028",
+    "title": "Sales Process & Commercial Models",
+    "url": "26dc370222d5802dbe6ccbb897d09028",
+    "type": "page"
+  },
+  {
+    "id": "309c3702-22d5-816b-a3c8-c6a8fcb14564",
+    "title": "Sales Weekly",
+    "url": "309c370222d5816ba3c8c6a8fcb14564",
+    "type": "page"
+  },
+  {
+    "id": "1f1c3702-22d5-80cc-bfb2-d2b821187466",
+    "title": "Senior Partnerships Manager",
+    "url": "1f1c370222d580ccbfb2d2b821187466",
+    "type": "page"
+  },
+  {
+    "id": "30ac3702-22d5-8056-ab0e-e30f81b0f290",
+    "title": "SF Office Visit: Calendar Process ",
+    "url": "30ac370222d58056ab0ee30f81b0f290",
+    "type": "page"
+  },
+  {
+    "id": "297c3702-22d5-8098-8a4d-f6fe659ae0f1",
+    "title": "SLAs with Cloud Providers",
+    "url": "297c370222d580988a4df6fe659ae0f1",
+    "type": "page"
+  },
+  {
+    "id": "31fc3702-22d5-81af-ad05-ded11d24be2e",
+    "title": "Speaker Guardrails & Prep Guide",
+    "url": "31fc370222d581afad05ded11d24be2e",
+    "type": "page"
+  },
+  {
+    "id": "305c3702-22d5-809a-a2f5-da3320ce2da9",
+    "title": "Spring 26 Review Timeline",
+    "url": "305c370222d5809aa2f5da3320ce2da9",
+    "type": "page"
+  },
+  {
+    "id": "329c3702-22d5-81e4-8507-d7ec97cb736e",
+    "title": "Strategic Finance / FP&A Hiring",
+    "url": "329c370222d581e48507d7ec97cb736e",
+    "type": "page"
+  },
+  {
+    "id": "2f0c3702-22d5-8073-9b20-f5f9d6646d0a",
+    "title": "Strategic finance/FP&A",
+    "url": "2f0c370222d580739b20f5f9d6646d0a",
+    "type": "page"
+  },
+  {
+    "id": "287c3702-22d5-8086-8d37-ff04b46d1485",
+    "title": "Strategic Planning & Operating model",
+    "url": "287c370222d580868d37ff04b46d1485",
+    "type": "page"
+  },
+  {
+    "id": "31ec3702-22d5-8050-98e3-df8c6ab10df4",
+    "title": "STRUCTURED HIRING",
+    "url": "31ec370222d5805098e3df8c6ab10df4",
+    "type": "page"
+  },
+  {
+    "id": "2fec3702-22d5-80b3-95cf-d8623cf16594",
+    "title": "System Design",
+    "url": "2fec370222d580b395cfd8623cf16594",
+    "type": "page"
+  },
+  {
+    "id": "173c3702-22d5-8056-98cd-e38aa235e4ae",
+    "title": "Team Directory  and New data source",
+    "url": "173c370222d5805698cde38aa235e4ae",
+    "type": "database"
+  },
+  {
+    "id": "17bc3702-22d5-80d7-b8a9-f0471ff142b5",
+    "title": "Team Directory & Org chart",
+    "url": "17bc370222d580d7b8a9f0471ff142b5",
+    "type": "page"
+  },
+  {
+    "id": "9bc20819-33c9-469a-a63c-d99723341c40",
+    "title": "Team specific tools and access",
+    "url": "9bc2081933c9469aa63cd99723341c40",
+    "type": "page"
+  },
+  {
+    "id": "48f58e73-ff9f-45f7-a300-f05c909b7e38",
+    "title": "Team Tasks",
+    "url": "48f58e73ff9f45f7a300f05c909b7e38",
+    "type": "database"
+  },
+  {
+    "id": "32fc3702-22d5-8050-8235-e658c1acd49f",
+    "title": "Technical Project Discussion — Interview Guide (Infrastructure)",
+    "url": "32fc370222d580508235e658c1acd49f",
+    "type": "page"
+  },
+  {
+    "id": "30dc3702-22d5-8028-a35a-ef7abba02c8e",
+    "title": "Template- Hiring Kick-off document",
+    "url": "30dc370222d58028a35aef7abba02c8e",
+    "type": "page"
+  },
+  {
+    "id": "129c3702-22d5-80a2-9fb8-f3aa6ec29b22",
+    "title": "Time Off Philosophy",
+    "url": "129c370222d580a29fb8f3aa6ec29b22",
+    "type": "page"
+  },
+  {
+    "id": "2c4c3702-22d5-808a-874f-e03f389c398e",
+    "title": "Training Knowledge Base",
+    "url": "2c4c370222d5808a874fe03f389c398e",
+    "type": "page"
+  },
+  {
+    "id": "342c3702-22d5-80c7-83fc-e18e6b069c7a",
+    "title": "Unstructured Thoughts from Cross-Functional Day",
+    "url": "342c370222d580c783fce18e6b069c7a",
+    "type": "page"
+  },
+  {
+    "id": "317c3702-22d5-805f-bac6-fb1734902f80",
+    "title": "VAE/SSL Pre-training",
+    "url": "317c370222d5805fbac6fb1734902f80",
+    "type": "page"
+  },
+  {
+    "id": "344c3702-22d5-81bb-a979-ed7cafa1348c",
+    "title": "Values Interview Guide",
+    "url": "344c370222d581bba979ed7cafa1348c",
+    "type": "page"
+  },
+  {
+    "id": "316c3702-22d5-8026-b751-cc1c2468c2ca",
+    "title": "Video  Data Tracker",
+    "url": "316c370222d58026b751cc1c2468c2ca",
+    "type": "database"
+  },
+  {
+    "id": "222c3702-22d5-81ef-a590-de42810d2827",
+    "title": "Video Datasets",
+    "url": "222c370222d581efa590de42810d2827",
+    "type": "database"
+  },
+  {
+    "id": "33dc3702-22d5-8066-b082-cd55981dae1a",
+    "title": "Vision for Training Cluster Team: Making 10,000+ GPU Training Reliable, Fast, and Effortless",
+    "url": "33dc370222d58066b082cd55981dae1a",
+    "type": "page"
+  },
+  {
+    "id": "25bc3702-22d5-80bb-8bb6-f88f582b9b31",
+    "title": "Which Flux Model for which use case?",
+    "url": "25bc370222d580bb8bb6f88f582b9b31",
+    "type": "page"
+  }
+]

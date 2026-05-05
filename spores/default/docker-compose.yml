@@ -1,0 +1,42 @@
+services:
+  anima:
+    image: anima:latest
+    container_name: anima
+    restart: unless-stopped
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    env_file:
+      - .env
+
+    environment:
+      - GRAPH_DB_PATH=/data/graph.db
+      - SESSION_DB_PATH=/data/sessions.db
+      - ANIMA_WORKSPACE_PATH=/workspace
+      - ANIMA_LOG_LEVEL=${ANIMA_LOG_LEVEL:-info}
+      - ANIMA_HEALTH_PORT=${ANIMA_HEALTH_PORT:-18790}
+
+    volumes:
+      - ./data:/data
+      - ./.env:/data/.env
+      - ./.env:/app/.env
+      - ./anima.json:/app/anima.json
+      - ./workspace:/workspace
+
+    ports:
+      - "0.0.0.0:18790:18790"
+      - "0.0.0.0:18800:18800"
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    stop_grace_period: 10s

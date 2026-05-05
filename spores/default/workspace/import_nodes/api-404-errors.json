@@ -1,0 +1,15 @@
+{
+  "nodeId": "api-404-errors",
+  "label": "API 404 Errors",
+  "type": "technical_issue",
+  "description": "Encountered HTTP 404 errors when accessing HA API endpoints",
+  "aspects": [
+    {
+      "name": "api_status",
+      "importance": 8,
+      "attributes": [
+        "/api/config/area_registry not found"
+      ]
+    }
+  ]
+}

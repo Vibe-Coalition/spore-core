@@ -1,0 +1,15 @@
+{
+  "nodeId": "entity-10",
+  "label": "Bennett 2026 Party",
+  "type": "organization",
+  "description": "Israeli political party led by Naftali Bennett",
+  "aspects": [
+    {
+      "name": "political_action",
+      "importance": 8,
+      "attributes": [
+        "Sent cease-and-desist to Likud over defamation of candidate Keren Turner"
+      ]
+    }
+  ]
+}

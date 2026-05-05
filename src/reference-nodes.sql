@@ -20,11 +20,11 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'For scripts needing a raw key: env_manage action:"vault_get" key="X" — writes to a temp file that auto-deletes in 5 minutes', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'web_serve action:"backend" auto-injects ALL vault keys as env vars in your backend process — no vault_get needed for backends', 9, 'seed', 'seed');
 
+-- Core keys only. Plugin-installed providers (FLUX, ElevenLabs,
+-- Deepgram, etc.) append their own *_API_KEY rows to this aspect via
+-- their plugin install.sql so the catalog grows with the install set.
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-api-keys', 'available_keys', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'BFL_API_KEY — FLUX image generation (api.bfl.ai)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'XI_API_KEY — ElevenLabs TTS and sound effects', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'DEEPGRAM_API_KEY — Deepgram speech-to-text', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'OPENAI_API_KEY — OpenAI', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'SEARXNG_URL — Primary web search (self-hosted metasearch). Set to base URL, e.g. http://searxng:8080', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'BRAVE_API_KEY — Fallback web search. Used when SearXNG is unset or returns nothing.', 6, 'seed', 'seed');
@@ -86,7 +86,7 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'Always include the current year in queries about recent topics ("expo router 2026", "React Native 0.76 breaking changes"). Without a year, search engines often return stale results from prior years that look authoritative but aren''t.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use site: filters for known trustworthy domains: `site:docs.expo.dev`, `site:github.com`, `site:stackoverflow.com`. Filters out SEO-spam blog posts that copy real docs out-of-date.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'For error messages, search the EXACT error string in quotes — `"TypeError: Cannot read properties of undefined" expo router`. The quotes pin the search to actual occurrences.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Authenticated APIs: `web_fetch({url: "...", credential: "BFL_API_KEY", method: "POST", body: {...}})` injects the vault key server-side without exposing it. The credential parameter is the vault key NAME (see ref-api-keys for the catalog).', 8, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'Authenticated APIs: `web_fetch({url: "...", credential: "BRAVE_API_KEY", method: "POST", body: {...}})` injects the vault key server-side without exposing it. The credential parameter is the vault key NAME (see ref-api-keys for the catalog).', 8, 'seed', 'seed');
 
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-search', 'output_format', 7, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
@@ -99,56 +99,10 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'Primary backend: SearXNG self-hosted metasearch (set via SEARXNG_URL env). Fallback: Brave Search API (BRAVE_API_KEY). If web_search returns nothing useful, that''s usually a real "no good results" signal — not a backend problem. Log lines tell which backend served the query.', 7, 'seed', 'seed');
 
 
--- ═══════════════════════════════════════════════════════════════
--- NODE: FLUX Image Generation
--- ═══════════════════════════════════════════════════════════════
-
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-bfl-api', 'FLUX Image Generation', 'reference',
-  'FLUX API for image generation and editing (api.bfl.ai).', 9, 'seed');
-
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-bfl-api', 'essentials', 10, 'seed');
-INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Domain: api.bfl.ai — NOT api.bfl.ml (that hangs)', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Auth header: X-Key: YOUR_BFL_API_KEY (not Bearer)', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Default model: flux-2-pro-preview (use for everything unless told otherwise)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Other models: flux-kontext-pro, flux-kontext-max, flux-pro-1.1, flux-2-pro', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Submit: POST https://api.bfl.ai/v1/{model} with JSON body', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Response has polling_url — ALWAYS use it (may point to regional node like api.us2.bfl.ai)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Poll the polling_url with X-Key header until status="Ready"', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Image URL at result.sample — NOT result.url or result.image_url', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Signed URLs expire ~1hr — download or display promptly', 8, 'seed', 'seed');
-
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-bfl-api', 'parameters', 8, 'seed');
-INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Required: prompt (string)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Optional: width, height, output_format ("jpeg" or "png"), seed', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Image editing: add input_image param (URL, raw base64, or data URI all work)', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Edit prompts: describe what CHANGED, not the full scene ("She is now holding X" not "A woman standing...")', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Typical generation: 5-15 seconds. Poll every 3s, timeout at 60s.', 7, 'seed', 'seed');
-
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-bfl-api', 'display_rule', 9, 'seed');
-INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Always show generated images inline in chat: ![description](result.sample URL)', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Do NOT just report a file path — the user wants to SEE the image', 9, 'seed', 'seed');
-
-
--- ═══════════════════════════════════════════════════════════════
--- NODE: ElevenLabs TTS & Sound Effects
--- ═══════════════════════════════════════════════════════════════
-
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-elevenlabs-api', 'ElevenLabs TTS & Sound Effects', 'reference',
-  'ElevenLabs API for text-to-speech and sound effect generation.', 7, 'seed');
-
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-elevenlabs-api', 'essentials', 9, 'seed');
-INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Auth header: xi-api-key: YOUR_XI_API_KEY', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'TTS: POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id} — returns audio bytes directly (no polling)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'SFX: POST https://api.elevenlabs.io/v1/sound-generation with {text, duration_seconds} — returns audio directly', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Best model: eleven_multilingual_v2', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'List voices: GET https://api.elevenlabs.io/v1/voices', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Voice settings: stability (0.3-0.5 for narration), similarity_boost (0.7-0.9), style (0.5-0.7), use_speaker_boost: true', 7, 'seed', 'seed');
+-- ref-bfl-api (FLUX) lives in plugins/flux/sql/install.sql.
+-- ref-elevenlabs-api lives in plugins/elevenlabs/sql/install.sql.
+-- Both are seeded only when the corresponding plugin is installed,
+-- and swept on uninstall via extracted_with tag.
 
 
 -- ═══════════════════════════════════════════════════════════════
@@ -192,30 +146,18 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'Use standard markdown: ![description](https://image-url.com/image.png)', 10, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'The control panel renders markdown images inline — marked + DOMPurify with img allowed', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Bare URLs are also auto-detected and rendered, but markdown syntax is cleaner', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Images in /workspace/web/ are served at your public URL — reference them by URL not file path', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'In web chat, reply with `/workspace/<file>` paths for images, video, audio, or files; the UI rewrites them to the current origin and renders/links them inline.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Prefer `/workspace/<filename>` in web chat. Use absolute URLs only when sharing a link meant to be opened outside the current chat.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'User uploads are saved under `/workspace/uploads`; analyze_media can auto-detect image/audio/video when the user means an uploaded attachment.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '/workspace/web/ is for standalone hosted files/pages; outside web chat, use the public URL for those files.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Do NOT use message_send with filePath for web UI — that only works on Discord/Telegram', 8, 'seed', 'seed');
 
 
--- ═══════════════════════════════════════════════════════════════
--- NODE: Browser Automation
--- ═══════════════════════════════════════════════════════════════
-
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-browser-automation', 'Browser Automation (Zendriver Default)', 'reference',
-  'How to use the built-in browser tool. Zendriver is the default backend; Playwright remains available as an explicit opt-in backend.', 7, 'seed');
-
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-browser-automation', 'setup', 8, 'seed');
-INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Zendriver is installed in the image and is the default backend for the built-in browser tool.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Launch the browser tool without specifying a backend to get Zendriver by default.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Playwright/Chromium remain available as an explicit opt-in backend when needed.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'The browser tool persists across calls, streams the preview panel, and browser.screenshot now returns a real filePath you can send back to the user.', 8, 'seed', 'seed');
-
-INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-browser-automation', 'usage', 8, 'seed');
-INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Use browser action="launch" url="..." to start a persistent Zendriver session.', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Actions: launch, navigate, click, type, scroll, screenshot, evaluate, close, status.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Set backend="playwright" only when you explicitly need the Playwright path.', 8, 'seed', 'seed');
+-- ref-browser-automation now lives in the browser-core plugin
+-- (plugins/browser-core/sql/install.sql); it's installed on plugin
+-- load and removed on uninstall. Backend-specific aspects (zendriver
+-- stealth, playwright debugging) come from the corresponding backend
+-- plugins. So uninstalling a backend cleanly drops just its docs.
 
 
 -- ═══════════════════════════════════════════════════════════════
@@ -278,7 +220,9 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'NEVER use /etc/init.d/cron start, service cron start, or /usr/sbin/cron directly. Those bypass the wrapper and can fail with pidfile permission errors.', 10, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Crontabs persist under /workspace/.crontabs and are restored automatically when the container boots.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Cron starts automatically on boot unless SPORE_ENABLE_CRON=false.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Use absolute paths and redirect output in cron entries because jobs run non-interactively.', 8, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'Use absolute paths and redirect output in cron entries because jobs run non-interactively.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Cron and background jobs can notify the operator by POSTing JSON to http://127.0.0.1:${SPORE_WEB_PORT:-18803}/api/proactive/trigger with {"source":"cron","message":"..."}. Loopback calls are accepted without auth; external callers must pass normal web auth.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use proactive trigger mode:"agent" only when the notification should start an agent turn. Omit mode, or set mode:"notify", for cheap operator notifications.', 7, 'seed', 'seed');
 
 INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-cron-runtime', 'startup_tasks', 8, 'seed');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
@@ -320,6 +264,52 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
   ((SELECT MAX(id) FROM aspects), 'Keep responses concise — long explanations burn output tokens for you and input tokens next turn', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use delegate_task for heavy work — runs in separate context', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Cache operational knowledge in your graph — don''t rely on re-fetching the same info every session', 9, 'seed', 'seed');
+
+-- ═══════════════════════════════════════════════════════════════
+-- NODE: Code Viewer Panel
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-code-viewer', 'Code Viewer Panel', 'reference',
+  'A built-in floating panel in the web control panel that automatically displays code when read_file, write_file, or edit_file are used.', 9, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-code-viewer', 'how_it_works', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'The code viewer is automatic: read_file shows syntax-highlighted content, write_file shows new content, and edit_file shows a unified diff.', 10, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'The user controls code-viewer mode in the web panel: Auto, On request, or Off. The agent should use file tools normally and not build a custom code viewer.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'The panel supports tabs, is draggable/resizable, remembers position, and silently skips binary files or files over 50KB.', 7, 'seed', 'seed');
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- NODE: Tool Workflows
+-- ═══════════════════════════════════════════════════════════════
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('ref-tool-workflows', 'Tool Workflows', 'reference',
+  'Operational patterns for choosing tools, asking the operator, waiting, tracking work, and avoiding waste.', 9, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tool-workflows', 'tool_selection', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Use edit_file for modifications to existing files; use write_file only for brand-new files. Rewriting whole files wastes time and risks losing unrelated edits.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use exec only for scripts, package commands, git, or shell commands with no dedicated tool. Prefer native read_file/grep/glob/web_fetch/graph tools when they exist.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use startup_tasks for long-running processes that must survive restarts; use cron for scheduled triggers. Do not use raw nohup for persistent services.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use graph_update for deliberate corrections or explicit knowledge persistence. Learning already happens automatically, so do not duplicate every ordinary conversation turn.', 8, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tool-workflows', 'efficiency', 8, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'Plan → execute → verify. Pick the most likely path, try it, and fall back only on failure.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Sequential by default. Parallelize only when results are truly independent and all branches are needed; do not shotgun tool calls.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Check before installing: `which <cmd>` or `pip list | grep <pkg>`. Never install the same package multiple ways in parallel.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Each tool call costs tokens and time. Fewer targeted calls beat many speculative calls.', 7, 'seed', 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tool-workflows', 'asking_waiting_tracking', 9, 'seed');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
+  ((SELECT MAX(id) FROM aspects), 'ask_user is available in web and Spore Code CLI sessions when the operator must pick between 2-5 concrete options; it opens a picker/modal and returns the selected label. In non-modal channels, ask the question in normal reply text instead.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'CLI QUESTIONS protocol is for plan-mode prose interviews, not the ask_user tool: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use schedule_wakeup for known waits such as deploy settling, job start delays, or rate-limit cooldowns. It releases the session and re-enters later instead of sleeping in a loop.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Never poll delegated tasks with task_status + sleep. If delegated tasks are running and no other work remains, end the turn; task_complete re-enters automatically.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use task_create/task_progress/task_list for jobs spanning more than one back-and-forth. Tasks survive restarts and blockers hide dependent tasks until resolved.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use log_watch for continuous local log visibility while a process runs; use tight regex because every match becomes an interjection.', 7, 'seed', 'seed');
 
 
 -- ═══════════════════════════════════════════════════════════════
@@ -372,12 +362,8 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) 
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
   SELECT 'spore', 'ref-api-keys', 'documents', 0.8, 'seed'
   WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-api-keys');
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'spore', 'ref-bfl-api', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-bfl-api');
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-  SELECT 'spore', 'ref-elevenlabs-api', 'documents', 0.8, 'seed'
-  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-elevenlabs-api');
+-- spore -> ref-bfl-api edge lives in plugins/flux/sql/install.sql.
+-- spore -> ref-elevenlabs-api edge lives in plugins/elevenlabs/sql/install.sql.
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
   SELECT 'spore', 'ref-web-architecture', 'documents', 0.8, 'seed'
   WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-web-architecture');
@@ -396,6 +382,12 @@ INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
   SELECT 'spore', 'ref-token-efficiency', 'documents', 0.8, 'seed'
   WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-token-efficiency');
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'spore', 'ref-code-viewer', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-code-viewer');
+INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'spore', 'ref-tool-workflows', 'documents', 0.8, 'seed'
+  WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-tool-workflows');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
   SELECT 'spore', 'ref-cron-runtime', 'documents', 0.8, 'seed'
   WHERE NOT EXISTS (SELECT 1 FROM edges WHERE source='spore' AND target='ref-cron-runtime');

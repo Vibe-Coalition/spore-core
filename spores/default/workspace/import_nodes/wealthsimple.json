@@ -1,0 +1,131 @@
+{
+  "nodeId": "wealthsimple",
+  "label": "Wealthsimple",
+  "type": "project",
+  "description": "Wealthsimple trading/banking",
+  "aspects": [
+    {
+      "name": "installation_details",
+      "importance": 8,
+      "attributes": [
+        "Installed curl_cffi dependency for Chrome TLS impersonation on 2026-04-12",
+        "Copied ws.py and spending.py to /workspace/skills/wealthsimple/scripts/ on 2026-04-12",
+        "Fixed hardcoded session file path to /workspace/skills/wealthsimple/scripts/ws_session.json on 2026-04-12"
+      ]
+    },
+    {
+      "name": "setup_instructions",
+      "importance": 9,
+      "attributes": [
+        "Requires login via python3 /workspace/skills/wealthsimple/scripts/ws.py login on 2026-04-12",
+        "Needs 6-digit OTP code submission after login on 2026-04-12"
+      ]
+    },
+    {
+      "name": "portfolio_overview",
+      "importance": 9,
+      "attributes": [
+        "Total Net Worth: $1,438,163.62 CAD as of 2026-04-12",
+        "Total value: $1,437,473 as of 2026-04-08",
+        "Total deposited: $1,427,287",
+        "Total gains: $10,186 (+0.7%)"
+      ]
+    },
+    {
+      "name": "transactions",
+      "importance": 7,
+      "attributes": [
+        "2026-02-20: Fractional order buy 2387.4667 x [sec-s-e7947deb977341ff9f0ddcf13703e9a6] @ 41.8854 CAD +$100,000.00",
+        "2026-02-20: Market order buy 2.7288 x [sec-s-220e8c65080c4...]"
+      ]
+    },
+    {
+      "name": "historical_performance",
+      "importance": 8,
+      "attributes": [
+        "2026-03-11: $1,438,834 (deposits: $1,435,386, gains: $3,448 / +0.2%)",
+        "2026-03-18: $1,430,966 (deposits: $1,431,343, gains: $-377 / -0.0%)"
+      ]
+    },
+    {
+      "name": "credit_card",
+      "importance": 7,
+      "attributes": [
+        "Outstanding balance: -$2,294.47 CAD"
+      ]
+    },
+    {
+      "name": "schedule_details",
+      "importance": 9,
+      "attributes": [
+        "Sends open report at 9:30 AM ET daily",
+        "Operates on weekdays only (no weekend reports)"
+      ]
+    },
+    {
+      "name": "delivery_method",
+      "importance": 8,
+      "attributes": [
+        "Delivers reports via Telegram",
+        "Recipient: User's DM with hyrule bot"
+      ]
+    },
+    {
+      "name": "content_includes",
+      "importance": 7,
+      "attributes": [
+        "Balances across all accounts (CAD + USD)",
+        "Day's gain/loss with color indicators",
+        "Top movers (winners & losers by %)",
+        "Cash available"
+      ]
+    },
+    {
+      "name": "system_status",
+      "importance": 7,
+      "attributes": [
+        "Running as PID 664",
+        "Checks every 30 seconds"
+      ]
+    },
+    {
+      "name": "test_report",
+      "importance": 7,
+      "attributes": [
+        "Test report sent to Telegram on 2026-04-12"
+      ]
+    },
+    {
+      "name": "status",
+      "importance": 8,
+      "attributes": [
+        "Already imported"
+      ]
+    },
+    {
+      "name": "description",
+      "importance": 7,
+      "attributes": [
+        "Wealthsimple trading/banking"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "yam",
+      "type": "manages"
+    },
+    {
+      "target": "tfsa",
+      "type": "manages"
+    },
+    {
+      "target": "rrsp",
+      "type": "manages"
+    },
+    {
+      "target": "telegram-bot",
+      "type": "delivers_to"
+    }
+  ]
+}

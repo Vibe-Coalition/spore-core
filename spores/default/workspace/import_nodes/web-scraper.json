@@ -1,0 +1,30 @@
+{
+  "nodeId": "web-scraper",
+  "label": "Web Scraper",
+  "type": "project",
+  "description": "Web scraping",
+  "aspects": [
+    {
+      "name": "technology",
+      "importance": 8,
+      "attributes": [
+        "Advanced scraping with zendriver",
+        "Undetectable Chrome CDP (Compatible with anti-scraping measures)"
+      ]
+    },
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Web scraping"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83d\udd27 Always useful"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "nodeId": "maya-bridge",
+  "label": "Maya Bridge",
+  "type": "project",
+  "description": "Remote control Autodesk Maya over TCP",
+  "aspects": [
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Remote control Autodesk Maya over TCP"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83c\udfa8 If you use Maya"
+      ]
+    }
+  ]
+}

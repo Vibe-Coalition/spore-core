@@ -1,0 +1,17 @@
+{
+  "nodeId": "chromium-browser",
+  "label": "Chromium",
+  "type": "software",
+  "description": "Web browser with JS rendering capabilities",
+  "aspects": [
+    {
+      "name": "installation_details",
+      "importance": 9,
+      "attributes": [
+        "Installed at /usr/bin/chromium",
+        "Version 147.0.7727.55",
+        "Built on Debian GNU/Linux 12 (bookworm)"
+      ]
+    }
+  ]
+}

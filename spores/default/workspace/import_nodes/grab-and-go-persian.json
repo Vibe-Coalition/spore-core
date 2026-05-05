@@ -1,0 +1,15 @@
+{
+  "nodeId": "grab-and-go-persian",
+  "label": "Grab and Go Persian",
+  "type": "place",
+  "description": "Persian restaurant where user ordered Kubideh Kebob twice",
+  "aspects": [
+    {
+      "name": "user_preference",
+      "importance": 9,
+      "attributes": [
+        "User ordered Kubideh Kebob w/ Barberry Rice twice"
+      ]
+    }
+  ]
+}

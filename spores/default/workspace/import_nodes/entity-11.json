@@ -1,0 +1,15 @@
+{
+  "nodeId": "entity-11",
+  "label": "Ichilov Hospital",
+  "type": "healthcare",
+  "description": "Hospital in Tel Aviv, Israel",
+  "aspects": [
+    {
+      "name": "medical_facility",
+      "importance": 7,
+      "attributes": [
+        "2 helicopters landed with injured from northern front"
+      ]
+    }
+  ]
+}

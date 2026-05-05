@@ -1,94 +1,61 @@
-# Production Docker Compose — hardened deployment
-# Usage: docker compose -f deploy/docker-compose.prod.yml up -d
+# Production Docker Compose — pull the official image from ghcr.io.
 #
-# Prerequisites:
-#   1. Build images: docker compose -f docker-compose.yml --profile build build
-#   2. Create .env.prod with your secrets (see .env.prod.example)
-#   3. Create Docker secrets: echo "your-key" | docker secret create anthropic_api_key -
-
-version: "3.8"
+# Usage:
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up -d
+#
+# Persistence: spore.json and .env are written by the first-run wizard
+# into /data, so the named volume below is the only state you need to
+# back up. No bind mount of /app/spore.json or /app/.env is required.
 
 networks:
-  anima-internal:
-    driver: bridge
-    internal: true
-  anima-web:
+  spore-web:
     driver: bridge
 
 services:
-  manager:
-    image: anima-manager:latest
-    container_name: anima-manager
+  spore:
+    image: "${SPORE_IMAGE:-ghcr.io/yumlevi/spore}:${SPORE_IMAGE_TAG:-latest}"
+    container_name: "${SPORE_AGENT_ID:-spore}"
     restart: unless-stopped
     networks:
-      - anima-internal
-      - anima-web
+      - spore-web
     ports:
-      - "127.0.0.1:18900:18900"
+      - "${SPORE_WEB_PORT:-18803}:${SPORE_WEB_PORT:-18803}"
+      - "127.0.0.1:${SPORE_HEALTH_PORT:-18790}:${SPORE_HEALTH_PORT:-18790}"
     environment:
-      MANAGER_PORT: "18900"
-      MANAGER_USER: "${MANAGER_USER:-admin}"
-      MANAGER_PASS: "${MANAGER_PASS}"
-      MANAGER_SERVICE_KEY: "${MANAGER_SERVICE_KEY}"
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 256M
-        reservations:
-          memory: 64M
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:18900/api/auth/check"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    read_only: true
-    tmpfs:
-      - /tmp
-
-  agent:
-    image: anima:latest
-    container_name: anima-agent
-    restart: unless-stopped
-    depends_on:
-      manager:
-        condition: service_healthy
-    networks:
-      - anima-internal
-      - anima-web
-    ports:
-      - "127.0.0.1:18790:18790"
-    environment:
-      AGENT_ID: "${AGENT_ID:-anima}"
-      ANIMA_DISPLAY_NAME: "${ANIMA_DISPLAY_NAME:-Anima}"
-      ANIMA_MODEL: "${ANIMA_MODEL:-claude-sonnet-4-6}"
-      ANIMA_LEARNER_MODEL: "${ANIMA_LEARNER_MODEL:-claude-haiku-4-5}"
-      ANIMA_HEALTH_PORT: "18790"
-      HEALTH_BIND_ADDR: "127.0.0.1"
+      AGENT_ID: "${SPORE_AGENT_ID:-spore}"
+      SPORE_DISPLAY_NAME: "${SPORE_DISPLAY_NAME:-}"
+      SPORE_WEB_PORT: "${SPORE_WEB_PORT:-18803}"
+      SPORE_HEALTH_PORT: "${SPORE_HEALTH_PORT:-18790}"
       GRAPH_DB_PATH: "/data/graph.db"
       SESSION_DB_PATH: "/data/sessions.db"
-      ANIMA_WORKSPACE_PATH: "/workspace"
-      MANAGER_URL: "http://anima-manager:18900"
-      MANAGER_SERVICE_KEY: "${MANAGER_SERVICE_KEY}"
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      SPORE_DATA_DIR: "/data"
+      SPORE_WORKSPACE_PATH: "/workspace"
+      # Optional manager / multi-spore mesh
+      MANAGER_URL: "${MANAGER_URL:-}"
+      MANAGER_SERVICE_KEY: "${MANAGER_SERVICE_KEY:-}"
+      # Optional headless-boot pre-seeds. Uncomment in .env.prod if you
+      # want to skip the wizard. Leaving these blank means the wizard
+      # collects them on first launch and persists into /data.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       DISCORD_TOKEN: "${DISCORD_TOKEN:-}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
-      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
-      ANIMA_DISCORD_ADMINS: "${ANIMA_DISCORD_ADMINS:-}"
-      ANIMA_PLUGINS_DIR: "/workspace/plugins"
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:-}"
+      SLACK_APP_TOKEN: "${SLACK_APP_TOKEN:-}"
     volumes:
-      - agent-data:/data
-      - agent-workspace:/workspace
+      - spore-data:/data
+      - spore-workspace:/workspace
     deploy:
       resources:
         limits:
           cpus: "2"
-          memory: 2G
+          memory: 4G
         reservations:
           memory: 512M
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:18790/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:${SPORE_HEALTH_PORT:-18790}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -97,7 +64,7 @@ services:
       - no-new-privileges:true
 
 volumes:
-  agent-data:
+  spore-data:
     driver: local
-  agent-workspace:
+  spore-workspace:
     driver: local

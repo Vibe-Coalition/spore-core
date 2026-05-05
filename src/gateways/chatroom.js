@@ -5,7 +5,7 @@
  * Implements Discord-style lull system for multi-agent/user chat:
  *   - Direct triggers (@mention) → immediate agent invocation
  *   - Passive messages → lull timer, then decide whether to respond
- *   - Anti-pile-on jitter → stagger responses from multiple animas
+ *   - Anti-pile-on jitter → stagger responses from multiple Spores
  *   - NO_REPLY gating → agent can opt out silently
  */
 

@@ -1,0 +1,15 @@
+{
+  "nodeId": "pairing_json_createdat",
+  "label": "Pairing JSON Created At",
+  "type": "timestamp",
+  "description": "Timestamp when the pairing.json file was created: 2026-04-12T08:49:18.574Z",
+  "aspects": [
+    {
+      "name": "creation_timestamp",
+      "importance": 8,
+      "attributes": [
+        "2026-04-12T08:49:18.574Z"
+      ]
+    }
+  ]
+}

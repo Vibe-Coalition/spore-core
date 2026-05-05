@@ -125,6 +125,8 @@ function initMobileGraphView() {
   const desktopVmBar = document.getElementById('view-mode-bar');
   if (modeRow && desktopVmBar) {
     desktopVmBar.querySelectorAll('button[data-vm]').forEach(b => modeRow.appendChild(b));
+    const codeBtn = desktopVmBar.querySelector('#cv-pending-badge');
+    if (codeBtn) modeRow.appendChild(codeBtn);
   }
 
   // d3 measured itself when #m-graph-view was display:none → its box

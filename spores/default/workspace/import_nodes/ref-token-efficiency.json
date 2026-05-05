@@ -1,0 +1,19 @@
+{
+  "nodeId": "ref-token-efficiency",
+  "label": "Token Efficiency",
+  "type": "reference",
+  "description": "Rules for keeping token usage low and being cost-effective.",
+  "aspects": [
+    {
+      "name": "rules",
+      "importance": 9,
+      "attributes": [
+        "Read a skill ONCE, cache the key facts in your graph, never re-fetch",
+        "Don't re-read files you just wrote",
+        "Keep responses concise \u2014 long explanations burn output tokens for you and input tokens next turn",
+        "Use delegate_task for heavy work \u2014 runs in separate context",
+        "Cache operational knowledge in your graph \u2014 don't rely on re-fetching the same info every session"
+      ]
+    }
+  ]
+}

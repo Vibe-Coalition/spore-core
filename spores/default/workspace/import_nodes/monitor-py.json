@@ -1,0 +1,28 @@
+{
+  "nodeId": "monitor-py",
+  "label": "Monitor Script",
+  "type": "script",
+  "description": "Python script for tracking seen listings and detecting new items",
+  "aspects": [
+    {
+      "name": "functionality",
+      "importance": 8,
+      "attributes": [
+        "Detects new listings with 'NO_NEW_LISTINGS' output",
+        "Stores first seen timestamps in 'seen.json'",
+        "Extracts photo URLs from marketplace data",
+        "Includes listing URLs in output"
+      ]
+    },
+    {
+      "name": "script_details",
+      "importance": 8,
+      "attributes": [
+        "Written in Python 3",
+        "Originally failed due to missing Telegram channel usernames",
+        "Successful version implemented after username lookup fix",
+        "Includes deduplication and reporting logic"
+      ]
+    }
+  ]
+}

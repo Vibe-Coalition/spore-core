@@ -1,0 +1,562 @@
+
+> cat-breeds@0.1.0 dev
+> next dev
+
+ ⚠ Warning: Next.js inferred your workspace root, but it may not be correct.
+ We detected multiple lockfiles and selected the directory of C:\Users\esfle\package-lock.json as the root directory.
+ To silence this warning, set `outputFileTracingRoot` in your Next.js config, or consider removing one of the lockfiles if it's not needed.
+   See https://nextjs.org/docs/app/api-reference/config/next-config-js/output#caveats for more information.
+ Detected additional lockfiles: 
+   * C:\Users\esfle\kimi_test\package-lock.json
+
+   ▲ Next.js 15.5.15
+   - Local:        http://localhost:3000
+   - Network:      http://100.102.90.97:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 1140ms
+ ○ Compiling / ...
+ ✓ Compiled / in 1484ms (2524 modules)
+ GET / 200 in 2035ms
+ ✓ Compiled in 601ms (1220 modules)
+ ⚠ Cross origin request detected from 100.102.90.97 to /_next/* resource. In a future major version of Next.js, you will need to explicitly configure "allowedDevOrigins" in next.config to allow this.
+Read more: https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins
+ ✓ Compiled in 145ms (1220 modules)
+ GET / 200 in 61ms
+ ✓ Compiled in 112ms (1220 modules)
+ GET / 200 in 55ms
+ ✓ Compiled in 103ms (1220 modules)
+ GET / 200 in 49ms
+ ✓ Compiled in 96ms (1220 modules)
+ ✓ Compiled in 111ms (1220 modules)
+ GET / 200 in 68ms
+ GET / 200 in 81ms
+ ✓ Compiled in 98ms (1220 modules)
+ GET / 200 in 82ms
+ ✓ Compiled in 98ms (1220 modules)
+ GET / 200 in 85ms
+ ✓ Compiled in 105ms (1220 modules)
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\server\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\server\\app-paths-manifest.json',
+  page: '/'
+}
+ ✓ Compiled /_error in 461ms (2870 modules)
+ ✓ Compiled in 108ms (1372 modules)
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ ✓ Compiled in 137ms (1372 modules)
+ ✓ Compiled in 149ms (1372 modules)
+ ✓ Compiled in 191ms (1372 modules)
+ ✓ Compiled in 279ms (2870 modules)
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\server\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\server\\app-paths-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 1725ms
+ GET / 500 in 283ms
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 763ms
+ GET / 500 in 258ms
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 691ms
+ GET / 500 in 249ms
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 690ms
+ GET / 500 in 246ms
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ ✓ Compiled in 401ms (2870 modules)
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 1106ms
+ GET / 500 in 276ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 725ms
+ GET / 500 in 251ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 635ms
+ GET / 500 in 250ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 636ms
+ GET / 500 in 249ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ✓ Compiled in 93ms (1372 modules)
+ ✓ Compiled in 90ms (1372 modules)
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ ✓ Compiled in 262ms (2870 modules)
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 845ms
+ GET / 500 in 251ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 662ms
+ GET / 500 in 266ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 623ms
+ GET / 500 in 247ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 626ms
+ GET / 500 in 251ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 628ms
+ GET / 500 in 251ms
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async L (C:\Users\esfle\kimi_test\.next\server\app\page.js:1:183918) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json',
+  page: '/'
+}
+ ⨯ Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'
+    at async (C:\Users\esfle\kimi_test\.next\server\pages\_error.js:8:14071) {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'C:\Users\esfle\kimi_test\.next\routes-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'C:\\Users\\esfle\\kimi_test\\.next\\routes-manifest.json'
+}
+ GET / 500 in 632ms
+ GET / 500 in 249ms

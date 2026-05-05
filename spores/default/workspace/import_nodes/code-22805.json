@@ -1,0 +1,16 @@
+{
+  "nodeId": "code-22805",
+  "label": "Code 22805",
+  "type": "product",
+  "description": "Numerical code sent via Telegram by the assistant",
+  "aspects": [
+    {
+      "name": "technical_details",
+      "importance": 8,
+      "attributes": [
+        "Generated code hash: 619ac17baef5ef607b",
+        "Associated with Telegram login process"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Navbar from '../components/Navbar.astro';
+import Footer from '../components/Footer.astro';
+import SectionHeading from '../components/SectionHeading.astro';
+---
+
+<BaseLayout title="About Sarah — Sarah Halevi">
+  <slot name="navbar">
+    <Navbar />
+  </slot>
+
+  <div class="pt-24 md:pt-28">
+    <!-- About Hero -->
+    <section class="py-16 px-4 sm:px-6 lg:px-8 bg-sandstone">
+      <div class="max-w-4xl mx-auto">
+        <SectionHeading title="About Sarah" />
+
+        <!-- Headshot placeholder -->
+        <div class="flex justify-center mt-10">
+          <div class="w-40 h-40 md:w-48 md:h-48 rounded-full bg-limestone border-2 border-gold/40 flex items-center justify-center shadow-lg">
+            <span class="font-heading text-4xl md:text-5xl font-bold text-gold">SH</span>
+          </div>
+        </div>
+
+        <!-- Bio -->
+        <div class="mt-12 space-y-6 text-center max-w-2xl mx-auto">
+          <p class="font-body text-bronze/80 leading-relaxed">
+            I've been drawn to the night sky for as long as I can remember — that quiet sense that the stars were telling stories, if only someone would listen. What started as a personal fascination became something much deeper: a calling to help others see themselves through the ancient language of astrology.
+          </p>
+          <p class="font-body text-bronze/80 leading-relaxed">
+            I studied both traditional and modern techniques because I believe the richest readings come from honoring the old ways while staying open to new ones. To me, your natal chart isn't a script you're forced to follow — it's a map. It illuminates the terrain of your life while always honoring your free will and your unique path.
+          </p>
+          <p class="font-body text-bronze/80 leading-relaxed">
+            I offer readings both in person and online, so no matter where you are, the wisdom of your chart is within reach. Every reading I give is crafted with care, attention, and deep respect for who you are.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Credentials -->
+    <section class="py-16 px-4 sm:px-6 lg:px-8 bg-limestone/30">
+      <div class="max-w-4xl mx-auto">
+        <SectionHeading title="Credentials & Training" />
+        <ul class="mt-8 max-w-xl mx-auto space-y-3">
+          <li class="flex items-start font-body text-bronze/80">
+            <span class="text-gold mr-3">✦</span>
+            Certification in Natal Chart Interpretation
+          </li>
+          <li class="flex items-start font-body text-bronze/80">
+            <span class="text-gold mr-3">✦</span>
+            Advanced Studies in Traditional Astrology
+          </li>
+          <li class="flex items-start font-body text-bronze/80">
+            <span class="text-gold mr-3">✦</span>
+            Professional Astrology Organization Member
+          </li>
+          <li class="flex items-start font-body text-bronze/80">
+            <span class="text-gold mr-3">✦</span>
+            Years of professional consultation experience
+          </li>
+          <li class="flex items-start font-body text-bronze/80">
+            <span class="text-gold mr-3">✦</span>
+            Ongoing study of Hellenistic and Medieval astrological traditions
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Philosophy -->
+    <section class="py-16 px-4 sm:px-6 lg:px-8 bg-sandstone">
+      <div class="max-w-4xl mx-auto">
+        <SectionHeading title="My Philosophy" />
+        <div class="mt-8 max-w-2xl mx-auto text-center space-y-6">
+          <p class="font-body text-bronze/80 leading-relaxed">
+            I believe astrology is a language — one that speaks of the sacred relationship between the cosmos and the individual. Your natal chart is a snapshot of the heavens at the exact moment you took your first breath, and it holds profound wisdom about who you are, what you're here for, and the gifts you carry.
+          </p>
+          <p class="font-body text-bronze/80 leading-relaxed">
+            A reading with me isn't about predicting your future or boxing you in. It's about illumination — shedding light on patterns, tendencies, and possibilities so you can move through your life with more awareness and intention. The stars impel; they do not compel.
+          </p>
+          <div class="mt-8 py-6 px-8 bg-limestone/50 rounded-lg border-l-4 border-gold">
+            <p class="font-heading text-xl md:text-2xl text-earth italic">
+              "The cosmos is within us. We are made of star-stuff." — Carl Sagan
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <slot name="footer">
+    <Footer />
+  </slot>
+</BaseLayout>

@@ -11,6 +11,7 @@ node_modules
 
 # Per-instance runtime data — the largest tree in the repo (~5GB).
 animas/
+spores/
 
 # Hand-snapshot .bak.* files left behind by prior plans.
 *.bak

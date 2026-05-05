@@ -1,0 +1,98 @@
+---
+---
+
+<form action="#" method="POST" class="space-y-6">
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <!-- Name -->
+    <div>
+      <label for="name" class="block font-body text-sm font-medium text-bronze mb-1.5">Name</label>
+      <input
+        type="text"
+        id="name"
+        name="name"
+        required
+        class="w-full px-4 py-3 rounded-lg border border-gold/30 bg-sandstone/80 text-earth font-body text-sm focus:outline-none focus:ring-2 focus:ring-gold/50 focus:border-gold transition-colors"
+        placeholder="Your full name"
+      />
+    </div>
+
+    <!-- Email -->
+    <div>
+      <label for="email" class="block font-body text-sm font-medium text-bronze mb-1.5">Email</label>
+      <input
+        type="email"
+        id="email"
+        name="email"
+        required
+        class="w-full px-4 py-3 rounded-lg border border-gold/30 bg-sandstone/80 text-earth font-body text-sm focus:outline-none focus:ring-2 focus:ring-gold/50 focus:border-gold transition-colors"
+        placeholder="your@email.com"
+      />
+    </div>
+  </div>
+
+  <!-- Birth Details Section -->
+  <div class="border-t border-gold/20 pt-6">
+    <p class="font-heading text-lg font-semibold text-earth mb-4">Birth Details</p>
+    <p class="font-body text-xs text-bronze/60 mb-4">These details are essential for creating an accurate natal chart.</p>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- Birth Date -->
+      <div>
+        <label for="birth-date" class="block font-body text-sm font-medium text-bronze mb-1.5">Birth Date</label>
+        <input
+          type="date"
+          id="birth-date"
+          name="birth-date"
+          required
+          class="w-full px-4 py-3 rounded-lg border border-gold/30 bg-sandstone/80 text-earth font-body text-sm focus:outline-none focus:ring-2 focus:ring-gold/50 focus:border-gold transition-colors"
+        />
+      </div>
+
+      <!-- Birth Time -->
+      <div>
+        <label for="birth-time" class="block font-body text-sm font-medium text-bronze mb-1.5">Birth Time</label>
+        <input
+          type="time"
+          id="birth-time"
+          name="birth-time"
+          required
+          class="w-full px-4 py-3 rounded-lg border border-gold/30 bg-sandstone/80 text-earth font-body text-sm focus:outline-none focus:ring-2 focus:ring-gold/50 focus:border-gold transition-colors"
+        />
+      </div>
+
+      <!-- Birth Place -->
+      <div>
+        <label for="birth-place" class="block font-body text-sm font-medium text-bronze mb-1.5">Birth Place</label>
+        <input
+          type="text"
+          id="birth-place"
+          name="birth-place"
+          required
+          class="w-full px-4 py-3 rounded-lg border border-gold/30 bg-sandstone/80 text-earth font-body text-sm focus:outline-none focus:ring-2 focus:ring-gold/50 focus:border-gold transition-colors"
+          placeholder="City, Country"
+        />
+      </div>
+    </div>
+  </div>
+
+  <!-- Message -->
+  <div>
+    <label for="message" class="block font-body text-sm font-medium text-bronze mb-1.5">Message</label>
+    <textarea
+      id="message"
+      name="message"
+      rows="5"
+      class="w-full px-4 py-3 rounded-lg border border-gold/30 bg-sandstone/80 text-earth font-body text-sm focus:outline-none focus:ring-2 focus:ring-gold/50 focus:border-gold transition-colors resize-vertical"
+      placeholder="[PLACEHOLDER: Tell me about what you'd like to explore in your reading...]"
+    ></textarea>
+  </div>
+
+  <!-- Submit -->
+  <div>
+    <button
+      type="submit"
+      class="bg-gold hover:bg-terracotta text-earth hover:text-sandstone font-body font-semibold text-sm uppercase tracking-widest px-8 py-4 rounded-lg transition-colors duration-300 shadow-md hover:shadow-lg cursor-pointer"
+    >
+      Send Inquiry
+    </button>
+  </div>
+</form>

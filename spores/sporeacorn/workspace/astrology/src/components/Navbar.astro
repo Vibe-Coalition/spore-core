@@ -1,0 +1,88 @@
+---
+const currentPath = Astro.url.pathname;
+
+const navLinks = [
+  { href: '/', label: 'Home' },
+  { href: '/about', label: 'About' },
+  { href: '/services', label: 'Services' },
+  { href: '/contact', label: 'Contact' },
+];
+---
+
+<nav class="fixed top-0 left-0 right-0 z-50 transition-all duration-300" id="main-nav">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="flex items-center justify-between h-16 md:h-20">
+      <!-- Logo -->
+      <a href="/" class="font-heading text-2xl md:text-3xl font-bold text-earth hover:text-gold transition-colors">
+        Sarah Halevi
+      </a>
+
+      <!-- Desktop Navigation -->
+      <div class="hidden md:flex items-center space-x-8">
+        {navLinks.map((link) => (
+          <a
+            href={link.href}
+            class:list={[
+              'relative font-body text-sm font-medium tracking-wide uppercase transition-colors duration-200',
+              currentPath === link.href
+                ? 'text-gold'
+                : 'text-bronze hover:text-gold',
+            ]}
+          >
+            {link.label}
+            <span
+              class:list={[
+                'absolute -bottom-1 left-0 h-0.5 bg-gold transition-all duration-300',
+                currentPath === link.href ? 'w-full' : 'w-0',
+              ]}
+            />
+          </a>
+        ))}
+      </div>
+
+      <!-- Mobile Hamburger (CSS checkbox hack) -->
+      <div class="md:hidden">
+        <input type="checkbox" id="nav-toggle" class="hidden peer" />
+        <label for="nav-toggle" class="cursor-pointer flex flex-col justify-center items-center w-10 h-10">
+          <span class="block w-6 h-0.5 bg-earth transition-all duration-300 peer-checked:rotate-45 peer-checked:translate-y-1.5"></span>
+          <span class="block w-6 h-0.5 bg-earth mt-1.5 transition-all duration-300 peer-checked:opacity-0"></span>
+          <span class="block w-6 h-0.5 bg-earth mt-1.5 transition-all duration-300 peer-checked:-rotate-45 peer-checked:-translate-y-1.5"></span>
+        </label>
+
+        <!-- Mobile Menu -->
+        <div class="absolute top-full left-0 right-0 bg-sandstone/95 backdrop-blur-sm border-t border-gold/20 hidden peer-checked:block">
+          <div class="px-4 py-4 space-y-3">
+            {navLinks.map((link) => (
+              <a
+                href={link.href}
+                class:list={[
+                  'block font-body text-sm font-medium tracking-wide uppercase py-2 transition-colors',
+                  currentPath === link.href
+                    ? 'text-gold'
+                    : 'text-bronze hover:text-gold',
+                ]}
+              >
+                {link.label}
+              </a>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<style>
+  #nav-toggle:checked + label span:nth-child(1) {
+    transform: rotate(45deg) translateY(4px);
+  }
+  #nav-toggle:checked + label span:nth-child(2) {
+    opacity: 0;
+  }
+  #nav-toggle:checked + label span:nth-child(3) {
+    transform: rotate(-45deg) translateY(-4px);
+  }
+  #nav-toggle:checked ~ div {
+    display: block;
+  }
+</style>

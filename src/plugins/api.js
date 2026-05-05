@@ -5,6 +5,10 @@
  * registering context engines, tools, gateways, worker hooks, and middleware.
  */
 
+const settingsRegistry = require('../settings/registry');
+const settingsLoader = require('../settings/loader');
+const settingsStore = require('../settings/store');
+
 class PluginAPI {
   constructor(pluginId, manifest, appContext, log, pluginPath = null, manager = null) {
     this.pluginId = pluginId;
@@ -31,6 +35,7 @@ class PluginAPI {
     this._ttsProviders = [];
     this._embedders = [];
     this._llmProviders = [];
+    this._browserBackends = [];
     this._frontendAssets = [];
     this._configChangeFn = null;
     this._shutdownFn = null;
@@ -53,6 +58,12 @@ class PluginAPI {
    * Register a tool. Definition must include:
    *   { description: string, inputSchema: object, execute: async (input, ctx) => result }
    *
+   * Optional exposure metadata:
+   *   platforms: ['cli'|'web'|...]      limit schema visibility to platforms
+   *   requiresProjectContext: true      require ctx.projectContext.cwd/clientCwd
+   *   mutating: true                    hide in read-only/plan contexts
+   *   available: (ctx) => boolean       final per-turn availability gate
+   *
    * By default the tool is exposed to the agent as `plugin_<pluginId>_<name>`
    * so plugins can't collide. Set `definition.namespaced = false` to keep the
    * bare name — used when extracting a built-in tool to preserve its public
@@ -64,25 +75,54 @@ class PluginAPI {
       throw new Error(`Tool "${name}" must have description, inputSchema, and execute function`);
     }
     const exposedName = definition.namespaced === false ? name : `plugin_${this.pluginId}_${name}`;
-    this._tools.push({ name: exposedName, definition });
+    this._tools.push({ name: exposedName, definition, pluginId: this.pluginId });
     this._log.debug(`[plugin:${this.pluginId}] Registered tool: ${exposedName}`);
   }
 
   /**
-   * Register a gateway. Factory receives { config, log, agent }.
-   * The returned gateway should implement connect(), disconnect(), getStatus().
+   * Register a channel gateway. Factory receives the full app context plus
+   * pluginConfig and gatewayManager. The returned gateway should implement
+   * connect(), disconnect(), and getStatus(); message/read/react/edit/http
+   * methods are optional capabilities.
    */
-  registerGateway(name, factory) {
-    const { config, log, agent } = this._appContext;
-    const gateway = factory({ config, log, agent });
-    this._gateways.push({ name, gateway });
+  registerChannelGateway(platform, factory, opts = {}) {
+    if (!platform || typeof platform !== 'string') throw new Error('registerChannelGateway requires a platform name');
+    if (typeof factory !== 'function') throw new Error('registerChannelGateway requires a factory function');
+    const { config, log, agent, tools, sessions, graph, gateways } = this._appContext;
+    const ctx = {
+      config,
+      pluginConfig: this.getConfig(),
+      log,
+      agent,
+      tools,
+      sessions,
+      graph,
+      gatewayManager: gateways,
+      pairing: gateways?.pairing || null,
+      pluginId: this.pluginId,
+      manifest: this.manifest,
+    };
+    const gateway = factory(ctx);
+    this._gateways.push({ name: platform, gateway, opts: { ...opts, pluginId: this.pluginId } });
 
-    const { gateways } = this._appContext;
-    if (gateways?.set) {
-      gateways.set(`plugin:${name}`, gateway);
+    if (gateways?.registerGateway) {
+      gateways.registerGateway(platform, gateway, { ...opts, pluginId: this.pluginId });
+      if (gateways._started) {
+        gateways.connectGateway(platform).catch(e => {
+          this._log.warn(`[plugin:${this.pluginId}] Gateway ${platform} failed to connect: ${e.message}`);
+        });
+      }
     }
 
-    this._log.debug(`[plugin:${this.pluginId}] Registered gateway: ${name}`);
+    this._log.debug(`[plugin:${this.pluginId}] Registered channel gateway: ${platform}`);
+    return gateway;
+  }
+
+  /**
+   * Backward-compatible alias for older gateway plugins.
+   */
+  registerGateway(name, factory, opts = {}) {
+    return this.registerChannelGateway(name, factory, opts);
   }
 
   /**
@@ -189,7 +229,14 @@ class PluginAPI {
 
   getConfig() {
     const allPluginConfig = this._appContext.config.plugins || {};
-    return allPluginConfig[this.pluginId] || {};
+    const cfg = { ...(allPluginConfig[this.pluginId] || {}) };
+    if (settingsLoader.isBooted()) {
+      const prefix = `plugins.${this.pluginId}.`;
+      for (const [key, value] of Object.entries(settingsStore.snapshotFlat())) {
+        if (key.startsWith(prefix)) cfg[key.slice(prefix.length)] = value;
+      }
+    }
+    return cfg;
   }
 
   /**
@@ -257,6 +304,69 @@ class PluginAPI {
       html: typeof pane.html === 'string' ? pane.html : null,
     };
     this._log.debug(`[plugin:${this.pluginId}] Registered settings pane: ${pane.title} (tab=${this._settingsPane.tab})`);
+
+    // Phase 1 shim: also register schema entries into the typed settings
+    // registry so the new system has visibility into plugin settings even
+    // before plugins migrate to registerSettings(). The pane mechanism
+    // continues to drive the legacy frontend renderer.
+    if (Array.isArray(pane.schema)) {
+      for (const field of pane.schema) {
+        if (!field?.key || typeof field.key !== 'string') continue;
+        try {
+          const registryType = _paneTypeToRegistryType(field);
+          this.registerSetting({
+            key: field.key,
+            type: registryType,
+            default: registryType === 'enum' && field.default !== undefined
+              ? String(field.default)
+              : (field.default !== undefined ? field.default : null),
+            secret: !!field.secret,
+            enum: registryType === 'enum' && Array.isArray(field.options)
+              ? field.options.map(o => String(o.value ?? o))
+              : undefined,
+            label: field.label || null,
+            help: field.help || null,
+            placeholder: field.placeholder || null,
+            scope: ['settings', 'runtime'],
+            group: 'plugins',
+          });
+        } catch (e) {
+          // Duplicate registration on hot-reload, etc. — non-fatal in Phase 1.
+          this._log.debug(`[plugin:${this.pluginId}] schema entry ${field.key} not mirrored to registry: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Register a single typed setting contributed by this plugin. The key
+   * is auto-namespaced under `plugins.<pluginId>.<key>`. See
+   * src/settings/registry.js for the full SettingDef shape.
+   *
+   *   api.registerSetting({ key: 'apiKey', type: 'secret', envVar: 'OPENAI_API_KEY',
+   *                         scope: ['server','wizard','settings'],
+   *                         group: 'providers', label: 'OpenAI API key' });
+   */
+  registerSetting(def) {
+    if (!def || typeof def !== 'object') throw new Error('registerSetting requires a def object');
+    if (typeof def.key !== 'string' || !def.key) throw new Error('registerSetting requires def.key');
+    const fullKey = def.key.startsWith(`plugins.${this.pluginId}.`)
+      ? def.key
+      : `plugins.${this.pluginId}.${def.key}`;
+    if (settingsRegistry.has(fullKey)) return settingsRegistry.get(fullKey);
+    const normalized = { ...def, key: fullKey, pluginId: this.pluginId };
+    const registered = settingsRegistry.register(normalized);
+    // Seed the runtime store so reads resolve to default / DB row / env
+    // immediately after registration (plugins typically register after
+    // loader.boot() has already run).
+    if (settingsLoader.isBooted()) settingsLoader.seedKey(registered);
+    return registered;
+  }
+
+  /** Bulk variant of registerSetting. */
+  registerSettings(defs) {
+    if (!Array.isArray(defs)) throw new Error('registerSettings requires an array');
+    return defs.map(d => this.registerSetting(d));
   }
 
   getSettingsPane() {
@@ -578,14 +688,61 @@ class PluginAPI {
       defaultBaseUrl: opts.defaultBaseUrl || null,
       // UI metadata read by the Settings → Providers tab. `label` is
       // the human-readable name in the per-tier dropdown + provider
-      // group header. Defaults to the registered name.
+      // group header. `modelsPlaceholder` is the wizard's hint string
+      // shown in the "models" field (e.g. "gpt-4o, gpt-4o-mini"); each
+      // provider plugin owns its own hint instead of the wizard
+      // hardcoding a per-provider table.
       label: typeof opts.label === 'string' ? opts.label : name,
+      modelsPlaceholder: typeof opts.modelsPlaceholder === 'string' ? opts.modelsPlaceholder : '',
     });
     this._log.debug(`[plugin:${this.pluginId}] Registered LLM provider: ${name} (prefixes: ${prefixes.join(', ')})`);
   }
 
   getProviders() {
     return this._llmProviders;
+  }
+
+  /**
+   * Register a browser backend (zendriver, playwright, …). The
+   * `browser-core` plugin owns the `browser` tool itself and routes
+   * incoming actions to whichever backend the operator has selected
+   * via `config.browserBackend` (or an explicit `backend` arg in the
+   * tool call). Each backend plugin contributes:
+   *
+   *   - `name`            — selector string, e.g. 'zendriver'
+   *   - `factory`         — `(ctx) => backendInstance`. ctx contains
+   *                         { log, config, broadcast }. The returned
+   *                         instance must implement at minimum:
+   *                         async execute(input), async destroy(),
+   *                         isRunning(): boolean.
+   *   - opts.label        — UI label (defaults to name)
+   *   - opts.aliases      — alternate selector strings (e.g. 'pw' → 'playwright')
+   *   - opts.capabilities — { stealth: bool, screencast: bool, … } — UI hints
+   *   - opts.isAvailable  — `(config) => bool`. Lets the backend opt out
+   *                         (e.g. if its npm dep failed to install). Defaults
+   *                         to () => true.
+   *
+   * The browser-core plugin reads these via pluginManager.getBrowserBackends().
+   */
+  registerBrowserBackend(name, factory, opts = {}) {
+    if (!name || typeof name !== 'string') throw new Error('registerBrowserBackend requires a string name');
+    if (typeof factory !== 'function') throw new Error('registerBrowserBackend requires a factory function');
+    const aliases = Array.isArray(opts.aliases) ? opts.aliases.map(a => String(a)) : [];
+    const capabilities = Object.assign({ stealth: false, screencast: false }, opts.capabilities || {});
+    const isAvailable = typeof opts.isAvailable === 'function' ? opts.isAvailable : () => true;
+    this._browserBackends.push({
+      name,
+      factory,
+      aliases,
+      capabilities,
+      isAvailable,
+      label: typeof opts.label === 'string' ? opts.label : name,
+    });
+    this._log.debug(`[plugin:${this.pluginId}] Registered browser backend: ${name}${aliases.length ? ` (aliases: ${aliases.join(', ')})` : ''}`);
+  }
+
+  getBrowserBackends() {
+    return this._browserBackends;
   }
 
   /**
@@ -661,6 +818,22 @@ class PluginAPI {
   async shutdown() {
     if (this._shutdownFn) await this._shutdownFn();
   }
+}
+
+/**
+ * Translate a registerSettingsPane schema field's UI type into a
+ * registry SettingDef type. Pane types are UI-flavored
+ * ('text'|'password'|'number'|'toggle'|'select'|'textarea'); registry
+ * types are data-flavored. Used by the Phase 1 shim in
+ * registerSettingsPane to mirror plugin schemas into the typed registry.
+ */
+function _paneTypeToRegistryType(field) {
+  const t = String(field.type || 'text').toLowerCase();
+  if (field.secret || t === 'password') return 'secret';
+  if (t === 'number') return 'integer';
+  if (t === 'toggle' || t === 'boolean') return 'boolean';
+  if (t === 'select' && Array.isArray(field.options)) return 'enum';
+  return 'string';
 }
 
 module.exports = { PluginAPI };

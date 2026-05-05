@@ -1,0 +1,21 @@
+{
+  "nodeId": "iran",
+  "label": "Iran",
+  "type": "country",
+  "description": "Islamic Republic of Iran",
+  "aspects": [
+    {
+      "name": "diplomatic_relations",
+      "importance": 7,
+      "attributes": [
+        "Rejected US demands for uranium enrichment restrictions on 2026-04-12"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "us",
+      "type": "had_diplomatic_tensions"
+    }
+  ]
+}

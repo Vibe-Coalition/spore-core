@@ -566,7 +566,7 @@ function applyRetrievalMixin(GraphContext) {
     });
 
     const response = await _withTimeout(llmClient.messages.create({
-      model: this.config?.recallModel || this.config?.learnerModel || this.config?.casualModel || this.config?.model,
+      model: require('../settings').modelForTier('recall'),
       max_tokens: 120,
       temperature: 0,
       messages: [{
@@ -593,7 +593,7 @@ function applyRetrievalMixin(GraphContext) {
 
   proto._llmDecomposeQuery = async function _llmDecomposeQuery(llmClient, query) {
     const response = await _withTimeout(llmClient.messages.create({
-      model: this.config?.recallModel || this.config?.learnerModel || this.config?.casualModel || this.config?.model,
+      model: require('../settings').modelForTier('recall'),
       max_tokens: 250,
       temperature: 0,
       messages: [{
@@ -892,7 +892,7 @@ Rules:
       const fetchLimit = scope && scope.allowedSessionIds.size > 0 ? limit * 4 : limit;
 
       const rows = this.db.prepare(`
-        SELECT e.id, e.content, e.observed_at, e.session_id, rank
+        SELECT e.id, e.content, e.observed_at, e.session_id, e.user_id, e.user_name, rank
         FROM episodes_fts
         JOIN episodes e ON episodes_fts.rowid = e.id
         WHERE episodes_fts MATCH ?
@@ -905,6 +905,8 @@ Rules:
         content: r.content,
         observedAt: r.observed_at,
         sessionId: r.session_id,
+        user_id: r.user_id,
+        user_name: r.user_name,
       }));
 
       // Project-scope filter: drop episodes whose session_id isn't on
@@ -983,6 +985,62 @@ Rules:
     }
 
     return results.slice(0, maxNodes);
+  };
+
+  /**
+   * Variant of _graphWalk that returns both visited nodes AND the edges
+   * traversed. Used by graph_query mode:'walk' to build a subgraph the
+   * agent can render with full edge labels (relation, weight, confidence).
+   *
+   * Returns: { nodes: [{id, depth}], edges: [{source,target,type,weight,confidence}] }
+   * Excludes the agent self-node (it's a synthetic hub that bloats results).
+   * Always includes seed nodes themselves in `nodes` at depth 0.
+   */
+  proto._graphWalkWithEdges = function _graphWalkWithEdges(seedNodeIds, maxDepth = 2, maxNodes = 25) {
+    if (!this.db || seedNodeIds.size === 0) return { nodes: [], edges: [] };
+    const agentId = this.config.agentId || 'spore';
+    const visited = new Set(seedNodeIds);
+    const nodes = [...seedNodeIds].map(id => ({ id, depth: 0 }));
+    const edges = [];
+    const seenEdgeKey = new Set();
+    let frontier = [...seedNodeIds];
+
+    for (let depth = 1; depth <= maxDepth; depth++) {
+      const nextFrontier = [];
+      for (const nid of frontier) {
+        try {
+          const rows = this.db.prepare(
+            'SELECT source, target, type, weight, confidence FROM edges WHERE source = ? OR target = ?'
+          ).all(nid, nid);
+          for (const e of rows) {
+            const key = `${e.source}|${e.target}|${e.type}`;
+            if (!seenEdgeKey.has(key)) {
+              seenEdgeKey.add(key);
+              edges.push({
+                source: e.source,
+                target: e.target,
+                type: e.type,
+                weight: e.weight ?? 1,
+                confidence: e.confidence || null,
+              });
+            }
+            const neighbor = e.source === nid ? e.target : e.source;
+            if (neighbor === agentId) continue;
+            if (!visited.has(neighbor)) {
+              visited.add(neighbor);
+              nextFrontier.push(neighbor);
+              nodes.push({ id: neighbor, depth });
+              if (nodes.length >= maxNodes) break;
+            }
+          }
+        } catch (e) { this.log.warn('[retrieval] _graphWalkWithEdges failed: ' + e.message); }
+        if (nodes.length >= maxNodes) break;
+      }
+      frontier = nextFrontier;
+      if (nodes.length >= maxNodes) break;
+    }
+
+    return { nodes, edges };
   };
 
   proto._decomposeTemporalQuery = function _decomposeTemporalQuery(messageContent) {
@@ -1335,8 +1393,10 @@ Rules:
     // Re-bind the local name so the existing rendering loop below uses
     // the filtered array. Defensive — assignment to `results` here in
     // case anything below re-iterates.
-    results.length = 0;
-    for (const n of resultsFinal) results.push(n);
+    if (resultsFinal !== results) {
+      results.length = 0;
+      for (const n of resultsFinal) results.push(n);
+    }
 
     if (results.length === 0) return null;
 

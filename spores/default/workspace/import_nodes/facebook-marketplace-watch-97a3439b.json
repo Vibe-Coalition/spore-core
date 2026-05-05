@@ -1,0 +1,33 @@
+{
+  "nodeId": "facebook-marketplace-watch-97a3439b",
+  "label": "Coffee Table Watch",
+  "type": "project",
+  "description": "Monitor for mid-century modern coffee tables within 20km radius, any price",
+  "aspects": [
+    {
+      "name": "monitoring_settings",
+      "importance": 8,
+      "attributes": [
+        "Search term: coffee table",
+        "Price range: any",
+        "Radius: 20km",
+        "Created on 2026-04-12"
+      ]
+    },
+    {
+      "name": "monitoring_parameters",
+      "importance": 7,
+      "attributes": [
+        "Searches for coffee tables",
+        "MCM style preference noted"
+      ]
+    },
+    {
+      "name": "style_preference",
+      "importance": 8,
+      "attributes": [
+        "mid-century modern"
+      ]
+    }
+  ]
+}

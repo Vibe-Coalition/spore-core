@@ -1,0 +1,23 @@
+{
+  "nodeId": "curl-cffi",
+  "label": "curl_cffi",
+  "type": "product",
+  "description": "Failed to run fb_login.py due to missing 'curl_cffi' module",
+  "aspects": [
+    {
+      "name": "installation_details",
+      "importance": 9,
+      "attributes": [
+        "Installed via pip with --target=/workspace/pylibs on 2026-04-12",
+        "Required resolving dependencies: pygments, mdurl, markdown-it-py, rich"
+      ]
+    },
+    {
+      "name": "error_details",
+      "importance": 8,
+      "attributes": [
+        "Check error: No module named 'curl_cffi'"
+      ]
+    }
+  ]
+}

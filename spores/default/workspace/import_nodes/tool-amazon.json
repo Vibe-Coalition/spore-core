@@ -1,0 +1,40 @@
+{
+  "nodeId": "tool-amazon",
+  "label": "amazon",
+  "type": "tool",
+  "description": "Search Amazon.ca product catalog and view order history using authenticated session",
+  "aspects": [
+    {
+      "name": "tool_info",
+      "importance": 8,
+      "attributes": [
+        "Search Amazon.ca product catalog and view order history using authenticated session. Use when user asks to find, search, or buy products on Amazon, check order history, or compare products.",
+        "Language: node",
+        "Path: /workspace/tools/amazon.js",
+        "Run: exec: python3 /workspace/skills/amazon/scripts/amazon.py orders"
+      ]
+    },
+    {
+      "name": "script_details",
+      "importance": 8,
+      "attributes": [
+        "Script copied to /workspace/skills/amazon/scripts/amazon.py on 2026-04-12",
+        "Tool registered as 'amazon' with run command 'exec: node /workspace/tools/amazon.js' on 2026-04-12"
+      ]
+    },
+    {
+      "name": "commands",
+      "importance": 7,
+      "attributes": [
+        "Supported commands: orders, order <id>, search <query>, set-cookies on 2026-04-12"
+      ]
+    },
+    {
+      "name": "status",
+      "importance": 8,
+      "attributes": [
+        "requires authentication via Amazon.ca cookies"
+      ]
+    }
+  ]
+}

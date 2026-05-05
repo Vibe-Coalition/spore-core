@@ -32,6 +32,14 @@ function projectNodeId(userId, cwd) {
   return `project-${u}-${h}`;
 }
 
+function projectNodeIdFromContext(userId, pc = {}) {
+  if (pc.projectIdentityKey) {
+    const h = crypto.createHash('sha256').update(pc.projectIdentityKey).digest('hex').slice(0, 12);
+    return `project-${h}`;
+  }
+  return projectNodeId(userId, pc.cwd);
+}
+
 // upsertProject is idempotent — call it on every chat:submit. The first
 // call for a given (userId, cwd) creates the node; subsequent calls
 // refresh aspects whose values changed (gitHash, last_seen) and leave
@@ -43,7 +51,7 @@ function projectNodeId(userId, cwd) {
 function upsertProject(learner, userId, pc) {
   if (!learner?.db || !pc?.cwd) return null;
   const db = learner.db;
-  const id = projectNodeId(userId, pc.cwd);
+  const id = projectNodeIdFromContext(userId, pc);
 
   let isNew = false;
   let gitHashChanged = false;
@@ -54,12 +62,11 @@ function upsertProject(learner, userId, pc) {
     const desc = pc.projectType
       ? `${pc.projectType} project at ${pc.cwd}`
       : `Project at ${pc.cwd}`;
-    // graphcorn: when a project node is freshly created INSIDE a Spore Code
-    // session, mark it temp + tag with sessionId so distillation can
-    // promote it. Returning users hit the !existing=false branch and
-    // their already-permanent project node stays untouched.
+    // Project nodes are durable anchors for a scoped project graph. Session
+    // nodes and discoveries may be temp/distilled, but the project anchor
+    // itself must survive even when a session ends before distillation.
     const extraJson = pc.sessionId
-      ? JSON.stringify({ ttl: 'temp', sessionId: pc.sessionId, tempCreated: new Date().toISOString() })
+      ? JSON.stringify({ createdInSession: pc.sessionId, createdAt: new Date().toISOString() })
       : '{}';
     db.prepare(
       'INSERT INTO nodes (id, label, type, description, importance, mentions, extracted_with, extracted_at, provenance, extra) VALUES (?, ?, ?, ?, 6, 1, ?, ?, ?, ?)'
@@ -153,10 +160,10 @@ function upsertProject(learner, userId, pc) {
 // getProject hydrates the cached node for a (userId, cwd) lookup or
 // returns null when none exists. Returns { id, label, gitHash, aspects }
 // where aspects is { name: [attr, ...] } for compactness.
-function getProject(learner, userId, cwd) {
+function getProject(learner, userId, cwd, pc = null) {
   if (!learner?.db || !cwd) return null;
   const db = learner.db;
-  const id = projectNodeId(userId, cwd);
+  const id = pc ? projectNodeIdFromContext(userId, { ...pc, cwd }) : projectNodeId(userId, cwd);
   const row = db.prepare('SELECT id, label, description FROM nodes WHERE id = ?').get(id);
   if (!row) return null;
 
@@ -187,10 +194,10 @@ function getProject(learner, userId, cwd) {
 // noteProjectInteraction appends a one-line summary onto the project
 // node's recent_activity aspect. Capped at 50 entries (older are
 // trimmed) so a chatty session doesn't unbounded-grow the node.
-function noteProjectInteraction(learner, userId, cwd, summary) {
+function noteProjectInteraction(learner, userId, cwd, summary, pc = null) {
   if (!learner?.db || !cwd || !summary) return;
   const db = learner.db;
-  const id = projectNodeId(userId, cwd);
+  const id = pc ? projectNodeIdFromContext(userId, { ...pc, cwd }) : projectNodeId(userId, cwd);
   const node = db.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
   if (!node) return;
 
@@ -231,10 +238,14 @@ function noteProjectInteraction(learner, userId, cwd, summary) {
 //     hot_paths: [{qname, name, file, line, callers, language}, ...] (≤20),
 //     notes: [string, ...]
 //   }
-function upsertProjectCodeGraph(learner, userId, cwd, summary) {
+function upsertProjectCodeGraph(learner, userId, cwd, summary, pc = null) {
   if (!learner?.db || !cwd || !summary) return null;
   const db = learner.db;
-  const id = projectNodeId(userId, cwd);
+  const id = projectNodeIdFromContext(userId, {
+    ...(pc || {}),
+    cwd,
+    projectIdentityKey: pc?.projectIdentityKey || summary?.projectIdentityKey || null,
+  });
   const projRow = db.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
   if (!projRow) return { error: `project node ${id} not found; session:start must run first` };
 
@@ -296,6 +307,7 @@ function upsertProjectCodeGraph(learner, userId, cwd, summary) {
 
 module.exports = {
   projectNodeId,
+  projectNodeIdFromContext,
   upsertProject,
   getProject,
   noteProjectInteraction,

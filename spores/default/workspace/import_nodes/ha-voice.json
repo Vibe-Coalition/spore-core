@@ -1,0 +1,29 @@
+{
+  "nodeId": "ha-voice",
+  "label": "Home Assistant Voice",
+  "type": "project",
+  "description": "Hebrew/English voice commands for Home Assistant",
+  "aspects": [
+    {
+      "name": "documentation_status",
+      "importance": 7,
+      "attributes": [
+        "SKILL.md missing"
+      ]
+    },
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Hebrew/English voice commands for Home Assistant"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83c\udfe0 If you have HA"
+      ]
+    }
+  ]
+}

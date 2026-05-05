@@ -1,0 +1,29 @@
+{
+  "nodeId": "discord-user",
+  "label": "Discord User",
+  "type": "project",
+  "description": "Discord user-level actions",
+  "aspects": [
+    {
+      "name": "documentation_status",
+      "importance": 7,
+      "attributes": [
+        "SKILL.md missing"
+      ]
+    },
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Discord user-level actions"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83e\udd37 Minimal docs"
+      ]
+    }
+  ]
+}

@@ -112,7 +112,131 @@ function syncRpButtons() {
 
 // ── Logs ──
 const logsContent = document.getElementById('logs-content');
+const LOG_VIEW_STORAGE_KEY = 'spore-active-log-view';
+const LOG_VIEWS = {
+  system: { label: 'System', description: 'Runtime process log' },
+  activity: { label: 'Activity', description: 'Cross-session agent activity' },
+  tokens: { label: 'Tokens', description: 'Usage and cost dashboard' },
+};
+let activeLogView = (() => {
+  try {
+    const saved = localStorage.getItem(LOG_VIEW_STORAGE_KEY);
+    return LOG_VIEWS[saved] ? saved : 'system';
+  } catch { return 'system'; }
+})();
+
+function _logsEsc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function _ensureLogsPaneSwitcher() {
+  const toolbar = document.getElementById('logs-toolbar');
+  if (!toolbar || document.getElementById('logs-view-switcher')) return;
+  const switcher = document.createElement('div');
+  switcher.id = 'logs-view-switcher';
+  switcher.setAttribute('role', 'tablist');
+  switcher.setAttribute('aria-label', 'Log view');
+  switcher.innerHTML = Object.entries(LOG_VIEWS)
+    .map(([id, view]) => `<button class="logs-view-btn" type="button" role="tab" data-log-view="${id}" title="${view.description}">${view.label}</button>`)
+    .join('');
+  switcher.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element ? e.target.closest('[data-log-view]') : null;
+    if (!btn) return;
+    setLogView(btn.dataset.logView, { open: false });
+  });
+  toolbar.prepend(switcher);
+}
+
+function _ensureDockLogsMenu() {
+  const dock = document.getElementById('desktop-dock');
+  if (!dock || document.getElementById('dock-logs-menu')) return null;
+  const menu = document.createElement('div');
+  menu.id = 'dock-logs-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'Choose log');
+  menu.innerHTML = Object.entries(LOG_VIEWS).map(([id, view]) => `
+    <button type="button" class="dock-log-choice" role="menuitem" data-log-view="${id}">
+      <span>${view.label}</span>
+      <small>${view.description}</small>
+    </button>
+  `).join('');
+  menu.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element ? e.target.closest('[data-log-view]') : null;
+    if (!btn) return;
+    e.stopPropagation();
+    setLogView(btn.dataset.logView, { open: true });
+    _closeDockLogsMenu();
+  });
+  dock.appendChild(menu);
+  return menu;
+}
+
+function _syncLogViewUi() {
+  _ensureLogsPaneSwitcher();
+  _ensureDockLogsMenu();
+  document.querySelectorAll('[data-log-view]').forEach((el) => {
+    el.classList.toggle('active', el.getAttribute('data-log-view') === activeLogView);
+    if (el.getAttribute('role') === 'tab') el.setAttribute('aria-selected', el.getAttribute('data-log-view') === activeLogView ? 'true' : 'false');
+  });
+  const title = document.querySelector('#logs-pane .floating-pane-title');
+  if (title) title.textContent = `${LOG_VIEWS[activeLogView]?.label || 'System'} Log`;
+  const auto = document.getElementById('logs-auto');
+  if (auto) auto.style.display = activeLogView === 'system' ? '' : 'none';
+}
+
+function _openDockLogsMenu() {
+  _ensureDockLogsMenu();
+  _syncLogViewUi();
+  document.getElementById('desktop-dock')?.classList.add('logs-menu-open');
+  document.getElementById('dock-logs')?.setAttribute('aria-expanded', 'true');
+  document.addEventListener('click', _dockLogsOutsideClick, true);
+}
+
+function _closeDockLogsMenu() {
+  document.getElementById('desktop-dock')?.classList.remove('logs-menu-open');
+  document.getElementById('dock-logs')?.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', _dockLogsOutsideClick, true);
+}
+
+function _dockLogsOutsideClick(e) {
+  const dock = document.getElementById('desktop-dock');
+  if (dock && !dock.contains(e.target)) _closeDockLogsMenu();
+}
+
+function toggleDockLogsMenu(e) {
+  e?.preventDefault?.();
+  e?.stopPropagation?.();
+  const dock = document.getElementById('desktop-dock');
+  if (dock?.classList.contains('logs-menu-open')) _closeDockLogsMenu();
+  else _openDockLogsMenu();
+}
+window.toggleDockLogsMenu = toggleDockLogsMenu;
+
+function setLogView(view, opts = {}) {
+  if (!LOG_VIEWS[view]) view = 'system';
+  activeLogView = view;
+  try { localStorage.setItem(LOG_VIEW_STORAGE_KEY, activeLogView); } catch {}
+  if (activeLogView !== 'system' && logsAutoInterval) {
+    clearInterval(logsAutoInterval);
+    logsAutoInterval = null;
+  }
+  _syncLogViewUi();
+  if (opts.open) openRightPanel('logs-pane', false);
+  else loadLogs();
+}
+window.setLogView = setLogView;
+
 async function loadLogs() {
+  _syncLogViewUi();
+  if (activeLogView === 'tokens') return loadTokenLog();
+  if (activeLogView === 'activity') return loadActivityLog();
+  return loadSystemLog();
+}
+
+async function loadSystemLog() {
+  logsContent.classList.remove('logs-rich');
   logsContent.textContent = 'Loading...';
   try {
     const r = await fetch(API + '/api/logs?lines=500', { headers: authHeaders() });
@@ -121,8 +245,47 @@ async function loadLogs() {
   } catch (e) { logsContent.textContent = 'Failed to load logs: ' + e.message; }
 }
 
+async function loadActivityLog() {
+  logsContent.classList.add('logs-rich');
+  logsContent.innerHTML = '<div class="logs-empty">Loading activity...</div>';
+  try {
+    const r = await fetch(API + '/api/activity-log?lines=200', { headers: authHeaders() });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    if (!entries.length) {
+      logsContent.innerHTML = '<div class="logs-empty">No activity entries captured yet.</div>';
+      return;
+    }
+    logsContent.innerHTML = `<div class="logs-activity-list">${entries.slice().reverse().map((entry) => {
+      const text = String(entry || '');
+      const m = text.match(/^\[([^\]]+)\]\s*(.*)$/);
+      const ts = m?.[1] || '';
+      const body = m?.[2] || text;
+      return `<div class="logs-activity-row">
+        ${ts ? `<span class="logs-activity-time">${_logsEsc(ts)}</span>` : ''}
+        <span class="logs-activity-text">${_logsEsc(body)}</span>
+      </div>`;
+    }).join('')}</div>`;
+  } catch (e) {
+    logsContent.innerHTML = `<div class="logs-empty error">Failed to load activity: ${_logsEsc(e.message)}</div>`;
+  }
+}
+
+async function loadTokenLog() {
+  logsContent.classList.add('logs-rich');
+  if (typeof renderTokenDashboard === 'function') {
+    await renderTokenDashboard(logsContent);
+    return;
+  }
+  logsContent.innerHTML = '<div class="logs-empty">Token dashboard is still loading. Try again in a moment.</div>';
+}
+
 document.getElementById('logs-refresh').onclick = loadLogs;
 document.getElementById('logs-auto').onclick = function() {
+  if (activeLogView !== 'system') {
+    setLogView('system', { open: false });
+  }
   if (logsAutoInterval) {
     clearInterval(logsAutoInterval); logsAutoInterval = null;
     this.style.borderColor = ''; this.style.color = '';
@@ -132,6 +295,7 @@ document.getElementById('logs-auto').onclick = function() {
     loadLogs();
   }
 };
+_syncLogViewUi();
 
 // ── Local Mount (Browser File System Access API) ──
 const _LM_DB_NAME = 'spore-local-mount';

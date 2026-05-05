@@ -13,6 +13,8 @@ const _CODING_VERB_RE = /\b(?:read|edit|write|create|delete|rename|move|copy|fix
 const _CODING_TOOL_RE = /\b(?:read_file|write_file|edit_file|exec|glob|grep|web_fetch|web_search|bash|terminal|file)\b/i;
 const _CODE_FENCE_RE = /```/;
 const _COMMAND_RE = /^\s*[\$>]?\s*(?:npm|yarn|pnpm|bun|go|cargo|pip|pip3|python|python3|node|deno|make|just|docker|git|ls|cd|cat|grep|sed|awk|find|curl|wget)\s/i;
+const _CAPABILITY_RE = /\b(?:what|which|list|show|tell\s+me|do\s+you|can\s+you|available|have|access)\b[\s\S]{0,80}\b(?:tools?|capabilit(?:y|ies)|browser|browse|web|internet|graph|memory|shell|terminal|files?|exec)\b/i;
+const _CAPABILITY_REVERSE_RE = /\b(?:tools?|capabilit(?:y|ies)|browser|browse|web|internet|graph|memory|shell|terminal|files?|exec)\b[\s\S]{0,80}\b(?:what|which|list|show|available|have|access|can\s+you|do\s+you)\b/i;
 
 function looksLikeCodingTurn(text) {
   if (!text || typeof text !== 'string') return false;
@@ -28,4 +30,9 @@ function looksLikeCodingTurn(text) {
   return false;
 }
 
-module.exports = { looksLikeCodingTurn };
+function looksLikeCapabilityQuestion(text) {
+  if (!text || typeof text !== 'string') return false;
+  return _CAPABILITY_RE.test(text) || _CAPABILITY_REVERSE_RE.test(text);
+}
+
+module.exports = { looksLikeCodingTurn, looksLikeCapabilityQuestion };

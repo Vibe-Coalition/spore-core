@@ -1,20 +1,62 @@
 /**
  * config.js — Configuration loader for SPORE
- * 
+ *
  * Loads from spore.json and environment variables.
  * Priority: env vars > spore.json > defaults
+ *
+ * Persistence locations: the wizard / settings UI writes spore.json and
+ * .env into the data dir (resolved from SPORE_DATA_DIR or
+ * dirname(GRAPH_DB_PATH), default `/data` in Docker). Legacy installs
+ * had these files at `/app/spore.json` and `/app/.env` via bind mount;
+ * loadConfigFresh below auto-migrates them forward on first boot of an
+ * upgraded image.
  */
 
 const fs = require('fs');
 const path = require('path');
 
-// Load .env file if present
-const envPath = path.join(__dirname, '.env');
-if (fs.existsSync(envPath)) {
-  fs.readFileSync(envPath, 'utf8').split('\n').forEach(line => {
-    const [key, ...rest] = line.split('=');
-    if (key && rest.length) process.env[key.trim()] = rest.join('=').trim();
-  });
+// Resolve dataDir at module-load time (before functions are called)
+// so we can find a .env file in the right place. Prefer SPORE_DATA_DIR,
+// fall back to dirname(GRAPH_DB_PATH), then to <__dirname>/data which
+// is the bare-mode default.
+function _resolveBootDataDir() {
+  if (process.env.SPORE_DATA_DIR) return process.env.SPORE_DATA_DIR;
+  if (process.env.GRAPH_DB_PATH) return path.dirname(process.env.GRAPH_DB_PATH);
+  return path.join(__dirname, 'data');
+}
+
+function _deriveDefaultWorkspacePath(config, root) {
+  const dataDir = config.dataDir || (config.graphDbPath ? path.dirname(config.graphDbPath) : null);
+  const resolvedDataDir = dataDir && path.isAbsolute(dataDir) ? dataDir : path.resolve(root, dataDir || 'data');
+  // Container images keep immutable app code in /app and mount user state at /workspace.
+  // Falling back to process.cwd() in Docker causes /app/tools to be indexed as user tools.
+  if (resolvedDataDir === '/data' || config.graphDbPath === '/data/graph.db') return '/workspace';
+  return path.join(root, 'workspace');
+}
+
+// Load .env file. Prefer the data-dir copy (the wizard writes here on
+// new installs); fall back to the legacy /app/.env that older installs
+// bind-mount. Order matters — read legacy first, then data-dir, so
+// data-dir values win on key collision.
+const _bootDataDir = _resolveBootDataDir();
+const _legacyEnvPath = path.join(__dirname, '.env');
+const _dataDirEnvPath = path.join(_bootDataDir, '.env');
+// One-time migration: if legacy /app/.env exists but data-dir doesn't,
+// copy it forward so the wizard's future writes build on it.
+if (fs.existsSync(_legacyEnvPath) && !fs.existsSync(_dataDirEnvPath)) {
+  try {
+    fs.mkdirSync(_bootDataDir, { recursive: true });
+    fs.copyFileSync(_legacyEnvPath, _dataDirEnvPath);
+  } catch { /* read-only data dir; we'll just keep reading legacy */ }
+}
+for (const candidate of [_legacyEnvPath, _dataDirEnvPath]) {
+  if (!fs.existsSync(candidate)) continue;
+  try {
+    fs.readFileSync(candidate, 'utf8').split('\n').forEach(line => {
+      const [key, ...rest] = line.split('=');
+      if (key && rest.length) process.env[key.trim()] = rest.join('=').trim();
+    });
+  } catch { /* unreadable .env is non-fatal */ }
 }
 
 const DEFAULTS = {
@@ -35,6 +77,7 @@ const DEFAULTS = {
   // recall search, fires only when enhancedRecall is on.
   recallModel: null,
   model: null, // DEPRECATED — backward compat; resolved to plannerModel at load time
+  embedder: null, // SPORE_EMBEDDER — active graph embedder provider name (e.g. gemma-300m, gemini)
   agentId: 'spore',
   /** Optional YYYY-MM-DD — authoritative "born" date for prompt tenure math (overrides graph node created). */
   agentBornDate: null,
@@ -47,6 +90,17 @@ const DEFAULTS = {
   learningMode: 'always', // 'always' | 'flush_only' | 'disabled'
   subagentMaxTokens: null, // null = auto, derived from the active model's modelLimits[].maxTokens
   maintainerIdleOnly: false,
+  // SPORE_LEARNER_HYPEREDGES — when true, the extraction prompt asks the
+  // LLM to also emit n-ary group facts (3+ entities) as hyperedges.
+  // Off by default because it adds tokens to every extraction call;
+  // turn on for experiments or when group facts are clearly under-served.
+  learnerHyperedges: false,
+
+  // SPORE_RULE_REFUSAL_MODE — 'helpful' (default) or 'strict'. When
+  // 'strict', the persona section is augmented with framing that prefers
+  // brief refusals over partial answers when an operator-defined rule
+  // could plausibly apply. Trades helpfulness for guard-rail certainty.
+  ruleRefusalMode: 'helpful',
 
   // Optional capabilities
   webPort: null,            // SPORE_WEB_PORT — expose an HTTP server on this port
@@ -58,6 +112,17 @@ const DEFAULTS = {
   janitorPruneBatchSize: 5,         // SPORE_JANITOR_PRUNE_BATCH — permanent nodes scanned per cycle
   janitorBootDelayMinutes: 8,       // first janitor cycle after boot — slightly after maintainer
   janitorEnabled: true,     // SPORE_JANITOR_ENABLED=false to disable entirely
+  channelDistillerEnabled: true,       // SPORE_CHANNEL_DISTILLER_ENABLED=false to disable
+  channelDistillerIntervalMinutes: 120, // SPORE_CHANNEL_DISTILLER_INTERVAL_MINUTES
+  channelDistillerIdleMinutes: 45,     // SPORE_CHANNEL_DISTILLER_IDLE_MINUTES
+  channelDistillerBootDelayMinutes: 20, // SPORE_CHANNEL_DISTILLER_BOOT_DELAY_MINUTES
+  channelDistillerBatchSize: 3,        // SPORE_CHANNEL_DISTILLER_BATCH_SIZE
+  graphMaintenanceEnabled: true,       // SPORE_GRAPH_MAINTENANCE_ENABLED=false to disable scoped graph upkeep
+  graphMaintenanceIntervalMinutes: 120, // SPORE_GRAPH_MAINTENANCE_INTERVAL_MINUTES
+  graphMaintenanceBatchSize: 4,        // SPORE_GRAPH_MAINTENANCE_BATCH_SIZE
+  generalKbResearchEnabled: true,      // SPORE_GENERAL_KB_RESEARCH_ENABLED=false to disable background KB enrichment
+  generalKbResearchIntervalHours: 24,  // SPORE_GENERAL_KB_RESEARCH_INTERVAL_HOURS
+  generalKbResearchBatchSize: 1,       // SPORE_GENERAL_KB_RESEARCH_BATCH_SIZE
   graphBackupEnabled: true,          // SPORE_BACKUP_ENABLED=false to disable
   graphBackupIntervalMinutes: 60,    // SPORE_BACKUP_INTERVAL_MINUTES
   graphBackupRetention: 20,          // SPORE_BACKUP_RETENTION — rolling count kept
@@ -86,7 +151,7 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
   // Paths (Docker overrides via GRAPH_DB_PATH=/data/graph.db in compose)
   graphDbPath: path.join(__dirname, 'data', 'graph.db'),
   sessionDbPath: path.join(__dirname, 'sessions.db'),
-  workspacePath: null, // null = process.cwd() in tools; or set e.g. "./workspace"
+  workspacePath: null, // derived after dataDir: /workspace in Docker, ./workspace for bare installs
 
   // Session + Compaction
   maxSessionMessages: 200,
@@ -130,10 +195,14 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
     },
   },
 
-  // Voice (STT/TTS pipeline for Discord voice channels + Telegram voice notes)
+  // Voice (STT/TTS pipeline for Discord voice channels + Telegram voice notes).
+  // sttProvider/ttsProvider are user preferences ("which configured plugin
+  // do I prefer"). When null, the voice pipeline picks the first
+  // configured provider it finds. Specific plugin keys (XI_API_KEY,
+  // DEEPGRAM_API_KEY, etc.) live inside their plugins, not here.
   voice: {
     enabled: false,
-    sttProvider: 'deepgram',
+    sttProvider: null,
     ttsProvider: null,
     ttsVoice: null,
     ttsModel: null,
@@ -203,7 +272,7 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
   pluginsDir: null,            // SPORE_PLUGINS_DIR — bundled dir, ships with image; defaults to <repo>/plugins
   pluginsUserDir: null,        // SPORE_PLUGINS_USER_DIR — operator-writable dir for installed plugins; defaults to <workspace>/plugins
   pluginsEnabled: false,       // SPORE_PLUGINS_ENABLED — opt-in; plugins run as full-privilege Node code
-  pluginsHotReload: false,     // SPORE_PLUGINS_HOT_RELOAD — opt-in; allow runtime install/uninstall via /api/plugins
+  pluginsHotReload: true,      // SPORE_PLUGINS_HOT_RELOAD=false disables runtime install/uninstall via /api/plugins
   plugins: {},                 // per-plugin config; populated as plugins.<id> = { ... } at runtime
 
   // Credential guard for write tools
@@ -221,10 +290,22 @@ let _configCache = null;
 function loadConfigFresh() {
   const config = { ...DEFAULTS };
 
-  // Prefer spore.json; fall back to legacy anima.json for un-migrated bind mounts.
-  let configPath = path.join(__dirname, 'spore.json');
-  if (!fs.existsSync(configPath)) configPath = path.join(__dirname, 'anima.json');
-  if (fs.existsSync(configPath)) {
+  // Phase 2: settings.db (in dataDir) is the canonical store. spore.json
+  // is read once by the settings migrator (loader.js) which writes its
+  // contents into settings.db and renames the file. We deliberately do
+  // NOT copy-forward spore.json from src/ to dataDir here — the
+  // migrator handles legacy locations. We still parse a dataDir
+  // spore.json if one exists so any pre-Phase-2 boots (where the
+  // settings migration hasn't run yet) hydrate this.config correctly.
+  const bootDataDir = _resolveBootDataDir();
+  const dataDirConfigPath = path.join(bootDataDir, 'spore.json');
+  const legacySrcConfigPath = path.join(__dirname, 'spore.json');
+
+  let configPath = null;
+  if (fs.existsSync(dataDirConfigPath)) configPath = dataDirConfigPath;
+  else if (fs.existsSync(legacySrcConfigPath)) configPath = legacySrcConfigPath;
+
+  if (configPath && fs.existsSync(configPath)) {
     try {
       const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
       Object.assign(config, fileConfig);
@@ -297,10 +378,11 @@ function loadConfigFresh() {
   if (process.env.SLACK_BOT_TOKEN) config.slackBotToken = process.env.SLACK_BOT_TOKEN;
   if (process.env.SLACK_APP_TOKEN) config.slackAppToken = process.env.SLACK_APP_TOKEN;
 
-  // Voice / STT / TTS keys + shared OpenAI API key
-  if (process.env.DEEPGRAM_API_KEY) config.deepgramApiKey = process.env.DEEPGRAM_API_KEY;
+  // Shared OpenAI API key — used by core for completions when an
+  // OpenAI-tier model is configured. Voice provider keys (Deepgram,
+  // ElevenLabs, ...) live inside their plugins; the plugin reads its
+  // own env var and exposes its state through the plugin manager.
   if (process.env.OPENAI_API_KEY) config.openaiApiKey = process.env.OPENAI_API_KEY;
-  if (process.env.XI_API_KEY) config.xiApiKey = process.env.XI_API_KEY;
 
   if (process.env.GRAPH_DB_PATH) config.graphDbPath = process.env.GRAPH_DB_PATH;
   if (process.env.SESSION_DB_PATH) config.sessionDbPath = process.env.SESSION_DB_PATH;
@@ -319,11 +401,20 @@ function loadConfigFresh() {
   if (process.env.SPORE_LOG_LEVEL) config.logLevel = process.env.SPORE_LOG_LEVEL;
   if (process.env.SPORE_HEALTH_PORT) config.healthPort = parseInt(process.env.SPORE_HEALTH_PORT, 10);
   if (process.env.SPORE_LEARNER_MODEL) config.learnerModel = process.env.SPORE_LEARNER_MODEL;
+  if (process.env.SPORE_LEARNER_HYPEREDGES) {
+    const v = String(process.env.SPORE_LEARNER_HYPEREDGES).trim().toLowerCase();
+    config.learnerHyperedges = (v === '1' || v === 'true' || v === 'yes' || v === 'on');
+  }
+  if (process.env.SPORE_RULE_REFUSAL_MODE) {
+    const v = String(process.env.SPORE_RULE_REFUSAL_MODE).trim().toLowerCase();
+    if (v === 'strict' || v === 'helpful') config.ruleRefusalMode = v;
+  }
   if (process.env.SPORE_SUBAGENT_MODEL) config.subagentModel = process.env.SPORE_SUBAGENT_MODEL;
   if (process.env.SPORE_IMAGE_VLM_MODEL) config.imageVlmModel = process.env.SPORE_IMAGE_VLM_MODEL;
   if (process.env.SPORE_VIDEO_VLM_MODEL) config.videoVlmModel = process.env.SPORE_VIDEO_VLM_MODEL;
   if (process.env.SPORE_AUDIO_VLM_MODEL) config.audioVlmModel = process.env.SPORE_AUDIO_VLM_MODEL;
   if (process.env.SPORE_RECALL_MODEL) config.recallModel = process.env.SPORE_RECALL_MODEL;
+  if (process.env.SPORE_EMBEDDER) config.embedder = process.env.SPORE_EMBEDDER;
   if (process.env.SPORE_SUBAGENT_MAX_TOKENS) config.subagentMaxTokens = parseInt(process.env.SPORE_SUBAGENT_MAX_TOKENS, 10);
   if (process.env.SPORE_OPENAI_REASONING_EFFORT) config.openaiReasoningEffort = process.env.SPORE_OPENAI_REASONING_EFFORT;
   if (process.env.SPORE_HEARTBEAT_MINUTES) config.heartbeatIntervalMinutes = parseInt(process.env.SPORE_HEARTBEAT_MINUTES, 10);
@@ -471,6 +562,41 @@ function loadConfigFresh() {
     if (Number.isFinite(n) && n > 0) config.janitorPruneBatchSize = Math.floor(n);
   }
   if (process.env.SPORE_JANITOR_ENABLED === 'false') config.janitorEnabled = false;
+  if (process.env.SPORE_CHANNEL_DISTILLER_ENABLED === 'false') config.channelDistillerEnabled = false;
+  if (process.env.SPORE_CHANNEL_DISTILLER_INTERVAL_MINUTES) {
+    const n = Number(process.env.SPORE_CHANNEL_DISTILLER_INTERVAL_MINUTES);
+    if (Number.isFinite(n) && n > 0) config.channelDistillerIntervalMinutes = n;
+  }
+  if (process.env.SPORE_CHANNEL_DISTILLER_IDLE_MINUTES) {
+    const n = Number(process.env.SPORE_CHANNEL_DISTILLER_IDLE_MINUTES);
+    if (Number.isFinite(n) && n > 0) config.channelDistillerIdleMinutes = n;
+  }
+  if (process.env.SPORE_CHANNEL_DISTILLER_BOOT_DELAY_MINUTES) {
+    const n = Number(process.env.SPORE_CHANNEL_DISTILLER_BOOT_DELAY_MINUTES);
+    if (Number.isFinite(n) && n >= 0) config.channelDistillerBootDelayMinutes = n;
+  }
+  if (process.env.SPORE_CHANNEL_DISTILLER_BATCH_SIZE) {
+    const n = Number(process.env.SPORE_CHANNEL_DISTILLER_BATCH_SIZE);
+    if (Number.isFinite(n) && n > 0) config.channelDistillerBatchSize = Math.floor(n);
+  }
+  if (process.env.SPORE_GRAPH_MAINTENANCE_ENABLED === 'false') config.graphMaintenanceEnabled = false;
+  if (process.env.SPORE_GRAPH_MAINTENANCE_INTERVAL_MINUTES) {
+    const n = Number(process.env.SPORE_GRAPH_MAINTENANCE_INTERVAL_MINUTES);
+    if (Number.isFinite(n) && n > 0) config.graphMaintenanceIntervalMinutes = n;
+  }
+  if (process.env.SPORE_GRAPH_MAINTENANCE_BATCH_SIZE) {
+    const n = Number(process.env.SPORE_GRAPH_MAINTENANCE_BATCH_SIZE);
+    if (Number.isFinite(n) && n > 0) config.graphMaintenanceBatchSize = Math.floor(n);
+  }
+  if (process.env.SPORE_GENERAL_KB_RESEARCH_ENABLED === 'false') config.generalKbResearchEnabled = false;
+  if (process.env.SPORE_GENERAL_KB_RESEARCH_INTERVAL_HOURS) {
+    const n = Number(process.env.SPORE_GENERAL_KB_RESEARCH_INTERVAL_HOURS);
+    if (Number.isFinite(n) && n > 0) config.generalKbResearchIntervalHours = n;
+  }
+  if (process.env.SPORE_GENERAL_KB_RESEARCH_BATCH_SIZE) {
+    const n = Number(process.env.SPORE_GENERAL_KB_RESEARCH_BATCH_SIZE);
+    if (Number.isFinite(n) && n > 0) config.generalKbResearchBatchSize = Math.floor(n);
+  }
   if (process.env.SPORE_BACKUP_ENABLED === 'false') config.graphBackupEnabled = false;
   if (process.env.SPORE_BACKUP_INTERVAL_MINUTES) {
     const n = Number(process.env.SPORE_BACKUP_INTERVAL_MINUTES);
@@ -542,9 +668,14 @@ function loadConfigFresh() {
   if (process.env.SPORE_PROACTIVE_MAX_DAY) config.proactive.maxPerDay = parseInt(process.env.SPORE_PROACTIVE_MAX_DAY, 10);
   if (process.env.SPORE_PROACTIVE_CHANNELS) config.proactive.channels = process.env.SPORE_PROACTIVE_CHANNELS.split(',').map(s => s.trim()).filter(Boolean);
 
-  // Auto-enable voice if STT is available (TTS always available via free Edge TTS fallback)
-  const hasSTT = !!(config.deepgramApiKey || config.openaiApiKey);
-  if (hasSTT && config.voice.enabled !== false) {
+  // Auto-enable voice if a likely-STT key is present in the env. We
+  // only peek at env (not config) — the actual STT plugin owns the
+  // key. This is best-effort: the voice pipeline still asks the plugin
+  // manager whether any STT provider is configured at runtime, and
+  // gracefully no-ops when none is.
+  const sttHintKeys = ['DEEPGRAM_API_KEY', 'OPENAI_API_KEY'];
+  const hasSttHint = sttHintKeys.some(k => !!process.env[k]);
+  if (hasSttHint && config.voice.enabled !== false) {
     config.voice.enabled = true;
   }
 
@@ -606,15 +737,18 @@ function loadConfigFresh() {
   if (config.sessionDbPath && !path.isAbsolute(config.sessionDbPath)) {
     config.sessionDbPath = path.resolve(root, config.sessionDbPath);
   }
+  // dataDir: parent of graph DB — all runtime state files live here
+  if (!config.dataDir) config.dataDir = path.dirname(config.graphDbPath);
+  if (!path.isAbsolute(config.dataDir)) config.dataDir = path.resolve(root, config.dataDir);
+
+  if (!config.workspacePath) {
+    config.workspacePath = _deriveDefaultWorkspacePath(config, root);
+  }
   if (config.workspacePath) {
     config.workspacePath = path.isAbsolute(config.workspacePath)
       ? config.workspacePath
       : path.resolve(root, config.workspacePath);
   }
-
-  // dataDir: parent of graph DB — all runtime state files live here
-  if (!config.dataDir) config.dataDir = path.dirname(config.graphDbPath);
-  if (!path.isAbsolute(config.dataDir)) config.dataDir = path.resolve(root, config.dataDir);
 
   // Shared dirs default to <dataDir>/shared/* (Docker mounts override via env)
   if (!config.sharedGraphsDir) config.sharedGraphsDir = path.join(config.dataDir, 'shared', 'graphs');
@@ -631,7 +765,273 @@ function loadConfig() {
   if (_configCache) return _configCache;
   _configCache = loadConfigFresh();
   process.env.GRAPH_DB_PATH = _configCache.graphDbPath;
+
+  // Phase 1 dual-run: also boot the new schema-driven settings system
+  // so its store + DB are warm. The new system runs alongside the legacy
+  // one — reads still flow through this object, writes still flow through
+  // _persistSettingsPatch, but the registry-backed snapshot is asserted
+  // to match the legacy snapshot in dev mode (see _settingsDualRunAssert).
+  // Phase 2 will switch the write path; Phase 3 will switch the read path.
+  try {
+    const settings = require('./settings');
+    settings.boot({ dataDir: _configCache.dataDir });
+    if (process.env.SPORE_SETTINGS_DUAL_RUN_ASSERT === '1' || process.env.NODE_ENV === 'development') {
+      _settingsDualRunAssert(_configCache, settings);
+    }
+    // CRITICAL: copy settings.db values back into _configCache so the
+    // legacy `config.foo` readers (agent loop, providers, _getSettingsState,
+    // etc.) see persisted state on every boot. Without this, settings.db
+    // has the values but every restart shows blank API keys / models in
+    // the UI because legacy loadConfigFresh only reads spore.json/.env.
+    _mirrorSettingsIntoLegacyConfig(_configCache, settings);
+  } catch (e) {
+    // Don't block boot if Phase 1 setup throws — log and continue.
+    // eslint-disable-next-line no-console
+    console.warn(`[config] settings module did not boot: ${e.stack || e.message}`);
+  }
+
   return _configCache;
+}
+
+/**
+ * Pull every value from the settings store into the legacy `config`
+ * object the rest of the codebase consumes. Mirrors the same legacy-key
+ * mapping used by WebGateway._mirrorSettingsToLegacyConfig — see the
+ * inline comment there for the canonical list. We duplicate it here so
+ * values are populated at boot, before any consumer reads them.
+ */
+function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
+  const snap = settings.snapshot();
+
+  if (snap.displayName !== undefined) cfg.displayName = snap.displayName;
+  if (Array.isArray(snap.nicknames)) cfg.nicknames = snap.nicknames;
+  if (snap.agentId) cfg.agentId = snap.agentId;
+  if (snap.enhancedRecall !== undefined) cfg.enhancedRecall = !!snap.enhancedRecall;
+
+  const models = snap.models || {};
+  if (models.casual !== undefined)         cfg.casualModel = models.casual;
+  if (models.normal !== undefined)         cfg.normalModel = models.normal;
+  if (models.planner !== undefined)        cfg.plannerModel = models.planner;
+  if (models.subagent !== undefined)       cfg.subagentModel = models.subagent;
+  if (models.learner !== undefined)        cfg.learnerModel = models.learner;
+  if (models.imageVlm !== undefined)       cfg.imageVlmModel = models.imageVlm;
+  if (models.videoVlm !== undefined)       cfg.videoVlmModel = models.videoVlm;
+  if (models.audioVlm !== undefined)       cfg.audioVlmModel = models.audioVlm;
+  if (models.recall !== undefined)         cfg.recallModel = models.recall;
+  if (models.visionFallback !== undefined) cfg.visionFallbackModel = models.visionFallback;
+  if (models.audioFallback !== undefined)  cfg.audioFallbackModel = models.audioFallback;
+  if (models.videoFallback !== undefined)  cfg.videoFallbackModel = models.videoFallback;
+  cfg.model = cfg.plannerModel || cfg.normalModel || cfg.casualModel || null;
+  if (snap.modelLimits !== undefined)      cfg.modelLimits = snap.modelLimits;
+
+  const providers = snap.providers || {};
+  if (providers.anthropic?.apiKey !== undefined)   cfg.anthropicApiKey = providers.anthropic.apiKey;
+  if (providers.openai?.apiKey !== undefined)      cfg.openaiApiKey = providers.openai.apiKey;
+  if (providers.openai?.baseUrl !== undefined)     cfg.openaiBaseUrl = providers.openai.baseUrl;
+  if (providers.openrouter?.apiKey !== undefined)  cfg.openrouterApiKey = providers.openrouter.apiKey;
+  if (providers.openrouter?.baseUrl !== undefined) cfg.openrouterBaseUrl = providers.openrouter.baseUrl;
+  if (providers.openrouter?.referer !== undefined) cfg.openrouterReferer = providers.openrouter.referer;
+  if (providers.local?.apiKey !== undefined)       cfg.localModelApiKey = providers.local.apiKey;
+  if (providers.local?.baseUrl !== undefined)      cfg.localModelBaseUrl = providers.local.baseUrl;
+  if (providers.local?.authHeader !== undefined)   cfg.localModelAuthHeader = providers.local.authHeader;
+  if (providers.gemini?.apiKey !== undefined)      cfg.geminiApiKey = providers.gemini.apiKey;
+  if (Array.isArray(providers.custom)) {
+    cfg.customProviders = {};
+    for (const p of providers.custom) {
+      const name = String(p?.name || '').trim().toLowerCase();
+      if (!name || !p?.url) continue;
+      cfg.customProviders[name] = {
+        url: p.url,
+        key: p.key || '',
+        authHeader: p.authHeader || 'bearer',
+      };
+    }
+    const local = cfg.customProviders.local;
+    if (local?.url) {
+      cfg.localModelBaseUrl = local.url;
+      cfg.localModelApiKey = local.key || '';
+      cfg.localModelAuthHeader = local.authHeader || 'bearer';
+    }
+  }
+
+  const ws = snap.webSearch || {};
+  if (ws.searxngUrl !== undefined)    cfg.searxngUrl = ws.searxngUrl;
+  if (ws.searxngApiKey !== undefined) cfg.searxngApiKey = ws.searxngApiKey;
+  if (ws.braveApiKey !== undefined)   cfg.braveApiKey = ws.braveApiKey;
+
+  if (snap.voice)     cfg.voice    = { ...(cfg.voice || {}),    ...snap.voice };
+  if (snap.proactive) cfg.proactive = { ...(cfg.proactive || {}), ...snap.proactive };
+  if (snap.channels)  cfg.channels  = { ...(cfg.channels || {}),  ...snap.channels };
+
+  // Plugin slots: settings store has plugins.<id>.<key> as flat keys.
+  // Reassemble into config.plugins[id] = { ...fields }.
+  if (!cfg.plugins) cfg.plugins = {};
+  for (const [k, v] of Object.entries(settings.snapshotFlat())) {
+    if (!k.startsWith('plugins.')) continue;
+    const rest = k.slice('plugins.'.length);
+    const slash = rest.indexOf('.');
+    if (slash <= 0) continue;
+    const pluginId = rest.slice(0, slash);
+    const field = rest.slice(slash + 1);
+    if (!cfg.plugins[pluginId]) cfg.plugins[pluginId] = {};
+    cfg.plugins[pluginId][field] = v;
+  }
+
+  if (snap.browserBackend !== undefined) cfg.browserBackend = snap.browserBackend;
+
+  // Other flat scalars that legacy code reads directly.
+  for (const k of [
+    'agentEffort', 'agentTimeoutMs', 'dmMaxIterations',
+    'maxSessionMessages', 'sessionIdleTimeoutMinutes', 'sessionDailyResetHour',
+    'maxTokens', 'contextWindow', 'compactTokenThreshold',
+    'casualMessageBudget', 'complexMessageBudget', 'maxToolResultChars',
+    'totalPromptBudget', 'sectionBudgets',
+    'subagentMaxTokens', 'subagentMaxIter', 'subagentTimeoutSeconds',
+    'maxSubagentChildren', 'lullMaxIterations',
+    'tokenBudgetPressure', 'intermediateTextThrottleSeconds',
+    'openaiReasoningEffort', 'learningMode', 'maintainerIdleOnly',
+    'tempNodeTtlHours', 'janitorMode', 'janitorIntervalMinutes',
+    'janitorRecycleBinTtlDays', 'janitorPruneBatchSize', 'janitorEnabled',
+    'channelDistillerEnabled', 'channelDistillerIntervalMinutes',
+    'channelDistillerIdleMinutes', 'channelDistillerBootDelayMinutes',
+    'channelDistillerBatchSize',
+    'graphMaintenanceEnabled', 'graphMaintenanceIntervalMinutes',
+    'graphMaintenanceBatchSize',
+    'generalKbResearchEnabled', 'generalKbResearchIntervalHours',
+    'generalKbResearchBatchSize',
+    'graphBackupEnabled', 'graphBackupIntervalMinutes', 'graphBackupRetention',
+    'graphBackupDir', 'graphBackupOnChangeOnly',
+    'heartbeatIntervalMinutes',
+    'clusterUsername', 'clusterLoginHost', 'clusterTmuxPrefix', 'clusterHosts',
+    'tailscaleEnabled', 'tailscaleHostname',
+    'hostReadPaths', 'extraPaths',
+    'webPort', 'publicUrl', 'ingressMode', 'ingressDomain', 'ingressPath', 'ingressHttps',
+    'webAuthUser', 'webAuthPass', 'inviteKey',
+    'personalityEditable', 'srcEditable', 'credentialGuard',
+    'pluginsEnabled', 'pluginsHotReload', 'embedder',
+    'logLevel', 'agentBornDate',
+  ]) {
+    if (snap[k] !== undefined) cfg[k] = snap[k];
+  }
+
+  // Null means "use the runtime-derived workspace", not "fall back to /app".
+  // Keep this separate from the generic scalar loop because settings defaults
+  // are nullable while the runtime path must always be concrete.
+  if (snap.workspacePath) {
+    cfg.workspacePath = path.isAbsolute(snap.workspacePath)
+      ? snap.workspacePath
+      : path.resolve(__dirname, snap.workspacePath);
+  }
+}
+
+/**
+ * Phase 1 only — emits warnings when the legacy config object and the
+ * new typed registry disagree about the resolved value of any
+ * registered key. Does NOT throw; the legacy config remains the
+ * source of truth until Phase 2.
+ *
+ * Drop this function (and its call site) when Phase 2 lands.
+ */
+function _settingsDualRunAssert(legacyConfig, settings) {
+  // Keys that are intentionally new in the registry — no legacy
+  // equivalent exists, so a mismatch here is expected. Drop entries
+  // here as legacy code grows to set them.
+  const NEW_REGISTRY_KEYS = new Set(['appearance.theme']);
+  const mismatches = [];
+  for (const def of settings.allDefs()) {
+    if (def.pluginId) continue;          // plugin keys aren't on legacy config
+    if (def.scope.includes('bootstrap')) continue;
+    if (NEW_REGISTRY_KEYS.has(def.key)) continue;
+    const legacyValue = _getLegacyConfigValue(legacyConfig, def.key);
+    const newValue = settings.get(def.key);
+    if (!_settingsValuesEqual(def.type, legacyValue, newValue)) {
+      mismatches.push({ key: def.key, legacy: legacyValue, registry: newValue, type: def.type });
+    }
+  }
+  if (mismatches.length) {
+    // eslint-disable-next-line no-console
+    console.warn(`[settings/dual-run] ${mismatches.length} key(s) differ between legacy config and registry:`);
+    for (const m of mismatches.slice(0, 20)) {
+      // eslint-disable-next-line no-console
+      console.warn(`  ${m.key} (${m.type}): legacy=${JSON.stringify(m.legacy)} registry=${JSON.stringify(m.registry)}`);
+    }
+    if (mismatches.length > 20) {
+      // eslint-disable-next-line no-console
+      console.warn(`  …${mismatches.length - 20} more`);
+    }
+  }
+}
+
+function _getLegacyConfigValue(cfg, key) {
+  // Registry keys are dotted; the legacy config has a mix of flat
+  // (e.g. casualModel) and nested (e.g. voice.silenceThresholdMs) shapes.
+  // Try nested-path resolution first; then map dotted registry keys back
+  // to their legacy flat-key equivalent for the migrated names.
+  const nested = key.split('.').reduce((acc, p) => (acc != null ? acc[p] : undefined), cfg);
+  if (nested !== undefined) return nested;
+  // Fallback: registry uses 'models.planner' but legacy uses 'plannerModel', etc.
+  const flatMap = {
+    'models.casual': 'casualModel',
+    'models.normal': 'normalModel',
+    'models.planner': 'plannerModel',
+    'models.subagent': 'subagentModel',
+    'models.learner': 'learnerModel',
+    'models.imageVlm': 'imageVlmModel',
+    'models.videoVlm': 'videoVlmModel',
+    'models.audioVlm': 'audioVlmModel',
+    'models.recall': 'recallModel',
+    'models.visionFallback': 'visionFallbackModel',
+    'models.audioFallback': 'audioFallbackModel',
+    'models.videoFallback': 'videoFallbackModel',
+    'providers.anthropic.apiKey': 'anthropicApiKey',
+    'providers.openai.apiKey': 'openaiApiKey',
+    'providers.openai.baseUrl': 'openaiBaseUrl',
+    'providers.openrouter.apiKey': 'openrouterApiKey',
+    'providers.openrouter.baseUrl': 'openrouterBaseUrl',
+    'providers.openrouter.referer': 'openrouterReferer',
+    'providers.local.apiKey': 'localModelApiKey',
+    'providers.local.baseUrl': 'localModelBaseUrl',
+    'providers.local.authHeader': 'localModelAuthHeader',
+    'providers.gemini.apiKey': 'geminiApiKey',
+    'webSearch.searxngUrl': 'searxngUrl',
+    'webSearch.searxngApiKey': 'searxngApiKey',
+    'webSearch.braveApiKey': 'braveApiKey',
+    'channels.telegram.botToken': 'telegramBotToken',
+    'channels.slack.botToken': 'slackBotToken',
+    'channels.slack.appToken': 'slackAppToken',
+    'channels.discord.token': 'discordToken',
+    'channels.discord.admins': 'discordAdmins',
+    'channels.discord.maxMessageLength': 'maxMessageLength',
+    'channels.discord.typingInterval': 'typingInterval',
+    'channels.discord.maxQueuePerChannel': 'maxQueuePerChannel',
+    'channels.discord.messageDebounceMs': 'messageDebounceMs',
+  };
+  if (flatMap[key]) return cfg[flatMap[key]];
+  return undefined;
+}
+
+function _settingsValuesEqual(type, a, b) {
+  // null / undefined / empty-string are interchangeable for this
+  // assertion: legacy code uses any of the three to mean "unset".
+  const aEmpty = a == null || a === '';
+  const bEmpty = b == null || b === '';
+  if (aEmpty && bEmpty) return true;
+  if (aEmpty || bEmpty) return false;
+  if (type === 'array<string>') {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    return a.every((v, i) => v === b[i]);
+  }
+  if (type === 'json') {
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+  }
+  if (type === 'integer' || type === 'number') {
+    return Number(a) === Number(b);
+  }
+  if (type === 'boolean') {
+    return Boolean(a) === Boolean(b);
+  }
+  return String(a) === String(b);
 }
 
 function resetConfigCache() {

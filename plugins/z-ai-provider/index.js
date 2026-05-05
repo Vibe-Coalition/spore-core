@@ -88,6 +88,7 @@ module.exports = function register(api) {
   }, {
     prefixes: [Z_AI_PREFIX],
     label: 'Z.ai (GLM)',
+    modelsPlaceholder: 'glm-4.6, glm-z1-flash',
     capabilities: { tools: true, vision: true, audio: false, video: false },
     isConfigured: (config) => {
       const slot = config?.plugins?.['z-ai-provider'] || {};

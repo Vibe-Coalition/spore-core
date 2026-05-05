@@ -401,7 +401,7 @@ class SessionManager {
     // substance. Two reasons to drop them on replay:
     //
     // 1. Cross-vendor safety: thinking blocks captured from an OAI-compat
-    //    backend (vLLM, GLM, BFL) carry no Anthropic `signature`. If the
+    //    backend (vLLM, GLM, etc.) carry no Anthropic `signature`. If the
     //    operator switches the model to claude-opus-4-7 mid-session, the
     //    Anthropic API replays history and returns
     //    `messages.N.content.M.thinking.signature: Field required` on the

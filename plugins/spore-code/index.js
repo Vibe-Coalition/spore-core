@@ -30,6 +30,68 @@
 // same key; both flows read it directly from this.config.
 
 const crypto = require('crypto');
+const { coreRequire, modelForTier } = require('../core-require');
+const { projectIdentityFromContext } = coreRequire('graph/scopes');
+const graphEvents = coreRequire('graph/events');
+
+const SESSION_GRAPH_SLUGS = new Map();
+const SESSION_PROJECT_KEYS = new Map();
+const SESSION_CLIENT_TOOLS = new Map();
+const SESSION_CLIENT_VERSIONS = new Map();
+
+const LEGACY_SPORE_CODE_TOOLS = new Set([
+  'index_codebase', 'search_symbols', 'trace_calls', 'get_snippet',
+  'architecture', 'impact', 'verify_implementation',
+]);
+
+function normalizeToolList(list) {
+  if (!Array.isArray(list)) return null;
+  const names = list.map(x => String(x || '').trim()).filter(Boolean);
+  return names.length ? new Set(names) : null;
+}
+
+function clearSessionRuntimeState(sessionId) {
+  const key = String(sessionId);
+  SESSION_GRAPH_SLUGS.delete(key);
+  SESSION_PROJECT_KEYS.delete(key);
+  SESSION_CLIENT_TOOLS.delete(key);
+  SESSION_CLIENT_VERSIONS.delete(key);
+}
+
+function clientToolsForCtx(ctx) {
+  return normalizeToolList(ctx?.clientTools)
+    || normalizeToolList(ctx?.projectContext?.localTools)
+    || (ctx?.channelId ? SESSION_CLIENT_TOOLS.get(String(ctx.channelId)) : null)
+    || null;
+}
+
+function sporeClientToolAvailable(toolName, opts = {}) {
+  return (ctx = {}) => {
+    if (ctx.platform !== 'cli') return false;
+    const pc = ctx.projectContext || {};
+    if (!pc.cwd && !pc.clientCwd) return false;
+    const tools = clientToolsForCtx(ctx);
+    if (!tools) return opts.legacy === true && LEGACY_SPORE_CODE_TOOLS.has(toolName);
+    return tools.has(toolName);
+  };
+}
+
+function sporeClientToolMeta(toolName, opts = {}) {
+  return {
+    platforms: ['cli'],
+    requiresProjectContext: true,
+    requiresClientTool: toolName,
+    available: sporeClientToolAvailable(toolName, opts),
+  };
+}
+
+function withLearnerDb(learner, db, graphSlug = null) {
+  if (!learner || !db) return learner;
+  const scoped = Object.create(learner);
+  scoped.db = db;
+  if (graphSlug) scoped._graphSlug = graphSlug;
+  return scoped;
+}
 
 // ── Resolve the host invite key ────────────────────────────────────
 // The spore-code /auth endpoint validates incoming Go-binary connections
@@ -200,6 +262,71 @@ const checkpointsLib = require('../session-graph/lib/checkpoints');
 const heuristicsLib  = require('../session-graph/lib/heuristics');
 const scriptsLib     = require('../session-graph/lib/scripts');
 
+function projectGraphForContext(api, userId, pc = {}) {
+  const registry = api._appContext?.tools?._graphRegistry;
+  const learner = api._appContext?.learner;
+  if (!registry || !learner?.getGraphDb || !pc?.cwd) return null;
+  const identity = projectIdentityFromContext(userId || 'anon', pc);
+  if (!identity) return null;
+  const slug = registry.ensureProjectGraph(identity.key, {
+    name: identity.label,
+    description: `${identity.basis} project memory${identity.remote ? ` for ${identity.remote}` : ` for ${identity.root}`}`,
+    source: 'spore-code',
+    createdBy: 'spore-code',
+    userId: userId || 'anon',
+    projectKey: identity.key,
+    projectRoot: identity.root,
+    projectRemote: identity.remote,
+  });
+  const db = learner.getGraphDb(slug);
+  if (!db) return null;
+  return {
+    slug,
+    identityKey: identity.key,
+    identity,
+    learner: withLearnerDb(learner, db, slug),
+  };
+}
+
+function scopedLearnerForTurn(api, opts) {
+  const slug = opts?.memoryEnvelope?.writeScopes?.projectSlug || opts?.memoryEnvelope?.projectSlug || null;
+  const learner = api._appContext?.learner;
+  if (!slug || !learner?.getGraphDb) return learner;
+  const db = learner.getGraphDb(slug);
+  return db ? withLearnerDb(learner, db, slug) : learner;
+}
+
+function scopedSessionMemory(api, ws, msg = {}) {
+  const ctx = api._appContext;
+  const baseLearner = ctx?.tools?.learner || ctx?.learner;
+  const sessionId = msg.sessionId != null ? String(msg.sessionId) : null;
+  const userId = ws?._user || msg.userName || 'anon';
+  const pc = { ...(msg.projectContext || {}), cwd: msg.cwd || msg.projectContext?.cwd };
+  let slug = sessionId ? SESSION_GRAPH_SLUGS.get(sessionId) : null;
+  let projectIdentityKey = sessionId ? SESSION_PROJECT_KEYS.get(sessionId) : null;
+
+  if (!slug && pc.cwd) {
+    const scoped = projectGraphForContext(api, userId, pc);
+    if (scoped?.slug) {
+      slug = scoped.slug;
+      projectIdentityKey = scoped.identityKey;
+      if (sessionId) {
+        SESSION_GRAPH_SLUGS.set(sessionId, slug);
+        SESSION_PROJECT_KEYS.set(sessionId, projectIdentityKey);
+      }
+      return { learner: scoped.learner, slug, projectIdentityKey, pc };
+    }
+  }
+
+  const db = slug && baseLearner?.getGraphDb ? baseLearner.getGraphDb(slug) : null;
+  return {
+    learner: db ? withLearnerDb(baseLearner, db, slug) : baseLearner,
+    slug,
+    projectIdentityKey,
+    pc,
+  };
+}
+
 // renderCodeGraphMap — pulls the cached `code_graph` aspect off the
 // project node (populated by update_code_graph_summary after each
 // architecture/index pass) and renders it as a structured prelude
@@ -208,9 +335,9 @@ const scriptsLib     = require('../session-graph/lib/scripts');
 // instead of starting cold and burning a tool call on architecture().
 // Returns null when no code_graph aspect exists yet — the prompt then
 // falls back to "call architecture() once first".
-function renderCodeGraphMap(learner, userId, cwd) {
+function renderCodeGraphMap(learner, userId, cwd, pc = null) {
   if (!learner?.db || !cwd) return null;
-  const proj = projectsLib.getProject(learner, userId, cwd);
+  const proj = projectsLib.getProject(learner, userId, cwd, pc);
   if (!proj) return null;
   const attrs = proj.aspects?.code_graph;
   if (!Array.isArray(attrs) || attrs.length === 0) return null;
@@ -222,8 +349,10 @@ function renderCodeGraphMap(learner, userId, cwd) {
   //   cluster: <name> — <files> files, <symbols> symbols (<lang>)
   //   hot: <qname> ← <n> callers (<file>:<line>)
   //   note: <free text>
+  //   bridge: <caller_qname> ← calls → <callee_qname> (<why>)   [code_overview, v0.5.0+]
+  //   question: <orientation question>                           [code_overview, v0.5.0+]
   // Group by prefix so the rendered block reads naturally.
-  const buckets = { head: [], stats: [], tech_stack: [], entry: [], cluster: [], hot: [], note: [] };
+  const buckets = { head: [], stats: [], tech_stack: [], entry: [], cluster: [], hot: [], note: [], bridge: [], question: [] };
   for (const a of attrs) {
     if (a.startsWith('index_head:')) buckets.head.push(a.slice('index_head:'.length).trim());
     else if (a.startsWith('stats:')) buckets.stats.push(a.slice('stats:'.length).trim());
@@ -232,9 +361,11 @@ function renderCodeGraphMap(learner, userId, cwd) {
     else if (a.startsWith('cluster:')) buckets.cluster.push(a.slice('cluster:'.length).trim());
     else if (a.startsWith('hot:')) buckets.hot.push(a.slice('hot:'.length).trim());
     else if (a.startsWith('note:')) buckets.note.push(a.slice('note:'.length).trim());
+    else if (a.startsWith('bridge:')) buckets.bridge.push(a.slice('bridge:'.length).trim());
+    else if (a.startsWith('question:')) buckets.question.push(a.slice('question:'.length).trim());
   }
   const out = [];
-  out.push('### Codebase Map (cached from last index — use this to skip rediscovery)');
+  out.push('### Codebase Map (from structural code index — orientation only, not prior reading)');
   if (buckets.head.length) out.push(`index_head: ${buckets.head[0]}  *(if your search comes back stale, re-run \`index_codebase({force:true})\`)*`);
   if (buckets.stats.length) out.push(`stats: ${buckets.stats[0]}`);
   if (buckets.tech_stack.length) out.push(`tech_stack: ${buckets.tech_stack[0]}`);
@@ -253,6 +384,14 @@ function renderCodeGraphMap(learner, userId, cwd) {
   if (buckets.note.length) {
     out.push('notes:');
     for (const n of buckets.note.slice(0, 10)) out.push(`  - ${n}`);
+  }
+  if (buckets.bridge.length) {
+    out.push('surprising_calls (cross-cluster bridges from `code_overview` — non-obvious structural couplings):');
+    for (const b of buckets.bridge.slice(0, 5)) out.push(`  - ${b}`);
+  }
+  if (buckets.question.length) {
+    out.push('orientation_questions (from `code_overview`, worth holding in mind):');
+    for (const q of buckets.question.slice(0, 3)) out.push(`  - ${q}`);
   }
   return out.join('\n');
 }
@@ -278,7 +417,9 @@ function maybePruneStaleScripts(api, opts) {
   if (!learner?.db) return;
   try {
     const userId = opts.userId || opts.userName || 'anon';
-    const projectId = scriptsLib.projectNodeId(userId, opts.projectContext.cwd);
+    const projectId = projectsLib.projectNodeIdFromContext
+      ? projectsLib.projectNodeIdFromContext(userId, { ...opts.projectContext, projectIdentityKey: opts.memoryEnvelope?.projectKey || null })
+      : scriptsLib.projectNodeId(userId, opts.projectContext.cwd);
     const projRow = learner.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(projectId);
     if (!projRow) return;
     let extra = {};
@@ -308,7 +449,10 @@ function noteProjectActivity(api, opts, finalText, toolLog) {
       ? ` [${toolLog.length} tool calls: ${toolLog.slice(0, 3).map(t => t.tool).join(', ')}${toolLog.length > 3 ? '…' : ''}]`
       : '';
     const summary = `${userSnip}${tools}`;
-    projects.noteProjectInteraction(learner, opts.userId || 'anon', opts.projectContext.cwd, summary);
+    projects.noteProjectInteraction(learner, opts.userId || 'anon', opts.projectContext.cwd, summary, {
+      ...opts.projectContext,
+      projectIdentityKey: opts.memoryEnvelope?.projectKey || null,
+    });
   } catch (e) {
     api.getLogger().warn(`[project-node] note failed: ${e.message}`);
   }
@@ -323,21 +467,33 @@ function noteProjectActivity(api, opts, finalText, toolLog) {
 function sessionStartHandler(api, ws, msg) {
   if (!msg?.sessionId) return;
   const ctx = api._appContext;
-  const learner = ctx?.tools?.learner || ctx?.learner;
+  const baseLearner = ctx?.tools?.learner || ctx?.learner;
   const config = ctx?.config || {};
-  if (!learner) return;
+  if (!baseLearner) return;
   try {
     const sessions = sessionsLib;
-    const r = sessions.upsertSessionNode(learner, {
+    const userId = ws._user || msg.userName || 'anon';
+    const pc = { ...(msg.projectContext || {}), cwd: msg.cwd || msg.projectContext?.cwd };
+    const scoped = projectGraphForContext(api, userId, pc);
+    const learner = scoped?.learner || baseLearner;
+    if (scoped?.slug) {
+      SESSION_GRAPH_SLUGS.set(String(msg.sessionId), scoped.slug);
+      SESSION_PROJECT_KEYS.set(String(msg.sessionId), scoped.identityKey);
+    }
+    const localTools = normalizeToolList(msg.localTools || msg.projectContext?.localTools);
+    if (localTools) SESSION_CLIENT_TOOLS.set(String(msg.sessionId), localTools);
+    if (msg.clientVersion) SESSION_CLIENT_VERSIONS.set(String(msg.sessionId), String(msg.clientVersion));
+    const r = graphEvents.withGraph(scoped?.slug ? { graph: scoped.slug } : null, () => sessions.upsertSessionNode(learner, {
       sessionId: msg.sessionId,
-      userId:    ws._user || msg.userName || 'anon',
+      userId,
       userName:  msg.userName,
       cwd:       msg.cwd,
       startedAt: msg.startedAt,
-      model:     config.normalModel || config.model,
+      model:     modelForTier('normal', config),
+      projectIdentityKey: scoped?.identityKey || null,
       ...(msg.projectContext || {}),
-    });
-    if (r) api.getLogger().info(`[graphcorn] session:start → ${r.id}${r.isNew ? ' (new)' : ''}${r.projectId ? ' part_of ' + r.projectId : ''}`);
+    }));
+    if (r) api.getLogger().info(`[graphcorn] session:start → ${r.id}${r.isNew ? ' (new)' : ''}${r.projectId ? ' part_of ' + r.projectId : ''}${scoped?.slug ? ` @ ${scoped.slug}` : ''}`);
   } catch (e) {
     api.getLogger().warn(`[graphcorn] session:start failed: ${e.message}`);
   }
@@ -348,22 +504,42 @@ function sessionStartHandler(api, ws, msg) {
 // distillSession is idempotent (extra.distilled_at marker), so if the
 // WS ALSO drops and re-fires distillation from the close handler in
 // core, the second call is a no-op.
+function waitForLearnerDrain(learner, timeoutMs = 5000) {
+  const started = Date.now();
+  return new Promise(resolve => {
+    const tick = () => {
+      const queueDepth = Array.isArray(learner?._queue) ? learner._queue.length : 0;
+      if (!learner?._running && queueDepth === 0) return resolve();
+      if (Date.now() - started >= timeoutMs) return resolve();
+      setTimeout(tick, 150);
+    };
+    tick();
+  });
+}
+
 function sessionEndHandler(api, ws, msg) {
   if (!msg?.sessionId) return;
   const ctx = api._appContext;
-  const learner = ctx?.tools?.learner || ctx?.learner;
+  const baseLearner = ctx?.tools?.learner || ctx?.learner;
   const config = ctx?.config || {};
   const log = api.getLogger();
-  if (!learner) return;
+  if (!baseLearner) return;
   try {
+    const slug = SESSION_GRAPH_SLUGS.get(String(msg.sessionId));
+    const db = slug && baseLearner.getGraphDb ? baseLearner.getGraphDb(slug) : null;
+    const learner = db ? withLearnerDb(baseLearner, db, slug) : baseLearner;
     const sessions = sessionsLib;
-    sessions.finalizeSessionNode(learner, msg.sessionId, { endedAt: msg.endedAt });
-    log.info(`[graphcorn] session:end → session-${msg.sessionId}`);
+    graphEvents.withGraph(slug ? { graph: slug } : null, () => sessions.finalizeSessionNode(learner, msg.sessionId, { endedAt: msg.endedAt }));
+    log.info(`[graphcorn] session:end → session-${msg.sessionId}${slug ? ` @ ${slug}` : ''}`);
     const llmClient = ctx?.tools?.llmClient;
     if (llmClient) {
-      sessions.summarizeSessionNode(learner, llmClient, config, msg.sessionId, log)
-        .then(() => sessions.distillSession(learner, llmClient, config, msg.sessionId, log))
-        .catch(e => log.warn(`[graphcorn] summary/distill error: ${e.message}`));
+      waitForLearnerDrain(baseLearner)
+        .then(() => graphEvents.withGraph(slug ? { graph: slug } : null, () => sessions.summarizeSessionNode(learner, llmClient, config, msg.sessionId, log)))
+        .then(() => graphEvents.withGraph(slug ? { graph: slug } : null, () => sessions.distillSession(learner, llmClient, config, msg.sessionId, log)))
+        .catch(e => log.warn(`[graphcorn] summary/distill error: ${e.message}`))
+        .finally(() => clearSessionRuntimeState(msg.sessionId));
+    } else {
+      clearSessionRuntimeState(msg.sessionId);
     }
   } catch (e) {
     api.getLogger().warn(`[graphcorn] session:end failed: ${e.message}`);
@@ -380,11 +556,15 @@ function sessionEndHandler(api, ws, msg) {
 // auto-leak.
 function saveProjectScriptFromFileHandler(api, ws, msg) {
   if (!msg?.sessionId || !msg?.cwd || !msg?.name || !msg?.body) return;
-  const ctx = api._appContext;
-  const learner = ctx?.tools?.learner || ctx?.learner;
+  const scoped = scopedSessionMemory(api, ws, msg);
+  const learner = scoped.learner;
   if (!learner) return;
   const userId = ws?._user || msg.userName || 'anon';
-  const projectId = scriptsLib.projectNodeId(userId, msg.cwd);
+  const projectId = projectsLib.projectNodeIdFromContext(userId, {
+    ...(scoped.pc || {}),
+    cwd: msg.cwd,
+    projectIdentityKey: scoped.projectIdentityKey,
+  });
   try {
     const r = scriptsLib.upsertScriptNode(learner, {
       projectId,
@@ -416,11 +596,15 @@ function saveProjectScriptFromFileHandler(api, ws, msg) {
 // saved-helper path automatically updates its reliability counters.
 function recordScriptOutcomeFromExecHandler(api, ws, msg) {
   if (!msg?.sessionId || !msg?.cwd || !msg?.name) return;
-  const ctx = api._appContext;
-  const learner = ctx?.tools?.learner || ctx?.learner;
+  const scoped = scopedSessionMemory(api, ws, msg);
+  const learner = scoped.learner;
   if (!learner) return;
   const userId = ws?._user || msg.userName || 'anon';
-  const projectId = scriptsLib.projectNodeId(userId, msg.cwd);
+  const projectId = projectsLib.projectNodeIdFromContext(userId, {
+    ...(scoped.pc || {}),
+    cwd: msg.cwd,
+    projectIdentityKey: scoped.projectIdentityKey,
+  });
   try {
     const r = scriptsLib.recordScriptOutcome(learner, projectId, msg.name, msg.ok === true);
     if (r?.ok) {
@@ -453,14 +637,18 @@ function recordScriptOutcomeFromExecHandler(api, ws, msg) {
 // silently every session.
 function codeGraphSummaryHandler(api, ws, msg) {
   if (!msg?.sessionId) return;
-  const ctx = api._appContext;
-  const learner = ctx?.tools?.learner || ctx?.learner;
+  const scoped = scopedSessionMemory(api, ws, msg);
+  const learner = scoped.learner;
   if (!learner) return;
   const userId = ws?._user || msg.userName || 'anon';
   const cwd = msg.cwd;
   if (!cwd) return;
   try {
-    const r = projectsLib.upsertProjectCodeGraph(learner, userId, cwd, msg.summary || {});
+    const r = projectsLib.upsertProjectCodeGraph(learner, userId, cwd, msg.summary || {}, {
+      ...(scoped.pc || {}),
+      cwd,
+      projectIdentityKey: scoped.projectIdentityKey,
+    });
     if (r?.ok) {
       api.getLogger().info(
         `[code_graph] mirrored summary onto ${r.projectNodeId} ` +
@@ -494,10 +682,15 @@ function codeGraphSummaryHandler(api, ws, msg) {
 function buildProjectContextSection(api, opts) {
   if (opts.platform !== 'cli' || !opts.projectContext) return null;
   const pc = opts.projectContext;
-  const cached = opts.cachedProjectNodeId && !opts.cachedProjectStale && !opts.cachedProjectIsNew;
+  const hasPriorProjectMemory = !!(
+    opts.cachedProjectHasPriorMemory ||
+    opts.cachedProjectHasPriorSessions ||
+    opts.cachedProjectHasPriorActivity
+  );
+  const cached = opts.cachedProjectNodeId && !opts.cachedProjectStale && !opts.cachedProjectIsNew && hasPriorProjectMemory;
   const parts = [];
   parts.push(`## Project Context — ${pc.project || 'project'}`);
-  parts.push(`**You have direct shell + filesystem access on the user's machine via your tools (exec, read_file, write_file, edit_file, grep, glob).** When the user asks about local state — "is the dev server up", "what's in this file", "why is X slow", "did the build finish", "what does ls show", "is port N open" — RUN THE TOOLS and answer with the actual result. Do NOT respond as if you're a remote chatbot ("I can't see your machine, here's how you could check"). For Spore Code sessions you are effectively a coding agent on the user's box; behave like one.`);
+  parts.push('Project operating rules are loaded from this project graph in the Scoped Recall Bundle. Follow those refs for runtime access, sandboxing, shell quoting, dev servers, helper scripts, listing/output filtering, plan/execute flow, and verification.');
   if (pc.cwd) parts.push(`- CWD: ${pc.cwd}`);
   if (pc.os || pc.arch) parts.push(`- Platform: ${pc.os || '?'}/${pc.arch || '?'}`);
   if (pc.projectType) parts.push(`- Project type: ${pc.projectType}`);
@@ -531,7 +724,7 @@ function buildProjectContextSection(api, opts) {
     }
   }
   if (cached) {
-    parts.push(`- Project memory: graph node \`${opts.cachedProjectNodeId}\` (cached — gitHash unchanged since last session). Use \`graph_query({ query: "...", nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve file tree, SPORE.md, prior decisions, and recent activity from past sessions.`);
+    parts.push(`- Project memory: graph node \`${opts.cachedProjectNodeId}\` (existing project memory from prior sessions). Use \`graph_query({ query: "...", nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve file tree, SPORE.md, prior decisions, and recent activity from past sessions.`);
   } else {
     if (pc.tree && pc.tree.length) {
       const shown = pc.tree.slice(0, 80);
@@ -545,7 +738,11 @@ function buildProjectContextSection(api, opts) {
     }
     if (opts.cachedProjectNodeId) {
       parts.push('');
-      parts.push(`**Project memory**: this project is tracked as graph node \`${opts.cachedProjectNodeId}\`. Use \`graph_query({ nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve prior decisions, conventions, and recent activity from past sessions.`);
+      if (hasPriorProjectMemory) {
+        parts.push(`**Project memory**: this project is tracked as graph node \`${opts.cachedProjectNodeId}\`. Use \`graph_query({ nodeId: "${opts.cachedProjectNodeId}" })\` to retrieve prior decisions, conventions, and recent activity from past sessions.`);
+      } else {
+        parts.push(`**Project graph**: \`${opts.cachedProjectNodeId}\` is fresh for this project scope. A code index may already be mirrored here, but that is only structural orientation. Do not claim you already read or explained the codebase unless this conversation actually did that.`);
+      }
     }
   }
 
@@ -554,7 +751,8 @@ function buildProjectContextSection(api, opts) {
     const sessNodeId = 'session-' + String(opts.channelId);
     let sessionExists = false;
     try {
-      const db = api._appContext?.learner?.db || api._appContext?.graph?.db;
+      const scopedLearner = scopedLearnerForTurn(api, opts);
+      const db = scopedLearner?.db || api._appContext?.graph?.db;
       sessionExists = !!db?.prepare('SELECT 1 FROM nodes WHERE id = ?').get(sessNodeId);
     } catch (e) { api.getLogger().warn('session-exists check failed: ' + e.message); }
     if (sessionExists) {
@@ -564,21 +762,16 @@ function buildProjectContextSection(api, opts) {
       if (opts.cachedProjectNodeId) {
         parts.push(`- Project node: \`${opts.cachedProjectNodeId}\` — sibling anchor for cross-session memory in the same project`);
       }
-      parts.push("- **Persist what you learn here.** When you discover something durable — a config that worked, a tool quirk, a fix for a tricky failure, a port number, a CLI flag — call `note_discovery({text: \"...\", kind: \"...\"})`. Don't wait for the learner; you know better what mattered. The discovery gets a `recorded_in` edge to this session AND a `learned_about` edge to the project, so future sessions on this project can find it via `graph_query`.");
-      parts.push("- `note_discovery` kinds: `fact` (plain knowledge), `gotcha` (non-obvious behavior), `workflow` (a procedure that worked), `config` (a setting/value), `failure_fix` (problem→solution pair).");
-      parts.push("- Use `graph_update` directly when you want full schema control (custom node type, multiple aspects, explicit edges to specific nodes). Use `note_discovery` for casual one-line saves — way less boilerplate.");
-      parts.push("- Every entity the LEARNER picks up from this conversation also auto-links to the session node via `discovered_in`. So even passive captures are anchored — no orphans.");
-      parts.push("- **Born temporary, distilled at session-end.** Every node you create this session (note_discovery, graph_update, learner-extracted) is born `temp` and tagged with this session id. When the session closes (graceful or ungraceful), a small LLM looks at all of them and **PROMOTES** the keepers to permanent (tools, libraries, frameworks, people, projects, durable workflows, failure→fix pairs), **APPENDS** session-specific lessons onto existing permanent nodes' `gotchas`, and soft-deletes the rest into `recycle_bin` (7-day restore window). So: capture aggressively, don't agonize over signal-vs-noise — distillation is the filter. If you really want a node permanent immediately (rare — only for things you're CERTAIN matter beyond this session), pass `temp: false` to `graph_update`.");
+      parts.push('- Persist durable discoveries with `note_discovery`; use `graph_update` only when you need full schema control. Session/project linking and distillation rules live in the project operating refs.');
     }
   }
 
   parts.push('');
   if (pc.scope === 'expanded') {
-    parts.push(`**Sandbox**: the user has run \`/scope expanded\`, lifting the cwd containment for this session. file operations may target any path on the user's machine — but the project root is still ${pc.cwd}, so write project files there unless the user has asked you to touch something elsewhere (shared dotfiles, a sibling repo, their home directory, etc.). Do NOT use /workspace/ or any server-side path — those live inside the Spore Core container and will be lost on restart.`);
+    parts.push(`**Sandbox**: expanded for this session. Project root is still ${pc.cwd}; write project files there unless the user explicitly asked for another path.`);
   } else {
-    parts.push(`**Sandbox**: ALL file operations (read_file, write_file, edit_file, exec) are sandboxed to ${pc.cwd}. Paths outside that directory will be REJECTED by the tool executor on the user's machine. If the user explicitly asks you to touch a path outside ${pc.cwd}, tell them to run \`/scope expanded\` first to lift the sandbox. Do NOT use /workspace/ or any server-side path — those live inside the Spore Core container and will be lost on restart. Write everything to ${pc.cwd}.`);
+    parts.push(`**Sandbox**: strict to ${pc.cwd}. If the user asks for paths outside this root, ask them to run \`/scope expanded\`.`);
   }
-  parts.push('**Work style**: One or two tool calls per turn, not six. After each file write or command, briefly tell the user what you did and what is next. Do NOT batch many write_file calls in a single response — the user cannot see progress and it takes too long to generate.');
   // Project memory summary — counts only, never bodies. Cheap: pulls
   // from the project node's scripts_index aspect + the codeindex
   // staleness flag we plumbed through ProjectContext. Lets the agent
@@ -586,9 +779,12 @@ function buildProjectContextSection(api, opts) {
   // tool call, so it can pick the right next move (list_project_scripts,
   // architecture, search_symbols, ...) without guessing.
   try {
-    const learner = api._appContext?.learner;
+    const learner = scopedLearnerForTurn(api, opts);
     const userId = opts.userId || opts.userName || 'anon';
-    const projectId = pc.cwd ? scriptsLib.projectNodeId(userId, pc.cwd) : null;
+    const projectId = pc.cwd ? projectsLib.projectNodeIdFromContext(userId, {
+      ...pc,
+      projectIdentityKey: opts.memoryEnvelope?.projectKey || null,
+    }) : null;
     const summary = [];
     let savedScripts = [];
     if (projectId && learner?.db) {
@@ -654,16 +850,7 @@ function buildProjectContextSection(api, opts) {
     api.getLogger().warn('project_memory_summary build failed: ' + e.message);
   }
 
-  // Helper-script convention. Bodies live in dedicated `script:` graph
-  // nodes (see save_project_script / list_project_scripts /
-  // get_project_script tools); .spore-code/scratch/ is the on-disk
-  // execution cache that the CLI rehydrates on demand. The legacy
-  // `scratch_helpers` aspect is the path-only index from the prior
-  // design; `migrateScratchHelpers` copies its contents into
-  // scripts_index on first read.
-  parts.push('**Helper scripts (LAN IP detection, QR generation, log parsers, build wrappers, etc.):** the GRAPH is the source of truth. Save with `save_project_script({name, description, language, body, tags?})` — the body is stored on a dedicated `script:<projectId>:<name>` node and a one-line summary lands on the project\'s `scripts_index` aspect, so future sessions on this project (or a fresh laptop) can recover the script. Discover existing helpers with `list_project_scripts({tag?, language?})` (cheap; index-only, no bodies). Fetch a body with `get_project_script({name})` — the CLI rehydrates `.spore-code/scratch/<name>.<ext>` if missing so you can `exec` it directly. After running, call `record_script_outcome({name, ok})` so reliable helpers float to the top and dead ones get pruned. Save body refusals: the regex guard rejects bodies matching common credential shapes (`sk-…`, `ghp_…`, AWS keys, password=…); pass `force:true` to override after verifying it\'s a false positive.');
-  parts.push('**Project listing — use the right tool, NEVER `exec find` / `exec ls -laR`**: The Project Tree above (and the cached node, when present) already shows the project structure with build/dependency/cache dirs filtered. If you need MORE detail, use `glob` (auto-skips noise dirs, capped at 500 paths, fast) or `read_file` on a specific path — NOT `exec find` / `exec ls -R` / `exec tree`. Walking a node_modules-heavy project with exec regularly hits the 3-minute tool timeout AND dumps thousands of irrelevant lines. Specifically `exec ls -laR` on a Node project = guaranteed timeout.');
-  parts.push('**Output filtering**: When listing files / describing a project / showing exec output, NEVER include build/dependency/cache directory contents in your reply — even if the tool returned them. Suppress: .git, node_modules, .venv / venv, __pycache__, dist, build, target, .next, .cache, .spore-code, vendor, .gradle, .mvn, .pytest_cache, .mypy_cache, .ruff_cache, .turbo, .nuxt, .svelte-kit, .terraform, .idea, .vscode/, *.egg-info, coverage, .nyc_output, .DS_Store. If a tool returned a wall of these, FILTER before pasting. The user does not want to see node_modules in chat.');
+  parts.push('Use the project operating refs for helper-script workflow, safe project listing, output filtering, shell/platform gotchas, background process handling, and verification discipline.');
   // Plan-mode-only research / lookup / gotcha-loading rules now live
   // in buildPlanModeSection (PHASE 3 area). They were wasted in
   // execute mode — the agent isn't researching during execution, it's
@@ -760,7 +947,11 @@ function buildPlanRouterSection(api, opts) {
   parts.push('Option B — Skip interview. Emit:');
   parts.push('NO_INTERVIEW_NEEDED: <one-line reason, ≤120 chars — e.g. "scope is concrete and stack is committed in package.json">');
   parts.push('');
-  parts.push('That\'s it. Do NOT emit both. Do NOT add a plan. Do NOT call mutating tools. Read-only inspection of the Project Context above is fine if you need to confirm something (e.g. checking package.json for the test runner).');
+  parts.push('That\'s it. Do NOT emit both. Do NOT add a plan. Read-only inspection of the Project Context above is fine if you need to confirm something (e.g. checking package.json for the test runner).');
+  parts.push('');
+  parts.push('RULES (HARD):');
+  parts.push('- Do NOT call write_file/edit_file/exec. This router turn is output-only.');
+  parts.push('- Do NOT start servers, install packages, create temp scripts, or modify project files.');
   parts.push(']');
   return parts.join('\n');
 }
@@ -814,7 +1005,11 @@ function buildPlanRouter2Section(api, opts) {
   parts.push('Option B — No follow-ups, ready to build. Emit:');
   parts.push('NO_FOLLOWUP_QUESTIONS: <one-line reason, ≤120 chars — e.g. "research pointed at server-render approach with no real alternative; ready to build">');
   parts.push('');
-  parts.push('That\'s it. Do NOT write the plan. Do NOT call mutating tools. Do NOT redo any research — your job is to evaluate the existing RESEARCH_DONE block, not extend it.');
+  parts.push('That\'s it. Do NOT write the plan. Do NOT redo any research — your job is to evaluate the existing RESEARCH_DONE block, not extend it.');
+  parts.push('');
+  parts.push('RULES (HARD):');
+  parts.push('- Do NOT call write_file/edit_file/exec. This router turn is output-only.');
+  parts.push('- Do NOT start servers, install packages, create temp scripts, or modify project files.');
   parts.push(']');
   return parts.join('\n');
 }
@@ -850,9 +1045,12 @@ function buildPlanResearchSection(api, opts) {
   parts.push('Map the existing codebase against the request. The output is a structured `code_targets` block naming exactly which files get created or modified, with current code excerpts (modifies) and pseudocode shapes (creates).');
   parts.push('');
   if (pc.hasCodeIndex) {
-    const learner = api._appContext?.learner;
+    const learner = scopedLearnerForTurn(api, opts);
     const userId = opts.userId || opts.userName || 'anon';
-    const map = renderCodeGraphMap(learner, userId, pc.cwd);
+    const map = renderCodeGraphMap(learner, userId, pc.cwd, {
+      ...pc,
+      projectIdentityKey: opts.memoryEnvelope?.projectKey || null,
+    });
     if (map) {
       parts.push(map);
       parts.push('');
@@ -917,7 +1115,7 @@ function buildPlanResearchSection(api, opts) {
   parts.push('```');
   parts.push('');
   parts.push('RULES (HARD):');
-  parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT call exec for anything destructive (read-only `ls`/`cat`/`--version`/`git status`/`git log` are fine).');
+  parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT call exec. Use read_file/glob/grep/code-index tools for read-only inspection.');
   parts.push('- Do NOT write the plan in this turn. The plan comes in the next (BUILDING) turn.');
   parts.push('- Do NOT emit PLAN_READY in this turn. RESEARCH_DONE is the marker for this turn.');
   parts.push('- For files_to_modify, current_excerpt MUST come from `get_snippet` — do not paraphrase or invent. If the symbol isn\'t in the index, fall back to `read_file` and excerpt the relevant lines.');
@@ -978,7 +1176,7 @@ function buildPlanBuildingSection(api, opts) {
   parts.push('PLAN_READY');
   parts.push('');
   parts.push('RULES (HARD):');
-  parts.push('- Do NOT call write_file/edit_file/exec mutating commands. Read-only inspection only.');
+  parts.push('- Do NOT call write_file/edit_file/exec. Read-only inspection only.');
   parts.push('- Do NOT redo research. The previous turn\'s RESEARCH_DONE is your input — use it.');
   parts.push('- Do NOT emit a QUESTIONS: block — that was the RESEARCH phase\'s opportunity.');
   parts.push('- End with `PLAN_READY` on its own line — that\'s the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.');
@@ -1003,14 +1201,17 @@ function buildPlanModeSection_LEGACY(api, opts) {
     // phase already oriented. When present, the prompt below skips the
     // `architecture()` first-call requirement — same data is already
     // here, just costs no tool call.
-    const learner = api._appContext?.learner;
+    const learner = scopedLearnerForTurn(api, opts);
     const userId = opts.userId || opts.userName || 'anon';
-    const map = renderCodeGraphMap(learner, userId, pc.cwd);
+    const map = renderCodeGraphMap(learner, userId, pc.cwd, {
+      ...pc,
+      projectIdentityKey: opts.memoryEnvelope?.projectKey || null,
+    });
     if (map) {
       parts.push('');
       parts.push(map);
       parts.push('');
-      parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}). The Codebase Map above is the cached architecture summary — use it as your starting orientation. Prefer structural queries over reading files — a single search_symbols result is roughly 50× cheaper in tokens than the equivalent grep + read_file pair. Order:`);
+      parts.push(`The repository at ${pc.cwd} is indexed (head ${pc.indexHead || '?'}). The Codebase Map above is a structural summary from the local index — use it as orientation, but do not present it as prior assistant reading. Prefer structural queries over reading files — a single search_symbols result is roughly 50× cheaper in tokens than the equivalent grep + read_file pair. Order:`);
       parts.push('  1. **Skip `architecture()`** — the Codebase Map above already gives you clusters, hot paths, entry points, and tech stack. Only call it if `index_head` looks stale or a cluster\'s listed paths don\'t match what you find when you probe further.');
       parts.push('  2. For each concept named in the user\'s request, `search_symbols({ name: "<concept>" })` (optionally narrow by `kind`, `file`, or `language`). Use the cluster names as a hint for which area to look in.');
       parts.push('  3. For each plausible target symbol, `trace_calls({ name: "<name>", direction: "callers", depth: 3 })` to learn who depends on it. Use `direction: "callees"` to learn what it depends on. Cross-check against the hot_paths list — if your target is on it, the change touches many callers.');
@@ -1121,9 +1322,9 @@ function buildPlanModeSection_LEGACY(api, opts) {
   parts.push('Format the VERIFICATION section as a bulleted list under a `## Verification` heading inside the plan. The user will review it alongside the steps before accepting.');
   parts.push('');
   parts.push('RULES (these are HARD constraints, not suggestions):');
-  parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT create directories. The user has explicitly chosen plan mode to PREVIEW your approach before any changes land.');
-  parts.push('- Do NOT call exec for anything destructive or modifying — no `mkdir`, `npm init`, `git init`, `touch`, `>`, `>>`, `mv`, `cp`, `rm`, `chmod`, `chown`, package installs, or builds. Read-only inspection only.');
-  parts.push('- You MAY use: read_file, glob, grep, web_search, web_fetch, delegate_task (persona="researcher" preferred), graph_query, exec (READ-ONLY commands only — `ls`, `cat`, `which`, `--version`, `git status`, `git log`, etc).');
+  parts.push('- Do NOT call write_file. Do NOT call edit_file. Do NOT call exec. The user has explicitly chosen plan mode to PREVIEW your approach before any changes land.');
+  parts.push('- Do NOT start servers, install packages, create temp scripts, delete files, or change project state. Use read_file/glob/grep/code-index tools for read-only inspection.');
+  parts.push('- You MAY use: list_dir, read_file, read_many_files, glob, grep, git_status, git_diff, bg_list/bg_tail, web_search, web_fetch, delegate_task (persona="researcher" preferred), graph_query, and exec only for read-only commands with no structured tool equivalent (`which`, `--version`, etc).');
   parts.push('- Do NOT put questions and PLAN_READY in the same response — ask first, then plan after answers.');
   parts.push('- Do NOT emit PLAN_READY without a `## Verification` section. A plan without verification is incomplete.');
   parts.push("- End your plan with \"PLAN_READY\" on its own line — that's the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.");
@@ -1231,6 +1432,7 @@ module.exports = function register(api) {
 
   api.registerTool('index_codebase', {
     namespaced: false,
+    ...sporeClientToolMeta('index_codebase', { legacy: true }),
     description:
       'Build (or refresh) the per-project code graph at <cwd>/.spore-code/index.db. ' +
       'Walks the cwd, parses Go/TS/JS/Python source, extracts symbols + CALLS edges + imports. ' +
@@ -1250,6 +1452,7 @@ module.exports = function register(api) {
 
   api.registerTool('search_symbols', {
     namespaced: false,
+    ...sporeClientToolMeta('search_symbols', { legacy: true }),
     description:
       'Query the project code index for symbols by name / kind / file / language. Returns name, qualified-name, kind, file, line, signature, container, exported. ' +
       'Use this INSTEAD of grep when you want to locate a function/class/method/type — ~50x cheaper in tokens than grep + read_file. ' +
@@ -1271,18 +1474,21 @@ module.exports = function register(api) {
 
   api.registerTool('trace_calls', {
     namespaced: false,
+    ...sporeClientToolMeta('trace_calls', { legacy: true }),
     description:
       'BFS over CALLS edges in the code index — answers "who calls X?" or "what does X call?". ' +
       'Returns a flat list of (caller_qname, callee_qname, line, depth) edges; reconstruct paths client-side if needed. ' +
-      'Use this INSTEAD of grepping for invocations: a trace_calls result is structural and authoritative for the indexed languages, whereas grep matches strings in comments and unrelated files.',
+      'Use this INSTEAD of grepping for invocations: a trace_calls result is structural and authoritative for the indexed languages, whereas grep matches strings in comments and unrelated files. ' +
+      'Pass `token_budget` to receive a text-rendered subgraph (seeds pinned, degree-sorted) instead of edge JSON — useful when surveying a wide call neighborhood without overflowing context.',
     inputSchema: {
       type: 'object',
       properties: {
-        name:      { type: 'string', description: 'Match callee_name (works without resolved qname). Either name or qname is required.' },
-        qname:     { type: 'string', description: 'Exact qualified-name match. Either name or qname is required.' },
-        direction: { type: 'string', enum: ['callers', 'callees', 'both'], description: 'Default: callers.' },
-        depth:     { type: 'number', description: '1..5; default 3.' },
-        limit:     { type: 'number', description: 'Total edge cap; default and max 200.' },
+        name:         { type: 'string', description: 'Match callee_name (works without resolved qname). Either name or qname is required.' },
+        qname:        { type: 'string', description: 'Exact qualified-name match. Either name or qname is required.' },
+        direction:    { type: 'string', enum: ['callers', 'callees', 'both'], description: 'Default: callers.' },
+        depth:        { type: 'number', description: '1..5; default 3.' },
+        limit:        { type: 'number', description: 'Total edge cap; default and max 200.' },
+        token_budget: { type: 'number', description: 'Optional. When set, return is text-rendered (seeds first, degree-sorted, char-budget cutoff) instead of JSON edges. Approx tokens; CLI v0.5.0+ only.' },
       },
     },
     execute: requireSporeClient('trace_calls'),
@@ -1290,6 +1496,7 @@ module.exports = function register(api) {
 
   api.registerTool('get_snippet', {
     namespaced: false,
+    ...sporeClientToolMeta('get_snippet', { legacy: true }),
     description:
       'Fetch source for a symbol by qualified name (preferred) or file+line range. ' +
       'Use this INSTEAD of read_file when you only need the body of one symbol — get_snippet returns just the relevant lines from the indexed range, not the whole file.',
@@ -1307,6 +1514,7 @@ module.exports = function register(api) {
 
   api.registerTool('architecture', {
     namespaced: false,
+    ...sporeClientToolMeta('architecture', { legacy: true }),
     description:
       'Produce a structured codebase summary: tech stack (file/symbol counts per language), clusters by top-level directory, entry points (Go main/init, JS main/bootstrap), hot paths (top-N symbols by inbound CALLS count), and coverage notes. ' +
       'Call this ONCE early in plan mode to orient yourself — far cheaper than grepping for "main" or reading package.json + go.mod.',
@@ -1316,6 +1524,7 @@ module.exports = function register(api) {
 
   api.registerTool('impact', {
     namespaced: false,
+    ...sporeClientToolMeta('impact', { legacy: true }),
     description:
       'Map a list of file paths (or the current `git diff --name-only HEAD` if omitted) to affected symbols, plus a transitive caller blast-radius count for each. ' +
       'Use this BEFORE producing a plan that edits files — surfaces "this 5-line change actually touches 23 callers" risk.',
@@ -1332,6 +1541,7 @@ module.exports = function register(api) {
 
   api.registerTool('verify_implementation', {
     namespaced: false,
+    ...sporeClientToolMeta('verify_implementation', { legacy: true }),
     description:
       'Goal-backward 4-level audit: for a list of qualified symbol names (or every symbol in a list of files), confirm exists → substantive → wired → export_level. ' +
       'Catches stub functions (panic("not implemented"), Python `pass`-only, comment-only bodies), unwired components (no callers anywhere), and "wired but only used in the same file" (not actually exported in practice). ' +
@@ -1345,6 +1555,78 @@ module.exports = function register(api) {
       },
     },
     execute: requireSporeClient('verify_implementation'),
+  });
+
+  // ── Graphify-style code-graph analytics (client-routed, v0.5.0+) ────
+  //
+  // Stubs registered here for agent discovery and contract definition;
+  // actual implementation runs on the user's machine via the Spore Code
+  // Go binary against `<cwd>/.spore-code/index.db`. When no v0.5.0+ CLI
+  // is connected, the requireSporeClient wrapper returns a clean error.
+  //
+  // These complement the existing index_codebase / search_symbols /
+  // trace_calls / architecture / impact / verify_implementation surface:
+  //   • code_overview — top god symbols, surprising cross-cluster CALLS
+  //     edges, suggested orientation questions. Layered on `architecture`
+  //     (which already provides hot-paths/clusters); adds
+  //     surprise-scoring and Louvain communities over the imports+CALLS
+  //     subgraph.
+  //   • trace_path    — bidirectional BFS over CALLS edges, "from X to Y
+  //     in the code." Code-graph analogue of graph_query mode:'path'.
+  //   • code_diff     — structural diff (added/removed symbols, signature
+  //     changes, new/removed CALLS edges) between two git refs. Code-
+  //     graph analogue of graph_diff.
+  //   • trace_calls token_budget — extends the existing schema with a
+  //     `token_budget` parameter. When set, the CLI returns a text-
+  //     rendered subgraph (seeds pinned, degree-sorted, char-budgeted)
+  //     instead of edge JSON. Code-graph analogue of graph_query
+  //     mode:'walk'.
+  api.registerTool('code_overview', {
+    namespaced: false,
+    ...sporeClientToolMeta('code_overview'),
+    description:
+      'Compute and return a structured codebase overview: top god symbols (most-called), surprising cross-cluster CALLS edges, Louvain communities over imports+CALLS, and suggested orientation questions. Use this once early in plan mode to orient yourself in an unfamiliar codebase — far cheaper than reading entry points + grepping for "main". Output overlaps with `architecture` but adds bridge-edge detection and structural questions; the CLI caches it alongside the index, so subsequent calls are near-instant unless `force` is passed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        top_n:  { type: 'number', description: 'Top-N god symbols to return. Default 8, max 20.' },
+        force:  { type: 'boolean', description: 'Recompute even if a cached overview exists for this index_head.' },
+      },
+    },
+    execute: requireSporeClient('code_overview'),
+  });
+
+  api.registerTool('trace_path', {
+    namespaced: false,
+    ...sporeClientToolMeta('trace_path'),
+    description:
+      'Bidirectional BFS over CALLS edges in the code index — "how does function X reach function Y?" Returns the shortest call path with file/line per hop. Use this INSTEAD of grepping for invocation chains: trace_path is structural and authoritative for the indexed languages, whereas grep matches strings in comments and unrelated files. Common use: "how does request handling reach the database?" or "what path connects auth to the user model?"',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from_qname: { type: 'string', description: 'Qualified name of the source symbol (e.g. `internal/api/handlers.go::ServeHTTP`).' },
+        to_qname:   { type: 'string', description: 'Qualified name of the target symbol.' },
+        max_hops:   { type: 'number', description: 'Maximum CALLS hops to consider. Default 8, max 20.' },
+      },
+      required: ['from_qname', 'to_qname'],
+    },
+    execute: requireSporeClient('trace_path'),
+  });
+
+  api.registerTool('code_diff', {
+    namespaced: false,
+    ...sporeClientToolMeta('code_diff'),
+    description:
+      'Structural diff between two git refs: added/removed symbols, signature changes, new/removed CALLS edges, list of changed files. Use this INSTEAD of `git diff --stat` + reading the patch when you need a structural ("what symbols changed and how does that ripple") rather than textual ("what lines changed") view of a change set. Defaults to comparing HEAD~1 vs HEAD.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from_ref: { type: 'string', description: 'Git ref for the older snapshot. Default: `HEAD~1`.' },
+        to_ref:   { type: 'string', description: 'Git ref for the newer snapshot. Default: `HEAD`.' },
+        limit:    { type: 'number', description: 'Cap on returned items per category. Default 50, max 200.' },
+      },
+    },
+    execute: requireSporeClient('code_diff'),
   });
 
   // Prompt sections — Project Context (every acorn turn) + Plan Mode (when
@@ -1379,7 +1661,8 @@ module.exports = function register(api) {
     if (ctx?.platform !== 'cli' || !ctx?.channelId) return;
     if (input?.temp === false || input?.temp === true) return;
     const learner = api._appContext?.learner;
-    const db = learner?.db;
+    const slug = result.graph || ctx?.memoryEnvelope?.writeScopes?.projectSlug || SESSION_GRAPH_SLUGS.get(String(ctx.channelId));
+    const db = slug && learner?.getGraphDb ? learner.getGraphDb(slug) : learner?.db;
     if (!db) return;
     const sessionId = ctx.channelId;
     const sessNodeId = 'session-' + String(sessionId);
@@ -1418,11 +1701,13 @@ module.exports = function register(api) {
   // mid-session but executed post session-end). Tagging with the stale
   // sessionId would create an orphan that sits temp until the 48h
   // janitor — better to leave it permanent.
-  api.registerWorkerHook('afterLearn', ({ sessionIdOpt, newNodeIds }) => {
+  api.registerWorkerHook('afterLearn', ({ sessionIdOpt, newNodeIds, writeTargets }) => {
     if (!sessionIdOpt || !Array.isArray(newNodeIds) || newNodeIds.length === 0) return;
     const ctx = api._appContext;
     const learner = ctx?.learner;
-    const db = learner?.db;
+    const slug = SESSION_GRAPH_SLUGS.get(String(sessionIdOpt))
+      || (Array.isArray(writeTargets) ? writeTargets.find(t => t?.slug)?.slug : null);
+    const db = slug && learner?.getGraphDb ? learner.getGraphDb(slug) : learner?.db;
     if (!db) return;
     const sessId = 'session-' + String(sessionIdOpt);
     const sessRow = db.prepare(
@@ -1436,6 +1721,36 @@ module.exports = function register(api) {
     const agentSelfId = config.agentId || 'spore';
 
     const getNode = db.prepare('SELECT type, extra FROM nodes WHERE id = ?');
+    if (sessionAlreadyDistilled) {
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      let recycled = 0;
+      for (const nid of newNodeIds) {
+        if (nid === sessId || nid === agentSelfId) continue;
+        const row = getNode.get(nid);
+        if (!row || row.type === 'person' || row.type === 'self' || row.type === 'agent' || row.type === 'project') continue;
+        try {
+          const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(nid);
+          const aspects = db.prepare('SELECT * FROM aspects WHERE node_id = ?').all(nid);
+          const attrs = db.prepare(`
+            SELECT a.* FROM attributes a
+            JOIN aspects asp ON asp.id = a.aspect_id
+            WHERE asp.node_id = ?
+          `).all(nid);
+          const edges = db.prepare('SELECT * FROM edges WHERE source = ? OR target = ?').all(nid, nid);
+          db.prepare(`
+            INSERT INTO recycle_bin (item_type, item_id, label, payload, deleted_by, reason, confidence, expires_at)
+            VALUES ('node', ?, ?, ?, 'graphcorn-late-learner', ?, 1.0, ?)
+          `).run(nid, node?.label || nid, JSON.stringify({ node, aspects, attributes: attrs, edges }), `learner output arrived after session ${sessionIdOpt} was distilled`, expiresAt);
+          db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(nid, nid);
+          db.prepare('DELETE FROM nodes WHERE id = ?').run(nid);
+          recycled++;
+        } catch (e) {
+          api.getLogger().warn(`[graphcorn] late learner recycle failed for ${nid}: ${e.message}`);
+        }
+      }
+      if (recycled) api.getLogger().info(`[graphcorn] recycled ${recycled} late learner node(s) after distill → ${sessId}`);
+      return;
+    }
     const updExtra = db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?');
     const checkE = db.prepare('SELECT 1 FROM edges WHERE source = ? AND target = ? AND type = ?');
     const insE = db.prepare(
@@ -1495,10 +1810,14 @@ module.exports = function register(api) {
   // _recordRoundCheckpoint, and _noteProjectActivity methods that lived in
   // src/agent/loop.js.
   api.registerLifecycleHook('afterTurn', ({ opts, finalText, toolLog }) => {
-    checkpointsLib.captureFailureFix(api, opts, toolLog || []);
-    checkpointsLib.recordRoundCheckpoint(api, opts, toolLog || [], finalText);
-    noteProjectActivity(api, opts, finalText, toolLog || []);
-    maybePruneStaleScripts(api, opts);
+    const learner = scopedLearnerForTurn(api, opts);
+    const scopedApi = learner && learner !== api._appContext?.learner
+      ? Object.assign(Object.create(api), { _appContext: { ...api._appContext, learner } })
+      : api;
+    checkpointsLib.captureFailureFix(scopedApi, opts, toolLog || []);
+    checkpointsLib.recordRoundCheckpoint(scopedApi, opts, toolLog || [], finalText);
+    noteProjectActivity(scopedApi, opts, finalText, toolLog || []);
+    maybePruneStaleScripts(scopedApi, opts);
   });
 
   // No plugin settings pane — the SPORE invite key (used by both this
@@ -1515,7 +1834,19 @@ module.exports = function register(api) {
   api.registerLifecycleHook('shouldSkipRecall', ({ opts, queryType }) => {
     return opts?.platform === 'cli'
       && queryType !== 'aggregation'
-      && heuristicsLib.looksLikeCodingTurn(opts?.messageContent);
+      && (
+        heuristicsLib.looksLikeCodingTurn(opts?.messageContent)
+        || heuristicsLib.looksLikeCapabilityQuestion(opts?.messageContent)
+      );
+  });
+
+  api.registerLifecycleHook('resolveMemoryScope', ({ opts, envelope }) => {
+    if (opts?.platform !== 'cli' || !opts?.projectContext?.cwd) return null;
+    return {
+      mode: 'codebase-session',
+      source: 'spore-code',
+      projectIdentityKey: envelope?.projectKey || null,
+    };
   });
 
   // beforeMessage lifecycle hook — fires once at the top of _runLoop's
@@ -1527,16 +1858,50 @@ module.exports = function register(api) {
   // cached node id and skip re-injecting the full file tree on subsequent
   // sessions in the same project.
   api.registerLifecycleHook('beforeMessage', ({ opts }) => {
-    const learner = api._appContext?.learner;
+    const learner = scopedLearnerForTurn(api, opts);
     if (!opts?.projectContext || !learner) return null;
     try {
       const projects = projectsLib;
-      const r = projects.upsertProject(learner, opts.userId || 'anon', opts.projectContext);
+      const pc = {
+        ...opts.projectContext,
+        projectIdentityKey: opts.memoryEnvelope?.projectKey || opts.memoryEnvelope?.projectIdentityKey || null,
+      };
+      const r = projects.upsertProject(learner, opts.userId || 'anon', pc);
       if (!r) return null;
+      const sessionNodeId = opts.channelId ? `session-${String(opts.channelId)}` : null;
+      let priorSessionCount = 0;
+      let priorActivityCount = 0;
+      try {
+        if (sessionNodeId) {
+          priorSessionCount = learner.db.prepare(`
+            SELECT COUNT(*) AS c
+              FROM edges e
+              JOIN nodes n ON n.id = e.target
+             WHERE e.source = ?
+               AND e.type = 'has_session'
+               AND e.target != ?
+               AND n.type LIKE 'session%'
+          `).get(r.id, sessionNodeId)?.c || 0;
+        }
+        priorActivityCount = learner.db.prepare(`
+          SELECT COUNT(*) AS c
+            FROM aspects asp
+            JOIN attributes a ON a.aspect_id = asp.id
+           WHERE asp.node_id = ?
+             AND asp.name = 'recent_activity'
+        `).get(r.id)?.c || 0;
+      } catch {
+        priorSessionCount = 0;
+        priorActivityCount = 0;
+      }
       return {
         cachedProjectNodeId: r.id,
         cachedProjectStale:  !!r.gitHashChanged,
         cachedProjectIsNew:  !!r.isNew,
+        cachedProjectHasPriorSessions: priorSessionCount > 0,
+        cachedProjectHasPriorActivity: priorActivityCount > 0,
+        cachedProjectHasPriorMemory: priorSessionCount > 0 || priorActivityCount > 0,
+        projectGraphSlug: opts.memoryEnvelope?.writeScopes?.projectSlug || null,
       };
     } catch (e) {
       api.getLogger().warn('[project-node] upsert failed: ' + e.message);
@@ -1575,11 +1940,18 @@ module.exports = function register(api) {
       const llmClient = ctx?.tools?.llmClient;
       for (const sid of sessionIds) {
         try {
-          sessions.finalizeSessionNode(learner, sid, { endedAt: new Date().toISOString() });
+          const slug = SESSION_GRAPH_SLUGS.get(String(sid));
+          const scopedDb = slug && learner.getGraphDb ? learner.getGraphDb(slug) : null;
+          const scopedLearner = scopedDb ? withLearnerDb(learner, scopedDb, slug) : learner;
+          graphEvents.withGraph(slug ? { graph: slug } : null, () => sessions.finalizeSessionNode(scopedLearner, sid, { endedAt: new Date().toISOString() }));
           if (llmClient) {
-            sessions.summarizeSessionNode(learner, llmClient, config, sid, log)
-              .then(() => sessions.distillSession(learner, llmClient, config, sid, log))
-              .catch(e => log.warn(`[graphcorn] ws-close distill error: ${e.message}`));
+            waitForLearnerDrain(learner)
+              .then(() => graphEvents.withGraph(slug ? { graph: slug } : null, () => sessions.summarizeSessionNode(scopedLearner, llmClient, config, sid, log)))
+              .then(() => graphEvents.withGraph(slug ? { graph: slug } : null, () => sessions.distillSession(scopedLearner, llmClient, config, sid, log)))
+              .catch(e => log.warn(`[graphcorn] ws-close distill error: ${e.message}`))
+              .finally(() => clearSessionRuntimeState(sid));
+          } else {
+            clearSessionRuntimeState(sid);
           }
         } catch (e) {
           log.warn(`[graphcorn] ws-close finalize failed: ${e.message}`);

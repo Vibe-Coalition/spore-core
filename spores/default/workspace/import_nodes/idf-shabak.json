@@ -1,0 +1,22 @@
+{
+  "nodeId": "idf-shabak",
+  "label": "IDF/SHABAK",
+  "type": "organization",
+  "description": "Israeli Defense Forces and Shin Bet intelligence agency",
+  "aspects": [
+    {
+      "name": "military_operations",
+      "importance": 9,
+      "attributes": [
+        "Executed strike in central Gaza killing 3 Hamas operatives on 2026-04-12",
+        "Killed Ali Sami Muhammad Shakara (Nukhba commander) and Muhammad al-Sid (Hamas Al-Aqsa TV producer)"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "hamas",
+      "type": "carried_out_strike"
+    }
+  ]
+}

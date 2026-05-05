@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Browser Tool Event Log Probe</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; padding: 16px; max-width: 720px; }
+  h2 { margin: 16px 0 4px; font-size: 16px; }
+  input, textarea, button { font: inherit; }
+  #target-input { width: 100%; padding: 6px; box-sizing: border-box; }
+  #target-button { padding: 8px 14px; cursor: pointer; }
+  #scroll-target { margin: 16px 0; padding: 12px; border: 1px solid #ccc; height: 220px; overflow: auto; }
+  #scroll-content { height: 1800px; background: linear-gradient(#fafafa, #ddd); }
+  pre { background: #f5f5f5; padding: 8px; font: 11px/1.3 ui-monospace, monospace; overflow:auto; max-height:280px; }
+  .ok { color: #1a7f1a; }
+  .bad { color: #b00; }
+</style>
+</head>
+<body>
+  <h1>Browser Tool Event Log Probe</h1>
+  <p>This page records every DOM event the browser tool generates and exposes it via <code>window.__events</code>. <code>isTrusted</code> tells you whether the event came from the OS / CDP layer (real input) or from JavaScript (synthetic / bot-flagged).</p>
+
+  <h2>Click target</h2>
+  <button id="target-button" type="button">Click me</button>
+
+  <h2>Type target</h2>
+  <input id="target-input" type="text" placeholder="Type here…" />
+
+  <h2>Scroll target</h2>
+  <div id="scroll-target">
+    <div id="scroll-content"></div>
+  </div>
+
+  <h2>Live event log</h2>
+  <pre id="log"></pre>
+
+  <script>
+  (() => {
+    const events = [];
+    window.__events = events;
+    window.__resetEvents = () => { events.length = 0; render(); };
+
+    const log = document.getElementById('log');
+    function render() {
+      const tail = events.slice(-200);
+      log.textContent = tail.map(e =>
+        `[${e.t.toFixed(0)}ms] ${e.type.padEnd(11)} on=${e.target.padEnd(16)} isTrusted=${e.isTrusted ? 'true ' : 'false'}` +
+        (e.key !== undefined ? ` key=${JSON.stringify(e.key)}` : '') +
+        (e.button !== undefined ? ` button=${e.button}` : '') +
+        (e.deltaY !== undefined ? ` deltaY=${e.deltaY}` : '') +
+        (e.x !== undefined ? ` (${e.x},${e.y})` : '')
+      ).join('\n');
+    }
+
+    const start = performance.now();
+    const watch = (el, name, kinds) => {
+      kinds.forEach(kind => {
+        el.addEventListener(kind, (ev) => {
+          const rec = {
+            t: performance.now() - start,
+            type: kind,
+            target: name,
+            isTrusted: ev.isTrusted,
+          };
+          if (ev instanceof KeyboardEvent) rec.key = ev.key;
+          if (ev instanceof MouseEvent && ev.type !== 'wheel') {
+            rec.button = ev.button;
+            rec.x = ev.clientX; rec.y = ev.clientY;
+          }
+          if (ev instanceof WheelEvent) rec.deltaY = ev.deltaY;
+          events.push(rec);
+          render();
+        }, true);
+      });
+    };
+
+    watch(document.getElementById('target-button'), 'button',
+          ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup', 'mouseover', 'focus']);
+    watch(document.getElementById('target-input'), 'input',
+          ['focus', 'blur', 'keydown', 'keypress', 'keyup', 'input', 'change']);
+    watch(document.getElementById('scroll-target'), 'scroll-target', ['wheel', 'scroll']);
+    watch(window, 'window', ['scroll']);
+
+    // Also surface navigator.webdriver — anti-bot stacks read this.
+    window.__webdriver = navigator.webdriver;
+  })();
+  </script>
+</body>
+</html>

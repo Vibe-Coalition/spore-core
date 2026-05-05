@@ -1,0 +1,48 @@
+{
+  "97a3439b": {
+    "id": "97a3439b",
+    "query": "coffee table",
+    "created": "2026-04-12T09:38:35.360423",
+    "last_checked": "2026-04-12T09:41:41.733370",
+    "params": {
+      "min_price": null,
+      "max_price": null,
+      "radius_km": 20,
+      "days": null
+    },
+    "preferences": [
+      {
+        "text": "I like mid-century modern style",
+        "added": "2026-04-12T09:39:01.956859"
+      }
+    ],
+    "stats": {
+      "total_seen": 15,
+      "total_alerts": 15,
+      "checks": 2
+    }
+  },
+  "7b7583ad": {
+    "id": "7b7583ad",
+    "query": "dining chair",
+    "created": "2026-04-12T09:39:01.991353",
+    "last_checked": "2026-04-12T09:41:42.869716",
+    "params": {
+      "min_price": null,
+      "max_price": null,
+      "radius_km": 20,
+      "days": null
+    },
+    "preferences": [
+      {
+        "text": "we like mid-century modern style",
+        "added": "2026-04-12T09:39:04.924675"
+      }
+    ],
+    "stats": {
+      "total_seen": 14,
+      "total_alerts": 14,
+      "checks": 2
+    }
+  }
+}

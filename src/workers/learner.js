@@ -56,7 +56,7 @@ Extract every durable fact, preference, plan, relationship, opinion, or event. O
 - DEDUP attributes: "casual tone" and "relaxed conversational style" are the same fact. Check existing attributes carefully.
 - **UPDATES (CRITICAL):** When new information **contradicts or supersedes** an existing attribute in the graph, you MUST use \`updates\` (not \`aspects\`) to replace the old value. Quote the existing attribute text exactly in \`old\`. Check the graph context carefully for existing facts that should be overwritten. Common update patterns: new personal bests/records replace old ones, job changes, location moves, changed preferences, corrected facts or numbers, updated statuses. If a user says "I beat my record", "actually it's X not Y", "I moved to", or reports a new value for something already tracked — that's an update. Do NOT use updates for additive info (e.g. a new hobby does not replace old hobbies).
 - **IMPLICIT KNOWLEDGE UPDATES:** A user stating "my personal best of X" or "my record of X" or "my salary of X" in a later conversation IS declaring the CURRENT value, even inside a sentence about future goals. "I'm hoping to beat my personal best of 25:50" means the current PB IS 25:50 — the user is NOT saying 25:50 is a goal. If the graph has an older value (e.g. PB of 27:12), this MUST be an update. Parse "my [metric] of [value]" as a statement of current state.
-- **EDGES:** Always create edges between entities that are related. Every new entity should have at least one edge. Use descriptive edge types.
+- **EDGES:** Always create edges between entities that are related. Every new entity should have at least one edge. Use descriptive edge types. Each edge MUST include a \`confidence\` field: \`extracted\` if the relationship is stated directly in the conversation ("Alice works at Acme"); \`inferred\` if it's a reasonable deduction from what was said but not explicitly stated ("Alice mentioned commuting to the Acme office, so she works there"); \`ambiguous\` if you're noting a possible relationship that needs human review (set this rarely — only when the connection is genuinely uncertain and worth flagging). When unsure between \`extracted\` and \`inferred\`, prefer \`inferred\` — overclaiming \`extracted\` is the worse error.
 - **COMPLETENESS:** If a message mentions a product with specs, an event with details, or a plan with dates — extract ALL the details, not just the first one. Multiple attributes per aspect is expected.
 - **ASIDE MENTIONS (CRITICAL):** Users often mention important facts as parenthetical asides — "by the way, my GPS broke on 3/22" or "oh also, I redeemed a coupon at Target." These are NOT throwaway remarks. Every factual aside with a date, event, outcome, location, or status change MUST be extracted as its own attribute, even if the main conversation topic is completely different. Scan the ENTIRE exchange for any factual statement, not just the dominant topic.
 - **DETAIL GRANULARITY:** Each distinct fact deserves its own attribute with full specifics. NEVER collapse multiple facts into one vague summary. BAD: "GPS issue experienced in past, resolved quickly." GOOD: "GPS system malfunction diagnosed on 2023-03-22" + "GPS system replaced at car dealership on 2023-03-22" + "Repair cost covered under warranty." Each date, outcome, and detail is separately searchable.
@@ -91,7 +91,7 @@ Return ONLY valid JSON:
     { "nodeId": "entity-id", "aspectName": "aspect_name", "old": "exact text of the existing attribute to replace", "new": "the updated fact", "eventDate": "YYYY-MM-DD or null" }
   ],
   "edges": [
-    { "source": "entity-id", "target": "other-id", "type": "knows|uses|created|related_to|manages|inspires|owns|visited|enrolled_in|works_at|lives_in|interested_in|purchased|attending" }
+    { "source": "entity-id", "target": "other-id", "type": "knows|uses|created|related_to|manages|inspires|owns|visited|enrolled_in|works_at|lives_in|interested_in|purchased|attending", "confidence": "extracted|inferred|ambiguous" }
   ],
   "gaps": [
     { "nodeId": "entity-id", "questions": ["What is unknown that came up in conversation?"] }
@@ -177,6 +177,17 @@ const MAX_ATTR_LENGTH = 600;
 // limit — leave it alone. Lower = noisier, higher = misses real facts.
 const MIN_IMPORTANCE = 5;
 
+// Edge confidence axis (extracted/inferred/ambiguous). Coerces LLM output
+// to one of the canonical values; returns null if unknown so callers can
+// pick a context-appropriate default (most edge sources default to
+// 'extracted', the maintainer's sparse-connect to 'inferred').
+const _CONFIDENCE_VALUES = new Set(['extracted', 'inferred', 'ambiguous']);
+function _normalizeConfidence(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim().toLowerCase();
+  return _CONFIDENCE_VALUES.has(s) ? s : null;
+}
+
 class Learner {
   constructor(config, logger, llmClient) {
     this.config = config;
@@ -184,6 +195,8 @@ class Learner {
     this.client = llmClient;
     this.db = null;
     this._sharedDbs = {};
+    this._graphDbs = {};
+    this._graphDbMeta = {};
     this._sharedProjects = [];
     this._sharedGraphsLastCheck = 0;
     this.stats = { runs: 0, entities: 0, aspects: 0, updates: 0, edges: 0, errors: 0, skipped: 0, queued: 0, skillsCreated: 0, skillsUpdated: 0 };
@@ -345,6 +358,48 @@ class Learner {
     }
   }
 
+  getGraphDb(slug) {
+    if (!slug) return this.db;
+    const registry = this._graphRegistry || this._appContext?.tools?._graphRegistry || null;
+    const dbPath = registry?.getDbPath?.(slug);
+    if (!dbPath) {
+      this.closeGraphDb(slug);
+      return null;
+    }
+    let stat = null;
+    try {
+      stat = require('fs').statSync(dbPath);
+    } catch {
+      this.closeGraphDb(slug);
+      return null;
+    }
+
+    const cached = this._graphDbs[slug];
+    const meta = this._graphDbMeta[slug];
+    if (cached) {
+      if (meta?.dbPath === dbPath && meta?.ino === stat.ino && meta?.dev === stat.dev) return cached;
+      this.closeGraphDb(slug);
+      this.log?.info?.(`[learner] Project graph handle refreshed for "${slug}"`);
+    }
+
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode=WAL');
+    db.exec('PRAGMA busy_timeout=5000');
+    db.exec('PRAGMA foreign_keys=ON');
+    this._graphDbs[slug] = db;
+    this._graphDbMeta[slug] = { dbPath, ino: stat.ino, dev: stat.dev };
+    return db;
+  }
+
+  closeGraphDb(slug) {
+    const db = this._graphDbs?.[slug];
+    if (db) {
+      try { db.close(); } catch { /* silent: best-effort close */ }
+    }
+    if (this._graphDbs) delete this._graphDbs[slug];
+    if (this._graphDbMeta) delete this._graphDbMeta[slug];
+  }
+
   /**
    * Extract and learn from a conversation exchange. Fire-and-forget safe.
    * Runs extraction immediately after every conversation turn.
@@ -361,10 +416,31 @@ class Learner {
         sessionId: opts.channelName || opts.userId || 'conversation',
         observedAt,
         turnIdx: this.stats.runs,
+        userId: opts.userId || null,
+        userName: opts.userName || null,
       });
     } catch (e) { this.log.warn('[learner] storeEpisode failed: ' + e.message); }
 
-    const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId };
+    // Per-turn dedup: SHA256 over (userMessage \0 assistantResponse). If
+    // we've already extracted from this exact exchange before, skip the
+    // LLM call. The episode is still recorded — the dedup only short-
+    // circuits the expensive extraction step.
+    const contentHash = require('crypto').createHash('sha256')
+      .update(String(userMessage || ''))
+      .update('\x00')
+      .update(String(assistantResponse || ''))
+      .digest('hex');
+    try {
+      const seen = this.db.prepare('SELECT 1 FROM learner_processed WHERE content_hash = ?').get(contentHash);
+      if (seen) {
+        this.stats.skipped++;
+        this.log.info(`[learner] Skipped extraction — exchange already processed (hash=${contentHash.slice(0, 8)})`);
+        graphEvents.emit('change', { op: 'learner:skip', reason: 'duplicate-exchange', source: 'learner' });
+        return;
+      }
+    } catch (e) { this.log.warn('[learner] dedup lookup failed: ' + e.message); }
+
+    const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId, contentHash };
 
     if (this._running || this._llmBusy) {
       const reason = this._running ? 'already-running' : 'llm-busy';
@@ -433,6 +509,17 @@ class Learner {
       if (this._sharedProjects.length > 0) {
         basePrompt = this._injectProjectRouting(basePrompt);
       }
+      if (mergedOpts.memoryEnvelope) {
+        basePrompt = this._injectMemoryScopeRouting(basePrompt, mergedOpts.memoryEnvelope);
+      }
+
+      // Optional hyperedge emission. Behind a config flag so we can A/B
+      // the extraction-prompt cost vs. signal — group facts are nice to
+      // have but not load-bearing, and the additional schema clause adds
+      // tokens to every extraction call.
+      if (this.config.learnerHyperedges) {
+        basePrompt = basePrompt + '\n\n**HYPEREDGES (optional):** When the conversation describes a relationship that genuinely involves 3+ entities together as a group (a meeting, a multi-party agreement, a shared event, a co-authorship), emit it as a hyperedge instead of a star of binary edges. Add a `hyperedges` field to your output:\n```\n"hyperedges": [{ "type": "attended|collaborated_on|shared_concept|agreed_to|...", "label": "human readable label", "confidence": "extracted|inferred|ambiguous", "members": [{ "node_id": "alice", "role": "organizer" }, { "node_id": "bob" }, { "node_id": "carol" }] }]\n```\nMembers must reference real entity IDs (existing or newly created in this same extraction). Use sparingly — only when the n-ary shape is genuinely the right model. Two-party relationships still go in `edges`.';
+      }
 
       const prompt = basePrompt;
 
@@ -493,6 +580,18 @@ class Learner {
       } else {
         this.log.info(`[learner] Extraction empty (batch of ${batch.length}, ${inTok}/${outTok} tokens, ${elapsed}ms) — nothing new worth capturing`);
       }
+
+      // Mark each entry's content_hash as processed so a duplicate
+      // exchange (replay, proactive repeat, identical user input) skips
+      // the next LLM call. Empty extractions count too — the LLM already
+      // decided nothing was worth capturing; re-running it would just
+      // waste tokens and reach the same verdict.
+      try {
+        const insSeen = this.db.prepare('INSERT OR IGNORE INTO learner_processed (content_hash, episode_id) VALUES (?, ?)');
+        for (const entry of batch) {
+          if (entry.contentHash) insSeen.run(entry.contentHash, entry.episodeId || null);
+        }
+      } catch (e) { this.log.warn('[learner] mark-processed failed: ' + e.message); }
       graphEvents.emit('change', {
         op: 'learner:done',
         sessionKey: sessionId,
@@ -550,6 +649,7 @@ class Learner {
             batchSize: batch.length,
             elapsedMs: Date.now() - startedAt,
             newNodeIds: lastWrote?.newNodeIds || [],    // ids of nodes the learner just created
+            writeTargets: lastWrote?.writeTargets || [],
             wrote: lastWrote || null,
           });
         } catch (e) { this.log.warn('[learner] afterLearn hook failed: ' + e.message); }
@@ -618,7 +718,7 @@ Return ONLY valid JSON (same schema as extraction):
   "entities": [{ "id": "entity-id", "label": "Label", "type": "type", "description": "desc" }],
   "aspects": [{ "nodeId": "entity-id", "name": "aspect_name", "attributes": ["missed fact 1"], "importance": 8, "eventDate": "YYYY-MM-DD or null" }],
   "updates": [{ "nodeId": "entity-id", "aspectName": "aspect_name", "old": "exact existing text", "new": "updated fact", "eventDate": "YYYY-MM-DD or null" }],
-  "edges": [{ "source": "id", "target": "id", "type": "related_to" }],
+  "edges": [{ "source": "id", "target": "id", "type": "related_to", "confidence": "extracted|inferred|ambiguous" }],
   "gaps": []
 }`;
 
@@ -761,6 +861,32 @@ The JSON schema for updates becomes:
     );
   }
 
+  _injectMemoryScopeRouting(prompt, envelope) {
+    const scopes = envelope?.writeScopes || {};
+    const lines = [];
+    lines.push('## Memory write routing');
+    lines.push('For EACH entity, aspect, update, edge, and gap, add a "target" field when it is not personal/user memory.');
+    lines.push(`- "local" — main/user graph for agent identity, global system config, and facts/preferences explicitly meant to apply across all channels.`);
+    if (scopes.projectSlug) {
+      lines.push(`- "graph:${scopes.projectSlug}" — current project/codebase graph. Use for repo facts, codebase decisions, scripts, fixes, tool/config discoveries, session summaries, and project-specific technical details.`);
+    }
+    if (scopes.channelSlug) {
+      lines.push(`- "graph:${scopes.channelSlug}" — current channel/person graph. Use for this channel user's schedules, report formats, notification preferences, recurring workflows, commitments, thread context, and private channel facts.`);
+      lines.push('- Never write another channel user\'s private preferences, schedules, or reports into this graph. Keep channel memory person-scoped unless the conversation is explicitly a shared group context.');
+    }
+    lines.push(`- Do NOT write to the general knowledge base directly. Reusable lessons are promoted later by the distiller after sanitization.`);
+    lines.push('Default target if omitted: ' + (scopes.defaultSlug && scopes.defaultSlug !== scopes.personalSlug ? `"graph:${scopes.defaultSlug}"` : '"local"') + '.');
+    lines.push('');
+    lines.push('Schema additions:');
+    lines.push('{ "id": "...", "label": "...", "type": "...", "description": "...", "ephemeral": false, "target": "local|graph:<slug>" }');
+    lines.push('{ "nodeId": "...", "name": "...", "attributes": [...], "importance": 7, "eventDate": null, "target": "local|graph:<slug>" }');
+
+    return prompt.replace(
+      'Return ONLY valid JSON:',
+      `${lines.join('\n')}\n\nReturn ONLY valid JSON:`
+    );
+  }
+
   _buildExchange(userMsg, assistantMsg, opts, observedAtIso) {
     const parts = [];
     if (observedAtIso) parts.push(`Observation time (UTC): ${observedAtIso}`);
@@ -788,12 +914,13 @@ The JSON schema for updates becomes:
     try {
       const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
       const data = JSON.parse(cleaned);
-      if (!data.entities && !data.aspects && !data.edges && !data.gaps && !data.updates) return null;
+      if (!data.entities && !data.aspects && !data.edges && !data.gaps && !data.updates && !data.hyperedges) return null;
       return {
         entities: Array.isArray(data.entities) ? data.entities : [],
         aspects: Array.isArray(data.aspects) ? data.aspects : [],
         updates: Array.isArray(data.updates) ? data.updates : [],
         edges: Array.isArray(data.edges) ? data.edges : [],
+        hyperedges: Array.isArray(data.hyperedges) ? data.hyperedges : [],
         gaps: Array.isArray(data.gaps) ? data.gaps : [],
       };
     } catch {
@@ -1043,7 +1170,17 @@ The JSON schema for updates becomes:
    * missing, "local", or refers to an unknown project.
    */
   _getTargetDb(target) {
-    if (!target || target === 'local' || this._sharedProjects.length === 0) {
+    if (!target || target === 'local') {
+      return { db: target === 'local' ? (this._mainWriteDb || this.db) : (this._defaultWriteDb || this.db), isShared: false, slug: null };
+    }
+    const graphMatch = String(target).match(/^graph:(.+)$/);
+    if (graphMatch) {
+      const slug = graphMatch[1];
+      const db = this.getGraphDb(slug);
+      if (db) return { db, isShared: false, slug, isScopedGraph: true };
+      return { db: this.db, isShared: false, slug: null };
+    }
+    if (this._sharedProjects.length === 0) {
       return { db: this.db, isShared: false, slug: null };
     }
     const match = target.match(/^project:(.+)$/);
@@ -1054,6 +1191,47 @@ The JSON schema for updates becomes:
   }
 
   _writeToGraph(extraction, opts = {}) {
+    if (opts.memoryEnvelope && !opts._scopedWriteInternal) {
+      const scopes = opts.memoryEnvelope.writeScopes || {};
+      const defaultTarget = scopes.defaultSlug && scopes.defaultSlug !== scopes.personalSlug
+        ? `graph:${scopes.defaultSlug}`
+        : 'local';
+      const bucketFor = (item) => item?.target || defaultTarget;
+      const buckets = new Map();
+      const add = (target, kind, item) => {
+        if (!buckets.has(target)) buckets.set(target, { entities: [], aspects: [], updates: [], edges: [], gaps: [], hyperedges: [] });
+        buckets.get(target)[kind].push(item);
+      };
+      for (const ent of extraction.entities || []) add(bucketFor(ent), 'entities', ent);
+      for (const asp of extraction.aspects || []) add(bucketFor(asp), 'aspects', asp);
+      for (const upd of extraction.updates || []) add(bucketFor(upd), 'updates', upd);
+      for (const edge of extraction.edges || []) add(bucketFor(edge), 'edges', edge);
+      for (const gap of extraction.gaps || []) add(bucketFor(gap), 'gaps', gap);
+      for (const h of extraction.hyperedges || []) add(bucketFor(h), 'hyperedges', h);
+
+      const total = { entities: 0, aspects: 0, updates: 0, edges: 0, gaps: 0, total: 0, newNodeIds: [], writeTargets: [] };
+      for (const [target, scopedExtraction] of buckets.entries()) {
+        const targetDb = this._getTargetDb(target);
+        const originalDb = this.db;
+        this._defaultWriteDb = targetDb.db;
+        this._mainWriteDb = originalDb;
+        this.db = targetDb.db;
+        try {
+          const wrote = graphEvents.withGraph(targetDb.slug || null, () => (
+            this._writeToGraph(scopedExtraction, { ...opts, _scopedWriteInternal: true, _writeTarget: target, _writeSlug: targetDb.slug || null })
+          ));
+          for (const k of ['entities', 'aspects', 'updates', 'edges', 'gaps', 'total']) total[k] += wrote[k] || 0;
+          total.newNodeIds.push(...(wrote.newNodeIds || []));
+          total.writeTargets.push({ target, slug: targetDb.slug || null, total: wrote.total || 0 });
+        } finally {
+          this.db = originalDb;
+          this._defaultWriteDb = null;
+          this._mainWriteDb = null;
+        }
+      }
+      return total;
+    }
+
     const wrote = { entities: 0, aspects: 0, updates: 0, edges: 0, total: 0 };
     if (!this.db) return wrote;
 
@@ -1198,11 +1376,12 @@ The JSON schema for updates becomes:
 
         // Reference-node guard. The `ref-*` nodes are seeded operational
         // knowledge (API shapes, sandbox rules, infrastructure facts)
-        // managed by reference-nodes.sql + migrate-ref-*.sql. Letting the
-        // learner accumulate session-derived facts on them was producing
-        // noise like "user prefers x" attached to ref-bfl-api. Nothing
-        // the learner ever wants to write belongs on a ref-* node — link
-        // via an edge instead if relationship matters.
+        // managed by reference-nodes.sql + migrate-ref-*.sql + plugin
+        // install.sql files. Letting the learner accumulate
+        // session-derived facts on them was producing noise like "user
+        // prefers x" attached to ref-api-keys. Nothing the learner ever
+        // wants to write belongs on a ref-* node — link via an edge
+        // instead if relationship matters.
         if (nodeId.startsWith('ref-')) {
           this.log.warn(`[learner] Rejected write to ref-* node: ${nodeId}/${asp.name} (${(asp.attributes || []).length} attrs dropped — ref nodes are seed-managed)`);
           continue;
@@ -1378,12 +1557,34 @@ The JSON schema for updates becomes:
         }
       }
 
+      // Build a one-shot normalized-ID map so edge endpoints whose only
+      // difference from an existing node ID is punctuation/casing get
+      // resolved in O(1) before paying for the full _resolveNodeId path
+      // (which fans out into label / alias / fuzzy / embedding lookups).
+      // _normalizeIdKey collapses non-alphanumerics and lowercases — the
+      // same shape both rawSrc/rawTgt and existing IDs reduce to.
+      const normIdMap = new Map();
+      const _normalizeIdKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      for (const row of this.db.prepare('SELECT id FROM nodes').all()) {
+        const k = _normalizeIdKey(row.id);
+        if (k && !normIdMap.has(k)) normIdMap.set(k, row.id);
+      }
+
+      const _resolveEdgeEndpoint = (raw) => {
+        if (idRemap[raw]) return idRemap[raw];
+        const exact = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(raw);
+        if (exact) return exact.id;
+        const fast = normIdMap.get(_normalizeIdKey(raw));
+        if (fast) return fast;
+        return this._resolveNodeId(raw, null) || raw;
+      };
+
       for (const edge of extraction.edges) {
         if (!edge.source || !edge.target || !edge.type) continue;
         const rawSrc = edge.source.toLowerCase().replace(/\s+/g, '-');
         const rawTgt = edge.target.toLowerCase().replace(/\s+/g, '-');
-        const src = idRemap[rawSrc] || this._resolveNodeId(rawSrc, null) || rawSrc;
-        const tgt = idRemap[rawTgt] || this._resolveNodeId(rawTgt, null) || rawTgt;
+        const src = _resolveEdgeEndpoint(rawSrc);
+        const tgt = _resolveEdgeEndpoint(rawTgt);
 
         const srcExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(src);
         const tgtExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(tgt);
@@ -1394,12 +1595,47 @@ The JSON schema for updates becomes:
         ).get(src, tgt, edge.type);
 
         if (!existingEdge) {
+          const conf = _normalizeConfidence(edge.confidence) || 'extracted';
           this.db.prepare(
-            'INSERT INTO edges (source, target, type, weight) VALUES (?, ?, ?, 1)'
-          ).run(src, tgt, edge.type);
+            "INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 1, 'learner', ?)"
+          ).run(src, tgt, edge.type, conf);
           wrote.edges++;
           this.stats.edges++;
-          graphEvents.emit('change', { op: 'edge:create', edge: { source: src, target: tgt, type: edge.type }, source: 'learner' });
+          graphEvents.emit('change', { op: 'edge:create', edge: { source: src, target: tgt, type: edge.type, confidence: conf }, source: 'learner' });
+        }
+      }
+
+      // Hyperedges (optional, gated by config.learnerHyperedges). Persist
+      // n-ary group facts the LLM emitted alongside binary edges. Skip
+      // members that don't resolve to real node IDs.
+      if (Array.isArray(extraction.hyperedges) && extraction.hyperedges.length > 0) {
+        for (const h of extraction.hyperedges) {
+          if (!h || !h.type || !Array.isArray(h.members) || h.members.length < 2) continue;
+          const validMembers = [];
+          for (const m of h.members) {
+            const rawId = m && m.node_id ? String(m.node_id).toLowerCase().replace(/\s+/g, '-') : null;
+            if (!rawId) continue;
+            const resolved = _resolveEdgeEndpoint(rawId);
+            const exists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(resolved);
+            if (!exists) continue;
+            validMembers.push({ id: resolved, role: m.role || null });
+          }
+          if (validMembers.length < 2) continue;
+          const conf = _normalizeConfidence(h.confidence) || 'extracted';
+          try {
+            this.db.exec('BEGIN IMMEDIATE');
+            const r = this.db.prepare(
+              "INSERT INTO hyperedges (label, type, confidence, weight, extracted_with) VALUES (?, ?, ?, 1.0, 'learner')"
+            ).run(h.label || null, h.type, conf);
+            const hid = Number(r.lastInsertRowid);
+            const insMember = this.db.prepare('INSERT OR IGNORE INTO hyperedge_members (hyperedge_id, node_id, role) VALUES (?, ?, ?)');
+            for (const vm of validMembers) insMember.run(hid, vm.id, vm.role);
+            this.db.exec('COMMIT');
+            graphEvents.emit('change', { op: 'hyperedge:create', hyperedge: { id: hid, type: h.type, label: h.label || null, members: validMembers.map(m => m.id) }, source: 'learner' });
+          } catch (e) {
+            try { this.db.exec('ROLLBACK'); } catch (_) { /* swallow */ }
+            this.log.warn('[learner] hyperedge insert failed: ' + e.message);
+          }
         }
       }
 
@@ -1421,11 +1657,14 @@ The JSON schema for updates becomes:
               'SELECT rowid FROM edges WHERE (source = ? AND target = ?) OR (source = ? AND target = ?)'
             ).get(nid, speakerId, speakerId, nid);
             if (!hasEdge) {
-              this.db.prepare('INSERT INTO edges (source, target, type, weight) VALUES (?, ?, ?, 1)')
+              // Auto-linked speaker→entity edges are 'inferred' — we observed
+              // the speaker mentioned the entity in this turn, but the
+              // relationship beyond "mentioned" is uncertain.
+              this.db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 1, 'learner', 'inferred')")
                 .run(speakerId, nid, 'mentioned');
               wrote.edges++;
               this.stats.edges++;
-              graphEvents.emit('change', { op: 'edge:create', edge: { source: speakerId, target: nid, type: 'mentioned' }, source: 'learner' });
+              graphEvents.emit('change', { op: 'edge:create', edge: { source: speakerId, target: nid, type: 'mentioned', confidence: 'inferred' }, source: 'learner' });
             }
           }
         }
@@ -1776,9 +2015,13 @@ ${structuredTemplate}`;
       const sessionId = opts.sessionId || opts.channelName || 'unknown';
       const observedAt = opts.observedAt || new Date().toISOString();
 
+      // user_id/user_name tracked so the episodes section in the system
+      // prompt can filter out a stay-silent user's own prior episodes when
+      // they're the current speaker — without this, prior leaks anchor
+      // future responses ("I already said X, no harm in saying it again").
       this.db.prepare(
-        'INSERT INTO episodes (session_id, turn_idx, content, observed_at) VALUES (?, ?, ?, ?)'
-      ).run(sessionId, opts.turnIdx || 0, content, observedAt);
+        'INSERT INTO episodes (session_id, turn_idx, content, observed_at, user_id, user_name) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(sessionId, opts.turnIdx || 0, content, observedAt, opts.userId || null, opts.userName || null);
 
       const epId = this.db.prepare('SELECT last_insert_rowid() as id').get().id;
       try {
@@ -2023,6 +2266,11 @@ ${structuredTemplate}`;
       try { sdb.close(); } catch { /* silent: best-effort close */ }
     }
     this._sharedDbs = {};
+    for (const sdb of Object.values(this._graphDbs || {})) {
+      try { sdb.close(); } catch { /* silent: best-effort close */ }
+    }
+    this._graphDbs = {};
+    this._graphDbMeta = {};
     if (this.db) {
       this.db.close();
       this.db = null;

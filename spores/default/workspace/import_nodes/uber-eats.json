@@ -1,0 +1,70 @@
+{
+  "nodeId": "uber-eats",
+  "label": "Uber Eats",
+  "type": "project",
+  "description": "Food delivery platform",
+  "aspects": [
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Order food via Uber Eats"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83c\udf55 Practical"
+      ]
+    },
+    {
+      "name": "scripts",
+      "importance": 8,
+      "attributes": [
+        "Main script: /workspace/skills/uber-eats/scripts/ue.py",
+        "Intercept scripts: intercept.py, intercept_add.py, intercept_checkout.py, etc.",
+        "Cookie file: /workspace/skills/uber-eats/scripts/ue_cookies.txt"
+      ]
+    },
+    {
+      "name": "commands",
+      "importance": 9,
+      "attributes": [
+        "orders - View past order history",
+        "search <query> - Search restaurants",
+        "store <uuid> - View restaurant menu",
+        "carts - View active carts",
+        "add <store> <item> - Add item to cart",
+        "reorder <order_uuid> - Reorder past orders",
+        "user - View profile"
+      ]
+    },
+    {
+      "name": "configuration",
+      "importance": 8,
+      "attributes": [
+        "Location-locked to 150 April Rd, Port Moody, BC",
+        "Requires cookie authentication via set-cookies command"
+      ]
+    },
+    {
+      "name": "setup_instructions",
+      "importance": 8,
+      "attributes": [
+        "Requires browser cookie authentication via Dev Tools network tab",
+        "Need to copy Cookie header from requests to ubereats.com",
+        "Auth tokens are stored in cookies for API access"
+      ]
+    },
+    {
+      "name": "service_details",
+      "importance": 8,
+      "attributes": [
+        "Uses cookie auth with sid, jwt-session, and cf_clearance cookies",
+        "Requires Cloudflare bypass cookie (cf_clearance)",
+        "Stores delivery address in uev2.loc cookie"
+      ]
+    }
+  ]
+}

@@ -7,16 +7,16 @@
 <script src="brand.js"></script>
 <link rel="stylesheet" href="styles/base.css?v=20260429c">
 <link rel="stylesheet" href="styles/onboarding.css?v=20260429c">
-<link rel="stylesheet" href="styles/layout.css?v=20260429c">
-<link rel="stylesheet" href="styles/panes.css?v=20260429c">
-<link rel="stylesheet" href="styles/settings.css?v=20260429c">
-<link rel="stylesheet" href="styles/chat.css?v=20260429c">
-<link rel="stylesheet" href="styles/graph.css?v=20260429c">
-<link rel="stylesheet" href="styles/misc.css?v=20260429c">
+<link rel="stylesheet" href="styles/layout.css?v=260504-chatfloat">
+<link rel="stylesheet" href="styles/panes.css?v=260505-dockchips">
+<link rel="stylesheet" href="styles/settings.css?v=260505-docklayer">
+<link rel="stylesheet" href="styles/chat.css?v=260504-chatstatus">
+<link rel="stylesheet" href="styles/graph.css?v=260505-dockchips">
+<link rel="stylesheet" href="styles/misc.css?v=260505-docklayer">
 <link rel="stylesheet" href="styles/mobile.css?v=20260429c">
 <!-- mobile-shell.css overrides everything above when body.mobile-shell.
      Loaded ONLY by mobile-viewer.html; desktop never sees it. -->
-<link rel="stylesheet" href="styles/mobile-shell.css?v=20260429l">
+<link rel="stylesheet" href="styles/mobile-shell.css?v=260504-codecue2">
 </head>
 <body class="mobile-shell">
 <!-- Mobile chrome — sits above the desktop body content. CSS hides the
@@ -247,16 +247,56 @@
       </section>
 
       <section class="ob-step" data-step="9">
-        <h3>Browser backend</h3>
-        <div class="ob-desc">Which browser engine should tools use by default?</div>
-        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin:12px 0 4px">
-          <input type="radio" name="ob-browser" value="zendriver" checked style="width:auto"> <strong>Zendriver</strong> — lightweight, recommended
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin:4px 0">
-          <input type="radio" name="ob-browser" value="playwright" style="width:auto"> <strong>Playwright</strong> — fuller automation API
-        </label>
+        <h3>Browser Automation</h3>
+        <div class="ob-desc">Pick the default backend for the <code>browser</code> tool. Setup installs browser-core plus the selected backend; you can enable the other backend later from Settings → Plugins.</div>
+        <div class="ob-browser-grid">
+          <label class="ob-choice-card ob-browser-card">
+            <input type="radio" name="ob-browser" value="zendriver" checked style="width:auto">
+            <span class="ob-browser-card-body">
+              <span class="ob-browser-title-row">
+                <strong>Zendriver</strong>
+                <span class="ob-pill">recommended</span>
+              </span>
+              <span class="ob-browser-summary">Stealth-patched Chromium for sites that punish obvious automation.</span>
+              <span class="ob-browser-meta">
+                <span>anti-bot resilient</span>
+                <span>real CDP events</span>
+                <span>best default</span>
+              </span>
+            </span>
+          </label>
+          <label class="ob-choice-card ob-browser-card">
+            <input type="radio" name="ob-browser" value="playwright" style="width:auto">
+            <span class="ob-browser-card-body">
+              <span class="ob-browser-title-row">
+                <strong>Playwright</strong>
+                <span class="ob-pill muted">debug-friendly</span>
+              </span>
+              <span class="ob-browser-summary">Standard Chromium automation with a smoother debugging and screencast workflow.</span>
+              <span class="ob-browser-meta">
+                <span>live preview</span>
+                <span>standard tooling</span>
+                <span>more detectable</span>
+              </span>
+            </span>
+          </label>
+        </div>
         <div class="ob-desc" style="margin-top:16px">You're all set. Click Finish to save and start using your agent.</div>
         <div class="ob-error" id="ob-finish-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="c">
+        <h3>Spore Code</h3>
+        <div class="ob-desc">Spore Code adds CLI session tracking, project context, plan-mode prompt sections, and codebase graph helpers.</div>
+        <label class="ob-choice-card" style="margin-top:12px">
+          <input type="checkbox" id="ob-spore-code-enabled" checked style="width:auto">
+          <span><strong>Install Spore Code</strong> — also installs its required session-graph dependency.</span>
+        </label>
+        <label class="ob-choice-card" style="margin-top:10px">
+          <input type="checkbox" id="ob-enhanced-recall-enabled" style="width:auto">
+          <span><strong>Enable Enhanced Recall</strong> — before retrieval, the agent asks the recall model to decompose your request into better graph/search queries. This improves temporal and cross-session memory, but it adds one extra LLM round before the main answer.</span>
+        </label>
+        <div class="ob-note" style="margin-top:8px">If no invite key exists, setup will generate one so Spore Code auth and guest self-registration work immediately. Turn this off if this instance is only for chat/graph use and should not expose coding workflow tools.</div>
       </section>
     </div>
     <div id="onboarding-foot">
@@ -283,6 +323,12 @@
       <button type="button" id="chat-collapse" title="Collapse chat sidebar" aria-label="Collapse chat sidebar">&#10094;</button>
       <button class="panel-collapse-btn" id="btn-toggle-graph-chat" title="Toggle graph" style="display:none">graph</button>
       <span class="ch-spacer"></span>
+      <button type="button" id="chat-float-toggle" class="floating-pane-btn chat-window-action" title="Undock chat" aria-label="Undock chat">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="9" height="9" rx="1.4"/><path d="M6 2.5h7.5V10"/><path d="M10.5 2.5h3v3"/></svg>
+      </button>
+      <button type="button" id="chat-window-maximize" class="floating-pane-btn chat-window-action" data-window-action="maximize" title="Maximize chat" aria-label="Maximize chat">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg>
+      </button>
       <button type="button" id="btn-clear-chat" title="Clear chat history" aria-label="Clear chat history">&#9003;</button>
       <span id="ws-status" class="disconnected" title="Disconnected" aria-label="Connection status"></span>
     </div>
@@ -341,11 +387,15 @@
         <span class="dock-icon">◎</span>
         <span class="dock-tooltip">Node</span>
       </button>
+      <button class="desktop-dock-btn dock-graphs-btn" id="dock-graphs" title="Switch knowledge graph" aria-haspopup="menu" aria-expanded="false">
+        <span class="dock-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" style="display:block"><circle cx="4" cy="4.5" r="1.8"/><circle cx="11.5" cy="5" r="1.8"/><circle cx="7.5" cy="11.5" r="1.8"/><path d="M5.7 4.6l4 .3M4.9 6l1.8 4M10.4 6.5l-1.8 3.5"/></svg></span>
+        <span class="dock-tooltip">Graphs</span>
+      </button>
       <button class="desktop-dock-btn" id="dock-files" title="Toggle files window">
         <span class="dock-icon">▤</span>
         <span class="dock-tooltip">Files</span>
       </button>
-      <button class="desktop-dock-btn" id="dock-logs" title="Toggle logs window">
+      <button class="desktop-dock-btn" id="dock-logs" title="Choose a log" aria-haspopup="menu" aria-expanded="false">
         <span class="dock-icon">≣</span>
         <span class="dock-tooltip">Logs</span>
       </button>
@@ -358,6 +408,7 @@
         <span class="dock-tooltip">Settings</span>
       </button>
     </div>
+    <div id="dock-graphs-menu" role="menu" aria-label="Quick graph switcher"></div>
   </div>
 
   <!-- Collapse tabs (shown when panels are collapsed) -->
@@ -380,6 +431,7 @@
       <button data-vm="list">list</button>
       <button data-vm="typemap">type map</button>
       <button data-vm="work">people &amp; projects</button>
+      <button id="cv-pending-badge" type="button" title="Open code viewer" hidden>code</button>
       <span class="vm-divider" aria-hidden="true"></span>
       <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">☀</button>
     </div>
@@ -427,13 +479,12 @@
     <!-- Code Viewer (docked in canvas or floating) -->
     <div id="code-viewer" class="cv-docked">
       <div id="code-viewer-header">
-        <span id="code-viewer-icon">{ }</span>
+        <span id="code-viewer-icon">code</span>
         <span id="code-viewer-path"></span>
         <span id="code-viewer-badge" class="cv-badge"></span>
         <select id="code-viewer-mode" title="Code viewer behavior">
-          <option value="auto">Auto</option>
-          <option value="on-request">On request</option>
-          <option value="off">Off</option>
+          <option value="on-request">on request</option>
+          <option value="off">off</option>
         </select>
         <button class="cv-dock-btn" id="cv-dock-btn" title="Dock back into graph pane">&#8689; dock</button>
         <button id="code-viewer-close" title="Close code viewer">&times;</button>
@@ -471,7 +522,6 @@
         <div id="tools-menu" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px;z-index:999;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
           <div class="tools-menu-item" id="tmi-settings" title="Configure this agent">Settings</div>
           <div class="tools-menu-item" id="tmi-graphs" title="Switch knowledge graph">Graphs</div>
-          <div class="tools-menu-item" id="tmi-longmemeval" title="Run LongMemEval benchmark">LongMemEval</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           <div class="tools-menu-item" id="tmi-enhanced-recall" title="LLM-powered query decomposition for better memory retrieval" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer">
             <span>Enhanced Recall</span>
@@ -482,64 +532,7 @@
       </div>
     </div>
     <div id="stats"></div>
-    <!-- LongMemEval floating HUD -->
-    <div id="lme-hud">
-      <div class="lme-panel" id="lme-panel">
-        <div id="lme-config">
-          <div class="lme-title-row"><span class="lme-title">LongMemEval</span><button class="lme-x" onclick="lmeClose()">&times;</button></div>
-          <div class="lme-row"><label>Variant</label><select class="lme-select" id="lme-variant"><option value="oracle" selected>Oracle (~15 MB)</option><option value="s">Small (~277 MB)</option><option value="m">Medium (~2.7 GB)</option></select></div>
-          <div class="lme-row"><label>Max Q</label><input type="number" class="lme-input" id="lme-max-q" value="500" min="1" max="500" style="width:70px"><span style="font-size:.6rem;color:var(--text-dim)">/500 (stratified across types)</span></div>
-          <div class="lme-row" style="flex-wrap:wrap;gap:4px"><label style="width:100%">Question Types</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="temporal-reasoning" checked> Temporal</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="multi-session" checked> Multi-session</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="knowledge-update" checked> Knowledge Update</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-user" checked> Single User</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-assistant" checked> Single Asst</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-preference" checked> Preferences</label>
-          </div>
-          <div class="lme-row"><label>Learner</label><select class="lme-select" id="lme-learner-model"><option value="claude-haiku-4-5" selected>Haiku 4.5 ($1/$5)</option><option value="claude-sonnet-4-6">Sonnet 4.6 ($3/$15)</option></select></div>
-          <div class="lme-row"><label>Answering</label><select class="lme-select" id="lme-answer-model"><option value="claude-haiku-4-5">Haiku 4.5 ($1/$5)</option><option value="claude-sonnet-4-6" selected>Sonnet 4.6 ($3/$15)</option><option value="claude-opus-4-6">Opus 4.6 ($15/$75)</option></select></div>
-          <div class="lme-row"><label><input type="checkbox" id="lme-eval-only"> Eval only (skip ingestion)</label></div>
-          <div class="lme-row"><label><input type="checkbox" id="lme-force-reeval"> Fresh eval (ignore cached answers)</label></div>
-          <div class="lme-row" id="lme-er-status" style="font-size:.65rem;color:var(--text-dim)"></div>
-          <div class="lme-cost" id="lme-cost-est">~$3-5 &bull; ~30-45 min (oracle)</div>
-          <div class="lme-row" style="margin-top:4px"><button class="lme-btn lme-btn-go" onclick="lmeStart()">Start</button></div>
-        </div>
-        <div id="lme-progress" style="display:none">
-          <div class="lme-title-row">
-            <span class="lme-phase" id="lme-phase-label">STARTING</span>
-            <div style="display:flex;align-items:center;gap:2px">
-              <span class="lme-elapsed" id="lme-elapsed">00:00</span>
-              <button class="lme-expand-toggle" onclick="lmeToggleExpand()" title="Expand/collapse details">&#9660;</button>
-              <button class="lme-x" onclick="lmeClose()" title="Close">&times;</button>
-            </div>
-          </div>
-          <div class="lme-bar"><div class="lme-bar-fill" id="lme-bar" style="width:0%"></div></div>
-          <div class="lme-pct" id="lme-pct-label">0 / 0</div>
-          <div class="lme-stats">
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-sessions">0</div><div class="lme-st-l">Sessions</div></div>
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-nodes">0</div><div class="lme-st-l">Nodes</div></div>
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-questions">0</div><div class="lme-st-l">Answered</div></div>
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-accuracy">--</div><div class="lme-st-l">Accuracy</div></div>
-          </div>
-          <div id="lme-expanded-stats">
-            <table class="lme-cat-table" id="lme-cat-table">
-              <thead><tr><th>Category</th><th>Pass</th><th style="text-align:right">Acc</th></tr></thead>
-              <tbody id="lme-cat-tbody"></tbody>
-            </table>
-            <div class="lme-eff-row">
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-latency">--</div><div class="lme-eff-l">Avg ms/q</div></div>
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-input">--</div><div class="lme-eff-l">Input tok</div></div>
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-output">--</div><div class="lme-eff-l">Output tok</div></div>
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-cost">--</div><div class="lme-eff-l">Est. cost</div></div>
-            </div>
-          </div>
-          <div class="lme-log" id="lme-log"></div>
-          <div style="margin-top:6px"><button class="lme-btn lme-btn-stop" onclick="lmeCancel()">Cancel</button></div>
-        </div>
-        <div id="lme-results" style="display:none"></div>
-      </div>
-    </div>
+    <!-- LongMemEval HUD moved to plugins/longmemeval (self-injects) -->
     <!-- Type Map drilldown window -->
     <div id="tm-window">
       <div id="tm-window-head" class="floating-pane-head">
@@ -839,9 +832,13 @@
 <script defer src="scripts/auth.js?v=20260429c"></script>
 <script defer src="scripts/tools-menu.js?v=20260429c"></script>
 
+<!-- Model library helper — must load before settings.js so the
+     populateSettingsPanel call site can use ModelLibrary.* freely. -->
+<script defer src="scripts/model-library.js?v=260504-modelfav"></script>
+
 <!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
      can find the original at top-level evaluation time. -->
-<script defer src="scripts/settings.js?v=20260429c"></script>
+<script defer src="scripts/settings.js?v=260505-graphacl"></script>
 
 <!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
 <script defer src="scripts/effects.js?v=20260429c"></script>
@@ -851,23 +848,22 @@
 
 <!-- Feature modules — wire DOM events, no top-level cross-script deps -->
 <script defer src="scripts/terminal.js?v=20260429c"></script>
-<script defer src="scripts/longmemeval.js?v=20260429c"></script>
 <script defer src="scripts/shared-skills.js?v=20260429c"></script>
-<script defer src="scripts/graph-picker.js?v=20260429c"></script>
+<script defer src="scripts/graph-picker.js?v=260505-graphacl"></script>
 <script defer src="scripts/files.js?v=20260429c"></script>
-<script defer src="scripts/right-panel.js?v=20260429c"></script>
+<script defer src="scripts/right-panel.js?v=260504-logmenu"></script>
 <script defer src="scripts/voice.js?v=20260429c"></script>
-<script defer src="scripts/onboarding.js?v=20260429c"></script>
-<script defer src="scripts/graph.js?v=20260429c"></script>
-<script defer src="scripts/chat.js?v=20260429c"></script>
-<script defer src="scripts/panels.js?v=20260429c"></script>
+<script defer src="scripts/onboarding.js?v=260504-recallob"></script>
+<script defer src="scripts/graph.js?v=260505-viewgraphfix"></script>
+<script defer src="scripts/chat.js?v=260505-viewgraphfix"></script>
+<script defer src="scripts/panels.js?v=260504-logmenu"></script>
 
 <!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
 <script defer src="scripts/boot.js?v=20260429c"></script>
 
 <!-- Mobile tab-bar wiring. Runs after every module has loaded so the
      desktop functions it calls (openSettingsPanel, etc.) are in scope. -->
-<script defer src="scripts/mobile-shell.js?v=20260429j"></script>
+<script defer src="scripts/mobile-shell.js?v=260504-codecue"></script>
 
 <!-- New Graph Modal -->
 <div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">
@@ -954,12 +950,6 @@ build/
         <div class="settings-note">Switch the active knowledge graph for this agent. Each graph has its own nodes, edges, and memory.</div>
       </div>
 
-      <div class="settings-section wide" data-target-tab="tools">
-        <h4>Benchmarks</h4>
-        <button class="settings-btn-secondary" id="settings-launch-lme">Run LongMemEval benchmark</button>
-        <div class="settings-note">Launches the LongMemEval HUD. Requires Enhanced Recall for best results.</div>
-      </div>
-
       <div class="settings-section wide" data-target-tab="plugins">
         <h4>Plugins</h4>
         <div id="settings-plugins-state" class="settings-note" style="opacity:.85"></div>
@@ -1018,23 +1008,28 @@ build/
       </div>
 
 
-      <div class="settings-section wide" data-target-tab="graph-memory">
-        <h4>Export / import</h4>
-          <div class="settings-note" style="margin-top:4px">Export this deployment's knowledge graph, general settings, and (optionally) provider configuration to carry to another Spore Core. Reference + agent self nodes are excluded from the graph; edges re-wire on import. Import takes a pre-import backup first.</div>
-
-          <div class="settings-hint" style="margin-top:10px">What to include in the export:</div>
-          <div class="settings-export-options">
-            <label class="settings-check-row"><input type="checkbox" id="settings-export-graph" checked><span>Knowledge graph</span></label>
-            <label class="settings-check-row"><input type="checkbox" id="settings-export-settings" checked><span>General settings</span></label>
-            <label class="settings-check-row"><input type="checkbox" id="settings-export-providers"><span>Providers <span class="settings-hint-inline">(URL + auth; keys redacted unless below is checked)</span></span></label>
-            <label class="settings-check-row" id="settings-export-secrets-wrap"><input type="checkbox" id="settings-export-secrets"><span>Include API keys <span class="settings-danger-inline">⚠ sensitive</span></span></label>
+      <div class="settings-section wide settings-portability-card" data-target-tab="backups">
+        <div class="settings-portability-head">
+          <div>
+            <h4>Export / import</h4>
+            <div class="settings-note">Move graph memory and settings between Spore Core deployments. Imports take a safety backup first.</div>
           </div>
-          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <button class="settings-btn-secondary" id="settings-graph-export" style="font-size:.68rem;padding:3px 8px">Export</button>
-            <button class="settings-btn-secondary" id="settings-graph-import" style="font-size:.68rem;padding:3px 8px">Import…</button>
-            <input type="file" id="settings-graph-import-file" accept=".json,application/json" style="display:none">
-          </div>
-          <div id="settings-graph-port-status" style="margin-top:6px;font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);white-space:pre-wrap"></div>
+          <div class="settings-portability-tag">portable snapshot</div>
+        </div>
+        <div class="settings-portability-callout">Reference nodes and the agent self node are excluded from graph exports; imported edges are re-wired to the target graph.</div>
+        <div class="settings-hint">Include in export</div>
+        <div class="settings-export-options">
+          <label class="settings-check-row"><input type="checkbox" id="settings-export-graph" checked><span>Knowledge graph</span></label>
+          <label class="settings-check-row"><input type="checkbox" id="settings-export-settings" checked><span>General settings</span></label>
+          <label class="settings-check-row"><input type="checkbox" id="settings-export-providers"><span>Providers <span class="settings-hint-inline">(URLs and auth settings)</span></span></label>
+          <label class="settings-check-row" id="settings-export-secrets-wrap"><input type="checkbox" id="settings-export-secrets"><span>Include API keys <span class="settings-danger-inline">sensitive</span></span></label>
+        </div>
+        <div class="settings-export-actions">
+          <button class="settings-btn-secondary settings-export-primary" id="settings-graph-export">Export bundle</button>
+          <button class="settings-btn-secondary" id="settings-graph-import">Import bundle...</button>
+          <input type="file" id="settings-graph-import-file" accept=".json,application/json" style="display:none">
+        </div>
+        <div id="settings-graph-port-status" class="settings-port-status"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="backups">
@@ -1106,13 +1101,13 @@ build/
         </div>
       </div>
 
-      <div class="settings-section" data-target-tab="agent">
+      <div class="settings-section" data-target-tab="graph-memory">
         <h4>Memory</h4>
         <div class="settings-check">
           <input id="settings-enhanced-recall" type="checkbox">
           <label for="settings-enhanced-recall" style="margin:0">Enable Enhanced Recall</label>
         </div>
-        <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session retrieval.</div>
+        <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session graph retrieval. This adds one extra LLM round before the main answer.</div>
       </div>
 
       <div class="settings-section" data-target-tab="agent">
@@ -1396,7 +1391,7 @@ build/
 
       <div class="settings-section wide" data-target-tab="advanced">
         <h4>Invite Key</h4>
-        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via Spore Code. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
+        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via Spore Code. Installing Spore Code during onboarding generates one automatically if none exists. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
         <label for="settings-invite-key">Invite key</label>
         <div style="display:flex; gap:6px; align-items:stretch; margin-top:4px">
           <input id="settings-invite-key" type="password" placeholder="empty = self-register + Spore Code disabled" autocomplete="off" style="flex:1; min-width:0">
@@ -1482,9 +1477,6 @@ build/
     </div>
   </div>
 </div>
-
-<!-- Pending badge for on-request mode (stays outside canvas) -->
-<div id="cv-pending-badge" onclick="_cvShowFromBadge()" title="Click to open code viewer"></div>
 
 <!-- Browser Live Preview -->
 <div id="browser-preview">

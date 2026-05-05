@@ -1,0 +1,390 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const DEFAULT_PERSIST_DIR = '/workspace/.crontabs';
+const DEFAULT_LOG_DIR = '/workspace/logs';
+const PROACTIVE_URL = 'http://127.0.0.1:${SPORE_WEB_PORT:-18803}/api/proactive/trigger';
+
+function exists(file) {
+  try { return fs.existsSync(file); } catch { return false; }
+}
+
+function readFile(file, limit = 64 * 1024) {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return null;
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = stat.size > 0 ? Math.min(stat.size, limit) : limit;
+      const buf = Buffer.alloc(size);
+      const len = fs.readSync(fd, buf, 0, buf.length, 0);
+      return buf.slice(0, len).toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function execText(command, args = [], opts = {}) {
+  return execFileSync(command, args, {
+    encoding: 'utf8',
+    timeout: opts.timeout || 3000,
+    maxBuffer: opts.maxBuffer || 128 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function currentUser() {
+  try {
+    return execText('/usr/bin/id', ['-un']).trim() || process.env.USER || 'spore';
+  } catch {
+    return process.env.USER || 'spore';
+  }
+}
+
+function commandInfo() {
+  return {
+    cronWrapper: exists('/usr/local/bin/cron') ? '/usr/local/bin/cron' : null,
+    realCron: exists('/usr/sbin/cron') ? '/usr/sbin/cron' : null,
+    crontabWrapper: exists('/usr/local/bin/crontab') ? '/usr/local/bin/crontab' : null,
+    realCrontab: exists('/usr/bin/crontab') ? '/usr/bin/crontab' : null,
+  };
+}
+
+function pidfileStatus(file) {
+  const raw = readFile(file, 256);
+  const pid = raw ? raw.trim() : '';
+  if (!pid || !/^\d+$/.test(pid)) return null;
+  const cmdline = readFile(`/proc/${pid}/cmdline`, 4096);
+  if (!cmdline) return { running: false, pid: Number(pid), source: file };
+  return {
+    running: cmdline.includes('cron'),
+    pid: Number(pid),
+    source: file,
+    command: cmdline.replace(/\0/g, ' ').trim(),
+  };
+}
+
+function daemonStatus() {
+  const byPid = pidfileStatus('/var/run/crond.pid') || pidfileStatus('/var/run/cron.pid');
+  if (byPid) return byPid;
+  try {
+    const out = execText('/usr/bin/pgrep', ['-x', 'cron']).trim();
+    const pid = out.split(/\s+/).filter(Boolean)[0];
+    if (pid) return { running: true, pid: Number(pid), source: 'pgrep' };
+  } catch {
+    // pgrep absent or no match.
+  }
+  return { running: false, pid: null, source: 'probe' };
+}
+
+function listPersistedCrontabs(persistDir) {
+  try {
+    return fs.readdirSync(persistDir)
+      .map(name => {
+        const file = path.join(persistDir, name);
+        const stat = fs.statSync(file);
+        if (!stat.isFile()) return null;
+        return {
+          user: name,
+          path: file,
+          bytes: stat.size,
+          modifiedAt: stat.mtime.toISOString(),
+        };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function readCrontab({ includeLines = false, maxLines = 80 } = {}) {
+  const info = commandInfo();
+  const user = currentUser();
+  const persistDir = process.env.CRONTAB_PERSIST_DIR || DEFAULT_PERSIST_DIR;
+  const persistedPath = path.join(persistDir, user);
+  const result = {
+    user,
+    active: { status: 'unavailable', lines: [] },
+    persisted: {
+      path: persistedPath,
+      exists: exists(persistedPath),
+      lines: [],
+    },
+  };
+
+  if (info.realCrontab) {
+    try {
+      const out = execText(info.realCrontab, ['-l'], { maxBuffer: 256 * 1024 });
+      const lines = out.replace(/\s+$/g, '').split(/\r?\n/).filter(line => line.length > 0);
+      result.active.status = lines.length ? 'present' : 'empty';
+      if (includeLines) result.active.lines = lines.slice(0, maxLines);
+      result.active.truncated = lines.length > maxLines;
+    } catch (e) {
+      const text = String(e.stderr || e.message || '');
+      result.active.status = /no crontab/i.test(text) ? 'missing' : 'error';
+      if (!/no crontab/i.test(text)) result.active.error = text.trim() || e.message;
+    }
+  }
+
+  if (result.persisted.exists) {
+    const raw = readFile(persistedPath, 256 * 1024) || '';
+    const lines = raw.replace(/\s+$/g, '').split(/\r?\n/).filter(line => line.length > 0);
+    if (includeLines) result.persisted.lines = lines.slice(0, maxLines);
+    result.persisted.truncated = lines.length > maxLines;
+  }
+
+  return result;
+}
+
+function status(input = {}) {
+  const persistDir = process.env.CRONTAB_PERSIST_DIR || DEFAULT_PERSIST_DIR;
+  const includeCrontab = !!input.includeCrontab || input.action === 'list';
+  return {
+    ok: true,
+    enabledByEnv: String(process.env.SPORE_ENABLE_CRON || 'true').toLowerCase() !== 'false',
+    commands: commandInfo(),
+    daemon: daemonStatus(),
+    persistDir: {
+      path: persistDir,
+      exists: exists(persistDir),
+      users: listPersistedCrontabs(persistDir),
+    },
+    crontab: readCrontab({ includeLines: includeCrontab }),
+  };
+}
+
+function guide() {
+  return {
+    ok: true,
+    cliGated: true,
+    summary: 'Use container cron for scheduled triggers. Use startup_tasks for long-running daemons, watchers, and servers.',
+    daemon: {
+      start: 'cron',
+      check: 'cron && crontab -l',
+      avoid: [
+        '/etc/init.d/cron start',
+        'service cron start',
+        '/usr/sbin/cron directly',
+      ],
+      why: 'The container ships /usr/local/bin/cron and /usr/local/bin/crontab wrappers. The wrappers handle already-running cron and crontab persistence.',
+    },
+    persistence: {
+      crontabs: '/workspace/.crontabs/<user>',
+      restoredOnBoot: true,
+      disabledBy: 'SPORE_ENABLE_CRON=false',
+    },
+    workflow: [
+      'Call cron { action:"status" } to check daemon and persisted crontabs.',
+      'Create cron entries with absolute paths, sparse environment assumptions, and explicit log redirection.',
+      'Install by replacing the current crontab with a temp file: crontab -l 2>/dev/null > /tmp/spore.cron; append the new line; crontab /tmp/spore.cron.',
+      'Call cron { action:"validate", entry:"..." } before installing a new entry.',
+      'Use /api/proactive/trigger when a job needs to notify the operator or start an agent turn.',
+    ],
+    proactiveTrigger: {
+      url: PROACTIVE_URL,
+      notify: 'POST JSON {"source":"cron:<name>","message":"...","mode":"notify"} for a cheap operator notification. Add channelId/target like "telegram:<chatId>" to send the exact message to that channel instead of the web panel.',
+      agent: 'Use mode:"agent" only when the scheduled event should start a new agent turn. Include channelId when it should target a specific channel, such as telegram:<id>.',
+      auth: 'Loopback 127.0.0.1 calls are accepted without auth. External callers need normal web auth.',
+    },
+    chooseTheRightTool: {
+      cron: 'Scheduled jobs, periodic triggers, daily reports, hourly checks.',
+      startup_tasks: 'Persistent background processes that should restart after container boot.',
+      schedule_wakeup: 'Short follow-up wakeups, roughly minutes rather than permanent schedules.',
+    },
+  };
+}
+
+function sanitizeName(name) {
+  const clean = String(name || 'cron-job')
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return clean || 'cron-job';
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function hasRedirect(command) {
+  return /(^|[^\\])(?:>>?|2>|&>|2>&1|\|\s*(?:tee|logger)\b)/.test(command);
+}
+
+function normalizeSchedule(schedule) {
+  const raw = String(schedule || '0 9 * * *').trim();
+  return raw || '0 9 * * *';
+}
+
+function buildExample(input = {}) {
+  const name = sanitizeName(input.name);
+  const schedule = normalizeSchedule(input.schedule);
+  const mode = ['notify', 'agent', 'none'].includes(String(input.mode || '').toLowerCase())
+    ? String(input.mode || '').toLowerCase()
+    : (input.command ? 'none' : 'agent');
+  const logPath = input.logPath || `${DEFAULT_LOG_DIR}/cron-${name}.log`;
+  let command = String(input.command || '').trim();
+
+  if (!command) {
+    const payload = {
+      source: `cron:${name}`,
+      message: String(input.message || `Scheduled cron trigger: ${name}`),
+      mode: mode === 'none' ? 'notify' : mode,
+    };
+    if (input.channelId) payload.channelId = String(input.channelId);
+    command = `/usr/bin/curl -fsS -X POST "${PROACTIVE_URL}" -H "content-type: application/json" --data ${shellSingleQuote(JSON.stringify(payload))}`;
+  }
+
+  const entry = `${schedule} ${command}${hasRedirect(command) ? '' : ` >>${logPath} 2>&1`}`;
+  return {
+    ok: true,
+    name,
+    entry,
+    installSketch: [
+      'tmp="$(mktemp)"',
+      'crontab -l 2>/dev/null > "$tmp" || true',
+      `printf '%s\\n' ${shellSingleQuote(entry)} >> "$tmp"`,
+      'crontab "$tmp"',
+      'rm -f "$tmp"',
+    ],
+    note: 'Run cron { action:"validate", entry:"..." } on the final crontab line before installing it.',
+  };
+}
+
+function parseCronLine(line) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed || trimmed.startsWith('#')) return null;
+  if (/^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(trimmed)) return null;
+  if (trimmed.startsWith('@')) {
+    const match = /^(@\S+)\s+(.+)$/.exec(trimmed);
+    return match ? { schedule: match[1], command: match[2], raw: trimmed } : { schedule: trimmed, command: '', raw: trimmed };
+  }
+  const parts = trimmed.split(/\s+/);
+  if (parts.length < 6) return { schedule: parts.slice(0, 5).join(' '), command: '', raw: trimmed, tooShort: true };
+  return { schedule: parts.slice(0, 5).join(' '), command: parts.slice(5).join(' '), raw: trimmed };
+}
+
+function commandStartsAbsolute(command) {
+  let cmd = String(command || '').trim();
+  cmd = cmd.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, '');
+  const cdMatch = /^cd\s+(\S+)\s+&&\s+(.+)$/.exec(cmd);
+  if (cdMatch) cmd = cdMatch[2].trim();
+  return cmd.startsWith('/') || cmd.startsWith('(') || cmd.startsWith('{');
+}
+
+function validateEntry(input = {}) {
+  const entry = String(input.entry || '');
+  if (!entry.trim()) return { ok: false, error: 'entry is required for validate.' };
+
+  const warnings = [];
+  const lines = entry.split(/\r?\n/);
+  let checked = 0;
+  for (const [idx, line] of lines.entries()) {
+    const parsed = parseCronLine(line);
+    if (!parsed) continue;
+    checked++;
+    const where = `line ${idx + 1}`;
+    if (parsed.tooShort || !parsed.command) {
+      warnings.push({ severity: 'error', line: idx + 1, message: `${where}: cron entries need a schedule and a command.` });
+      continue;
+    }
+    if (/\/etc\/init\.d\/cron|service\s+cron\s+start|\/usr\/sbin\/cron\b/.test(parsed.command)) {
+      warnings.push({ severity: 'error', line: idx + 1, message: `${where}: do not start cron from inside a cron entry; use the runtime wrapper once outside the job.` });
+    }
+    if (!hasRedirect(parsed.command)) {
+      warnings.push({ severity: 'warn', line: idx + 1, message: `${where}: add stdout/stderr redirection so failures are inspectable.` });
+    }
+    if (!commandStartsAbsolute(parsed.command)) {
+      warnings.push({ severity: 'warn', line: idx + 1, message: `${where}: cron has a sparse PATH; prefer an absolute command path or /bin/sh -lc with an absolute script path.` });
+    }
+    if (/(^|[^\\])%/.test(parsed.command)) {
+      warnings.push({ severity: 'warn', line: idx + 1, message: `${where}: unescaped % has special meaning in crontab commands; escape it as \\% if it is literal.` });
+    }
+    if (/api\/proactive\/trigger/.test(parsed.command) && !/127\.0\.0\.1|localhost/.test(parsed.command)) {
+      warnings.push({ severity: 'warn', line: idx + 1, message: `${where}: proactive trigger calls are auth-free only on loopback; external URLs need normal web auth.` });
+    }
+  }
+
+  if (checked === 0) {
+    warnings.push({ severity: 'error', line: null, message: 'No cron command lines found. Comments, blanks, and VAR=value lines were ignored.' });
+  }
+
+  return {
+    ok: !warnings.some(w => w.severity === 'error'),
+    checkedLines: checked,
+    warnings,
+  };
+}
+
+module.exports = function register(api) {
+  api.registerTool('cron', {
+    namespaced: false,
+    available: (ctx = {}) => ctx.platform !== 'cli',
+    description: 'Cron runtime guide for scheduled jobs inside this Spore container. Use this before setting up, checking, or troubleshooting cron. It returns wrapper-safe workflow guidance, daemon/crontab status, proactive-trigger examples, and crontab validation. This tool is intentionally hidden from CLI/Spore Code sessions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['guide', 'status', 'list', 'example', 'validate'],
+          description: 'guide returns the cron workflow; status checks daemon and persistence state; list includes current/persisted crontab lines; example builds a safe crontab line; validate checks a crontab entry.',
+        },
+        includeCrontab: {
+          type: 'boolean',
+          description: 'For action=status, include active and persisted crontab lines. action=list always includes them.',
+        },
+        entry: {
+          type: 'string',
+          description: 'Crontab line or full crontab text to validate when action=validate.',
+        },
+        schedule: {
+          type: 'string',
+          description: 'Cron schedule for action=example, such as "0 9 * * *" or "@hourly". Default is "0 9 * * *".',
+        },
+        command: {
+          type: 'string',
+          description: 'Optional command for action=example. If omitted, the example uses /api/proactive/trigger.',
+        },
+        name: {
+          type: 'string',
+          description: 'Short job name for examples and proactive trigger source, such as "daily-report".',
+        },
+        mode: {
+          type: 'string',
+          enum: ['notify', 'agent', 'none'],
+          description: 'For action=example with no command: notify sends a notification, agent starts an agent turn, none is only used with a supplied command.',
+        },
+        message: {
+          type: 'string',
+          description: 'Message body for proactive trigger examples.',
+        },
+        channelId: {
+          type: 'string',
+          description: 'Optional target for proactive agent examples, such as "telegram:123456" or "web:control-panel".',
+        },
+        logPath: {
+          type: 'string',
+          description: 'Optional log file path for generated examples. Default: /workspace/logs/cron-<name>.log.',
+        },
+      },
+      required: ['action'],
+    },
+    execute: async (input = {}, ctx = {}) => {
+      if (ctx.platform === 'cli') {
+        return { ok: false, error: 'cron is not available in CLI/Spore Code sessions.' };
+      }
+      const action = String(input.action || 'guide').toLowerCase();
+      if (action === 'guide') return guide();
+      if (action === 'status' || action === 'list') return status({ ...input, action });
+      if (action === 'example') return buildExample(input);
+      if (action === 'validate') return validateEntry(input);
+      return { ok: false, error: `Unknown cron action: ${action}` };
+    },
+  });
+};

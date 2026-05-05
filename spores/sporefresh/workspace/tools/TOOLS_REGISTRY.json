@@ -1,0 +1,10 @@
+{
+  "echo-probe": {
+    "name": "echo-probe",
+    "description": "scratch tool to verify save_tool works",
+    "language": "bash",
+    "path": "/workspace/tools/echo-probe.sh",
+    "usage": "bash workspace/tools/echo-probe.sh",
+    "createdAt": "2026-05-05T14:35:07.416Z"
+  }
+}

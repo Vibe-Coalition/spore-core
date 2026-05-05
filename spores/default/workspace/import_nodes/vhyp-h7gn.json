@@ -1,0 +1,33 @@
+{
+  "nodeId": "vhyp-h7gn",
+  "label": "VHYP-H7GN",
+  "type": "product",
+  "description": "Telegram pairing code generated for user @thisAndThat0",
+  "aspects": [
+    {
+      "name": "pairing_code",
+      "importance": 8,
+      "attributes": [
+        "Generated for Telegram user @thisAndThat0 on 2026-04-12",
+        "Used in /data/graphs/pairing.json at 2026-04-12"
+      ]
+    },
+    {
+      "name": "timestamp",
+      "importance": 7,
+      "attributes": [
+        "created_at_2026-04-12T08:43:00.223Z"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "pairing-store",
+      "type": "associated_with"
+    },
+    {
+      "target": "real-name-pirateking",
+      "type": "associated"
+    }
+  ]
+}

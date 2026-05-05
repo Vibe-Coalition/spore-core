@@ -1,0 +1,21 @@
+{
+  "nodeId": "us",
+  "label": "United States",
+  "type": "country",
+  "description": "United States of America",
+  "aspects": [
+    {
+      "name": "military_posturing",
+      "importance": 7,
+      "attributes": [
+        "Trump threatened to 'bomb Iran back to the stone age' on 2026-04-12"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "iran",
+      "type": "issued_threats"
+    }
+  ]
+}

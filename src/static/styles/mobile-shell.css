@@ -183,6 +183,44 @@ body.mobile-shell #m-g-mode-row button.active {
   color: var(--bg) !important;
   border-color: var(--text-bright) !important;
 }
+body.mobile-shell #m-g-mode-row #cv-pending-badge {
+  --cv-mode-accent: var(--accent2);
+  display: none !important;
+  align-items: center;
+  gap: 6px;
+  color: var(--cv-mode-accent) !important;
+  border-color: color-mix(in srgb, var(--cv-mode-accent) 35%, var(--border)) !important;
+  background: color-mix(in srgb, var(--cv-mode-accent) 9%, var(--surface)) !important;
+}
+[data-theme="light"] body.mobile-shell #m-g-mode-row #cv-pending-badge {
+  --cv-mode-accent: var(--accent3);
+}
+body.mobile-shell #m-g-mode-row #cv-pending-badge.cv-ready {
+  display: inline-flex !important;
+}
+body.mobile-shell #m-g-mode-row #cv-pending-badge[hidden] {
+  display: none !important;
+}
+body.mobile-shell #m-g-mode-row #cv-pending-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cv-mode-accent) 13%, transparent);
+}
+body.mobile-shell #m-g-mode-row #cv-pending-badge.cv-attention {
+  color: var(--cv-mode-accent) !important;
+  animation: cvModeNudge 1.45s cubic-bezier(.4,.05,.2,1) infinite;
+}
+body.mobile-shell #m-g-mode-row #cv-pending-badge.cv-attention::before {
+  animation: cvModePulse 1.7s ease-out infinite;
+}
+body.mobile-shell #m-g-mode-row #cv-pending-badge.cv-open {
+  background: var(--text-bright) !important;
+  border-color: var(--text-bright) !important;
+  color: var(--bg) !important;
+}
 
 /* Canvas slot — fills the gap between top bar and detail panel. */
 #m-g-canvas-slot {
@@ -408,6 +446,7 @@ body.mobile-shell.m-view-settings #m-settings-view {
 #m-chat-stream {
   flex: 1 1 auto; min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   padding: 12px 12px 4px;
   background: var(--bg);
@@ -422,9 +461,11 @@ body.mobile-shell #m-chat-stream #chat-messages {
   background: transparent !important;
   padding: 0 !important;
   margin: 0 !important;
-  overflow: visible !important;
+  overflow-x: hidden !important;
+  overflow-y: visible !important;
   height: auto !important;
   width: 100% !important;
+  min-width: 0 !important;
 }
 
 /* ── Chat row layout ──
@@ -440,6 +481,7 @@ body.mobile-shell #m-chat-stream #chat-messages {
 body.mobile-shell .chat-row {
   width: 100% !important;
   max-width: 100% !important;
+  min-width: 0 !important;
   align-self: stretch !important;
   margin: 4px 0;
 }
@@ -486,6 +528,11 @@ body.mobile-shell #m-composer #chat-input-area {
    focus. Desktop's #chat-input is 0.82rem (~13px) which trips it. */
 body.mobile-shell #m-composer #chat-input {
   font-size: 16px !important;
+  min-width: 0 !important;
+}
+body.mobile-shell #m-composer #chat-text-row {
+  min-width: 0 !important;
+  max-width: 100% !important;
 }
 /* Touch tap-target floor on composer buttons — desktop has them at
    28×28 / smaller, which is below the 44px platform minimum. Bump

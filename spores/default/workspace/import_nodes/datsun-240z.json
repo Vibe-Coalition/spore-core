@@ -1,0 +1,16 @@
+{
+  "nodeId": "datsun-240z",
+  "label": "Datsun 240Z",
+  "type": "product",
+  "description": "Classic Japanese sports car",
+  "aspects": [
+    {
+      "name": "visual_attributes",
+      "importance": 7,
+      "attributes": [
+        "White color",
+        "Classic sports car design"
+      ]
+    }
+  ]
+}

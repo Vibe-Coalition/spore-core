@@ -229,6 +229,8 @@ class Maintainer {
       await this.deriveInferences(scale);
       await this.expireEpisodicAttributes(10);
       await this.embedUnembeddedNodes(10);
+      await this.runCommunityDetection({ force });
+      await this.runGraphOverview({ force });
 
       this.stats.cycles++;
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
@@ -813,9 +815,9 @@ If no good connections exist, return: []`,
         if (dup) continue;
 
         this.db.prepare(
-          "INSERT INTO edges (source, target, type, weight, extracted_with) VALUES (?, ?, ?, 0.6, 'maintainer')"
+          "INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 0.6, 'maintainer', 'inferred')"
         ).run(edge.source, edge.target, edge.type);
-        graphEvents.emit('change', { op: 'edge:create', edge: { source: edge.source, target: edge.target, type: edge.type }, source: 'maintainer' });
+        graphEvents.emit('change', { op: 'edge:create', edge: { source: edge.source, target: edge.target, type: edge.type, confidence: 'inferred' }, source: 'maintainer' });
         created++;
       }
 
@@ -825,6 +827,91 @@ If no good connections exist, return: []`,
       }
     } catch (e) {
       this.log.error('[maintainer] Sparse connect error:', e.message);
+    }
+  }
+
+  // ── Community Detection ────────────────────────────────────────────────────
+
+  /**
+   * Run pure-JS Louvain over the current graph and persist communities into
+   * node_groups / node_group_members. Gated by a node+edge-count delta:
+   * if the graph has barely changed since the last run, skip — communities
+   * are advisory and stale-by-a-cycle is fine.
+   */
+  async runCommunityDetection({ force = false } = {}) {
+    if (!this.db) return null;
+    try {
+      const nodeCount = this.db.prepare('SELECT COUNT(*) AS c FROM nodes').get()?.c || 0;
+      const edgeCount = this.db.prepare('SELECT COUNT(*) AS c FROM edges').get()?.c || 0;
+
+      // Need enough scaffolding to make community detection meaningful.
+      if (nodeCount < 20 || edgeCount < 10) {
+        this.log.debug?.(`[community] graph too small (${nodeCount}n / ${edgeCount}e) — skipping`);
+        return null;
+      }
+
+      const lastNode = this._lastCommunityNodeCount ?? 0;
+      const lastEdge = this._lastCommunityEdgeCount ?? 0;
+      const delta = Math.abs(nodeCount - lastNode) + Math.abs(edgeCount - lastEdge);
+      if (!force && delta < 50 && this._lastCommunityRunAt) {
+        this.log.debug?.(`[community] only ${delta} graph deltas since last run — skipping`);
+        return null;
+      }
+
+      const { runCommunityDetection } = require('./community');
+      const result = runCommunityDetection(this.db, this.log);
+
+      this._lastCommunityRunAt = Date.now();
+      this._lastCommunityNodeCount = nodeCount;
+      this._lastCommunityEdgeCount = edgeCount;
+      this.stats.communities = result.communityCount;
+
+      return result;
+    } catch (e) {
+      this.log.error('[maintainer] Community detection error:', e.message);
+      return null;
+    }
+  }
+
+  // ── Graph Overview ─────────────────────────────────────────────────────────
+
+  /**
+   * Compute the graph overview (god nodes / surprising bridges / suggested
+   * questions) and persist it to graph_overviews. Runs after community
+   * detection so the bridge-scorer has community memberships to work with.
+   * Same change-counter gate — overview runs are advisory and reusing
+   * yesterday's payload is fine if the graph hasn't moved much.
+   */
+  async runGraphOverview({ force = false } = {}) {
+    if (!this.db) return null;
+    try {
+      const nodeCount = this.db.prepare('SELECT COUNT(*) AS c FROM nodes').get()?.c || 0;
+      const edgeCount = this.db.prepare('SELECT COUNT(*) AS c FROM edges').get()?.c || 0;
+
+      if (nodeCount < 20 || edgeCount < 10) {
+        this.log.debug?.(`[overview] graph too small (${nodeCount}n / ${edgeCount}e) — skipping`);
+        return null;
+      }
+
+      const lastNode = this._lastOverviewNodeCount ?? 0;
+      const lastEdge = this._lastOverviewEdgeCount ?? 0;
+      const delta = Math.abs(nodeCount - lastNode) + Math.abs(edgeCount - lastEdge);
+      if (!force && delta < 25 && this._lastOverviewRunAt) {
+        this.log.debug?.(`[overview] only ${delta} graph deltas since last run — skipping`);
+        return null;
+      }
+
+      const { computeOverview } = require('./overview');
+      const result = computeOverview(this.db, this.log);
+
+      this._lastOverviewRunAt = Date.now();
+      this._lastOverviewNodeCount = nodeCount;
+      this._lastOverviewEdgeCount = edgeCount;
+
+      return result;
+    } catch (e) {
+      this.log.error('[maintainer] Graph overview error:', e.message);
+      return null;
     }
   }
 

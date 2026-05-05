@@ -1,0 +1,15 @@
+{
+  "nodeId": "device-count-84",
+  "label": "Device Count",
+  "type": "system_status",
+  "description": "84 controllable devices detected in Home Assistant",
+  "aspects": [
+    {
+      "name": "system_inventory",
+      "importance": 7,
+      "attributes": [
+        "84 controllable devices mapped"
+      ]
+    }
+  ]
+}

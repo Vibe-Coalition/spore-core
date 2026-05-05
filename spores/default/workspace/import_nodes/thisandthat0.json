@@ -1,0 +1,53 @@
+{
+  "nodeId": "thisandthat0",
+  "label": "thisAndThat0",
+  "type": "person",
+  "description": "Telegram channel where user is interacting",
+  "aspects": [
+    {
+      "name": "pairing_status",
+      "importance": 9,
+      "attributes": [
+        "Approved for Telegram communication on 2026-04-12",
+        "Completed pairing flow with code VHYP-H7GN",
+        "Approved for Telegram communication on 2026-04-12"
+      ]
+    },
+    {
+      "name": "association",
+      "importance": 8,
+      "attributes": [
+        "approved_for_telegram_communication",
+        "generated_pairing_code"
+      ]
+    },
+    {
+      "name": "connections",
+      "importance": 7,
+      "attributes": [
+        "Paired with bot: hyru1ebot"
+      ]
+    },
+    {
+      "name": "members",
+      "importance": 7,
+      "attributes": [
+        "Contains at least PirateKing"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "vhyp-h7gn",
+      "type": "used"
+    },
+    {
+      "target": "vhyp-h7gn",
+      "type": "generated"
+    },
+    {
+      "target": "pairing-code-aaw8-y6kb",
+      "type": "paired_with"
+    }
+  ]
+}

@@ -11,6 +11,7 @@
 const { MultiProvider, detectBackend } = require('../providers');
 const graphEvents = require('../graph/events');
 const { effortDefaults } = require('./effort');
+const { resolveDefaultMemoryEnvelope, mergeMemoryEnvelope } = require('../graph/scopes');
 
 // ── Budget-scaling constants ─────────────────────────────────────────
 // All message-budget fractions are expressed against the active model's
@@ -98,7 +99,7 @@ class AgentLoop {
       this.log.warn('No model configured — agent AI is disabled. Set up a provider in the Manager, create a new agent, and restart.');
       return false;
     }
-    const backend = detectBackend(this.config.model);
+    const backend = detectBackend(this.config.model, this.config);
     // Plugin-driven configuration check. Each provider plugin exposes
     // isConfigured(config) → bool through its registerProvider opts;
     // manager.getProviders surfaces the result. If the model's owning
@@ -120,6 +121,208 @@ class AgentLoop {
     ].filter(Boolean).join(' ');
     this.log.info(`Agent loop initialized — tiers: casual=${this.config.casualModel} normal=${this.config.normalModel} planner=${this.config.plannerModel}${multimodal ? ` ${multimodal}` : ''} (${backend})`);
     return true;
+  }
+
+  _runtimeToolNames(opts = {}) {
+    try {
+      const defs = this.tools?.getToolDefinitions?.({
+        platform: opts.platform,
+        projectContext: opts.projectContext,
+      }) || [];
+      return [...new Set(defs.map(t => t?.name).filter(Boolean))].sort();
+    } catch (e) {
+      this.log?.warn?.(`[prompt] Failed to build runtime tool inventory: ${e.message}`);
+      return [];
+    }
+  }
+
+  _buildRuntimeToolContract(opts = {}) {
+    const names = this._runtimeToolNames(opts);
+    if (names.length === 0) return null;
+
+    const has = (name) => names.includes(name);
+    const keyOrder = [
+      'browser',
+      'web_search',
+      'web_fetch',
+      'graph_query',
+      'graph_update',
+      'settings_read',
+      'web_serve',
+      'webapp_request',
+      'list_dir',
+      'read_file',
+      'read_many_files',
+      'write_file',
+      'edit_file',
+      'patch_file',
+      'git_status',
+      'git_diff',
+      'run_tests',
+      'bg_list',
+      'bg_tail',
+      'bg_kill',
+      'exec',
+      'env_manage',
+      'message_read',
+      'message_send',
+      'telegram_pairing',
+      'delegate_task',
+      'ask_user',
+    ];
+    const keyNames = keyOrder.filter(has);
+    const fmt = (list) => list.map(n => `\`${n}\``).join(', ');
+
+    const lines = [
+      '## Runtime Tool Contract',
+      `You have callable tools in this chat (${names.length} total). Key tools now available: ${fmt(keyNames.length ? keyNames : names.slice(0, 18))}.`,
+      `Callable tool names: ${fmt(names)}.`,
+      '- Do not claim that browser, web, graph, file, shell, or other tool access is unavailable when the relevant callable tool is listed above.',
+      opts.platform === 'cli' && opts.projectContext?.mode === 'plan'
+        ? '- PLAN MODE IS ACTIVE. Do not run commands or write/edit files. Use read-only tools only, and produce the phase-specific plan-mode marker instead of executing.'
+        : '- If the user asks you to browse/open a website, inspect/query the graph, read/check files, run a command, test something, or verify current state, call the relevant tool unless policy blocks it.',
+      '- If a tool call fails or a backend is unavailable, report the actual tool error and then offer the best fallback.',
+    ];
+
+    if (opts.platform === 'cli' && opts.projectContext?.mode === 'plan') {
+      lines.push(
+        '## Plan Mode Guard',
+        'RULES (HARD):',
+        '- Spore Code plan mode is read-only. Do NOT call `exec`, `write_file`, `edit_file`, `patch_file`, `run_tests`, `bg_kill`, `web_serve`, `env_manage`, or `save_tool`.',
+        '- Do not start servers, install packages, edit project files, create temp scripts, delete files, or change environment/configuration.',
+        '- Follow the active Plan Mode phase. Router phases emit `QUESTIONS:` or `NO_INTERVIEW_NEEDED`; research emits `RESEARCH_DONE`; building ends with `PLAN_READY`.',
+      );
+    }
+
+    if (has('browser')) {
+      const backends = this.tools?._pluginManager?.getBrowserBackends?.()
+        ?.filter(b => b?.available)
+        ?.map(b => b.name)
+        ?.filter(Boolean) || [];
+      lines.push(`- For live websites or interactive browsing, use \`browser\` first${backends.length ? ` (available backend${backends.length === 1 ? '' : 's'}: ${backends.join(', ')})` : ''}. Use \`web_search\` / \`web_fetch\` for search and static article fetches.`);
+    } else if (has('web_search') || has('web_fetch')) {
+      lines.push('- No interactive browser tool is listed, but web search/fetch tools are available for non-interactive web tasks.');
+    }
+    if (has('graph_query')) {
+      lines.push('- When the user asks about your graph, memory, nodes, edges, or stored context, use `graph_query` instead of answering from the prompt projection alone.');
+    }
+    if (has('settings_read')) {
+      lines.push('- For current Spore settings/configuration (public URL, web port, model routing, providers, plugins, hot reload, browser backend), use `settings_read`. Do not infer these from `.env`, `spore.json`, shell env, or old prompt memory.');
+      try {
+        const summary = this.tools?._settingsSummaryForTool?.(this.tools._settingsModule?.());
+        if (summary?.runtime) {
+          lines.push(`- Current runtime settings: publicUrl=${summary.runtime.publicUrl || '(none)'}, webPort=${summary.runtime.webPort || '(none)'}, browserBackend=${summary.agent?.browserBackend || '(none)'}, pluginsHotReload=${summary.plugins?.hotReload === undefined ? '(unknown)' : String(summary.plugins.hotReload)}.`);
+        }
+      } catch { /* settings summary is best-effort prompt context */ }
+    }
+    if (has('web_serve')) {
+      lines.push('- Use `web_serve` action:"status" to check the hosted app URL/status, action:"start" for static apps, or action:"backend" for apps with an API backend.');
+    }
+
+    return lines.join('\n');
+  }
+
+  _withRuntimeToolContract(systemPrompt, opts = {}) {
+    const contract = this._buildRuntimeToolContract(opts);
+    if (!contract) return systemPrompt || '';
+    const body = systemPrompt || '';
+    if (body.startsWith('## Runtime Tool Contract\n')) return body;
+    return `${contract}\n\n${body}`;
+  }
+
+  _detectForcedToolNameForIntent(content, opts = {}) {
+    const text = String(content || '').toLowerCase();
+    if (!text.trim()) return null;
+    const names = new Set(this._runtimeToolNames(opts));
+    const has = (name) => names.has(name);
+
+    const textFromMessage = (msg) => {
+      if (!msg) return '';
+      if (typeof msg.content === 'string') return msg.content;
+      if (Array.isArray(msg.content)) {
+        return msg.content
+          .map(b => typeof b === 'string' ? b : (b?.text || b?.content || ''))
+          .join('\n');
+      }
+      return '';
+    };
+    const detectFromText = (raw) => {
+      const t = String(raw || '').toLowerCase();
+      if (!t.trim()) return null;
+
+      const inlineTool = t.match(/<tool_call\b[^>]*\bname=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+      const inlineName = inlineTool && (inlineTool[1] || inlineTool[2] || inlineTool[3] || '').trim();
+      if (inlineName && has(inlineName)) return inlineName;
+
+      const verb = /\b(use|call|run|invoke|execute|try|test|route|open|browse|query|make|create|add|save|write|record)\b/i;
+      for (const name of names) {
+        if (t.includes(name.toLowerCase()) && verb.test(t)) return name;
+      }
+
+      const hasUrl = /\bhttps?:\/\/\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?/i.test(t);
+      const browserIntent = /\b(browse|browser|open\s+(?:a\s+)?(?:site|website|webpage|page|url)|visit|navigate|go\s+to|load\s+(?:a\s+)?(?:site|website|webpage|page|url)|zendriver|playwright)\b/i.test(t);
+      if (has('browser') && (browserIntent || (hasUrl && /\b(open|browse|visit|navigate|load|check|look\s+at|read)\b/i.test(t)))) {
+        return 'browser';
+      }
+
+      const graphTarget = /\b(graph|nodes?|edges?|memory|memories|stored\s+context|knowledge\s+graph)\b/i.test(t);
+      const graphQueryAction = /\b(check|inspect|query|search|look\s+at|look\s+up|show|list|read|find|use|what(?:'s| is)?\s+in|do\s+you\s+have)\b/i.test(t);
+      if (has('graph_query') && graphTarget && graphQueryAction) {
+        return 'graph_query';
+      }
+
+      const graphWriteTarget = graphTarget || /\b(node|fact|remember|reminder|note)\b/i.test(t);
+      const graphWriteAction = /\b(make|create|add|save|write|record|remember|store)\b/i.test(t);
+      if (has('graph_update') && graphWriteTarget && graphWriteAction) {
+        return 'graph_update';
+      }
+
+      const pairingCode = /\b[A-HJ-NP-Z2-9]{4}[-\s]?[A-HJ-NP-Z2-9]{4}\b/i.test(t);
+      const pairingIntent = /\b(pair(?:ing)?|approve|authorize|allow|connect|link|revoke)\b/i.test(t);
+      const telegramTarget = /\b(?:telegram|tg)\b/i.test(t);
+      if (has('telegram_pairing') && ((telegramTarget && (pairingCode || pairingIntent)) || (pairingCode && pairingIntent))) {
+        return 'telegram_pairing';
+      }
+
+      const settingsTarget = /\b(settings?|settings\s+panel|spore\s+config(?:uration)?|runtime\s+config(?:uration)?|current\s+config(?:uration)?|your\s+config(?:uration)?|the\s+config(?:uration)?|public\s+url|web\s+port|web_serve|model\s+routing|providers?|plugins?|hot\s+reload|browser\s+backend)\b/i.test(t);
+      const settingsAction = /\b(check|inspect|read|show|list|see|view|tell|what(?:'s| is| are)?|current|configured|enabled|disabled|access)\b/i.test(t);
+      const configFileIntent = /\b(config\s+file|file|repo|codebase|package\.json|tsconfig|vite|webpack|eslint|docker[-\s]?compose|ya?ml|json)\b/i.test(t);
+      if (has('settings_read') && settingsTarget && settingsAction && !configFileIntent) {
+        return 'settings_read';
+      }
+
+      return null;
+    };
+
+    const direct = detectFromText(text);
+    if (direct) return direct;
+
+    const retryIntent = /^(?:try\s+again|again|retry|retry\s+it|do\s+it|run\s+it|call\s+it|use\s+it|same(?:\s+thing)?|one\s+more(?:\s+time)?|yes(?:\s+please)?|yeah|yep|ok(?:ay)?|pair\s+it|approve\s+it|authorize\s+it|yes\s+pair\s+it|yes\s+approve\s+it|try\s+the\s+(?:actual\s+)?tool(?:\s+again)?)\.?$/i.test(text.trim());
+    if (retryIntent && Array.isArray(opts.messages)) {
+      for (let i = opts.messages.length - 1; i >= 0; i--) {
+        const previous = textFromMessage(opts.messages[i]);
+        if (!previous || previous.trim().toLowerCase() === text.trim()) continue;
+        const inherited = detectFromText(previous);
+        if (inherited) return inherited;
+      }
+    }
+
+    return null;
+  }
+
+  _buildPromptCallParts(systemPrompt, promptMode, opts = {}) {
+    const staticPrompt = this._withRuntimeToolContract(
+      this.graph.buildStaticPrompt(promptMode, opts),
+      opts
+    );
+    if (systemPrompt && staticPrompt && systemPrompt.startsWith(staticPrompt)) {
+      const dynamicContext = systemPrompt.length > staticPrompt.length
+        ? systemPrompt.slice(staticPrompt.length)
+        : null;
+      return { staticPrompt, dynamicContext };
+    }
+    this.log?.debug?.('[prompt] Static prompt split skipped because static prompt is not a prefix of the full system prompt');
+    return { staticPrompt: null, dynamicContext: null };
   }
 
   /**
@@ -146,9 +349,10 @@ class AgentLoop {
       return { text: msg, error: true };
     }
 
-    const sessionKey = this.sessions.constructor.buildKey(
+    const sessionKey = opts.sessionKey || this.sessions.constructor.buildKey(
       opts.channelId, opts.isDm, opts.userId
     );
+    opts.sessionKey = sessionKey;
 
     // Prevent concurrent runs on same session
     if (this.activeRuns.has(sessionKey)) {
@@ -194,6 +398,8 @@ class AgentLoop {
       userId: opts.userId,
       userName: opts.userName,
       platform: opts.platform,
+      messageTarget: opts.messageTarget || null,
+      platformMeta: opts.platformMeta || null,
       isDm: opts.isDm !== false,
       sessionKey,
     });
@@ -204,7 +410,10 @@ class AgentLoop {
       if (forceReleaseTimer) clearTimeout(forceReleaseTimer);
       this.activeRuns.delete(sessionKey);
       this._activeAbortControllers.delete(sessionKey);
-      this._pendingInterjections.delete(sessionKey); // discard stale interjections
+      if (ac.signal.aborted) {
+        this._preservePendingInterjectionsOnAbort(sessionKey);
+      }
+      this._pendingInterjections.delete(sessionKey);
       this.tools._abortSignal = null;
       // Clean up per-session tool context
       if (this.tools._sessionContexts) this.tools._sessionContexts.delete(sessionKey);
@@ -269,6 +478,27 @@ class AgentLoop {
     });
   }
 
+  _preservePendingInterjectionsOnAbort(sessionKey) {
+    const queued = this._pendingInterjections.get(sessionKey);
+    if (!(queued && queued.length > 0)) return 0;
+    const items = queued.map(ij => typeof ij === 'string' ? { content: ij, opts: null } : ij);
+    let saved = 0;
+    for (const item of items) {
+      const content = String(item?.content || '').trim();
+      if (!content) continue;
+      try {
+        this.sessions.addMessage(sessionKey, 'user', content);
+        saved++;
+      } catch (e) {
+        this.log.warn(`[abort] Failed to preserve queued interjection for ${sessionKey}: ${e.message}`);
+      }
+    }
+    if (saved > 0) {
+      this.log.info(`[abort] Preserved ${saved} queued interjection(s) for ${sessionKey}`);
+    }
+    return saved;
+  }
+
   /**
    * The main agent loop — handles multi-turn tool use
    */
@@ -279,11 +509,15 @@ class AgentLoop {
     this.tools._sessionContexts.set(sessionKey, {
       trigger: opts.trigger || null,
       channelId: opts.channelId || null,
-      platform: opts.platform || 'discord',
+      platform: opts.platform || null,
+      messageTarget: opts.messageTarget || null,
+      platformMeta: opts.platformMeta || null,
       userMessage: opts.content || null,
       userName: opts.userName || null,
       userId: opts.userId || null,
       userRole: opts.userRole || null,
+      sessionToken: opts.sessionToken || null,
+      projectContext: opts.projectContext || null,
       abortSignal: opts._abortSignal || null,
     });
 
@@ -291,7 +525,7 @@ class AgentLoop {
     // These are best-effort when multiple sessions run concurrently.
     this.tools._currentTrigger = opts.trigger || null;
     this.tools._currentChannelId = opts.channelId || null;
-    this.tools._currentPlatform = opts.platform || 'discord';
+    this.tools._currentPlatform = opts.platform || null;
     this.tools._currentUserMessage = opts.content || null;
     this.tools._currentUserName = opts.userName || null;
     this.tools._currentUserId = opts.userId || null;
@@ -335,13 +569,26 @@ class AgentLoop {
       projectContext: opts.projectContext || null,
     };
 
+    const memoryEnvelope = this._resolveMemoryEnvelope(opts, dynamicOpts);
+    if (memoryEnvelope) {
+      opts.memoryEnvelope = memoryEnvelope;
+      dynamicOpts.memoryEnvelope = memoryEnvelope;
+      const ctx = this.tools._sessionContexts?.get(sessionKey);
+      if (ctx) {
+        ctx.memoryEnvelope = memoryEnvelope;
+        ctx.projectContext = opts.projectContext || null;
+      }
+      this.tools._currentMemoryEnvelope = memoryEnvelope;
+    }
+
     // Detect casual chat for lighter prompt mode
     const msgText = typeof opts.content === 'string' ? opts.content : '';
     const directTriggers = ['mention', 'reply', 'dm', 'task_complete'];
     // Casual = short conversational messages (greetings, reactions, simple questions).
     // Anything that sounds like a task/instruction is NOT casual.
     // Status/progress questions are NOT casual — they need recent context to answer.
-    const hasTaskWords = /\b(file|code|write|read|edit|exec|run|build|deploy|install|script|create|generate|save|delete|fix|update|refactor|search|find|look\s?up|query|research|analyze|summarize|compare|explain|describe|list|show|add|remove|change|make|brand|ensure|set\s?up|configure|modify|replace|move|copy|send|fetch|download|upload|check|test|debug|implement|design|render|compile|parse|convert|merge|split|connect|disconnect|publish|schedule|cancel|approve|reject|assign|review|tone|adjust|tweak|polish|clean|improve|optimize|finish|complete|continue|proceed|resume|redo|undo|revert|restart|stop|pause|wrap\s?up|serve|host|share|put|post|drop|deliver|attach|play|record|stream|open|close|start|enable|disable|turn\s?on|turn\s?off)\b/i.test(msgText);
+    const hasTaskWords = /\b(file|code|write|read|edit|exec|run|build|deploy|install|script|create|generate|save|delete|fix|update|refactor|search|find|look\s?up|query|research|analyze|summarize|compare|explain|describe|list|show|add|remove|change|make|brand|ensure|set\s?up|configure|modify|replace|move|copy|send|fetch|download|upload|check|test|debug|implement|design|render|compile|parse|convert|merge|split|connect|disconnect|publish|schedule|cancel|approve|reject|assign|review|tone|adjust|tweak|polish|clean|improve|optimize|finish|complete|continue|proceed|resume|redo|undo|revert|restart|stop|pause|wrap\s?up|serve|host|share|put|post|drop|deliver|attach|play|record|stream|open|close|start|enable|disable|turn\s?on|turn\s?off|browse|browser|internet|website|webpage|url|zendriver|playwright)\b/i.test(msgText);
+    const hasCapabilityWords = /\b(tool|tools|browser|browse|web|internet|website|webpage|url|zendriver|playwright|graph|nodes?|edges?|memory|memories|exec|shell|terminal|files?)\b/i.test(msgText);
     const hasStatusWords = /\b(status|progress|going|doing|happening|working\s+on|how.*going|how.*coming|update\s+on|where.*at|eta|done\s+yet|finished|ready)\b/i.test(msgText);
     const hasActiveTasks = this.tools?._delegatedTasks && [...this.tools._delegatedTasks.values()].some(t => t.status === 'running');
     // Stickiness: once a session has accumulated substantive coding work
@@ -366,6 +613,7 @@ class AgentLoop {
     const sessionIsSubstantive = sessionHasToolUse || !!opts.projectContext;
     const isCasualChat = directTriggers.includes(opts.trigger) && msgText.length < 200
       && !hasTaskWords && !(hasStatusWords && hasActiveTasks)
+      && !hasCapabilityWords
       && !sessionIsSubstantive;
     const promptMode = isCasualChat ? 'chat' : 'full';
 
@@ -378,11 +626,17 @@ class AgentLoop {
     let cachedProjectNodeId = null;
     let cachedProjectStale = false;
     let cachedProjectIsNew = false;
+    let cachedProjectHasPriorSessions = false;
+    let cachedProjectHasPriorActivity = false;
+    let cachedProjectHasPriorMemory = false;
     const beforePatch = this._firePluginBeforeMessage(opts);
     if (beforePatch) {
       cachedProjectNodeId = beforePatch.cachedProjectNodeId || null;
       cachedProjectStale  = !!beforePatch.cachedProjectStale;
       cachedProjectIsNew  = !!beforePatch.cachedProjectIsNew;
+      cachedProjectHasPriorSessions = !!beforePatch.cachedProjectHasPriorSessions;
+      cachedProjectHasPriorActivity = !!beforePatch.cachedProjectHasPriorActivity;
+      cachedProjectHasPriorMemory = !!beforePatch.cachedProjectHasPriorMemory;
     }
 
     // Build system prompt using async path (hybrid search + Enhanced Recall).
@@ -396,7 +650,11 @@ class AgentLoop {
       cachedProjectNodeId,
       cachedProjectStale,
       cachedProjectIsNew,
+      cachedProjectHasPriorSessions,
+      cachedProjectHasPriorActivity,
+      cachedProjectHasPriorMemory,
     });
+    systemPrompt = this._withRuntimeToolContract(systemPrompt, dynamicOpts);
     // DEBUG: dump the assembled system prompt + tool list to disk so we can
     // inspect exactly what hit the model. Toggle with SPORE_DEBUG_DUMP_PROMPT=1.
     if (process.env.SPORE_DEBUG_DUMP_PROMPT === '1') {
@@ -405,7 +663,10 @@ class AgentLoop {
         const path = require('path');
         const dir = process.env.SPORE_DEBUG_DUMP_DIR || '/data';
         const outFile = path.join(dir, 'last-prompt.txt');
-        const toolList = (this.tools?.getToolDefinitions?.() || []).map(t => t.name);
+        const toolList = (this.tools?.getToolDefinitions?.({
+          platform: opts.platform,
+          projectContext: opts.projectContext,
+        }) || []).map(t => t.name);
         const dump = [
           `# trigger=${opts.trigger} platform=${opts.platform} promptMode=${promptMode}`,
           `# user=${opts.userId || ''} session=${sessionKey}`,
@@ -445,8 +706,7 @@ class AgentLoop {
     // opts forwarded so plugin-contributed prompt sections can branch on
     // platform / projectContext / sessionId without breaking the static cache
     // (plugin sections are computed fresh, not cached).
-    const staticPrompt = this.graph.buildStaticPrompt(promptMode, opts);
-    const dynamicContext = systemPrompt.length > staticPrompt.length ? systemPrompt.slice(staticPrompt.length) : null;
+    let { staticPrompt, dynamicContext } = this._buildPromptCallParts(systemPrompt, promptMode, dynamicOpts);
 
     // 2. Add the user message to session history (text only — images are ephemeral)
     // Task completion messages are internal system prompts — don't pollute chat history
@@ -520,11 +780,12 @@ class AgentLoop {
       && /^\s*\[BUILD_PLAN\]/.test(typeof opts.content === 'string' ? opts.content : '');
     // `let` because _maybeEscalateModel below reassigns it when a tool call
     // forces a tier bump (e.g. casual → planner mid-loop).
+    const settings = require('../settings');
     let activeModel = isBuildingTurn
-      ? (this.config.plannerModel || this.config.normalModel)
+      ? settings.modelForTier('planner')
       : isCasualChat
-        ? (this.config.casualModel || this.config.normalModel || this.config.plannerModel)
-        : (this.config.normalModel || this.config.plannerModel);
+        ? settings.modelForTier('casual')
+        : settings.modelForTier('normal');
     const _modelLimit = this._lookupModelLimit(activeModel);
     const contextWindow = (_modelLimit?.contextWindow && Number(_modelLimit.contextWindow) > 0)
       ? Number(_modelLimit.contextWindow)
@@ -641,6 +902,14 @@ class AgentLoop {
       this.log.info(`[routing] BUILDING turn → planner (${activeModel})`);
     }
     let chatTools = null;
+    let forcedToolName = this._detectForcedToolNameForIntent(opts.content, {
+      platform: opts.platform,
+      projectContext: opts.projectContext,
+      messages,
+    });
+    if (forcedToolName) {
+      this.log.info(`[agent] Explicit tool intent detected — forcing first turn to use ${forcedToolName}`);
+    }
 
     const abortSignal = opts._abortSignal;
 
@@ -713,16 +982,34 @@ class AgentLoop {
           cachedProjectNodeId,
           cachedProjectStale,
           cachedProjectIsNew,
+          cachedProjectHasPriorSessions,
+          cachedProjectHasPriorActivity,
+          cachedProjectHasPriorMemory,
         });
         iterations = ijResult.iterations;
         if (ijResult.systemPrompt && ijResult.systemPrompt !== systemPrompt) {
           systemPrompt = ijResult.systemPrompt;
+          ({ staticPrompt, dynamicContext } = this._buildPromptCallParts(systemPrompt, promptMode, dynamicOpts));
         }
 
         const iterStart = Date.now();
         this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
 
-        const response = await this._callLLM(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta, onToolUse: opts.onToolUse, onStatus: opts.onStatus, tools: chatTools, model: activeModel, abortSignal });
+        const response = await this._callLLM(systemPrompt, messages, {
+          staticPrompt,
+          dynamicContext,
+          onTextDelta: opts.onTextDelta,
+          onThinkingDelta: opts.onThinkingDelta,
+          onToolUse: opts.onToolUse,
+          onStatus: opts.onStatus,
+          tools: chatTools,
+          model: activeModel,
+          platform: opts.platform,
+          projectContext: opts.projectContext,
+          forceToolName: forcedToolName,
+          abortSignal,
+        });
+        forcedToolName = null;
 
         const iterMs = Date.now() - iterStart;
 
@@ -796,8 +1083,9 @@ class AgentLoop {
         // 2-tier escalation (extracted)
         activeModel = this._maybeEscalateModel(toolBlocks, activeModel);
         if (toolBlocks.length > 0 && response.stop_reason === 'tool_use') {
+          const assistantContent = this._stripUnsignedThinkingBlocks(response.content);
           // Store compact version in session — trim large tool inputs for history
-          const compactContent = response.content.map(block => {
+          const compactContent = assistantContent.map(block => {
             if (block.type === 'tool_use' && block.input) {
               const inputStr = JSON.stringify(block.input);
               if (inputStr.length > 2000) {
@@ -807,7 +1095,7 @@ class AgentLoop {
             return block;
           });
           this.sessions.addMessage(sessionKey, 'assistant', compactContent);
-          messages.push({ role: 'assistant', content: response.content });
+          messages.push({ role: 'assistant', content: assistantContent });
 
           const dispatch = await this._executeToolBatch(toolBlocks, { abortSignal, sessionKey, loopTracker, toolLog, opts });
           const toolResults = dispatch.toolResults;
@@ -816,6 +1104,9 @@ class AgentLoop {
 
           if (abortSignal?.aborted) {
             this.log.info(`[abort] Session ${sessionKey} aborted during tool execution`);
+            if (toolResults.length > 0) {
+              this._persistToolResults(sessionKey, messages, toolResults, iterations);
+            }
             loopBroken = true;
             break;
           }
@@ -891,8 +1182,7 @@ class AgentLoop {
     const wasUserAbort = abortSignal?.aborted && opts._abortController?._userAbort;
 
     if (wasUserAbort) {
-      this.log.info(`[abort] User-initiated stop for ${sessionKey} — cleaning session`);
-      this._cleanSessionAfterAbort(sessionKey);
+      this.log.info(`[abort] User-initiated stop for ${sessionKey} — interrupted current generation/tool execution without rewriting session`);
       finalText = null;
     } else if (loopBroken && (!finalText || !finalText.trim())) {
       try {
@@ -901,7 +1191,14 @@ class AgentLoop {
           role: 'user',
           content: '[SYSTEM: Your tool calls were blocked because you appeared to be stuck in a loop. Summarize what you have accomplished so far and respond to the user. Do not call any more tools.]',
         });
-        const finalResponse = await this._callLLM(systemPrompt, messages, { staticPrompt, dynamicContext, onTextDelta: opts.onTextDelta, onThinkingDelta: opts.onThinkingDelta });
+        const finalResponse = await this._callLLM(systemPrompt, messages, {
+          staticPrompt,
+          dynamicContext,
+          onTextDelta: opts.onTextDelta,
+          onThinkingDelta: opts.onThinkingDelta,
+          platform: opts.platform,
+          projectContext: opts.projectContext,
+        });
         if (finalResponse.usage) {
           totalUsage.input_tokens += finalResponse.usage.input_tokens;
           totalUsage.output_tokens += finalResponse.usage.output_tokens;
@@ -974,11 +1271,16 @@ class AgentLoop {
    */
   _kickOffLearnerExtraction(opts, finalText, toolLog) {
     const learningMode = this.config.learningMode || 'always';
+    if (opts.suppressLearning === true) return;
     if (!(finalText && this.learner && learningMode === 'always')) return;
     this.learner.extractAndLearn(opts.content, finalText, {
       userName: opts.userName,
+      userId: opts.userId,
       channelName: opts.channelName,
       toolCalls: toolLog.length > 0 ? toolLog : undefined,
+      platform: opts.platform || null,
+      projectContext: opts.projectContext || null,
+      memoryEnvelope: opts.memoryEnvelope || null,
       // graphcorn: pass the sessionId (= opts.channelId for Spore Code —
       // see web.js:4719 where agentOpts.channelId is set to the WS
       // sessionId). The learner uses this to link every newly-
@@ -1040,6 +1342,34 @@ class AgentLoop {
     return any ? merged : null;
   }
 
+  _resolveMemoryEnvelope(opts, dynamicOpts) {
+    const registry = this.tools?._graphRegistry || this.graph?._graphRegistry || null;
+    let envelope = resolveDefaultMemoryEnvelope({
+      opts: { ...opts, ...dynamicOpts },
+      registry,
+      log: this.log,
+    });
+    if (this._pluginManager) {
+      const handlers = this._pluginManager.getLifecycleHooks?.('resolveMemoryScope') || [];
+      for (const handler of handlers) {
+        try {
+          const patch = handler({
+            opts,
+            dynamicOpts,
+            envelope,
+            registry,
+            learner: this.learner,
+            log: this.log,
+          });
+          envelope = mergeMemoryEnvelope(envelope, patch);
+        } catch (e) {
+          this.log.warn('[loop] resolveMemoryScope lifecycle hook failed: ' + e.message);
+        }
+      }
+    }
+    return envelope;
+  }
+
   /**
    * Build the wide ctx passed to plugin tool/middleware handlers. Pulls from
    * the per-session tool context map first (set in _runLoop), falls back to
@@ -1058,6 +1388,7 @@ class AgentLoop {
       userMessage:    sessionCtx.userMessage    ?? opts?.content        ?? null,
       sessionToken:   sessionCtx.sessionToken   ?? opts?.sessionToken   ?? null,
       projectContext: sessionCtx.projectContext ?? opts?.projectContext ?? null,
+      memoryEnvelope: sessionCtx.memoryEnvelope ?? opts?.memoryEnvelope ?? null,
       abortSignal:    sessionCtx.abortSignal    ?? opts?._abortSignal   ?? null,
     };
   }
@@ -1218,10 +1549,20 @@ class AgentLoop {
     };
 
     // Race each tool against the abort signal so a stuck tool doesn't block the loop
+    const interruptedToolResult = (tb) => ({
+      type: 'tool_result',
+      tool_use_id: tb.id,
+      content: JSON.stringify({
+        interrupted: true,
+        error: 'Interrupted by user before this tool completed.',
+        note: 'Only the current generation/tool execution was stopped. Preserve the conversation/task context and wait for the next user instruction.',
+      }),
+    });
+
     const abortRace = abortSignal ? (tb) => Promise.race([
       runOne(tb),
       new Promise(resolve => {
-        const onAbort = () => resolve({ type: 'tool_result', tool_use_id: tb.id, content: JSON.stringify({ error: 'Aborted by user.' }) });
+        const onAbort = () => resolve(interruptedToolResult(tb));
         if (abortSignal.aborted) { onAbort(); return; }
         abortSignal.addEventListener('abort', onAbort, { once: true });
       }),
@@ -1257,6 +1598,13 @@ class AgentLoop {
           toolResults.push(await abortRace(toolBlocks[i]));
           i++;
         }
+      }
+    }
+
+    const seen = new Set(toolResults.map(r => r?.tool_use_id).filter(Boolean));
+    for (const tb of toolBlocks) {
+      if (!seen.has(tb.id)) {
+        toolResults.push(interruptedToolResult(tb));
       }
     }
 
@@ -1300,7 +1648,7 @@ class AgentLoop {
   _handleEndTurn(ctx) {
     const { response, responseText, sessionKey, opts, messages } = ctx;
     let { finalText, lastSentIntermediate } = ctx;
-    if (responseText) finalText = responseText;
+    finalText = responseText || '';
     // Store in session regardless (for context continuity)
     if (finalText) this.sessions.addMessage(sessionKey, 'assistant', finalText);
     // If the final text was already sent as intermediate, don't re-send it
@@ -1384,6 +1732,13 @@ class AgentLoop {
             cachedProjectNodeId: ctx.cachedProjectNodeId,
             cachedProjectStale: ctx.cachedProjectStale,
             cachedProjectIsNew: ctx.cachedProjectIsNew,
+            cachedProjectHasPriorSessions: ctx.cachedProjectHasPriorSessions,
+            cachedProjectHasPriorActivity: ctx.cachedProjectHasPriorActivity,
+            cachedProjectHasPriorMemory: ctx.cachedProjectHasPriorMemory,
+          });
+          systemPrompt = this._withRuntimeToolContract(systemPrompt, {
+            ...ctx.dynamicOpts,
+            projectContext: opts.projectContext,
           });
           this.log.info(`[interject] Mode change ${currentMode || '(unset)'} → ${newMode} — system prompt rebuilt (${systemPrompt.length} bytes)`);
           // Run the same marker validator the initial build does, so we
@@ -1449,14 +1804,15 @@ class AgentLoop {
    */
   _maybeEscalateModel(toolBlocks, activeModel) {
     if (!(toolBlocks.length > 0 && activeModel)) return activeModel;
-    const casualM = this.config.casualModel || this.config.normalModel;
-    const normalM = this.config.normalModel || this.config.plannerModel;
+    const settings = require('../settings');
+    const casualM = settings.modelForTier('casual');
+    const normalM = settings.modelForTier('normal');
     if (activeModel === casualM && casualM !== normalM) {
       activeModel = normalM;
       this.log.info(`[escalation] casual → normal (${activeModel})`);
     }
-    const plannerM = this.config.plannerModel;
-    if (activeModel === normalM && normalM !== plannerM) {
+    const plannerM = settings.modelForTier('planner', { strict: true });
+    if (activeModel === normalM && normalM !== plannerM && plannerM) {
       const hasDelegation = toolBlocks.some(b => b.name === 'delegate_task');
       if (hasDelegation) {
         activeModel = plannerM;
@@ -1464,6 +1820,15 @@ class AgentLoop {
       }
     }
     return activeModel;
+  }
+
+  _stripUnsignedThinkingBlocks(content) {
+    if (!Array.isArray(content)) return content;
+    return content.filter(block => {
+      if (!block || typeof block !== 'object') return true;
+      if (block.type === 'thinking') return !!block.signature;
+      return block.type !== 'redacted_thinking';
+    });
   }
 
   /**
@@ -1488,7 +1853,11 @@ class AgentLoop {
         result: {
           type: 'tool_result',
           tool_use_id: toolBlock.id,
-          content: JSON.stringify({ error: 'Aborted by user.' }),
+          content: JSON.stringify({
+            interrupted: true,
+            error: 'Interrupted by user before this tool started.',
+            note: 'Only the current generation/tool execution was stopped. Preserve the conversation/task context and wait for the next user instruction.',
+          }),
         },
         criticalBlock, delegated,
       };
@@ -1528,11 +1897,48 @@ class AgentLoop {
 
     const toolDetail = this._toolInputSummary(toolBlock.name, toolBlock.input);
     graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
-    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail }); } catch { /* silent: best-effort UI callback */ } }
+    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail, input: toolBlock.input }); } catch { /* silent: best-effort UI callback */ } }
     const toolExecStart = Date.now();
     // Pass the session's context explicitly so concurrent sessions
     // don't race on a shared "current session" field in tools.js.
-    const toolCtx = this.tools._sessionContexts?.get(sessionKey) || { sessionKey };
+    const toolCtx = {
+      ...(this.tools._sessionContexts?.get(sessionKey) || {}),
+      sessionKey,
+      platform: opts.platform || this.tools._sessionContexts?.get(sessionKey)?.platform || null,
+      projectContext: opts.projectContext || this.tools._sessionContexts?.get(sessionKey)?.projectContext || null,
+    };
+    const planModeBlock = this.tools.planModeBlockForTool?.(toolBlock.name, toolBlock.input, toolCtx);
+    if (planModeBlock) {
+      const resultContent = JSON.stringify(planModeBlock);
+      this.log.warn(`[agent] Tool ${toolBlock.name} blocked by plan-mode guard`);
+      if (opts.onStatus) {
+        try {
+          opts.onStatus({
+            type: 'tool_exec_done',
+            tool: toolBlock.name,
+            detail: toolDetail,
+            durationMs: Date.now() - toolExecStart,
+            resultChars: resultContent.length,
+            blocked: true,
+          });
+        } catch { /* silent: best-effort UI callback */ }
+      }
+      toolLog.push({
+        tool: toolBlock.name,
+        input: JSON.stringify(toolBlock.input).substring(0, 300),
+        resultPreview: resultContent.substring(0, 300),
+        succeeded: false,
+        exitCode: null,
+      });
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: resultContent,
+        },
+        criticalBlock, delegated,
+      };
+    }
 
     // Plugin middleware: beforeToolExec — handlers get the same wide ctx the
     // plugin tool dispatcher gets, so a plugin observing graph_update can read
@@ -1711,15 +2117,47 @@ class AgentLoop {
     return MODEL_OUTPUT_TOKEN_FALLBACK; // generic fallback for models not yet probed
   }
 
-  // Resolve a model ref against config.modelLimits with a few key forms so
-  // lookups are consistent everywhere. Returns the limit entry or null.
-  //   1. Direct match (handles e.g. "kimi//blob/raw/…/Kimi-K2.6")
-  //   2. Any stored key that ENDS with "/<model>" (handles bare-name model
-  //      lookup against provider/model keys)
-  //   3. Any stored key that, when provider-prefixed-stripped, equals model
+  // Resolve a model ref against the centralized model library, with
+  // legacy `config.modelLimits` as fallback. Returns the limit entry
+  // ({ contextWindow, compactAt, ... }) or null.
+  //
+  // Lookup order:
+  //   1. model_library row by exact id ("claude-opus-4-7" or
+  //      "openai/gpt-4o")
+  //   2. model_library row by trailing modelId ("/<model>" suffix)
+  //   3. legacy config.modelLimits (same fallback shape — kept so any
+  //      stale modelLimits not yet migrated still resolves)
   _lookupModelLimit(model) {
+    if (!model) return null;
+    try {
+      const lib = require('../settings/model-library');
+      const direct = lib.get(model);
+      if (direct) {
+        return {
+          contextWindow: direct.contextWindow,
+          compactAt: direct.compactAt,
+          maxTokens: direct.maxOutput,
+          capabilities: direct.capabilities,
+          reasoningEffortDefault: direct.reasoningEffortDefault,
+        };
+      }
+      // Bare-name lookup: any row whose modelId equals the requested
+      // model (e.g. requesting "gpt-4o" matches "openai/gpt-4o")
+      for (const e of lib.list()) {
+        if (e.modelId === model) {
+          return {
+            contextWindow: e.contextWindow,
+            compactAt: e.compactAt,
+            maxTokens: e.maxOutput,
+            capabilities: e.capabilities,
+            reasoningEffortDefault: e.reasoningEffortDefault,
+          };
+        }
+      }
+    } catch { /* settings not booted (e.g. unit test) — fall through */ }
+
     const limits = this.config.modelLimits;
-    if (!limits || !model) return null;
+    if (!limits) return null;
     if (limits[model]) return limits[model];
     for (const k of Object.keys(limits)) {
       if (k.endsWith('/' + model)) return limits[k];
@@ -1939,7 +2377,8 @@ class AgentLoop {
    * nginx stays happy.
    *
    * Default is now streaming. Set `config.nonStreamToolTurns: true` to
-   * revert if a provider regresses.
+   * revert if a provider regresses. Provider-specific forced-tool
+   * transport fallbacks belong in provider plugins/clients, not here.
    */
   _shouldUseNonStreamToolTurn(requestOpts) {
     if (!Array.isArray(requestOpts?.tools) || requestOpts.tools.length === 0) return false;
@@ -2022,7 +2461,10 @@ class AgentLoop {
     // Tag last tool with cache_control so the full tool array is cached on repeat calls.
     // Pass the per-call platform explicitly so the cli-tool-catalog filter doesn't
     // race with the legacy `_currentPlatform` global in concurrent multi-session runs.
-    const tools = opts.tools || this.tools.getToolDefinitions({ platform: opts.platform });
+    const tools = opts.tools || this.tools.getToolDefinitions({
+      platform: opts.platform,
+      projectContext: opts.projectContext,
+    });
     if (tools.length > 0) {
       const last = tools[tools.length - 1];
       if (!last.cache_control) {
@@ -2077,11 +2519,22 @@ class AgentLoop {
     const maxTokens = _perModelMax > 0
       ? _perModelMax
       : (this.config.maxTokens !== MODEL_OUTPUT_TOKEN_FALLBACK ? this.config.maxTokens : this._modelMaxOutputTokens(model));
+    const forceToolName = opts.forceToolName && tools.some(t => t?.name === opts.forceToolName)
+      ? opts.forceToolName
+      : null;
     let requestOpts = {
       max_tokens: maxTokens,
       ...resolvedRequest,
       model,
     };
+    if (forceToolName && !Array.isArray(requestOpts.tools)) {
+      requestOpts.tools = tools;
+      this.log.warn(`[agent] Re-attached tools for forced ${forceToolName} call after provider capability adapter stripped them`);
+    }
+    if (forceToolName) {
+      requestOpts.tool_choice = { type: 'tool', name: forceToolName };
+      this.log.info(`[agent] Tool choice forced: ${forceToolName}`);
+    }
     // Default reasoning effort — each provider plugin declares
     // getDefaultReasoningEffort(model, hostConfig) and knows which
     // host-config field is its knob (anthropic.thinkingBudget vs
@@ -2234,6 +2687,15 @@ class AgentLoop {
   _cleanSessionAfterAbort(sessionKey) {
     const history = this.sessions.getHistory(sessionKey, 200);
     if (!history || history.length === 0) return;
+    const pendingAskUser = (() => {
+      try {
+        return typeof this.tools.listPendingQuestions === 'function'
+          ? this.tools.listPendingQuestions(sessionKey)
+          : [];
+      } catch {
+        return [];
+      }
+    })();
 
     // ── Pass 1: extract real conversational turns and tool activity ──
     const realTurns = [];
@@ -2277,6 +2739,11 @@ class AgentLoop {
     const summaryParts = ['[SESSION SUMMARY — your previous work before the user interrupted:]'];
     if (userTopics.length > 0) {
       summaryParts.push(`User requests: ${userTopics.slice(0, 5).join(' | ')}`);
+    }
+    if (pendingAskUser.length > 0) {
+      const pending = pendingAskUser[0];
+      const labels = (pending.options || []).map((o, i) => `${i + 1}. ${o.label}`).join(' | ');
+      summaryParts.push(`Pending ask_user question at interruption: ${pending.question}${labels ? ` Options: ${labels}` : ''}`);
     }
     if (filesWritten.size > 0) {
       summaryParts.push(`Files modified: ${[...filesWritten].slice(0, 10).join(', ')}`);
@@ -2325,7 +2792,9 @@ class AgentLoop {
     // Cancellation note + ack
     cleaned.push({
       role: 'user',
-      content: '[You were working on a task but the user STOPPED you. That task is CANCELLED. Await their next message — it is a completely new instruction. Follow ONLY the new instruction. You can reference the session summary above if context is needed, and use read_file to check file state.]',
+      content: pendingAskUser.length > 0
+        ? '[You were working on a task but the user STOPPED you while an ask_user question was pending. That task is CANCELLED. Await their next message as a new instruction, but if it appears to answer the pending question in the summary, briefly ask whether they want to resume that task from the saved context.]'
+        : '[You were working on a task but the user STOPPED you. That task is CANCELLED. Await their next message — it is a completely new instruction. Follow ONLY the new instruction. You can reference the session summary above if context is needed, and use read_file to check file state.]',
     });
     cleaned.push({ role: 'assistant', content: 'Understood — previous task cancelled. I have the summary of what was done. What would you like me to do?' });
 

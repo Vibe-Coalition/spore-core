@@ -1,0 +1,13 @@
+{
+  "nodeId": "marshall-amplifiers",
+  "label": "Marshall Amplifiers",
+  "type": "product",
+  "description": "Two Marshall amplifiers next to the vehicle",
+  "aspects": [
+    {
+      "name": "quantity",
+      "importance": 8,
+      "attributes": []
+    }
+  ]
+}

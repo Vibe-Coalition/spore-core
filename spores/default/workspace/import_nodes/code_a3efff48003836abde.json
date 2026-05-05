@@ -1,0 +1,15 @@
+{
+  "nodeId": "code_a3efff48003836abde",
+  "label": "Telegram Login Code",
+  "type": "security_code",
+  "description": "Specific authentication code sent during Telegram userbot login process",
+  "aspects": [
+    {
+      "name": "authentication_event",
+      "importance": 9,
+      "attributes": [
+        "CODE_SENT:a3efff48003836abde"
+      ]
+    }
+  ]
+}

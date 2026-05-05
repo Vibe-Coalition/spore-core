@@ -1,0 +1,18 @@
+{
+  "nodeId": "tool-uber-eats",
+  "label": "uber-eats",
+  "type": "tool",
+  "description": "Browse, search, and order from Uber Eats. View order history, search restaurants, browse menus, build carts, and reorder past favorites. Locked to 150 April Rd, Port Moody, BC.",
+  "aspects": [
+    {
+      "name": "tool_info",
+      "importance": 8,
+      "attributes": [
+        "Browse, search, and order from Uber Eats. View order history, search restaurants, browse menus, build carts, and reorder past favorites. Locked to 150 April Rd, Port Moody, BC.",
+        "Language: node",
+        "Path: /workspace/tools/uber-eats.js",
+        "Run: exec: python3 /workspace/skills/uber-eats/scripts/ue.py orders"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "nodeId": "anthropic",
+  "label": "Anthropic",
+  "type": "organization",
+  "description": "AI research company",
+  "aspects": [
+    {
+      "name": "product_development",
+      "importance": 8,
+      "attributes": [
+        "Developed 'Claude Mythos Preview' AI model on 2026-04-12 which was deemed too dangerous for release"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "claude-mythos-preview",
+      "type": "developed"
+    }
+  ]
+}

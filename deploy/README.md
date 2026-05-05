@@ -1,163 +1,118 @@
-# Anima Deployment Guide
+# Spore Core — Deployment
 
-Deploy autonomous Anima agents anywhere — from a local machine to a multi-agent Kubernetes cluster. Each deployment includes the Manager UI for visual fleet management and Traefik for unified routing.
+Spore Core ships as a single Docker image. The official image is built by
+GitHub Actions on every push to `main` and on tagged releases (see
+`.github/workflows/docker-publish.yml`) and published to GitHub Container
+Registry.
 
-## Deployment Options
+```
+ghcr.io/yumlevi/spore:latest          # bleeding edge (main branch)
+ghcr.io/yumlevi/spore:v0.3.0          # specific version
+ghcr.io/yumlevi/spore:sha-<short>     # specific commit
+```
 
-| Method | Best for | Complexity |
-|--------|----------|------------|
-| Docker Compose (dev) | Local development, single machine | Low |
-| Docker Compose (prod) | Single server production | Medium |
-| Fly.io | Quick cloud deploy, small teams | Low |
-| Railway | One-click cloud deploy | Low |
-| Kubernetes (Helm) | Production at scale, multi-agent | High |
+Multi-arch builds: `linux/amd64` + `linux/arm64`.
 
 ---
 
-## 1. Docker Compose (Development)
-
-The default setup using `new-agent.sh`:
+## Quickstart — Docker run
 
 ```bash
-cd /path/to/anima
-./new-agent.sh
+docker run -d --name spore --restart unless-stopped \
+  -p 18803:18803 -p 127.0.0.1:18790:18790 \
+  -v spore-data:/data \
+  -v spore-workspace:/workspace \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  ghcr.io/yumlevi/spore:latest
 ```
 
-This creates a per-agent directory under `animas/` with its own `docker-compose.yml`.
+Open <http://localhost:18803> and you should land on the canvas.
 
-## 2. Docker Compose (Production)
+---
 
-Hardened compose with named volumes, resource limits, security options, and internal networking.
+## Production — Docker Compose
+
+The recommended setup. Pulls the official image, mounts named volumes,
+sets resource limits + `no-new-privileges`.
 
 ```bash
-# Build images first
-docker compose -f docker-compose.yml --profile build build
-
-# Create .env.prod with your secrets
 cp deploy/.env.prod.example deploy/.env.prod
-# Edit deploy/.env.prod with your API keys
+# edit deploy/.env.prod — at minimum set ANTHROPIC_API_KEY (or another
+# model provider). Tweak ports / display name / image tag as needed.
 
-# Deploy
 docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up -d
 ```
 
-### Key differences from dev:
-- Health port bound to `127.0.0.1` (not exposed externally)
-- Named Docker volumes instead of bind mounts
-- Resource limits enforced
-- `no-new-privileges` security option
-- Internal network for manager-agent communication
-- Manager health check as agent dependency
+Tail logs: `docker compose -f deploy/docker-compose.prod.yml logs -f`.
 
-## 3. Fly.io
-
-```bash
-# Install flyctl
-curl -L https://fly.io/install.sh | sh
-
-# Set secrets
-fly secrets set ANTHROPIC_API_KEY=sk-ant-... DISCORD_TOKEN=...
-
-# Create volumes
-fly volumes create anima_data --size 1 --region iad
-
-# Deploy
-cd deploy/fly
-./deploy.sh my-agent
-```
-
-See `deploy/fly/fly.toml` for the full configuration.
-
-## 4. Railway
-
-1. Fork the repo to your GitHub
-2. Create a new Railway project from the repo
-3. Set environment variables in the Railway dashboard
-4. Add a persistent volume mounted at `/data`
-5. Deploy
-
-See `deploy/railway/README.md` for detailed instructions.
-
-## 5. Kubernetes (Helm)
-
-```bash
-# Build and push images to your registry
-./deploy/build-push.sh ghcr.io/Klace
-
-# Install the chart
-helm install anima deploy/helm/anima \
-  --set image.repository=ghcr.io/Klace/anima \
-  --set managerImage.repository=ghcr.io/Klace/anima-manager \
-  --set agent.agentId=sophia \
-  --set agent.displayName=Sophia \
-  --set agent.discord.enabled=true
-
-# Set secrets separately
-kubectl create secret generic anima-secrets \
-  --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
-  --from-literal=DISCORD_TOKEN=... \
-  --from-literal=MANAGER_SERVICE_KEY=$(openssl rand -hex 32)
-```
-
-### Multi-agent deployment
-
-```bash
-helm install anima deploy/helm/anima \
-  --set agent.agentId=sophia \
-  --set agents[0].agentId=harry-the-alien \
-  --set agents[0].displayName="Harry The Alien" \
-  --set agents[0].discord.enabled=true
-```
-
-### Key architecture decisions:
-- **StatefulSet** per agent (SQLite requires exclusive file access)
-- **PVC per agent** for data/ and workspace/
-- **NetworkPolicy** restricts inter-pod traffic to manager <-> agents only
-- Health port at `0.0.0.0` for kubelet probes (security via NetworkPolicy)
+To pin a specific release, set `SPORE_IMAGE_TAG=v0.3.0` in `.env.prod`.
+To use a private registry, set `SPORE_IMAGE=registry.example.com/spore-core`.
 
 ---
 
-## Building Images
+## Multi-spore (Manager) deployments
+
+For running several agents on one box with a shared Manager UI, see the
+`spores/` agent-directory convention in the main README. Each agent gets
+its own `data/` + `workspace/` + `spore.json` and binds different ports.
+
+---
+
+## Building locally
+
+If you're hacking on Spore Core itself:
 
 ```bash
-# Local build only
+# Build only
 ./deploy/build-push.sh
 
-# Build and push to registry
-./deploy/build-push.sh ghcr.io/Klace
+# Build and push to your own registry
+./deploy/build-push.sh ghcr.io/<your-user>/spore-core
 ```
 
-Images are tagged with `:latest`, `:VERSION`, and `:GIT_SHA`.
+The script tags `spore-core:latest`, `spore-core:<version>`, and
+`spore-core:<git-sha>`. Build context is the repo root; the Dockerfile
+lives at `src/Dockerfile`.
 
 ---
 
-## Environment Variables Reference
+## Releasing a new official version
 
-### Required
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_API_KEY` | Anthropic API key |
-| `DISCORD_TOKEN` | Discord bot token (if using Discord) |
+1. Bump `version` in `src/package.json`.
+2. Tag the release: `git tag v0.3.1 && git push origin v0.3.1`.
+3. The GitHub Actions workflow builds + pushes
+   `ghcr.io/<owner>/<repo>:v0.3.1`, `:0.3`, `:0`, and `:latest` automatically.
 
-### Security
+To trigger an ad-hoc rebuild without a tag, run the workflow from the
+Actions tab → *Build and publish official Docker image* → *Run workflow*.
+
+**One-time setup (per repo):** Settings → Actions → General → *Workflow
+permissions* → enable **Read and write permissions**. This lets the
+workflow push to ghcr.io with the auto-issued `GITHUB_TOKEN` — no extra
+secrets needed.
+
+---
+
+## Environment variables (the essentials)
+
 | Variable | Description | Default |
-|----------|-------------|---------|
-| `MANAGER_SERVICE_KEY` | Shared secret for inter-agent auth | (none) |
-| `HEALTH_BIND_ADDR` | Health server bind address | `127.0.0.1` |
-| `ANIMA_DISCORD_ADMINS` | Comma-separated user/role IDs for admin commands | (none) |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Or `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `GEMINI_API_KEY` — at least one provider. | (none) |
+| `AGENT_ID` | Unique id for this agent's graph + node label. | `spore` |
+| `SPORE_DISPLAY_NAME` | Human-readable name. | (from `AGENT_ID`) |
+| `SPORE_WEB_PORT` | HTTP port for the web canvas. | `18803` |
+| `SPORE_HEALTH_PORT` | HTTP port for `/health` + metrics. | `18790` |
+| `GRAPH_DB_PATH` | Knowledge graph SQLite location inside the container. | `/data/graph.db` |
+| `SESSION_DB_PATH` | Sessions SQLite location. | `/data/sessions.db` |
+| `SPORE_WORKSPACE_PATH` | Writable workspace mount. | `/workspace` |
+| `SPORE_WEB_AUTH_USER` / `SPORE_WEB_AUTH_PASS` | HTTP basic auth on the canvas. | (open) |
 
-### Agent Config
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `AGENT_ID` | Unique agent identifier | `anima` |
-| `ANIMA_DISPLAY_NAME` | Human-readable name | (from agent ID) |
-| `ANIMA_MODEL` | Main LLM model | `claude-sonnet-4-6` |
-| `ANIMA_LEARNER_MODEL` | Learner model | `claude-haiku-4-5` |
-| `ANIMA_PLUGINS_DIR` | Path to plugins directory | `/workspace/plugins` |
+Optional gateway tokens auto-enable when set:
+`DISCORD_TOKEN`, `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`.
 
-### Storage
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GRAPH_DB_PATH` | Path to knowledge graph SQLite | `/data/graph.db` |
-| `SESSION_DB_PATH` | Path to sessions SQLite | `/data/sessions.db` |
-| `ANIMA_WORKSPACE_PATH` | Agent workspace directory | `/workspace` |
+Plugin keys are owned by their respective plugins (read in their own
+`index.js`). Set them in the env and the corresponding plugin (if
+installed) will pick them up: `XI_API_KEY` (elevenlabs),
+`DEEPGRAM_API_KEY` (deepgram), `BFL_API_KEY` (flux).
+
+See `deploy/.env.prod.example` for the full reference.

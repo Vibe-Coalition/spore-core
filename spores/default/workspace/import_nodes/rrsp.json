@@ -1,0 +1,26 @@
+{
+  "nodeId": "rrsp",
+  "label": "RRSP",
+  "type": "account",
+  "description": "Registered Retirement Savings Plan",
+  "aspects": [
+    {
+      "name": "holdings",
+      "importance": 7,
+      "attributes": [
+        "XEQT: 1,526.6 shares",
+        "NVDA: 28.3 shares"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "nxqx",
+      "type": "holds"
+    },
+    {
+      "target": "nvda",
+      "type": "holds"
+    }
+  ]
+}

@@ -153,6 +153,9 @@ class PluginManager {
         kind: raw.kind,
         entry: raw.entry || './index.js',
         depends: raw.depends || [],
+        description: raw.description || '',
+        category: raw.category || null,
+        channel: raw.channel || null,
         configSchema: raw.config_schema || {},
         openclawCompat: false,
       };
@@ -167,6 +170,9 @@ class PluginManager {
         kind: raw.kind || 'context-engine',
         entry: raw.entry || './index.js',
         depends: raw.depends || [],
+        description: raw.description || '',
+        category: raw.category || null,
+        channel: raw.channel || null,
         configSchema: raw.config_schema || {},
         openclawCompat: true,
       };
@@ -185,6 +191,9 @@ class PluginManager {
           kind: meta.kind,
           entry: meta.entry || pkg.main || './index.js',
           depends: meta.depends || [],
+          description: meta.description || pkg.description || '',
+          category: meta.category || null,
+          channel: meta.channel || null,
           configSchema: meta.config_schema || {},
           openclawCompat: !!pkg.openclaw,
         };
@@ -555,13 +564,42 @@ class PluginManager {
     return result;
   }
 
+  _toolAvailable(tool, ctx = {}) {
+    const def = tool?.definition || {};
+    const platform = ctx?.platform || null;
+    if (Array.isArray(def.platforms) && def.platforms.length > 0) {
+      if (!platform || !def.platforms.includes(platform)) return false;
+    }
+    if (def.requiresProjectContext) {
+      const pc = ctx?.projectContext || {};
+      if (!pc.cwd && !pc.clientCwd) return false;
+    }
+    if (def.mutating && ctx?.projectContext?.mode === 'plan') return false;
+    if (typeof def.available === 'function') {
+      try {
+        if (def.available(ctx) === false) return false;
+      } catch (e) {
+        this._appContext?.log?.warn?.(`[plugin:${tool?.pluginId || 'unknown'}] tool availability check failed for ${tool?.name}: ${e.message}`);
+        return false;
+      }
+    }
+    return true;
+  }
+
   /**
-   * Collect all tool definitions registered by tool plugins.
+   * Collect all tool definitions registered by plugins.
+   *
+   * Tools are capabilities, not plugin kinds: gateway/channel plugins can
+   * legitimately own operational tools for their channel, such as approving
+   * a Telegram pairing code. Walking every plugin keeps that ownership local
+   * instead of forcing channel-specific actions into core tools.
    */
-  getToolDefinitions() {
+  getToolDefinitions(ctx = {}) {
     const defs = [];
-    for (const api of this.getPlugins('tool')) {
-      defs.push(...api.getRegisteredTools().map(t => ({
+    for (const [, plugin] of this.plugins) {
+      const api = plugin.instance;
+      if (!api?.getRegisteredTools) continue;
+      defs.push(...api.getRegisteredTools().filter(t => this._toolAvailable(t, ctx)).map(t => ({
         name: t.name,
         description: t.definition.description,
         input_schema: t.definition.inputSchema,
@@ -574,10 +612,17 @@ class PluginManager {
   /**
    * Execute a plugin-registered tool by name. Returns null if not a plugin tool.
    */
-  async executePluginTool(name, input, ctx) {
-    for (const api of this.getPlugins('tool')) {
+  async executePluginTool(name, input, ctx = {}) {
+    for (const [, plugin] of this.plugins) {
+      const api = plugin.instance;
+      if (!api?.getRegisteredTools) continue;
       const tool = api.getRegisteredTools().find(t => t.name === name);
-      if (tool) return await tool.definition.execute(input, ctx);
+      if (tool) {
+        if (!this._toolAvailable(tool, ctx)) {
+          return { error: `Tool ${name} is not available in this ${ctx?.platform || 'current'} context.` };
+        }
+        return await tool.definition.execute(input, ctx);
+      }
     }
     return null;
   }
@@ -767,6 +812,70 @@ class PluginManager {
   }
 
   /**
+   * Display name for an installed plugin (the manifest's `name` field,
+   * e.g. "ElevenLabs TTS" / "Deepgram STT"). Returns the input id if
+   * the plugin isn't loaded, so callers can use the result inline
+   * without nullchecks.
+   */
+  getPluginDisplayName(pluginId) {
+    if (!pluginId) return '';
+    const plugin = this.plugins.get(pluginId);
+    return plugin?.manifest?.name || pluginId;
+  }
+
+  /**
+   * Aggregate the current voice surface in one call. Used by core
+   * code that needs to render "is voice configured?" without poking
+   * at plugin-specific config keys (xiApiKey / deepgramApiKey, etc.).
+   *
+   * Active provider selection mirrors createSTT/createTTS in
+   * src/voice/: prefer a configured provider matching the user's
+   * `config.voice.sttProvider` / `ttsProvider`, otherwise the first
+   * configured one.
+   *
+   *   {
+   *     hasSTT, hasTTS,                         // any configured provider exists
+   *     activeSTT: { pluginId, name, displayName } | null,
+   *     activeTTS: { pluginId, name, displayName } | null,
+   *     stt: [{ pluginId, name, displayName, configured }, ...],
+   *     tts: [{ pluginId, name, displayName, configured }, ...],
+   *   }
+   */
+  voiceCapabilities() {
+    const cfg = this._appContext?.config || {};
+    const decorate = (p) => ({
+      pluginId: p.pluginId,
+      name: p.name,
+      displayName: this.getPluginDisplayName(p.pluginId),
+      configured: !!p.configured,
+    });
+    const stt = this.getSTTProviders().map(decorate);
+    const tts = this.getTTSProviders().map(decorate);
+
+    const pickActive = (list, preferred) => {
+      const configured = list.filter(p => p.configured);
+      if (!configured.length) return null;
+      if (preferred) {
+        const match = configured.find(p => p.name === preferred);
+        if (match) {
+          return { pluginId: match.pluginId, name: match.name, displayName: match.displayName };
+        }
+      }
+      const first = configured[0];
+      return { pluginId: first.pluginId, name: first.name, displayName: first.displayName };
+    };
+
+    return {
+      hasSTT: stt.some(p => p.configured),
+      hasTTS: tts.some(p => p.configured),
+      activeSTT: pickActive(stt, cfg.voice?.sttProvider),
+      activeTTS: pickActive(tts, cfg.voice?.ttsProvider),
+      stt,
+      tts,
+    };
+  }
+
+  /**
    * Walk every plugin's embedder registrations. Output rows carry the
    * declared `dim` so callers (graph/embedder.js, retrieval.js) can
    * filter stored embeddings by both provider name and dimension —
@@ -802,6 +911,17 @@ class PluginManager {
     for (const [pluginId, plugin] of this.plugins) {
       const providers = plugin.instance?.getProviders?.() || [];
       for (const p of providers) {
+        let prefixes = Array.isArray(p.prefixes) ? [...p.prefixes] : [];
+        if (p.name === 'custom' && pluginId === 'local-oai-provider') {
+          for (const name of Object.keys(cfg.customProviders || {})) {
+            const prefix = String(name || '').trim().toLowerCase();
+            if (prefix && !prefixes.includes(prefix)) prefixes.push(prefix);
+          }
+          const slot = cfg.plugins?.['local-oai-provider'] || {};
+          if (!cfg.customProviders?.local && (cfg.localModelBaseUrl || slot.baseUrl) && !prefixes.includes('local')) {
+            prefixes.push('local');
+          }
+        }
         let configured = false;
         try { configured = !!p.isConfigured(cfg); } catch (e) {
           this.log.warn(`[plugins] provider isConfigured(${pluginId}/${p.name}) threw: ${e.message}`);
@@ -810,7 +930,7 @@ class PluginManager {
           pluginId,
           name: p.name,
           factory: p.factory,
-          prefixes: p.prefixes,
+          prefixes,
           capabilities: p.capabilities,
           listModels: p.listModels || null,
           applyReasoningEffort: p.applyReasoningEffort || null,
@@ -819,7 +939,41 @@ class PluginManager {
           wrapSystemPrompt: p.wrapSystemPrompt || null,
           defaultBaseUrl: p.defaultBaseUrl,
           label: p.label || p.name,
+          modelsPlaceholder: p.modelsPlaceholder || '',
           configured,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Aggregate every plugin-registered browser backend (zendriver,
+   * playwright, …). Each returned entry is the same shape the plugin
+   * api stored, plus `pluginId` and `available` (the result of the
+   * backend's isAvailable() check). The browser-core plugin reads
+   * this list to dispatch `browser` tool calls to the right backend.
+   */
+  getBrowserBackends() {
+    const cfg = this._appContext?.config || {};
+    const out = [];
+    for (const [pluginId, plugin] of this.plugins) {
+      const backends = plugin.instance?.getBrowserBackends?.() || [];
+      for (const b of backends) {
+        let available = true;
+        try { available = !!b.isAvailable(cfg); }
+        catch (e) {
+          this.log.warn(`[plugins] browser backend isAvailable(${pluginId}/${b.name}) threw: ${e.message}`);
+          available = false;
+        }
+        out.push({
+          pluginId,
+          name: b.name,
+          factory: b.factory,
+          aliases: b.aliases || [],
+          capabilities: b.capabilities || {},
+          label: b.label || b.name,
+          available,
         });
       }
     }
@@ -1054,6 +1208,19 @@ class PluginManager {
     if (!VALID_KINDS.has(manifest.kind)) throw new Error(`Unknown plugin kind: ${manifest.kind}`);
     if (this.plugins.has(manifest.id)) throw new Error(`Plugin ${manifest.id} is already installed`);
 
+    // Hard dependency check — without this, `require('../../<dep>/lib/...')`
+    // calls inside the plugin would fail at register-time with a
+    // confusing module-not-found error. Mirror the symmetric check in
+    // uninstallPlugin, which refuses to remove a plugin that other
+    // installed plugins depend on.
+    const missing = (manifest.depends || []).filter(dep => !this.plugins.has(dep));
+    if (missing.length) {
+      throw new Error(
+        `Cannot install ${manifest.id} — missing dependencies: ${missing.join(', ')}. ` +
+        `Install ${missing.length === 1 ? 'that plugin' : 'those plugins'} first.`
+      );
+    }
+
     const entryFile = path.join(resolved, manifest.entry || './index.js');
     if (!fs.existsSync(entryFile)) throw new Error(`Entry file not found: ${entryFile}`);
 
@@ -1091,7 +1258,7 @@ class PluginManager {
       }
 
       if (this._appContext.tools?.reloadPluginTools) {
-        this._appContext.tools.reloadPluginTools();
+        this._appContext.tools.reloadPluginTools(`installed ${manifest.id}`);
       }
 
       this.log.info(`[plugins] Hot-installed ${manifest.id} (${manifest.kind})`);
@@ -1138,8 +1305,13 @@ class PluginManager {
       const gws = api.getRegisteredGateways();
       removed.gateways = gws.length;
       const gatewayMap = this._appContext?.gateways;
-      if (gatewayMap?.delete) {
-        for (const { name } of gws) gatewayMap.delete(`plugin:${name}`);
+      for (const { name } of gws) {
+        try {
+          if (gatewayMap?.unregisterGateway) await gatewayMap.unregisterGateway(name);
+          else if (gatewayMap?.delete) gatewayMap.delete(name);
+        } catch (e) {
+          this.log.warn(`[plugins] gateway ${name} unregister failed: ${e.message}`);
+        }
       }
     }
 
@@ -1169,7 +1341,7 @@ class PluginManager {
     this.plugins.delete(pluginId);
 
     if (this._appContext?.tools?.reloadPluginTools) {
-      this._appContext.tools.reloadPluginTools();
+      this._appContext.tools.reloadPluginTools(`uninstalled ${pluginId}`);
     }
 
     this.log.info(`[plugins] Hot-uninstalled ${pluginId} (tools=${removed.tools}, gateways=${removed.gateways}, refNodes=${removed.refNodes})`);
@@ -1200,6 +1372,9 @@ class PluginManager {
         name: plugin.manifest.name,
         version: plugin.manifest.version,
         kind: plugin.manifest.kind,
+        description: plugin.manifest.description || '',
+        category: plugin.manifest.category || null,
+        channel: plugin.manifest.channel || null,
         source: plugin.source || 'unknown',
         openclawCompat: !!plugin.manifest.openclawCompat,
         depends: plugin.manifest.depends || [],
@@ -1244,6 +1419,9 @@ class PluginManager {
           name: manifest.name,
           version: manifest.version,
           kind: manifest.kind,
+          description: manifest.description || '',
+          category: manifest.category || null,
+          channel: manifest.channel || null,
           source: src,
           path: pluginPath,
           depends: manifest.depends || [],

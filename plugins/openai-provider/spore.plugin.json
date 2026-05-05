@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "kind": "tool",
   "entry": "./index.js",
-  "depends": ["local-oai-provider"],
-  "description": "OpenAI chat-completion provider. Claims the 'openai' model prefix (e.g. 'openai/gpt-4o-mini'). Wraps the canonical OAICompatClient from local-oai-provider with OpenAI's defaults (baseURL https://api.openai.com/v1, Bearer auth). Reads the API key from plugins.openai-provider.apiKey or the legacy OPENAI_API_KEY env var; backfills on first install."
+  "depends": [],
+  "description": "Native OpenAI Responses provider. Claims the 'openai' model prefix (e.g. 'openai/gpt-5.5') and talks to https://api.openai.com/v1/responses directly with structured function tools. Reads the API key from plugins.openai-provider.apiKey or OPENAI_API_KEY; backfills on first install."
 }

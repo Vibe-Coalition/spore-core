@@ -1,0 +1,51 @@
+{
+  "nodeId": "searxng",
+  "label": "SearXNG",
+  "type": "project",
+  "description": "Search instance used by Anima for web searches",
+  "aspects": [
+    {
+      "name": "current_status",
+      "importance": 7,
+      "attributes": [
+        "Not running locally in the current environment"
+      ]
+    },
+    {
+      "name": "configuration",
+      "importance": 9,
+      "attributes": [
+        "Operational with results from Reuters, BBC, AP News on 2026-04-12",
+        "No external API keys required"
+      ]
+    },
+    {
+      "name": "network_details",
+      "importance": 7,
+      "attributes": [
+        "SearXNG running at 192.168.1.78:1366"
+      ]
+    },
+    {
+      "name": "configuration_details",
+      "importance": 8,
+      "attributes": [
+        "SEARXNG_URL set to http://192.168.1.78:1366",
+        "Operational with results from Reuters, BBC, AP News"
+      ]
+    },
+    {
+      "name": "status_change",
+      "importance": 8,
+      "attributes": [
+        "adopted as primary search tool"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "entity-2",
+      "type": "affects"
+    }
+  ]
+}

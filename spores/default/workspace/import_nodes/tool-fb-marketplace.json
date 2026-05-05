@@ -1,0 +1,18 @@
+{
+  "nodeId": "tool-fb-marketplace",
+  "label": "fb-marketplace",
+  "type": "tool",
+  "description": "Search Facebook Marketplace listings, monitor deals, and chat with sellers. Uses authenticated Facebook GraphQL API.",
+  "aspects": [
+    {
+      "name": "tool_info",
+      "importance": 8,
+      "attributes": [
+        "Search Facebook Marketplace listings, monitor deals, and chat with sellers. Uses authenticated Facebook GraphQL API.",
+        "Language: bash",
+        "Path: /workspace/tools/fb-marketplace.sh",
+        "Run: exec: fb-marketplace search \"coffee table\" --max 200"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "nodeId": "env_file",
+  "label": ".env file",
+  "type": "configuration_file",
+  "description": "Environment configuration file",
+  "aspects": [
+    {
+      "name": "storage_location",
+      "importance": 9,
+      "attributes": [
+        "/data/.env"
+      ]
+    },
+    {
+      "name": "location",
+      "importance": 8,
+      "attributes": [
+        "/data/.env"
+      ]
+    }
+  ]
+}

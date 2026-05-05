@@ -1,0 +1,9 @@
+{
+  "default": {
+    "slug": "default",
+    "name": "Default",
+    "description": "Initial knowledge graph",
+    "created": "2026-04-12T08:19:32.186Z",
+    "nodeCount": 11
+  }
+}

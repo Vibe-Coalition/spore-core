@@ -1,0 +1,21 @@
+{
+  "nodeId": "video-1775987863076-output-3-mp4",
+  "label": "Video File",
+  "type": "project",
+  "description": "3.5-minute video with city pop visuals",
+  "aspects": [
+    {
+      "name": "duration",
+      "importance": 8,
+      "attributes": [
+        "213.12 seconds (3.55 minutes)"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "frame1-jpg",
+      "type": "contains"
+    }
+  ]
+}

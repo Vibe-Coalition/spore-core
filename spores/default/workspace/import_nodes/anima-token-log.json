@@ -1,0 +1,535 @@
+{
+  "nodeId": "anima-token-log",
+  "label": "Anima Token Log",
+  "type": "log",
+  "description": "Graph-native log node: Anima Token Log",
+  "aspects": [
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": [
+        "{\"date\":\"2026-04-12\",\"input\":6036947,\"output\":79789,\"cached\":0,\"calls\":105,\"iters\":392,\"byChannel\":{\"web:chat\":{\"in\":4083843,\"out\":49706,\"calls\":61,\"iters\":348},\"telegram:thisAndThat0\":{\"in\":1953104,\"out\":30083,\"calls\":44,\"iters\":44}},\"byTrigger\":{\"dm\":{\"in\":6036947,\"out\":79789,\"calls\":105,\"iters\":392}},\"byPlatform\":{\"other\":{\"in\":4083843,\"out\":49706,\"calls\":61,\"iters\":348},\"telegram\":{\"in\":1953104,\"out\":30083,\"calls\":44,\"iters\":44}}}"
+      ]
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    },
+    {
+      "name": "daily",
+      "importance": 5,
+      "attributes": []
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "nodeId": "curl",
+  "label": "curl",
+  "type": "concept",
+  "description": "Command-line tool used as fallback for web fetching"
+}

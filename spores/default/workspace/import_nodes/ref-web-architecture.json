@@ -1,0 +1,36 @@
+{
+  "nodeId": "ref-web-architecture",
+  "label": "Web Server & Routing",
+  "type": "reference",
+  "description": "How the built-in web server works, port rules, routing, and the user-app proxy.",
+  "aspects": [
+    {
+      "name": "routing",
+      "importance": 9,
+      "attributes": [
+        "Request flow: Browser -> Traefik (strips /animas/{id} prefix) -> container port (ANIMA_WEB_PORT)",
+        "Route priority: /graph -> /api/* system routes -> user app proxy -> static files from /workspace/web/",
+        "web_serve tool serves static files from /workspace/web/ \u2014 files written there are live immediately",
+        "/graph is the control panel \u2014 served automatically by the built-in server"
+      ]
+    },
+    {
+      "name": "user_app_proxy",
+      "importance": 9,
+      "attributes": [
+        "To run a custom backend: start it on any free port, write that port number to /workspace/.app-port",
+        "The web gateway proxies unmatched /api/* requests to your app port automatically",
+        "Example: echo 3001 > /workspace/.app-port then your server on :3001 handles /api/anything",
+        "To auto-start your server on boot: write a /workspace/.on-boot.sh script"
+      ]
+    },
+    {
+      "name": "critical_rules",
+      "importance": 10,
+      "attributes": [
+        "NEVER run Express or any server on the ANIMA_WEB_PORT \u2014 it replaces the built-in server and breaks /graph",
+        "Use a DIFFERENT port for custom backends (3001, 3002, etc.) and set /workspace/.app-port"
+      ]
+    }
+  ]
+}

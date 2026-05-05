@@ -1,0 +1,15 @@
+{
+  "nodeId": "timezone_error",
+  "label": "Timezone Handling Error",
+  "type": "code_error",
+  "description": "TypeError in scheduler.py due to incorrect timezone configuration",
+  "aspects": [
+    {
+      "name": "code_error",
+      "importance": 8,
+      "attributes": [
+        "TypeError: tzinfo argument must be None or of a tzinfo subclass"
+      ]
+    }
+  ]
+}

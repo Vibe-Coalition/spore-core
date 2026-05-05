@@ -1,0 +1,18 @@
+{
+  "nodeId": "my-agent-web",
+  "label": "Web Services",
+  "type": "capability",
+  "description": "Web server configuration for Anima.",
+  "aspects": [
+    {
+      "name": "web_services",
+      "importance": 9,
+      "attributes": [
+        "Web server is running on internal port 18800.",
+        "No public domain configured \u2014 reachable on LAN or via direct port only.",
+        "Graph viewer is available at /graph relative to the web server root.",
+        "Web interface requires HTTP Basic Auth (username: admin)."
+      ]
+    }
+  ]
+}

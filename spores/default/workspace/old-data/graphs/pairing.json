@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "pending": {
+    "telegram": [
+      {
+        "id": "697706930",
+        "code": "AAW8-Y6KB",
+        "createdAt": "2026-04-12T08:49:18.574Z",
+        "lastSeenAt": "2026-04-12T08:51:45.292Z",
+        "meta": {
+          "name": "PirateKing",
+          "username": "thisAndThat0"
+        }
+      }
+    ]
+  },
+  "approved": {
+    "telegram": [
+      "697706930"
+    ]
+  }
+}

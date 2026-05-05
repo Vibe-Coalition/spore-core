@@ -1,0 +1,22 @@
+{
+  "nodeId": "overseerr",
+  "label": "Overseerr",
+  "type": "project",
+  "description": "Search/request movies & TV on Plex via Overseerr",
+  "aspects": [
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Search/request movies & TV on Plex"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83c\udfac If you have Plex"
+      ]
+    }
+  ]
+}

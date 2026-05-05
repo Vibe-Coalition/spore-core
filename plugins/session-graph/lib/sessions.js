@@ -33,12 +33,17 @@
 //                       (mirror so traversal works either way)
 
 const projects = require('./projects');
+const { coreRequire, modelForTier } = require('../../core-require');
 // Event bus — lets the graph viewer (and any other subscribers) see
 // distillation work live. Without this, summarize/distill runs silently
 // from the viewer's POV; a fresh node appears only after manual refresh.
-// Lives in core; container layout is /app/graph/events.js so the
-// relative path from /app/plugins/spore-code/lib/ is three up + graph/.
-const graphEvents = require('../../../graph/events');
+const graphEvents = coreRequire('graph/events');
+
+function emitChange(learner, payload) {
+  try {
+    graphEvents.emit('change', learner?._graphSlug && !payload.graph ? { ...payload, graph: learner._graphSlug } : payload);
+  } catch {}
+}
 
 // Shared helper — uses the same streaming pattern as maintainer.js
 // to avoid nginx 60s idle timeouts on slow reasoning models (GLM 5.1,
@@ -92,16 +97,15 @@ function upsertSessionNode(learner, opts = {}) {
 
   // Always make sure the project node exists too — gives us the edge
   // target (and matches the user-cwd convention for the edge below).
-  // Pass sessionId so the project node is born temp + session-tagged
-  // ONLY if it's freshly created in this session. Returning users hit
-  // an already-permanent project node; upsertProject leaves its extra
-  // alone in that case.
+  // Pass sessionId so the project node records where it was created.
+  // Project nodes are durable anchors; temp/distillation applies to
+  // session nodes and discoveries, not the project anchor itself.
   let projectId = null;
   if (cwd) {
     const projRes = projects.upsertProject(learner, userId || 'anon', {
       cwd, project: opts.project, gitBranch: opts.gitBranch, gitHash: opts.gitHash,
       projectType: opts.projectType, sporeMd: opts.sporeMd, tree: opts.tree,
-      tools: opts.tools, os: opts.os, arch: opts.arch,
+      tools: opts.tools, os: opts.os, arch: opts.arch, projectIdentityKey: opts.projectIdentityKey,
       sessionId,
     });
     projectId = projRes?.id || null;
@@ -127,7 +131,7 @@ function upsertSessionNode(learner, opts = {}) {
       'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) ' +
       'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)'
     ).run(id, label, 'session', description, 6, 'graphcorn', 'session-start', new Date().toISOString(), extraJson);
-    graphEvents.emit('change', { op: 'node:create', node: { id, label, type: 'session', description }, source: 'graphcorn' });
+    emitChange(learner, { op: 'node:create', node: { id, label, type: 'session', description }, source: 'graphcorn' });
   } else {
     db.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
   }
@@ -245,7 +249,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     return;
   }
 
-  graphEvents.emit('change', { op: 'session:summarize-start', nodeId: id, source: 'graphcorn' });
+  emitChange(learner, { op: 'session:summarize-start', nodeId: id, source: 'graphcorn' });
 
   // Pull the round breadcrumbs — chronological from oldest to newest.
   const rows = db.prepare(
@@ -328,7 +332,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
   ].filter(s => s !== '').join('\n');
 
   try {
-    const model = config?.casualModel || config?.normalModel || config?.model;
+    const model = modelForTier('casual', config);
     // 8k — reasoning models (GLM-5.1, Kimi K2.6) routinely use
     // thousands of thinking tokens before producing the text block.
     // 500 was aggressively small; 1500 was better but still risked
@@ -348,7 +352,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
       db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(extraObj), id);
       if (log) log.warn(`[graphcorn] summary for ${id} returned empty text — marked to avoid retries`);
-      graphEvents.emit('change', { op: 'session:summarize-done', nodeId: id, empty: true, source: 'graphcorn' });
+      emitChange(learner, { op: 'session:summarize-done', nodeId: id, empty: true, source: 'graphcorn' });
       return;
     }
     // Replace any prior summary aspect (if session ended twice on a
@@ -366,14 +370,181 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     extraObj.summarized_at = new Date().toISOString();
     db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
       .run(JSON.stringify(extraObj), id);
-    graphEvents.emit('change', { op: 'aspect:create', nodeId: id, aspect: 'summary', source: 'graphcorn' });
-    graphEvents.emit('change', { op: 'attribute:create', nodeId: id, aspect: 'summary', content: text, source: 'graphcorn' });
-    graphEvents.emit('change', { op: 'session:summarize-done', nodeId: id, empty: false, chars: text.length, source: 'graphcorn' });
+    emitChange(learner, { op: 'aspect:create', nodeId: id, aspect: 'summary', source: 'graphcorn' });
+    emitChange(learner, { op: 'attribute:create', nodeId: id, aspect: 'summary', content: text, source: 'graphcorn' });
+    emitChange(learner, { op: 'session:summarize-done', nodeId: id, empty: false, chars: text.length, source: 'graphcorn' });
     if (log) log.info(`[graphcorn] session ${id} summary written (${text.length} chars, ${rows.length} rounds, model=${model})`);
   } catch (e) {
     if (log) log.warn(`[graphcorn] summary for ${id} failed: ${e.message}`);
-    graphEvents.emit('change', { op: 'session:summarize-done', nodeId: id, error: e.message, source: 'graphcorn' });
+    emitChange(learner, { op: 'session:summarize-done', nodeId: id, error: e.message, source: 'graphcorn' });
   }
+}
+
+function _sanitizeReusableLesson(text) {
+  const raw = String(text || '').replace(/^Learned in session:\s*/i, '').trim();
+  if (!raw || raw.length < 20) return null;
+  if (/(sk-[a-z0-9]|ghp_[a-z0-9]|password\s*=|api[_-]?key\s*=|secret\s*=)/i.test(raw)) return null;
+  return raw
+    .replace(/\s*\(source:\s*[^)]+\)\s*$/i, '')
+    .replace(/\/(?:home|Users|mnt|app|workspace|data)\/[^\s`'")]+/g, '<project-path>')
+    .replace(/[A-Za-z]:\\[^\s`'")]+/g, '<project-path>')
+    .slice(0, 600);
+}
+
+function _looksProjectSpecificReusableLesson({ nodeId, label, type, aspect, lesson }) {
+  const id = String(nodeId || '').toLowerCase();
+  const t = String(type || '').toLowerCase();
+  const a = String(aspect || '').toLowerCase();
+  const text = `${label || ''}\n${lesson || ''}`.toLowerCase();
+  if (!id) return true;
+  if (t === 'project' || t === 'session' || id.startsWith('project-') || id.startsWith('project:') || id.startsWith('session-')) return true;
+  if (a === 'scratch_helpers' || a === 'recent_activity' || a === 'manifest' || a === 'code_graph') return true;
+  if (/(^|[\\/])\.spore-code[\\/]|scratch helper|scratch_helpers|local workspace|repository path|source code located|untracked files|dev server runs on|requires testing device/i.test(text)) return true;
+  if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(text)) return true;
+  return false;
+}
+
+function _genericKbDescription(desc) {
+  const d = String(desc || '').trim();
+  return !d || /^reusable (project )?lesson/i.test(d) || /^reusable knowledge distilled/i.test(d);
+}
+
+function _descriptionFromLesson(desc, cleanLesson) {
+  if (!_genericKbDescription(desc)) return String(desc).slice(0, 500);
+  const sentence = String(cleanLesson || '')
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?])\s+/)[0]
+    .trim();
+  return (sentence || cleanLesson || 'Reusable engineering lesson').slice(0, 500);
+}
+
+function _aspectWithAttr(db, nodeId, aspectName, content, { weight = 7, importance = 7, source = 'session-distill' } = {}) {
+  if (!content) return false;
+  let asp = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(nodeId, aspectName);
+  if (!asp) {
+    db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, ?, ?)').run(nodeId, aspectName, weight, source);
+    asp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+  }
+  const dup = db.prepare('SELECT 1 FROM attributes WHERE aspect_id = ? AND content = ?').get(asp.id, content);
+  if (dup) return false;
+  db.prepare('INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, ?, ?, ?)')
+    .run(asp.id, content, importance, source, source);
+  return true;
+}
+
+function promoteReusableKnowledge(learner, sessionId, parsed, opts = {}) {
+  const registry = learner?._graphRegistry;
+  if (!learner?.getGraphDb || !registry?.getGeneralKnowledgeSlug) return { promoted: 0 };
+  const slug = registry.getGeneralKnowledgeSlug();
+  const kb = learner.getGraphDb(slug);
+  if (!kb) return { promoted: 0 };
+  const sessionNodeId_ = sessionNodeId(sessionId);
+  const projectId = opts.projectId || null;
+  const source = `source: ${projectId || 'project'} / ${sessionNodeId_}`;
+  const upsert = (nodeId, label, type, description, lesson, aspectName = null) => {
+    if (_looksProjectSpecificReusableLesson({ nodeId, label, type, aspect: aspectName, lesson })) return false;
+    const clean = _sanitizeReusableLesson(lesson);
+    if (!clean) return false;
+    const id = String(nodeId || label || 'lesson')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80);
+    if (!id) return false;
+    const existing = kb.prepare('SELECT id FROM nodes WHERE id = ?').get(id);
+    const nextDescription = _descriptionFromLesson(description, clean);
+    if (!existing) {
+      kb.prepare(
+        'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) VALUES (?, ?, ?, ?, 6, 1, ?, ?, ?, ?)'
+      ).run(id, label || id, type || 'concept', nextDescription, 'general-kb', 'session-distill', new Date().toISOString(), JSON.stringify({ sourceSession: sessionId, sourceProject: projectId, confidence: 'conservative-auto' }));
+    } else {
+      kb.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+      const row = kb.prepare('SELECT description FROM nodes WHERE id = ?').get(id);
+      if (_genericKbDescription(row?.description)) {
+        kb.prepare('UPDATE nodes SET description = ?, updated = CURRENT_TIMESTAMP WHERE id = ?').run(nextDescription, id);
+      }
+    }
+    let asp = kb.prepare("SELECT id FROM aspects WHERE node_id = ? AND name = 'reusable_lessons'").get(id);
+    if (!asp) {
+      kb.prepare("INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, 'reusable_lessons', 8, 'session-distill')").run(id);
+      asp = { id: kb.prepare('SELECT last_insert_rowid() AS id').get().id };
+    }
+    const content = `${clean} (${source})`;
+    const dup = kb.prepare('SELECT 1 FROM attributes WHERE aspect_id = ? AND content = ?').get(asp.id, content);
+    if (!dup) {
+      kb.prepare(
+        "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 8, 'session-distill', 'session-distill')"
+      ).run(asp.id, content);
+      _aspectWithAttr(kb, id, 'summary', clean, { weight: 9, importance: 8, source: 'session-distill' });
+      _aspectWithAttr(kb, id, 'applicability', 'Reusable across projects when the same tool, framework, protocol, or UI constraint appears.', { weight: 6, importance: 6, source: 'session-distill' });
+      graphEvents.emit('change', { op: 'attribute:create', nodeId: id, aspect: 'reusable_lessons', content, source: 'general-kb', graph: slug });
+      return true;
+    }
+    return false;
+  };
+
+  let promoted = 0;
+  for (const c of parsed?.createNodes || []) {
+    const type = String(c?.type || 'concept').toLowerCase();
+    if (!['tool', 'library', 'framework', 'service', 'concept'].includes(type)) continue;
+    for (const asp of c.aspects || []) {
+      for (const attr of asp.attributes || []) {
+        if (upsert(c.nodeId, c.label, type, c.description, attr, asp.name)) promoted++;
+      }
+    }
+  }
+  for (const a of parsed?.appendNotes || []) {
+    if (upsert(a.targetNodeId, a.targetNodeId, 'concept', 'Reusable project lesson', a.content, a.aspect)) promoted++;
+  }
+  return { promoted, slug };
+}
+
+function repairGeneralKnowledgeBase(learner, log) {
+  const registry = learner?._graphRegistry;
+  if (!learner?.getGraphDb || !registry?.getGeneralKnowledgeSlug) return { repaired: 0, removed: 0 };
+  const slug = registry.getGeneralKnowledgeSlug();
+  const kb = learner.getGraphDb(slug);
+  if (!kb) return { repaired: 0, removed: 0 };
+  let repaired = 0;
+  let removed = 0;
+  const nodes = kb.prepare(`
+    SELECT n.id, n.label, n.type, n.description,
+           (SELECT a.content FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+             WHERE asp.node_id = n.id AND asp.name = 'reusable_lessons'
+             ORDER BY a.id LIMIT 1) AS lesson
+      FROM nodes n
+     WHERE n.extracted_with IN ('session-distill', 'general-kb') OR n.provenance = 'general-kb'
+  `).all();
+  for (const n of nodes) {
+    const clean = _sanitizeReusableLesson(n.lesson);
+    if (_looksProjectSpecificReusableLesson({ nodeId: n.id, label: n.label, type: n.type, aspect: 'reusable_lessons', lesson: n.lesson })) {
+      try {
+        const payload = JSON.stringify({
+          node: n,
+          aspects: kb.prepare('SELECT * FROM aspects WHERE node_id = ?').all(n.id),
+          edges: kb.prepare('SELECT * FROM edges WHERE source = ? OR target = ?').all(n.id, n.id),
+        });
+        kb.prepare(`
+          INSERT INTO recycle_bin (item_type, item_id, label, payload, deleted_by, reason, confidence, expires_at)
+          VALUES ('node', ?, ?, ?, 'general-kb-repair', 'project-specific reusable lesson stayed in project graph', 1.0, datetime('now', '+7 days'))
+        `).run(n.id, n.label, payload);
+        kb.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(n.id, n.id);
+        kb.prepare('DELETE FROM nodes WHERE id = ?').run(n.id);
+        removed++;
+      } catch (e) {
+        log?.warn?.(`[general-kb] repair remove ${n.id} failed: ${e.message}`);
+      }
+      continue;
+    }
+    if (clean && _genericKbDescription(n.description)) {
+      kb.prepare('UPDATE nodes SET description = ?, updated = CURRENT_TIMESTAMP WHERE id = ?').run(_descriptionFromLesson(n.description, clean), n.id);
+      _aspectWithAttr(kb, n.id, 'summary', clean, { weight: 9, importance: 8, source: 'general-kb-repair' });
+      repaired++;
+    }
+  }
+  if ((repaired || removed) && log) log.info(`[general-kb] repair complete: repaired=${repaired} removed=${removed}`);
+  try { registry.refreshStats(slug); } catch {}
+  return { repaired, removed };
 }
 
 // distillSession — Phase 8 (extends Phase 7).
@@ -427,7 +598,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
   extraObj.distilling = true;
   db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
     .run(JSON.stringify(extraObj), id);
-  graphEvents.emit('change', { op: 'session:distill-start', nodeId: id, source: 'graphcorn' });
+  emitChange(learner, { op: 'session:distill-start', nodeId: id, source: 'graphcorn' });
 
   try {
     // Exclude the session node itself from the candidate list — it
@@ -459,7 +630,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       delete extraObj.distilling;
       db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(extraObj), id);
-      graphEvents.emit('change', { op: 'session:distill-done', nodeId: id, promoted: 0, created: 0, dropped: 0, notesAppended: 0, empty: true, source: 'graphcorn' });
+      emitChange(learner, { op: 'session:distill-done', nodeId: id, promoted: 0, created: 0, dropped: 0, notesAppended: 0, empty: true, source: 'graphcorn' });
       if (log) log.info(`[distill] ${id} no temps and no rounds — marked complete`);
       return { promoted: 0, dropped: 0 };
     }
@@ -541,7 +712,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       'Anything not in `promote` will be soft-deleted (recycle_bin, 7-day retention). Keep `promote` tight — quality over quantity. Be generous with `createNodes` — every tool/framework/library the agent USED should get a node.',
     ].join('\n');
 
-    const model = config?.casualModel || config?.normalModel || config?.model;
+    const model = modelForTier('casual', config);
     // Streaming to keep the HTTP connection alive on slow reasoning
     // models (GLM/Kimi spend 30-60s thinking on distill-size inputs).
     // Non-streaming was hitting nginx's 60s idle timeout and returning
@@ -653,14 +824,14 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         if (projectIdForEdges) {
           try {
             insE.run(newId, projectIdForEdges, 'uses');
-            graphEvents.emit('change', { op: 'edge:create', edge: { source: newId, target: projectIdForEdges, type: 'uses' }, source: 'graphcorn-distill' });
+            emitChange(learner, { op: 'edge:create', edge: { source: newId, target: projectIdForEdges, type: 'uses' }, source: 'graphcorn-distill' });
           } catch (e) { console.warn('[sessions] insE.run failed: ' + e.message); }
         }
         try {
           insE.run(newId, id, 'first_seen_in');
-          graphEvents.emit('change', { op: 'edge:create', edge: { source: newId, target: id, type: 'first_seen_in' }, source: 'graphcorn-distill' });
+          emitChange(learner, { op: 'edge:create', edge: { source: newId, target: id, type: 'first_seen_in' }, source: 'graphcorn-distill' });
         } catch (e) { console.warn('[sessions] insE.run failed: ' + e.message); }
-        graphEvents.emit('change', { op: 'node:create', node: { id: newId, label, type: nodeType, description }, source: 'graphcorn-distill' });
+        emitChange(learner, { op: 'node:create', node: { id: newId, label, type: nodeType, description }, source: 'graphcorn-distill' });
         createdCount.value++;
       } catch (e) {
         if (log) log.warn(`[distill] createNode ${newId} failed: ${e.message}`);
@@ -713,7 +884,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         ext.distilled_at = new Date().toISOString();
         db.prepare('UPDATE nodes SET extra = ?, importance = MAX(importance, 6), updated = CURRENT_TIMESTAMP WHERE id = ?')
           .run(JSON.stringify(ext), targetId);
-        graphEvents.emit('change', { op: 'node:update', nodeId: targetId, renamedFrom: targetId !== tempId ? tempId : undefined, source: 'graphcorn-distill' });
+        emitChange(learner, { op: 'node:update', nodeId: targetId, renamedFrom: targetId !== tempId ? tempId : undefined, source: 'graphcorn-distill' });
         promotedIds.add(tempId);
       }
     }
@@ -736,7 +907,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         db.prepare(
           "INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 7, 'graphcorn-distill', 'graphcorn-distill')"
         ).run(asp.id, content);
-        graphEvents.emit('change', { op: 'attribute:create', nodeId: tgt, aspect: aspectName, content, source: 'graphcorn-distill' });
+        emitChange(learner, { op: 'attribute:create', nodeId: tgt, aspect: aspectName, content, source: 'graphcorn-distill' });
         notesAppended++;
       }
     }
@@ -786,11 +957,16 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         insBin.run(t.id, t.label, payload, `session ${sessionId} not promoted`, expiresAt);
         db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(t.id, t.id);
         db.prepare('DELETE FROM nodes WHERE id = ?').run(t.id);
-        graphEvents.emit('change', { op: 'node:delete', nodeId: t.id, source: 'graphcorn-distill' });
+        emitChange(learner, { op: 'node:delete', nodeId: t.id, source: 'graphcorn-distill' });
         dropped++;
       } catch (e) {
         if (log) log.warn(`[distill] failed to recycle ${t.id}: ${e.message}`);
       }
+    }
+
+    const kbPromotion = promoteReusableKnowledge(learner, sessionId, parsed, { projectId: projectIdForEdges });
+    if (kbPromotion.promoted > 0 && log) {
+      log.info(`[distill] promoted ${kbPromotion.promoted} reusable lesson(s) to ${kbPromotion.slug}`);
     }
 
     extraObj.distilled_at = new Date().toISOString();
@@ -798,11 +974,12 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     extraObj.distilled_created = createdCount.value;
     extraObj.distilled_dropped = dropped;
     extraObj.distilled_notes_appended = notesAppended;
+    extraObj.general_kb_promoted = kbPromotion.promoted || 0;
     delete extraObj.distilling;
     db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
       .run(JSON.stringify(extraObj), id);
 
-    graphEvents.emit('change', {
+    emitChange(learner, {
       op: 'session:distill-done',
       nodeId: id,
       promoted: promotedIds.size,
@@ -867,7 +1044,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
           // Aspects + attributes cascade via the schema's ON DELETE CASCADE.
           db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
 
-          graphEvents.emit('change', { op: 'node:delete', nodeId: id, source: 'graphcorn-archive' });
+          emitChange(learner, { op: 'node:delete', nodeId: id, source: 'graphcorn-archive' });
           archiveResult = { archived: true, edgesRemoved: sessEdges.length, aspectsRemoved: new Set(sessAspects.map(r => r.aspect_id)).size };
           if (log) log.info(`[distill] ${id} archived to recycle_bin (${archiveResult.edgesRemoved} edges, ${archiveResult.aspectsRemoved} aspects, restorable until ${archiveExpiresAt})`);
         }
@@ -889,10 +1066,19 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     try {
       db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), id);
     } catch {}
-    graphEvents.emit('change', { op: 'session:distill-done', nodeId: id, error: e.message, source: 'graphcorn' });
+    emitChange(learner, { op: 'session:distill-done', nodeId: id, error: e.message, source: 'graphcorn' });
     if (log) log.warn(`[distill] ${id} failed: ${e.message} (temps left in place; janitor will clean in 48h)`);
     return { error: e.message };
   }
 }
 
-module.exports = { sessionNodeId, upsertSessionNode, finalizeSessionNode, bumpTurnCount, summarizeSessionNode, distillSession };
+module.exports = {
+  sessionNodeId,
+  upsertSessionNode,
+  finalizeSessionNode,
+  bumpTurnCount,
+  summarizeSessionNode,
+  distillSession,
+  promoteReusableKnowledge,
+  repairGeneralKnowledgeBase,
+};

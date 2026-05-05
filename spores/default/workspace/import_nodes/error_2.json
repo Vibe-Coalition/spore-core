@@ -1,0 +1,15 @@
+{
+  "nodeId": "error_2",
+  "label": "Permission denied error",
+  "type": "error",
+  "description": "OSError: [Errno 13] Permission denied when installing packages",
+  "aspects": [
+    {
+      "name": "installation_issue",
+      "importance": 8,
+      "attributes": [
+        "ERROR: Could not install packages due to an OSError: [Errno 13] Permission denied"
+      ]
+    }
+  ]
+}

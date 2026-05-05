@@ -1,0 +1,15 @@
+{
+  "nodeId": "python_script_fix",
+  "label": "Python Script Fix Confirmation",
+  "type": "transaction",
+  "description": "Python script output confirming approved list was fixed: 'fixed - approved list is now: {\\'telegram\\': [\\'697706930\\']}'",
+  "aspects": [
+    {
+      "name": "approval_list_fix",
+      "importance": 7,
+      "attributes": [
+        "approved list format corrected to string IDs"
+      ]
+    }
+  ]
+}

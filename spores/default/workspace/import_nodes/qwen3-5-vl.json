@@ -1,0 +1,16 @@
+{
+  "nodeId": "qwen3-5-vl",
+  "label": "Qwen3.5 VL",
+  "type": "model",
+  "description": "Default vision-capable LLM for image analysis",
+  "aspects": [
+    {
+      "name": "compatibility",
+      "importance": 7,
+      "attributes": [
+        "OAI-compat vision model",
+        "Uses BFL endpoint for inference"
+      ]
+    }
+  ]
+}

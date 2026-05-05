@@ -1,0 +1,17 @@
+// Initialize request:
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"spore","version":"0.1.0"}}}
+
+// Initialize response:
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"notion-mcp-server","version":"2.2.1"}}}
+
+// Initialized notification (no id, no response):
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+
+// List tools:
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+
+// Call a tool:
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"API-post-search","arguments":{"query":"meeting notes","filter":{"property":"object","value":"page"}}}}
+
+// Tool call response:
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{...}"}],"isError":false}}

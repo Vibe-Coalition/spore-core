@@ -424,7 +424,7 @@ function importGraph(db, payload, { log = console } = {}) {
     INSERT INTO attributes (aspect_id, content, importance, source, created, updated_at, extracted_with, event_date, document_date, source_excerpt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const insEdge = db.prepare('INSERT INTO edges (source, target, type, weight, created, extracted_with) VALUES (?, ?, ?, ?, ?, ?)');
+  const insEdge = db.prepare('INSERT INTO edges (source, target, type, weight, created, extracted_with, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)');
   const insAlias = db.prepare('INSERT INTO aliases (node_id, alias) VALUES (?, ?)');
   const insNodeSource = db.prepare('INSERT INTO node_sources (node_id, source) VALUES (?, ?)');
   const insReflection = db.prepare('INSERT INTO reflections (node_id, content, model, source, created) VALUES (?, ?, ?, ?, ?)');
@@ -499,7 +499,7 @@ function importGraph(db, payload, { log = console } = {}) {
         continue;
       }
       try {
-        insEdge.run(source, target, e.type || 'related_to', e.weight ?? 1.0, e.created || new Date().toISOString(), e.extracted_with || 'import');
+        insEdge.run(source, target, e.type || 'related_to', e.weight ?? 1.0, e.created || new Date().toISOString(), e.extracted_with || 'import', e.confidence || null);
         report.edgesImported++;
       } catch (err) {
         report.edgesSkipped.push({ type: e.type, source, target, reason: err.message });

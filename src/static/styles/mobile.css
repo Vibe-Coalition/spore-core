@@ -116,7 +116,7 @@
     grid-template-columns: 1fr 1fr;
     grid-template-areas:
       "label    label"
-      "provider model"
+      "combo    combo"
       "ctx      compact"
       "test     result";
     gap: 4px 6px;
@@ -130,8 +130,7 @@
     font-size: .68rem; color: var(--text-dim);
     text-transform: uppercase; letter-spacing: .08em;
   }
-  .ob-tier-row > [data-ob-tier-provider]  { grid-area: provider; }
-  .ob-tier-row > [data-ob-tier-model]     { grid-area: model; }
+  .ob-tier-row > [data-ob-tier-combo]     { grid-area: combo; }
   .ob-tier-row > [data-ob-tier-ctx]       { grid-area: ctx; }
   .ob-tier-row > [data-ob-tier-compact]   { grid-area: compact; }
   .ob-tier-row > [data-ob-tier-test]      { grid-area: test; min-height: 36px; }

@@ -9,7 +9,8 @@
 // conversion, every image/audio/video block from upstream silently
 // drops and the model responds as if the user sent text-only.
 
-const { stripPrefix } = require('../../../providers');
+const { coreRequire } = require('../../core-require');
+const { stripPrefix } = coreRequire('providers');
 
 class GeminiClient {
   constructor(opts) {

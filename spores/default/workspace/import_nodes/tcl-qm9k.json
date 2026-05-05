@@ -1,0 +1,26 @@
+{
+  "nodeId": "tcl-qm9k",
+  "label": "TCL QM9K",
+  "type": "product",
+  "description": "100-inch Mini-LED quantum dot TV with record-breaking brightness",
+  "aspects": [
+    {
+      "name": "technical_specs",
+      "importance": 9,
+      "attributes": [
+        "4,400+ nits peak brightness (some tests hit 5,800 with 5,184 dimming zones)",
+        "Mini-LED with quantum dot technology",
+        "Excellent color accuracy and brightness"
+      ]
+    },
+    {
+      "name": "user_reviews",
+      "importance": 9,
+      "attributes": [
+        "CNET, The Verge, PCMag raves about it",
+        "Reddit's hometheater crowd recommends it as best value 100\" TV",
+        "On par with Sony's 100\" at half the price"
+      ]
+    }
+  ]
+}

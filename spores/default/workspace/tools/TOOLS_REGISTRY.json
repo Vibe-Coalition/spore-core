@@ -1,0 +1,50 @@
+{
+  "wealthsimple": {
+    "name": "wealthsimple",
+    "description": "Read-only Wealthsimple portfolio access via GraphQL API. Commands: login, otp <code>, accounts, balances, holdings, history, transactions [account]. Also supports spending analysis.",
+    "language": "python",
+    "path": "/workspace/tools/wealthsimple.py",
+    "usage": "exec: python3 /workspace/tools/wealthsimple.py balances",
+    "createdAt": "2026-04-12T20:28:07.668Z"
+  },
+  "home-assistant": {
+    "name": "home-assistant",
+    "description": "Home Assistant REST API integration. Controls lights, switches, and other entities via the HA API.",
+    "language": "bash",
+    "path": "/workspace/tools/home-assistant.sh",
+    "usage": "exec: bash /workspace/tools/home-assistant.sh lights on",
+    "createdAt": "2026-04-12T20:28:07.685Z"
+  },
+  "fb-marketplace": {
+    "name": "fb-marketplace",
+    "description": "Facebook Marketplace CLI. Search listings, watch for deals, scan inbox, send messages.",
+    "language": "bash",
+    "path": "/workspace/tools/fb-marketplace.sh",
+    "usage": "exec: bash /workspace/tools/fb-marketplace.sh search \"coffee table\"",
+    "createdAt": "2026-04-12T20:28:07.697Z"
+  },
+  "vision": {
+    "name": "vision",
+    "description": "Vision Service — Analyze images using a vision-capable LLM. Supports local and remote models.",
+    "language": "python",
+    "path": "/workspace/tools/vision.py",
+    "usage": "exec: python3 /workspace/tools/vision.py analyze /path/to/image.jpg",
+    "createdAt": "2026-04-12T20:28:07.712Z"
+  },
+  "amazon": {
+    "name": "amazon",
+    "description": "Amazon product search and price tracking. Search products, track prices, get deal alerts.",
+    "language": "python",
+    "path": "/workspace/tools/amazon.py",
+    "usage": "exec: python3 /workspace/tools/amazon.js search \"rtx 4090\"",
+    "createdAt": "2026-04-12T20:28:07.730Z"
+  },
+  "uber-eats": {
+    "name": "uber-eats",
+    "description": "Uber Eats order tracking and restaurant search. Browse menus, place orders, track deliveries.",
+    "language": "python",
+    "path": "/workspace/tools/uber-eats.py",
+    "usage": "exec: python3 /workspace/tools/uber-eats.js restaurants near \"150 April Rd\"",
+    "createdAt": "2026-04-12T20:28:07.744Z"
+  }
+}

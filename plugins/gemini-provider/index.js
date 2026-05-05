@@ -123,6 +123,7 @@ module.exports = function register(api) {
   }, {
     prefixes: ['gemini'],
     label: 'Gemini',
+    modelsPlaceholder: 'gemini-2.5-flash, gemini-2.0-pro',
     capabilities: { tools: true, vision: true, audio: true, video: true },
     isConfigured: (config) => {
       const slot = config?.plugins?.['gemini-provider'] || {};

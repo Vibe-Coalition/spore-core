@@ -19,14 +19,22 @@ const { noteDiscovery } = require('./lib/discovery');
 const scripts = require('./lib/scripts');
 const projectsLib = require('./lib/projects');
 const decisions = require('./lib/decisions');
+const sessionsLib = require('./lib/sessions');
 
 module.exports = function register(api) {
+  try {
+    sessionsLib.repairGeneralKnowledgeBase(api._appContext?.learner, api.getLogger());
+  } catch (e) {
+    api.getLogger().warn(`[general-kb] startup repair failed: ${e.message}`);
+  }
+
   // note_discovery tool — bare name (namespaced:false) preserves the
   // public contract for the agent. The generic ctx-driven gate (sessionId
   // = ctx.channelId when ctx.platform === 'cli') means this works for any
   // CLI-class session, not just acorn-cli.
   api.registerTool('note_discovery', {
     namespaced: false,
+    mutating: true,
     description:
       'Persist a durable discovery to the knowledge graph and link it to the current session AND project. ' +
       'WHEN TO USE — any time a non-trivial fact or fix surfaces during a coding session: ' +
@@ -58,7 +66,7 @@ module.exports = function register(api) {
       },
       required: ['text'],
     },
-    execute: (input, ctx) => noteDiscovery(api, input, ctx),
+    execute: (input, ctx) => noteDiscovery(ctxApi(ctx), input, ctx),
   });
 
   // Project-scoped script primitives. These tools materialize agent-
@@ -73,16 +81,59 @@ module.exports = function register(api) {
   // (same convention as note_discovery / projects.js). Outside an
   // acorn ctx they no-op with a clear error rather than guessing.
 
+  function ctxProjectIdentityKey(ctx) {
+    return ctx?.memoryEnvelope?.projectKey
+      || ctx?.memoryEnvelope?.projectIdentityKey
+      || ctx?.memoryEnvelope?.writeScopes?.projectIdentityKey
+      || null;
+  }
+
   function ctxProjectId(ctx) {
     if (ctx?.platform !== 'cli') return null;
     const cwd = ctx?.projectContext?.cwd || ctx?.projectContext?.clientCwd;
     if (!cwd) return null;
     const userId = ctx?.userId || ctx?.userName || 'anon';
-    return scripts.projectNodeId(userId, cwd);
+    return projectsLib.projectNodeIdFromContext(userId, {
+      ...ctx.projectContext,
+      cwd,
+      projectIdentityKey: ctxProjectIdentityKey(ctx),
+    });
   }
+
+  function ctxLearner(ctx) {
+    const learner = api._appContext?.learner;
+    const slug = ctx?.memoryEnvelope?.writeScopes?.projectSlug
+      || ctx?.memoryEnvelope?.projectSlug
+      || null;
+    if (slug && learner?.getGraphDb) {
+      const db = learner.getGraphDb(slug);
+      if (db) {
+        const scoped = Object.create(learner);
+        scoped.db = db;
+        scoped._graphSlug = slug;
+        return scoped;
+      }
+    }
+    return learner;
+  }
+
+  function ctxApi(ctx) {
+    const learner = ctxLearner(ctx);
+    if (!learner || learner === api._appContext?.learner) return api;
+    return Object.assign(Object.create(api), {
+      _appContext: { ...(api._appContext || {}), learner },
+    });
+  }
+
+  const projectToolScope = {
+    platforms: ['cli'],
+    requiresProjectContext: true,
+  };
 
   api.registerTool('save_project_script', {
     namespaced: false,
+    ...projectToolScope,
+    mutating: true,
     description:
       'Save a reusable helper script to the current project so the next session can pick it up. ' +
       'Creates a dedicated `script:<projectId>:<name>` graph node with body + meta + stats aspects, ' +
@@ -105,7 +156,7 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context — save_project_script only works inside a Spore Code session' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       return scripts.upsertScriptNode(learner, {
         projectId,
         sessionId: ctx?.channelId || null,
@@ -122,6 +173,7 @@ module.exports = function register(api) {
 
   api.registerTool('list_project_scripts', {
     namespaced: false,
+    ...projectToolScope,
     description:
       'List the helper scripts saved for the current project. Returns name + description + language + tags + counters for each entry — body NOT included. ' +
       'Cheap: reads only the project node\'s `scripts_index` aspect, never the dedicated script: nodes. Call this at session start in plan mode to discover what prior sessions already wrote so you can re-use rather than re-derive.',
@@ -135,7 +187,7 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       const list = scripts.listScriptsIndex(learner, projectId, {
         tag: input?.tag,
         language: input?.language,
@@ -146,6 +198,7 @@ module.exports = function register(api) {
 
   api.registerTool('get_project_script', {
     namespaced: false,
+    ...projectToolScope,
     description:
       'Fetch the full body + meta + stats for one script saved on the current project. Returns `materializePath` so the CLI can write the body to .spore-code/scratch/<name>.<ext> if it\'s not already there (handles the "fresh laptop" case automatically).',
     inputSchema: {
@@ -158,13 +211,15 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       return scripts.getScriptNode(learner, projectId, input.name);
     },
   });
 
   api.registerTool('update_code_graph_summary', {
     namespaced: false,
+    ...projectToolScope,
+    mutating: true,
     description:
       'Mirror a structural code-index summary (clusters, tech stack, entry points, hot paths, stats) into the current project node\'s `code_graph` aspect. ' +
       'Call this AFTER running the local `architecture` tool — pass its result through. The summary survives across sessions and shows up in the Spore Core graph viewer alongside other project memory. ' +
@@ -174,26 +229,32 @@ module.exports = function register(api) {
       properties: {
         index_head:   { type: 'string', description: 'Git short-sha at index time (from architecture.index_head).' },
         stats:        { type: 'object', description: '{files, symbols, functions, methods, classes, calls} from architecture.stats.' },
-        tech_stack:   { type: 'array', description: 'Language breakdown — array of {language, files, symbols}.' },
-        entry_points: { type: 'array', description: 'Array of {qname, name, file, line, kind, language}; cap at 10.' },
-        clusters:     { type: 'array', description: 'Top-level dir clusters — array of {name, path, files, symbols, dominant_lang}; cap at 30.' },
-        hot_paths:    { type: 'array', description: 'Top callers — array of {qname, name, file, line, callers, language}; cap at 20.' },
+        tech_stack:   { type: 'array', items: { type: 'object' }, description: 'Language breakdown — array of {language, files, symbols}.' },
+        entry_points: { type: 'array', items: { type: 'object' }, description: 'Array of {qname, name, file, line, kind, language}; cap at 10.' },
+        clusters:     { type: 'array', items: { type: 'object' }, description: 'Top-level dir clusters — array of {name, path, files, symbols, dominant_lang}; cap at 30.' },
+        hot_paths:    { type: 'array', items: { type: 'object' }, description: 'Top callers — array of {qname, name, file, line, callers, language}; cap at 20.' },
         notes:        { type: 'array', items: { type: 'string' }, description: 'Coverage notes from architecture.notes.' },
       },
     },
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context — update_code_graph_summary only works inside a Spore Code session' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       const userId = ctx?.userId || ctx?.userName || 'anon';
       const cwd = ctx?.projectContext?.cwd || ctx?.projectContext?.clientCwd;
       if (!cwd) return { ok: false, error: 'no cwd in projectContext' };
-      return projectsLib.upsertProjectCodeGraph(learner, userId, cwd, input || {});
+      return projectsLib.upsertProjectCodeGraph(learner, userId, cwd, input || {}, {
+        ...ctx.projectContext,
+        cwd,
+        projectIdentityKey: ctxProjectIdentityKey(ctx),
+      });
     },
   });
 
   api.registerTool('record_script_outcome', {
     namespaced: false,
+    ...projectToolScope,
+    mutating: true,
     description:
       'Bump success_count or fail_count on a saved project script + its index summary. Call this after exec\'ing the script body so the maintainer/janitor can later prune always-failing or never-used helpers.',
     inputSchema: {
@@ -207,7 +268,7 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       return scripts.recordScriptOutcome(learner, projectId, input.name, input.ok === true);
     },
   });
@@ -222,6 +283,8 @@ module.exports = function register(api) {
 
   api.registerTool('decisions_new', {
     namespaced: false,
+    ...projectToolScope,
+    mutating: true,
     description:
       'Record a new architectural decision (ADR) on the current project. Saves the full body to a dedicated `decision:<projectId>:<id>` node and a summary entry on the project\'s `decisions_index` aspect. ' +
       'WHEN to call: when a non-obvious tradeoff is made — language choice, framework, data model shape, deployment target, library replacement, etc. ' +
@@ -241,7 +304,7 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context — decisions_new only works inside a Spore Code session' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       const author = input?.author || ctx?.userName || ctx?.userId || null;
       return decisions.newDecision(learner, {
         projectId,
@@ -257,6 +320,7 @@ module.exports = function register(api) {
 
   api.registerTool('decisions_list', {
     namespaced: false,
+    ...projectToolScope,
     description:
       'List the architectural decisions recorded on the current project. Returns id + title + status + created_at for each — body NOT included. ' +
       'Cheap: reads only the `decisions_index` aspect, never the dedicated decision: nodes. Call this in plan mode to surface ADR constraints — accepted decisions are non-negotiable; the plan must respect them.',
@@ -269,7 +333,7 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       const list = decisions.listDecisions(learner, projectId, { status: input?.status });
       return { ok: true, count: list.length, decisions: list };
     },
@@ -277,6 +341,7 @@ module.exports = function register(api) {
 
   api.registerTool('decisions_get', {
     namespaced: false,
+    ...projectToolScope,
     description:
       'Fetch the full body + meta of one decision recorded on the current project.',
     inputSchema: {
@@ -289,13 +354,15 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       return decisions.getDecision(learner, projectId, input.id);
     },
   });
 
   api.registerTool('decisions_update', {
     namespaced: false,
+    ...projectToolScope,
+    mutating: true,
     description:
       'Update an existing decision — change its status (e.g. "proposed" → "accepted"), rewrite the body, or fix the title. ' +
       'Use this when the operator marks an ADR accepted, supersedes one, or revises the rationale. The created_at is preserved; updated_at refreshes.',
@@ -312,7 +379,7 @@ module.exports = function register(api) {
     execute: (input, ctx) => {
       const projectId = ctxProjectId(ctx);
       if (!projectId) return { ok: false, error: 'no project context' };
-      const learner = api._appContext?.learner;
+      const learner = ctxLearner(ctx);
       return decisions.updateDecision(learner, {
         projectId,
         id:     input.id,

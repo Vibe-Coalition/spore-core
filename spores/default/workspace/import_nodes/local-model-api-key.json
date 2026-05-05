@@ -1,0 +1,24 @@
+{
+  "nodeId": "local-model-api-key",
+  "label": "Local Model API Key",
+  "type": "product",
+  "description": "Authentication key for the local model API",
+  "aspects": [
+    {
+      "name": "activation",
+      "importance": 9,
+      "attributes": [
+        "Set via env_manage action (value: bfl_3kPsz9NMNczIoeKKk7g1DgUe4DD3h2gs)",
+        "Applied to vision service configuration",
+        "Confirmed working after update (2026-04-12)",
+        "bfl_3kPsz9NMNczIoeKKk7g1DgUe4DD3h2gs"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "tool-vision",
+      "type": "authenticates"
+    }
+  ]
+}

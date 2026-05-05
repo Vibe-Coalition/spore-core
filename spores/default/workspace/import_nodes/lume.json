@@ -1,0 +1,29 @@
+{
+  "nodeId": "lume",
+  "label": "Lume",
+  "type": "project",
+  "description": "Lume \u2014 unclear",
+  "aspects": [
+    {
+      "name": "documentation_status",
+      "importance": 7,
+      "attributes": [
+        "SKILL.md missing"
+      ]
+    },
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Unclear"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\u2753 Needs investigation"
+      ]
+    }
+  ]
+}

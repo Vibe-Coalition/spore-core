@@ -81,6 +81,95 @@
   }
   .ob-step .ob-error { color: var(--danger); font-size: .78rem; margin-top: 6px; min-height: 1em; }
   .ob-step .ob-note { font-size: .72rem; color: var(--text-dim); margin-top: 4px; }
+  .ob-choice-card {
+    display: flex !important;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    margin: 0 !important;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--text) !important;
+    letter-spacing: 0 !important;
+    text-transform: none !important;
+    font-size: .84rem !important;
+    line-height: 1.45;
+    cursor: pointer;
+  }
+  .ob-choice-card:hover {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    background: color-mix(in srgb, var(--panel) 88%, var(--accent) 12%);
+  }
+  .ob-choice-card:has(input:checked) {
+    border-color: color-mix(in srgb, var(--accent) 78%, var(--border));
+    background:
+      linear-gradient(135deg,
+        color-mix(in srgb, var(--panel) 82%, var(--accent) 18%),
+        color-mix(in srgb, var(--panel) 92%, var(--accent2) 8%));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+  .ob-choice-card input { flex: 0 0 auto; margin-top: 3px; accent-color: var(--accent); }
+  .ob-choice-card strong { color: var(--text-bright); }
+
+  /* Browser backend cards */
+  .ob-browser-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .ob-browser-card {
+    min-height: 178px;
+    padding: 14px !important;
+  }
+  .ob-browser-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+  .ob-browser-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .ob-pill {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--border));
+    border-radius: 999px;
+    padding: 1px 7px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    font-size: .62rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .ob-pill.muted {
+    color: var(--text-dim);
+    border-color: var(--border);
+    background: color-mix(in srgb, var(--panel) 86%, var(--text-dim) 14%);
+  }
+  .ob-browser-summary {
+    display: block;
+    color: var(--text);
+  }
+  .ob-browser-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: auto;
+  }
+  .ob-browser-meta span {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 7px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--bg) 72%, transparent);
+    font-size: .66rem;
+  }
 
   /* Theme swatch grid */
   #ob-theme-grid {
@@ -159,18 +248,19 @@
   }
   .ob-custom-row .ob-test-result { font-size: .72rem; }
 
-  /* Model tiers */
+  /* Model tiers — provider+model collapsed into a single combobox cell */
   .ob-tier-row {
     display: grid;
-    grid-template-columns: 90px 110px 1fr 70px 70px auto auto;
+    grid-template-columns: 90px 1fr 70px 70px auto auto;
     gap: 6px; align-items: center; margin-bottom: 6px;
   }
+  .ob-tier-row > [hidden] { display: none; }
   .ob-tier-row select, .ob-tier-row input { min-width: 0; font-size: .76rem; padding: 5px 7px; }
   .ob-tier-row input[type="number"] { -moz-appearance: textfield; }
   .ob-tier-row input[type="number"]::-webkit-outer-spin-button,
   .ob-tier-row input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .ob-tier-header {
-    display: grid; grid-template-columns: 90px 110px 1fr 70px 70px auto auto; gap: 6px;
+    display: grid; grid-template-columns: 90px 1fr 70px 70px auto auto; gap: 6px;
     font-size: .62rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .08em;
     margin-bottom: 6px;
   }
@@ -178,6 +268,7 @@
   .ob-tier-row .label { font-size: .76rem; color: var(--text); }
   .ob-tier-row input, .ob-tier-row select { font-size: .78rem; padding: 6px 8px; }
   .ob-tier-row .ob-test-result { font-size: .7rem; }
+  .ob-tier-row .ob-tier-combobox { min-width: 0; }
 
   /* Footer */
   #onboarding-foot {
@@ -205,6 +296,10 @@
   .ob-btn.primary:hover { opacity: .85; }
   .ob-sub-error { color: var(--danger); font-size: .78rem; }
 
+  @media (max-width: 620px) {
+    .ob-browser-grid { grid-template-columns: 1fr; }
+    .ob-browser-card { min-height: auto; }
+  }
+
   #app { display: flex; height: 100vh; height: 100dvh; position: relative; z-index: 1; }
   #app.hidden { display: none; }
-

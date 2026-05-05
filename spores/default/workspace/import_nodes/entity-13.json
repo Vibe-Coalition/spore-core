@@ -1,0 +1,15 @@
+{
+  "nodeId": "entity-13",
+  "label": "IRGC",
+  "type": "military",
+  "description": "Islamic Revolutionary Guard Corps of Iran",
+  "aspects": [
+    {
+      "name": "military_policy",
+      "importance": 9,
+      "attributes": [
+        "Issued statement: any military vessel approaching Strait of Hormuz will be treated as ceasefire violation"
+      ]
+    }
+  ]
+}

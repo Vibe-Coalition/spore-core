@@ -1,0 +1,39 @@
+{
+  "nodeId": "dining-chairs-watch-7b7583ad",
+  "label": "Dining Chairs Watch",
+  "type": "project",
+  "description": "Monitor for mid-century modern dining chairs within 20km radius, any price",
+  "aspects": [
+    {
+      "name": "monitoring_parameters",
+      "importance": 9,
+      "attributes": [
+        "Searches for dining chairs",
+        "MCM style preference noted",
+        "20km radius",
+        "Any price"
+      ]
+    },
+    {
+      "name": "style_preference",
+      "importance": 8,
+      "attributes": [
+        "mid-century modern"
+      ]
+    },
+    {
+      "name": "search_radius",
+      "importance": 8,
+      "attributes": [
+        "20km"
+      ]
+    },
+    {
+      "name": "price_range",
+      "importance": 8,
+      "attributes": [
+        "any"
+      ]
+    }
+  ]
+}

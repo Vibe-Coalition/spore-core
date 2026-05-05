@@ -1,0 +1,16 @@
+{
+  "nodeId": "telegram-697706930",
+  "label": "Telegram Channel",
+  "type": "channel",
+  "description": "User's Telegram messaging channel",
+  "aspects": [
+    {
+      "name": "notification_status",
+      "importance": 8,
+      "attributes": [
+        "FB Marketplace scan results sent to Telegram on 2026-04-12",
+        "Automated alerts enabled for new listings"
+      ]
+    }
+  ]
+}

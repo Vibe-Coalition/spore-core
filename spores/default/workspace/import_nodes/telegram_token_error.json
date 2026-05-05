@@ -1,0 +1,15 @@
+{
+  "nodeId": "telegram_token_error",
+  "label": "TELEGRAM_BOT_TOKEN Not Set",
+  "type": "system_error",
+  "description": "Telegram bot token not found in environment during scheduler initialization",
+  "aspects": [
+    {
+      "name": "error_occurred",
+      "importance": 9,
+      "attributes": [
+        "TELEGRAM_BOT_TOKEN not set"
+      ]
+    }
+  ]
+}

@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { DatabaseSync } = require('node:sqlite');
 
 function ts() {
   const d = new Date();
@@ -25,54 +26,57 @@ function ts() {
 }
 
 class BackupWorker {
-  constructor(config, log, db, graphDbPath) {
+  constructor(config, log, db, graphDbPath, registry = null) {
     this.config = config;
     this.log = log;
     this.db = db;
     this.graphDbPath = graphDbPath;
+    this.registry = registry;
     this._running = false;
     this._timer = null;
     this._lastHash = null;
+    this._lastHashes = {};
+    this._graphBackupLocks = new Set();
     this.stats = {
       runs: 0, snapshots: 0, skipped: 0, rotated: 0, restores: 0, errors: 0,
       lastRunAt: null, lastSnapshotAt: null,
     };
   }
 
-  _backupDir() {
+  _backupDir(graphDbPath = this.graphDbPath) {
     const configured = this.config.graphBackupDir;
     if (configured) return configured;
-    return path.join(path.dirname(this.graphDbPath), 'backups');
+    return path.join(path.dirname(graphDbPath || this.graphDbPath), 'backups');
   }
 
-  _ensureDir() {
-    const dir = this._backupDir();
+  _ensureDir(graphDbPath = this.graphDbPath) {
+    const dir = this._backupDir(graphDbPath);
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {
       if (e.code !== 'EEXIST') throw e;
     }
     return dir;
   }
 
-  _baseName() {
-    return path.basename(this.graphDbPath, path.extname(this.graphDbPath));
+  _baseName(graphDbPath = this.graphDbPath) {
+    return path.basename(graphDbPath, path.extname(graphDbPath));
   }
 
-  _currentSignature() {
+  _currentSignature(db = this.db) {
     try {
       const counts = [];
-      const tables = this.db.prepare(
+      const tables = db.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND sql NOT LIKE '%VIRTUAL%' AND name NOT LIKE 'sqlite_%' ORDER BY name"
       ).all();
       for (const t of tables) {
         try {
-          const c = this.db.prepare(`SELECT COUNT(*) AS c FROM "${t.name}"`).get().c;
+          const c = db.prepare(`SELECT COUNT(*) AS c FROM "${t.name}"`).get().c;
           counts.push(`${t.name}:${c}`);
         } catch (e) { this.log.warn('[backup] db.prepare failed: ' + e.message); }
       }
       let maxUpdated = null;
       for (const col of ['updated', 'updated_at', 'deleted_at', 'created']) {
         try {
-          const r = this.db.prepare(`SELECT MAX(${col}) AS m FROM nodes`).get();
+          const r = db.prepare(`SELECT MAX(${col}) AS m FROM nodes`).get();
           if (r?.m) { maxUpdated = r.m; break; }
         } catch (e) { this.log.warn('[backup] db.prepare failed: ' + e.message); }
       }
@@ -91,12 +95,12 @@ class BackupWorker {
     const ms = mins * 60_000;
     if (this._timer) clearInterval(this._timer);
     this._timer = setInterval(() => {
-      this.runBackup().catch(e => this.log.error('[backup] tick error:', e.message));
+      this.runBackups().catch(e => this.log.error('[backup] tick error:', e.message));
     }, ms);
     this.log.info(`[backup] Scheduled every ${mins}m, retention=${this.config.graphBackupRetention || 20}, dir=${this._backupDir()}`);
     // Also take a boot snapshot a couple minutes after start so there's always at least one
     setTimeout(() => {
-      this.runBackup({ force: false }).catch(e => this.log.error('[backup] boot snapshot error:', e.message));
+      this.runBackups({ force: false }).catch(e => this.log.error('[backup] boot snapshot error:', e.message));
     }, 120_000);
   }
 
@@ -109,30 +113,14 @@ class BackupWorker {
     if (this._running) return { ok: false, error: 'already running' };
     if (this.config.graphBackupEnabled === false && !force) return { ok: false, error: 'disabled' };
     this._running = true;
-    this.stats.runs++;
-    this.stats.lastRunAt = new Date().toISOString();
-
     try {
-      const sig = this._currentSignature();
-      if (!force && this.config.graphBackupOnChangeOnly !== false && sig && this._lastHash && sig === this._lastHash) {
-        this.stats.skipped++;
-        this.log.debug('[backup] Skipping — graph unchanged since last snapshot');
-        return { ok: true, skipped: true };
-      }
-
-      const dir = this._ensureDir();
-      const suffix = note ? `-${String(note).replace(/[^a-z0-9-]/gi, '').slice(0, 24)}` : '';
-      const file = path.join(dir, `${this._baseName()}.${ts()}${suffix}.bak`);
-      const escaped = file.replace(/'/g, "''");
-      this.db.exec(`VACUUM INTO '${escaped}'`);
-
-      const sz = fs.statSync(file).size;
-      this._lastHash = sig;
-      this.stats.snapshots++;
-      this.stats.lastSnapshotAt = new Date().toISOString();
-      this.log.info(`[backup] Snapshot ${path.basename(file)} (${(sz/1024).toFixed(1)} KB)${note ? ` note=${note}` : ''}`);
-      this._rotate();
-      return { ok: true, file, size: sz };
+      return await this._runBackupFile({
+        db: this.db,
+        graphDbPath: this.graphDbPath,
+        key: this.registry?.getActiveSlug?.() || 'active',
+        force,
+        note,
+      });
     } catch (e) {
       this.stats.errors++;
       this.log.error('[backup] runBackup:', e.message);
@@ -142,11 +130,85 @@ class BackupWorker {
     }
   }
 
-  _rotate() {
+  async runBackups({ force = false, note = null } = {}) {
+    if (!this.registry) return this.runBackup({ force, note });
+    if (this._running) return { ok: false, error: 'already running' };
+    if (this.config.graphBackupEnabled === false && !force) return { ok: false, error: 'disabled' };
+
+    this._running = true;
+    const graphs = this.registry.list?.() || [];
+    const results = [];
+    try {
+      for (const graph of graphs) {
+        const dbPath = this.registry.getDbPath?.(graph.slug);
+        if (!dbPath || !fs.existsSync(dbPath)) {
+          results.push({ slug: graph.slug, ok: false, error: 'db missing' });
+          continue;
+        }
+        results.push(await this.runBackupForGraph({ slug: graph.slug, dbPath, force, note }));
+      }
+      return { ok: true, graphs: results };
+    } finally {
+      this._running = false;
+    }
+  }
+
+  async runBackupForGraph({ slug, dbPath, force = false, note = null } = {}) {
+    if (!dbPath) return { ok: false, error: 'dbPath required' };
+    if (this.config.graphBackupEnabled === false && !force) return { ok: false, error: 'disabled' };
+    const key = slug || dbPath;
+    if (this._graphBackupLocks.has(key)) return { slug, ok: false, error: 'already running' };
+
+    this._graphBackupLocks.add(key);
+    let db = null;
+    try {
+      db = dbPath === this.graphDbPath && this.db ? this.db : new DatabaseSync(dbPath);
+      return await this._runBackupFile({ db, graphDbPath: dbPath, key, force, note, slug });
+    } catch (e) {
+      this.stats.errors++;
+      this.log.error(`[backup] runBackupForGraph ${key}:`, e.message);
+      return { slug, ok: false, error: e.message };
+    } finally {
+      if (db && db !== this.db) {
+        try { db.close(); } catch {}
+      }
+      this._graphBackupLocks.delete(key);
+    }
+  }
+
+  async _runBackupFile({ db, graphDbPath, key, force = false, note = null, slug = null }) {
+    this.stats.runs++;
+    this.stats.lastRunAt = new Date().toISOString();
+
+    const sig = this._currentSignature(db);
+    const prevHash = this._lastHashes[key] || (key === 'active' ? this._lastHash : null);
+    if (!force && this.config.graphBackupOnChangeOnly !== false && sig && prevHash && sig === prevHash) {
+      this.stats.skipped++;
+      this.log.debug(`[backup] Skipping ${slug || key} — graph unchanged since last snapshot`);
+      return { slug, ok: true, skipped: true };
+    }
+
+    const dir = this._ensureDir(graphDbPath);
+    const suffix = note ? `-${String(note).replace(/[^a-z0-9-]/gi, '').slice(0, 24)}` : '';
+    const file = path.join(dir, `${this._baseName(graphDbPath)}.${ts()}${suffix}.bak`);
+    const escaped = file.replace(/'/g, "''");
+    db.exec(`VACUUM INTO '${escaped}'`);
+
+    const sz = fs.statSync(file).size;
+    this._lastHashes[key] = sig;
+    if (key === 'active') this._lastHash = sig;
+    this.stats.snapshots++;
+    this.stats.lastSnapshotAt = new Date().toISOString();
+    this.log.info(`[backup] Snapshot ${path.basename(file)} (${(sz/1024).toFixed(1)} KB)${slug ? ` graph=${slug}` : ''}${note ? ` note=${note}` : ''}`);
+    this._rotate(graphDbPath);
+    return { slug, ok: true, file, size: sz };
+  }
+
+  _rotate(graphDbPath = this.graphDbPath) {
     try {
       const keep = Math.max(1, Number(this.config.graphBackupRetention) || 20);
-      const dir = this._ensureDir();
-      const prefix = this._baseName() + '.';
+      const dir = this._ensureDir(graphDbPath);
+      const prefix = this._baseName(graphDbPath) + '.';
       const files = fs.readdirSync(dir)
         .filter(f => f.startsWith(prefix) && f.endsWith('.bak'))
         .map(f => ({ name: f, full: path.join(dir, f), mtime: fs.statSync(path.join(dir, f)).mtimeMs }))

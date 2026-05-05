@@ -1,0 +1,32 @@
+{
+  "nodeId": "system-restart",
+  "label": "System Restart",
+  "type": "status_change",
+  "description": "User reported restarting the system",
+  "aspects": [
+    {
+      "name": "system_status",
+      "importance": 7,
+      "attributes": [
+        "restarted but still nothing"
+      ]
+    },
+    {
+      "name": "error_log",
+      "importance": 8,
+      "attributes": [
+        "ERROR: The confirmation code has expired (caused by SignInRequest) on 2026-04-12"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "hyru1ebot",
+      "type": "controls"
+    },
+    {
+      "target": "telegram-697706930",
+      "type": "mentioned"
+    }
+  ]
+}

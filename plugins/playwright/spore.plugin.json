@@ -1,0 +1,9 @@
+{
+  "id": "playwright",
+  "name": "Playwright Browser Backend",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": ["browser-core"],
+  "description": "Standard Playwright Chromium backend. Live screencast preview, easier introspection, but more detectable than zendriver — picks up automation tells from headless mode and standard Chrome that anti-bot stacks fingerprint. Use on cooperative sites or when the screencast preview matters for debugging. Registers as the 'playwright' selector via api.registerBrowserBackend; browser-core dispatches to it."
+}

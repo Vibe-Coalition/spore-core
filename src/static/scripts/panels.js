@@ -63,6 +63,7 @@ function _focusFloatingWindow(id) {
   if (!_usesFloatingWindows()) return;
   const el = document.getElementById(id);
   if (!el) return;
+  if (id === 'chat-panel' && !el.classList.contains('chat-floating')) return;
   _floatingZCounter += 1;
   el.style.zIndex = String(_floatingZCounter);
 }
@@ -139,6 +140,7 @@ function _saveFloatingWindowRect(id) {
   if (!_usesFloatingWindows()) return;
   const el = document.getElementById(id);
   if (!el) return;
+  if (id === 'chat-panel' && !el.classList.contains('chat-floating')) return;
   if (el.classList.contains('window-maximized')) return;
   if (el.getClientRects().length === 0) return;
   const rect = _clampFloatingWindowRect(el.getBoundingClientRect());
@@ -152,6 +154,7 @@ function _ensureFloatingWindowInViewport(id, rectLike = null) {
   if (!_usesFloatingWindows()) return null;
   const el = document.getElementById(id);
   if (!el) return null;
+  if (id === 'chat-panel' && !el.classList.contains('chat-floating')) return null;
   if (el.classList.contains('window-maximized')) {
     const maxRect = _floatingWindowMaxRect();
     _applyRectToFloatingWindow(el, maxRect);
@@ -168,6 +171,7 @@ function _applyFloatingWindowRect(id) {
   if (!_usesFloatingWindows()) return;
   const el = document.getElementById(id);
   if (!el) return;
+  if (id === 'chat-panel' && !el.classList.contains('chat-floating')) return;
   if (el.classList.contains('window-maximized')) {
     const maxRect = _floatingWindowMaxRect();
     _applyRectToFloatingWindow(el, maxRect);
@@ -254,6 +258,7 @@ function _initFloatingWindow(id, handleSelector) {
     const observer = new ResizeObserver(() => {
       if (!_usesFloatingWindows()) return;
       if (el.getClientRects().length === 0) return;
+      if (id === 'chat-panel' && !el.classList.contains('chat-floating')) return;
       _ensureFloatingWindowInViewport(id, el.getBoundingClientRect());
       _saveFloatingWindowRect(id);
       if (id === 'terminal-pane') window._refitTerminalLayout?.();
@@ -263,7 +268,6 @@ function _initFloatingWindow(id, handleSelector) {
 }
 
 function _initDesktopFloatingWindows() {
-  // chat-panel is a docked right sidebar (not a floating window) on desktop.
   _initFloatingWindow('node-pane', '.floating-pane-head');
   _initFloatingWindow('files-pane', '.floating-pane-head');
   _initFloatingWindow('logs-pane', '.floating-pane-head');
@@ -272,10 +276,15 @@ function _initDesktopFloatingWindows() {
 }
 
 window.addEventListener('resize', () => {
-  if (!_usesFloatingWindows()) return;
-  ['node-pane', 'files-pane', 'logs-pane', 'skills-pane', 'terminal-pane'].forEach((id) => {
+  if (!_usesFloatingWindows()) {
+    _setChatFloatingMode(false, { persist: false, focus: false });
+    return;
+  }
+  if (_panelState().chatFloating === true) _setChatFloatingMode(true, { persist: false, focus: false });
+  ['chat-panel', 'node-pane', 'files-pane', 'logs-pane', 'skills-pane', 'terminal-pane'].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
+    if (id === 'chat-panel' && !el.classList.contains('chat-floating')) return;
     if (el.classList.contains('window-maximized')) {
       _applyFloatingWindowRect(id);
       return;
@@ -302,6 +311,7 @@ function _panelState() {
 function _savePanelState() {
   const s = {};
   for (const [id, p] of Object.entries(_panels)) s[id] = !p.el.classList.contains(p.cls);
+  s.chatFloating = !!document.getElementById('chat-panel')?.classList.contains('chat-floating');
   s.floatingTabs = Array.from(activeRpTabs);
   s.lastNonNodeTab = lastNonNodeTab;
   s.terminalOpen = !!document.getElementById('terminal-pane')?.classList.contains('window-open');
@@ -378,6 +388,71 @@ function togglePanel(id) {
   _savePanelState();
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
 }
+function _chatFloatingCloseSvg() {
+  return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>';
+}
+function _chatDockedCloseGlyph() {
+  return '&#10094;';
+}
+function _isChatFloating() {
+  return !!document.getElementById('chat-panel')?.classList.contains('chat-floating');
+}
+function _syncChatFloatingChrome() {
+  const floating = _isChatFloating();
+  const toggle = document.getElementById('chat-float-toggle');
+  const max = document.getElementById('chat-window-maximize');
+  const close = document.getElementById('chat-collapse');
+  document.body.classList.toggle('chat-is-floating', floating);
+  if (toggle) {
+    toggle.setAttribute('title', floating ? 'Dock chat' : 'Undock chat');
+    toggle.setAttribute('aria-label', floating ? 'Dock chat' : 'Undock chat');
+    toggle.classList.toggle('is-floating', floating);
+  }
+  if (max) {
+    max.hidden = !floating;
+    max.style.display = floating ? '' : 'none';
+  }
+  if (close) {
+    close.innerHTML = floating ? _chatFloatingCloseSvg() : _chatDockedCloseGlyph();
+    close.setAttribute('title', floating ? 'Close chat window' : 'Collapse chat sidebar');
+    close.setAttribute('aria-label', floating ? 'Close chat window' : 'Collapse chat sidebar');
+  }
+  _updateFloatingWindowChrome('chat-panel');
+}
+function _clearChatFloatingInlineRect() {
+  const el = document.getElementById('chat-panel');
+  if (!el) return;
+  el.style.left = '';
+  el.style.top = '';
+  el.style.right = '';
+  el.style.bottom = '';
+  el.style.width = '';
+  el.style.height = '';
+  el.style.zIndex = '';
+}
+function _setChatFloatingMode(floating, opts = {}) {
+  const el = document.getElementById('chat-panel');
+  if (!el) return;
+  const shouldFloat = !!floating && _usesFloatingWindows();
+  const wasFloating = el.classList.contains('chat-floating');
+  if (shouldFloat) {
+    el.classList.add('chat-floating', 'window-open');
+    el.classList.remove('window-maximized', 'fill-remaining');
+    _initFloatingWindow('chat-panel', '#chat-header');
+    _applyFloatingWindowRect('chat-panel');
+    if (opts.focus !== false) _focusFloatingWindow('chat-panel');
+  } else {
+    el.classList.remove('chat-floating', 'window-open', 'window-maximized');
+    delete el.dataset.prevRect;
+    _clearChatFloatingInlineRect();
+  }
+  _syncChatFloatingChrome();
+  _syncPanelFill();
+  _syncResizeHandles();
+  _syncChatReopen();
+  if (typeof _syncUtilBar === 'function') _syncUtilBar();
+  if (opts.persist !== false && wasFloating !== shouldFloat) _savePanelState();
+}
 function restorePanelState() {
   const s = _panelState();
   if (_usesFloatingWindows()) {
@@ -385,6 +460,7 @@ function restorePanelState() {
     document.getElementById('chat-panel').classList.toggle('collapsed', !chatVisible);
     document.getElementById('canvas').classList.remove('panel-collapsed');
     document.getElementById('btn-toggle-chat').classList.toggle('active', chatVisible);
+    _setChatFloatingMode(s.chatFloating === true, { persist: false, focus: false });
     _initDesktopFloatingWindows();
     activeRpTabs.clear();
     activeRpTab = null;
@@ -412,9 +488,11 @@ function restorePanelState() {
     _syncPanelFill();
     syncRpButtons();
     _syncChatReopen();
+    _syncChatFloatingChrome();
     if (typeof _syncUtilBar === 'function') _syncUtilBar();
     return;
   }
+  _setChatFloatingMode(false, { persist: false, focus: false });
   for (const [id, p] of Object.entries(_panels)) {
     const visible = s[id] !== undefined ? s[id] : true;
     p.el.classList.toggle(p.cls, !visible);
@@ -427,6 +505,7 @@ function restorePanelState() {
   _syncResizeHandles();
   _syncPanelFill();
   if (typeof _syncChatReopen === 'function') _syncChatReopen();
+  _syncChatFloatingChrome();
 }
 document.getElementById('tab-right-panel').onclick = () => togglePanel('right-panel');
 document.getElementById('tab-canvas').onclick = () => togglePanel('canvas');
@@ -434,6 +513,10 @@ document.getElementById('tab-chat').onclick = () => togglePanel('chat-panel');
 document.getElementById('btn-toggle-chat').onclick = () => togglePanel('chat-panel');
 const _chatCollapseBtn = document.getElementById('chat-collapse');
 if (_chatCollapseBtn) _chatCollapseBtn.onclick = () => togglePanel('chat-panel');
+document.getElementById('chat-float-toggle')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  _setChatFloatingMode(!_isChatFloating());
+});
 // Reflect chat-panel collapsed state on the dock chat button (active when
 // the sidebar is open). Was a separate floating button; now lives in the
 // bottom dock alongside Node / Files / Logs / Terminal / Settings.
@@ -470,6 +553,7 @@ function _restoreChatWidth() {
 _restoreChatWidth();
 window.addEventListener('resize', () => {
   // Re-clamp if the viewport shrank past the saved width.
+  if (_isChatFloating()) return;
   const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--chat-width'));
   if (Number.isFinite(cur)) _applyChatWidth(cur);
 });
@@ -508,6 +592,7 @@ window.addEventListener('resize', () => {
   let dragId = null;
   handle.addEventListener('pointerdown', (e) => {
     if (!_usesFloatingWindows()) return;
+    if (_isChatFloating()) return;
     if (document.getElementById('chat-panel').classList.contains('collapsed')) return;
     dragId = e.pointerId;
     handle.classList.add('dragging');
@@ -625,7 +710,8 @@ document.getElementById('dock-files')?.addEventListener('click', () => {
   toggleRightPaneWindow('files-pane');
 });
 document.getElementById('dock-logs')?.addEventListener('click', () => {
-  toggleRightPaneWindow('logs-pane');
+  if (typeof window.toggleDockLogsMenu === 'function') window.toggleDockLogsMenu();
+  else toggleRightPaneWindow('logs-pane');
 });
 document.getElementById('dock-terminal')?.addEventListener('click', () => {
   window.toggleTerminal?.();
@@ -640,9 +726,7 @@ document.getElementById('dock-settings')?.addEventListener('click', () => {
 document.addEventListener('click', (e) => {
   const t = e.target;
   if (!(t instanceof Element)) return;
-  if (t.id === 'settings-launch-lme') {
-    if (typeof lmeOpen === 'function') lmeOpen();
-  } else if (t.id === 'settings-new-graph') {
+  if (t.id === 'settings-new-graph') {
     if (typeof openNewGraphModal === 'function') openNewGraphModal();
     else if (typeof showNewGraphModal === 'function') showNewGraphModal();
   } else if (t.id === 'settings-maintainer-run') {
@@ -697,13 +781,18 @@ function _collectModelTierFormValues(tier) {
   const model = v(`settings-model-${tier}-name`);
   // Include all provider configs so the backend can build the ephemeral client
   const providers = {
-    anthropic: _collectProviderFormValues('anthropic'),
-    openai: _collectProviderFormValues('openai'),
-    openrouter: _collectProviderFormValues('openrouter'),
-    local: _collectProviderFormValues('local'),
-    gemini: _collectProviderFormValues('gemini'),
-    custom: typeof collectSettingsCustomProviders === 'function' ? collectSettingsCustomProviders() : [],
+    custom: typeof collectSettingsCustomProviders === 'function' ? collectSettingsCustomProviders({ preserveStoredKey: false }) : [],
+    __plugins: {},
   };
+  document.querySelectorAll('[data-provider-form]').forEach(wrap => {
+    const name = wrap.getAttribute('data-provider-form');
+    if (!name || name === 'custom') return;
+    const values = _collectProviderFormValues(name);
+    providers[name] = values;
+    const pluginId = wrap.getAttribute('data-provider-plugin-id') || '';
+    if (pluginId) providers.__plugins[pluginId] = values;
+  });
+  if (Object.keys(providers.__plugins).length === 0) delete providers.__plugins;
   // Include the per-tier maxTokens + reasoningEffort overrides so Test
   // respects the values the user just typed (without requiring a Save first).
   const maxOut = parseInt(v(`settings-model-${tier}-maxout`), 10);
@@ -1122,7 +1211,7 @@ async function _graphExportDownload() {
       providers: wantProviders ? '1' : '0',
       secrets: wantSecrets ? '1' : '0',
     }).toString();
-    const r = await fetch(API + '/api/graph/export?' + qs, { headers: authHeaders() });
+    const r = await fetch(graphApiUrl('/api/graph/export?' + qs), { headers: authHeaders() });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const blob = await r.blob();
     let filename = 'spore-export.json';
@@ -1202,7 +1291,7 @@ async function _graphImportUpload(file) {
       apply_settings: hasSettings ? '1' : '0',
     }).toString();
 
-    const r = await fetch(API + '/api/graph/import?' + qs, {
+    const r = await fetch(graphApiUrl('/api/graph/import?' + qs), {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: text,
@@ -1276,34 +1365,22 @@ document.getElementById('settings-new-graph')?.addEventListener('click', () => {
 });
 
 document.getElementById('filter-type').onchange = (e) => {
-  const type = e.target.value;
-  gNodes.selectAll('g').attr('opacity', d => (!type || d.type === type) ? 1 : 0.12);
-  gLinks.selectAll('line').attr('opacity', d => {
-    if (!type) return 1;
-    const s = d.source.type || graphData.nodes.find(n => n.id === d.source)?.type;
-    const t = d.target.type || graphData.nodes.find(n => n.id === d.target)?.type;
-    return (s === type || t === type) ? 1 : 0.05;
-  });
+  // Funnel through the unified filter state so it composes with the
+  // timeline-filter and the marquee-selection visibility check (a
+  // dimmed node from EITHER filter is unselectable). Direct opacity
+  // writes here used to clobber whatever the timeline filter had set.
+  window._graphFilterState = window._graphFilterState || { typeFilter: '', timeMin: null, timeMax: null };
+  window._graphFilterState.typeFilter = e.target.value || '';
+  if (typeof window._applyGraphFilters === 'function') window._applyGraphFilters();
 };
 
 document.getElementById('search-input').oninput = (e) => {
-  const q = e.target.value.toLowerCase();
-  if (!q) {
-    gNodes.selectAll('g').attr('opacity', 1);
-    gLinks.selectAll('line').attr('opacity', 1);
-    return;
-  }
-  const matches = new Set(graphData.nodes.filter(n =>
-    n.label.toLowerCase().includes(q) || n.id.includes(q) || n.type.includes(q) ||
-    (n.description||'').toLowerCase().includes(q)
-  ).map(n => n.id));
-
-  gNodes.selectAll('g').attr('opacity', d => matches.has(d.id) ? 1 : 0.1);
-  gLinks.selectAll('line').attr('opacity', d => {
-    const s = d.source.id || d.source;
-    const t = d.target.id || d.target;
-    return (matches.has(s) || matches.has(t)) ? 0.5 : 0.03;
-  });
+  // Funnel through the unified filter state — search composes with the
+  // type-filter and timeline-filter, and the marquee-selection
+  // visibility check skips dimmed nodes for all three.
+  window._graphFilterState = window._graphFilterState || { typeFilter: '', timeMin: null, timeMax: null, searchQuery: '' };
+  window._graphFilterState.searchQuery = (e.target.value || '').toLowerCase();
+  if (typeof window._applyGraphFilters === 'function') window._applyGraphFilters();
 };
 
 // ── Resizable Panels ──
@@ -1382,4 +1459,3 @@ document.getElementById('mobile-nav').addEventListener('click', (e) => {
     if (activeRpTabs.size === 0) openRightPanel('files-pane', false);
   }
 });
-

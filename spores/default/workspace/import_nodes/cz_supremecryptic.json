@@ -1,0 +1,15 @@
+{
+  "nodeId": "cz_supremecryptic",
+  "label": "CZ @SupremeCryptic",
+  "type": "User",
+  "description": "User or entity associated with cryptocurrency discussions",
+  "aspects": [
+    {
+      "name": "Association",
+      "importance": 8,
+      "attributes": [
+        "Cryptocurrency-related"
+      ]
+    }
+  ]
+}

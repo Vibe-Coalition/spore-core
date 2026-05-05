@@ -1,0 +1,19 @@
+{
+  "agentId": "animaacorn",
+  "proactive": {
+    "enabled": true,
+    "cooldownMinutes": 60,
+    "maxPerDay": 5,
+    "channels": []
+  },
+  "voice": {
+    "enabled": false,
+    "sttProvider": "deepgram",
+    "ttsSpeed": 1,
+    "edgeVoice": "en-US-AriaNeural",
+    "silenceThresholdMs": 400,
+    "maxUtteranceSecs": 30
+  },
+  "displayName": "duck",
+  "nicknames": []
+}

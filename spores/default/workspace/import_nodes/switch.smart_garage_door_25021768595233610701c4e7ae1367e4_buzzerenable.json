@@ -1,0 +1,13 @@
+{
+  "nodeId": "switch.smart_garage_door_25021768595233610701c4e7ae1367e4_buzzerenable",
+  "label": "Smart Garage Door Buzzer Enable",
+  "type": "switch",
+  "description": "Buzzer enable switch for garage door",
+  "aspects": [
+    {
+      "name": "state",
+      "importance": 8,
+      "attributes": []
+    }
+  ]
+}

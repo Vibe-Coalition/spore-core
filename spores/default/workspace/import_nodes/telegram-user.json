@@ -1,0 +1,38 @@
+{
+  "nodeId": "telegram-user",
+  "label": "Telegram User",
+  "type": "project",
+  "description": "Python script for Telegram bot functionality",
+  "aspects": [
+    {
+      "name": "documentation_status",
+      "importance": 7,
+      "attributes": [
+        "SKILL.md missing"
+      ]
+    },
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Telegram user-level actions"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83d\udcf1 Already have bot"
+      ]
+    },
+    {
+      "name": "creation_details",
+      "importance": 7,
+      "attributes": [
+        "Created at /workspace/tools/telegram-userbot.py",
+        "Script size: 4460 bytes",
+        "Initialized as a Telegram userbot framework"
+      ]
+    }
+  ]
+}

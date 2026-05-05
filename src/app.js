@@ -20,7 +20,7 @@ const { GraphContext, setEmbedderManager } = require('./graph');
 const { SessionManager } = require('./agent');
 const { ToolSystem } = require('./tools');
 const { AgentLoop } = require('./agent');
-const { Learner, Maintainer, Janitor, BackupWorker } = require('./workers');
+const { Learner, Maintainer, Janitor, ChannelDistiller, BackupWorker, GraphMaintenanceCoordinator } = require('./workers');
 const { GatewayManager } = require('./gateways');
 const { PluginManager } = require('./plugins');
 
@@ -155,7 +155,7 @@ function updateWebCapabilityNode(config, db, log) {
       const targetExists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(nodeId);
       const sourceExists = db.prepare('SELECT id FROM nodes WHERE id = ?').get(agentId);
       if (targetExists && sourceExists) {
-        db.prepare('INSERT INTO edges (source, target, type, weight) VALUES (?, ?, ?, 1)').run(agentId, nodeId, 'has_capability');
+        db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 1, 'boot', 'extracted')").run(agentId, nodeId, 'has_capability');
       }
     }
 
@@ -238,10 +238,10 @@ function migrateReferenceNodes(db, log) {
   // audit / restore until verified across all SPORE instances.
 
 // Web search & fetch reference node — gives the agent a per-tool
-  // ref node for web_search/web_fetch (alongside ref-search-tools,
-  // ref-bfl-api, ref-elevenlabs-api, etc.) AND a cross-reference on
-  // ref-acorn-context.client_routing so acorn agents see "use
-  // web_search for current info" alongside the local-routing hints.
+  // ref node for web_search/web_fetch (alongside ref-search-tools)
+  // AND a cross-reference on ref-acorn-context.client_routing so
+  // acorn agents see "use web_search for current info" alongside the
+  // local-routing hints.
   try {
     const migPath = path.join(__dirname, 'migrate-ref-web-search.sql');
     if (fs.existsSync(migPath)) {
@@ -253,6 +253,75 @@ function migrateReferenceNodes(db, log) {
     }
   } catch (e) {
     log.warn(`[boot] ref-web-search migration failed: ${e.message}`);
+  }
+
+  // Cron runtime reference node — includes the local proactive trigger
+  // endpoint so scheduled jobs can notify chat without carrying this recipe
+  // in every prompt.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-cron-runtime.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+        WHERE asp.node_id='ref-cron-runtime'
+          AND asp.name='cron'
+          AND a.content LIKE 'Cron and background jobs can notify%'
+      `).get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+        WHERE asp.node_id='ref-cron-runtime'
+          AND asp.name='cron'
+          AND a.content LIKE 'Cron and background jobs can notify%'
+      `).get()?.c || 0;
+      if (after > before) log.info('[boot] ref-cron-runtime proactive trigger migrated');
+    }
+  } catch (e) {
+    log.warn(`[boot] ref-cron-runtime migration failed: ${e.message}`);
+  }
+
+  // General tool workflow reference node. This is static operational
+  // knowledge, so it belongs in ref nodes rather than the always-included
+  // prompt.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-tool-workflows.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-tool-workflows'").get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare("SELECT COUNT(*) AS c FROM aspects WHERE node_id='ref-tool-workflows'").get()?.c || 0;
+      if (after > before) log.info(`[boot] ref-tool-workflows migrated: +${after - before} aspects`);
+    }
+  } catch (e) {
+    log.warn(`[boot] ref-tool-workflows migration failed: ${e.message}`);
+  }
+
+  // Web chat / panel behavior docs. The live prompt keeps only short
+  // pointers; this migration carries the detailed source-of-truth rules.
+  try {
+    const migPath = path.join(__dirname, 'migrate-ref-web-chat-ui.sql');
+    if (fs.existsSync(migPath)) {
+      const sql = fs.readFileSync(migPath, 'utf8');
+      const before = db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+        WHERE asp.node_id='ref-image-display'
+          AND a.content LIKE 'In web chat, reply with%'
+      `).get()?.c || 0;
+      db.exec(sql);
+      const after = db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+        WHERE asp.node_id='ref-image-display'
+          AND a.content LIKE 'In web chat, reply with%'
+      `).get()?.c || 0;
+      if (after > before) log.info('[boot] ref-web-chat-ui migrated');
+    }
+  } catch (e) {
+    log.warn(`[boot] ref-web-chat-ui migration failed: ${e.message}`);
   }
 }
 
@@ -279,6 +348,7 @@ async function boot() {
   await ensureGraph(config, log);
 
   const graph = new GraphContext(config, log);
+  graph._graphRegistry = graphRegistry;
   if (!graph.init()) {
     log.error('Failed to initialize graph context engine. Exiting.');
     process.exit(1);
@@ -308,9 +378,10 @@ async function boot() {
   // it sets config._isOAuth at register time and on every config
   // change. Core no longer string-matches against vendor token shapes.
   const llmClient = new MultiProvider(config);
-  log.info(`Provider ready — main model backend: ${require('./providers').detectBackend(config.model)}`);
+  log.info(`Provider cache initialized — main model backend: ${require('./providers').detectBackend(config.model, config)}`);
 
   const learner = new Learner(config, log, llmClient);
+  learner._graphRegistry = graphRegistry;
   if (!learner.init()) log.warn('Learner failed to init — learning disabled.');
 
   const maintainer = new Maintainer(config, log, llmClient, learner.db);
@@ -321,8 +392,18 @@ async function boot() {
   janitor.ensureSchema();
   log.info(`Janitor initialized (mode=${config.janitorMode || 'moderate'}, interval=${config.janitorIntervalMinutes || 360}m)`);
 
-  const backup = new BackupWorker(config, log, learner.db, config.graphDbPath);
+  const channelDistiller = new ChannelDistiller(config, log, llmClient, learner, graphRegistry);
+  log.info(`Channel distiller initialized (interval=${config.channelDistillerIntervalMinutes || 120}m, idle=${config.channelDistillerIdleMinutes || 45}m)`);
+
+  const backup = new BackupWorker(config, log, learner.db, config.graphDbPath, graphRegistry);
   backup.start();
+
+  const graphMaintenance = new GraphMaintenanceCoordinator(config, log, llmClient, learner, graphRegistry, {
+    maintainer,
+    janitor,
+    backup,
+  });
+  log.info(`Graph maintenance coordinator initialized (interval=${config.graphMaintenanceIntervalMinutes || 120}m)`);
 
   const sessions = new SessionManager(config, log, learner);
   if (!sessions.init()) {
@@ -334,7 +415,9 @@ async function boot() {
   tools.learner = learner;
   tools._maintainer = maintainer;
   tools._janitor = janitor;
+  tools._channelDistiller = channelDistiller;
   tools._backup = backup;
+  tools._graphMaintenance = graphMaintenance;
   tools._sessions = sessions;
   tools._graphRegistry = graphRegistry;
 
@@ -345,8 +428,10 @@ async function boot() {
   }
   agent.graphContext = graph;
   tools._agent = agent;
+  graphMaintenance.agent = agent;
 
   const gateways = new GatewayManager(config, log, agent, tools);
+  graph._gatewayManager = gateways;
 
   // Plugin system — opt-in. Plugins run as full-privilege Node code with no
   // sandbox, so loading is gated behind SPORE_PLUGINS_ENABLED.
@@ -380,6 +465,7 @@ async function boot() {
   agent._pluginManager = plugins;
   learner._pluginManager = plugins;
   maintainer._pluginManager = plugins;
+  channelDistiller._pluginManager = plugins;
   // GraphContext._buildPluginPromptSections + _buildPluginSection both gate
   // on this — without it, every plugin-contributed prompt section silently
   // disappears regardless of mode/registration. Was missed in phase 1 wiring.
@@ -400,6 +486,7 @@ async function boot() {
   try {
     const { setProviderManager } = require('./providers');
     setProviderManager(plugins);
+    log.info(`Provider ready — main model backend: ${require('./providers').detectBackend(config.model, config)}`);
   } catch (e) {
     log.warn(`[boot] setProviderManager failed: ${e.message}`);
   }
@@ -414,6 +501,9 @@ async function boot() {
     const _webGw = gateways.getGateway?.('web') || tools.gateway;
     if (_webGw && typeof _webGw._broadcastToSessionKey === 'function') {
       tools._wsBroadcast = (sessionKey, payload) => _webGw._broadcastToSessionKey(sessionKey, payload);
+    }
+    if (typeof tools._wireWebGatewayBroadcaster === 'function') {
+      tools._wireWebGatewayBroadcaster();
     }
     log.info('Spore Core is running.');
   } catch (e) {
@@ -482,6 +572,9 @@ async function boot() {
         } else if (result.error) {
           log.warn(`[web] Could not auto-start web server: ${result.error}`);
         }
+      }
+      if (typeof tools._wireWebGatewayBroadcaster === 'function') {
+        tools._wireWebGatewayBroadcaster();
       }
     } catch (e) {
       log.warn(`[web] Auto-start failed: ${e.message}`);
@@ -559,6 +652,9 @@ async function boot() {
         log.info('[heartbeat] Skipping maintenance — conversations active');
       } else {
         cycleSummary = await maintainer.runMaintenance();
+        if (config.graphMaintenanceEnabled !== false) {
+          await graphMaintenance.run({ reason: 'heartbeat' });
+        }
       }
     } catch (e) {
       log.error('[heartbeat] Maintainer error:', e.message);
@@ -576,13 +672,10 @@ async function boot() {
   }, heartbeatMs);
 
   async function dispatchProactive(cycleSummary) {
-    const discord = gateways.getGateway('discord');
-    const slack = gateways.getGateway('slack');
     const webGw = tools.gateway;
 
     const channelHints = [
-      ...(discord?.getActiveChannelIds?.() || []).map(h => ({ ...h, _gw: 'discord' })),
-      ...(slack?.getActiveChannelIds?.() || []).map(h => ({ ...h, _gw: 'slack' })),
+      ...gateways.getActiveChannelHints(),
       ...(webGw?.getActiveChannelIds?.() || []).map(h => ({ ...h, _gw: 'web' })),
     ];
 
@@ -590,14 +683,15 @@ async function boot() {
     if (!action || action.action !== 'post') return;
 
     const hint = channelHints.find(h => h.id === action.channelId);
-    const gwName = hint?._gw || 'discord';
+    const gwName = hint?._gw || null;
 
     if (gwName === 'web' && webGw?.injectProactivePrompt) {
       webGw.injectProactivePrompt(action.channelId, action.context, action.topic);
-    } else if (gwName === 'slack' && slack?.injectProactivePrompt) {
-      slack.injectProactivePrompt(action.channelId, action.context, action.topic);
-    } else if (discord?.injectProactivePrompt) {
-      discord.injectProactivePrompt(action.channelId, action.context, action.topic);
+    } else if (gwName) {
+      const gateway = gateways.getGateway(gwName);
+      if (gateway?.injectProactivePrompt) {
+        gateway.injectProactivePrompt(action.channelId, action.context, action.topic);
+      }
     }
   }
 
@@ -609,6 +703,9 @@ async function boot() {
       const cycleSummary = await maintainer.runMaintenance();
       if (cycleSummary && config.proactive?.enabled) {
         dispatchProactive(cycleSummary);
+      }
+      if (config.graphMaintenanceEnabled !== false) {
+        await graphMaintenance.run({ reason: 'boot' });
       }
     } catch (e) {
       log.error('[boot-maintenance] Error:', e.message);
@@ -629,6 +726,21 @@ async function boot() {
     try { await janitor.runJanitor(); } catch (e) { log.error('[boot-janitor] Error:', e.message); }
   }, janitorBootDelay);
 
+  // Channel distiller: channel conversations do not have a reliable
+  // session-end moment, so promote reusable lessons after an idle window.
+  const channelDistillerIntervalMs = (config.channelDistillerIntervalMinutes || 120) * 60_000;
+  const channelDistillerBootDelay = (config.channelDistillerBootDelayMinutes || 20) * 60_000;
+  const channelDistillerTimer = setInterval(async () => {
+    if (config.channelDistillerEnabled === false) return;
+    if (config.maintainerIdleOnly && agent.activeRuns.size > 0) return;
+    try { await channelDistiller.run(); } catch (e) { log.error('[channel-distill] Interval error:', e.message); }
+  }, channelDistillerIntervalMs);
+  log.info(`[channel-distill] Scheduled every ${Math.round(channelDistillerIntervalMs / 60000)}m, idle threshold ${config.channelDistillerIdleMinutes || 45}m, first cycle in ${Math.round(channelDistillerBootDelay / 60000)}m`);
+  setTimeout(async () => {
+    if (config.channelDistillerEnabled === false) return;
+    try { await channelDistiller.run(); } catch (e) { log.error('[boot-channel-distill] Error:', e.message); }
+  }, channelDistillerBootDelay);
+
   log.info(`Heartbeat scheduled every ${config.heartbeatIntervalMinutes || 45} minutes`);
 
   const shutdown = async (signal) => {
@@ -637,6 +749,7 @@ async function boot() {
       clearInterval(heartbeatTimer);
       clearInterval(wakeupSweepTimer);
       clearInterval(janitorTimer);
+      clearInterval(channelDistillerTimer);
       try { backup.stop(); } catch (e) { console.warn('[app] backup.stop failed: ' + e.message); }
       tools._killAllTracked();
       await plugins.shutdownAll();
@@ -707,9 +820,9 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
         const start = Date.now();
         const invokeSessionKey = `invoke:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
-        const fromAnima = body.from || null;
+        const fromSpore = body.from || null;
         const invokeLines = [
-          `[INTER-ANIMA MESSAGE${fromAnima ? ` from ${fromAnima}` : ''}]`,
+          `[INTER-SPORE MESSAGE${fromSpore ? ` from ${fromSpore}` : ''}]`,
           context ? `Context: ${context}` : null,
           '',
           message,
@@ -724,8 +837,8 @@ function startHealthServer(config, log, graph, sessions, gateways, learner, main
           content: invokeLines,
           channelId: invokeSessionKey,
           channelName: 'invoke',
-          userId: fromAnima || 'orchestrator',
-          userName: fromAnima || 'Orchestrator',
+          userId: fromSpore || 'orchestrator',
+          userName: fromSpore || 'Orchestrator',
           isDm: true,
           trigger: 'invoke',
           platform: 'api',

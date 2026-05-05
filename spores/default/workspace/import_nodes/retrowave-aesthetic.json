@@ -1,0 +1,17 @@
+{
+  "nodeId": "retrowave-aesthetic",
+  "label": "Retrowave Aesthetic",
+  "type": "concept",
+  "description": "Retro-futuristic synth-driven style",
+  "aspects": [
+    {
+      "name": "characteristics",
+      "importance": 7,
+      "attributes": [
+        "Synthwave elements",
+        "Retro-futuristic visuals",
+        "Vibrant color palette"
+      ]
+    }
+  ]
+}

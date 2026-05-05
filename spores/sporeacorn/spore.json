@@ -1,0 +1,34 @@
+{
+  "agentId": "animaacorn",
+  "displayName": "Spore Acorn",
+  "nicknames": [
+    "acorn"
+  ],
+  "privacy": {
+    "default": {
+      "private": false,
+      "learn": true,
+      "shareToFeed": true,
+      "respond": true
+    }
+  },
+  "channels": {},
+  "contextWindow": 32768,
+  "compactTokenThreshold": 24000,
+  "compactKeepTail": 20,
+  "proactive": {
+    "enabled": true,
+    "cooldownMinutes": 60,
+    "maxPerDay": 5,
+    "channels": []
+  },
+  "voice": {
+    "enabled": false,
+    "sttProvider": "deepgram",
+    "ttsSpeed": 1,
+    "edgeVoice": "en-US-AriaNeural",
+    "silenceThresholdMs": 400,
+    "maxUtteranceSecs": 30
+  },
+  "enhancedRecall": false
+}

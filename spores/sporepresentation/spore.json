@@ -1,0 +1,12 @@
+{
+  "agentId": "animapresentation",
+  "displayName": "Spore Presentation",
+  "nicknames": ["presentation"],
+  "privacy": {
+    "default": { "private": false, "learn": true, "shareToFeed": true, "respond": true }
+  },
+  "channels": {},
+  "contextWindow": 200000,
+  "compactTokenThreshold": 150000,
+  "compactKeepTail": 40
+}

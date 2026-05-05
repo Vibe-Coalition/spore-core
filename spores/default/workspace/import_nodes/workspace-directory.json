@@ -1,0 +1,33 @@
+{
+  "nodeId": "workspace-directory",
+  "label": "Workspace Directory",
+  "type": "directory",
+  "description": "Container-mounted workspace directory (~/.openclaw/workspace) accessible directly on the host filesystem",
+  "aspects": [
+    {
+      "name": "mount_info",
+      "importance": 9,
+      "attributes": [
+        "mounted_as_bind_mount",
+        "data_access_on_host",
+        "contains_container_files"
+      ]
+    },
+    {
+      "name": "transfer_methods",
+      "importance": 8,
+      "attributes": [
+        "recommended_cp_command",
+        "recommended_scp_command",
+        "recommended_rsync_command",
+        "recommended_tar_command"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "magic-wormhole",
+      "type": "requires"
+    }
+  ]
+}

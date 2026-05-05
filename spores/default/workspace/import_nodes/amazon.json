@@ -1,0 +1,88 @@
+{
+  "nodeId": "amazon",
+  "label": "Amazon",
+  "type": "skill",
+  "description": "Record of 10 orders and 15 items retrieved from Amazon",
+  "aspects": [
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Search Amazon.ca + order history"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83d\uded2 Practical"
+      ]
+    },
+    {
+      "name": "setup_instructions",
+      "importance": 8,
+      "attributes": [
+        "Required: Amazon.ca cookies obtained via browser Dev Tools Network tab",
+        "Command to execute: node /workspace/tools/amazon.js set-cookies '<your cookies>'"
+      ]
+    },
+    {
+      "name": "setup_requirements",
+      "importance": 8,
+      "attributes": [
+        "Requires full initial page load cookies before CAPTCHA challenges",
+        "Needs valid session-id and ubid-acbca tokens",
+        "Auth token (at-acbca) may rotate after logout",
+        "Cookies must be saved using 'set-cookies' command with proper formatting"
+      ]
+    },
+    {
+      "name": "authentication_requirements",
+      "importance": 9,
+      "attributes": [
+        "Cookies require periodic renewal after logout",
+        "CAPTCHA tokens (x-amz-captcha-1/2) are single-use",
+        "csd-key token requires validation for session integrity"
+      ]
+    },
+    {
+      "name": "status",
+      "importance": 8,
+      "attributes": [
+        "Amazon skill is live"
+      ]
+    },
+    {
+      "name": "session_cookies",
+      "importance": 9,
+      "attributes": [
+        "at-acbca",
+        "ubid-acbca",
+        "session-id",
+        "x-acbca",
+        "sst-acbca",
+        "session-token"
+      ]
+    },
+    {
+      "name": "order_count",
+      "importance": 8,
+      "attributes": [
+        "10 orders"
+      ]
+    },
+    {
+      "name": "item_count",
+      "importance": 8,
+      "attributes": [
+        "15 items"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "amazon",
+      "type": "manages"
+    }
+  ]
+}

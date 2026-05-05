@@ -1,0 +1,21 @@
+{
+  "nodeId": "timeout-001",
+  "label": "Command Timeout",
+  "type": "system_setting",
+  "description": "Execution timeout duration for image analysis",
+  "aspects": [
+    {
+      "name": "execution_timeout",
+      "importance": 7,
+      "attributes": [
+        "30s"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "error-001",
+      "type": "caused_by"
+    }
+  ]
+}

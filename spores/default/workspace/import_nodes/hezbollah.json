@@ -1,0 +1,22 @@
+{
+  "nodeId": "hezbollah",
+  "label": "Hezbollah",
+  "type": "organization",
+  "description": "Lebanese militant group",
+  "aspects": [
+    {
+      "name": "military_actions",
+      "importance": 8,
+      "attributes": [
+        "Launched rocket/UAV barrage on Israeli territories on 2026-04-12",
+        "Targeted Kiryat Shmona, Mateh Asher, Ma'ale Yosef, Western & Upper Galilee"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "israeli-news-hebrew",
+      "type": "launched_attack"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "nodeId": "telegram_test",
+  "label": "TELEGRAM_TEST",
+  "type": "environment_variable",
+  "description": "Test variable for Telegram integration",
+  "edges": [
+    {
+      "target": "env_file",
+      "type": "stored_in"
+    }
+  ]
+}

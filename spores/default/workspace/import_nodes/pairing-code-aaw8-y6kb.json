@@ -1,0 +1,35 @@
+{
+  "nodeId": "pairing-code-aaw8-y6kb",
+  "label": "AAW8-Y6KB",
+  "type": "concept",
+  "description": "Telegram pairing code for user @thisAndThat0",
+  "aspects": [
+    {
+      "name": "pairing_details",
+      "importance": 8,
+      "attributes": [
+        "Code: AAW8-Y6KB",
+        "Telegram user ID: 697706930",
+        "Created at: 2026-04-12",
+        "Status: Approved"
+      ]
+    },
+    {
+      "name": "creation_timestamp",
+      "importance": 7,
+      "attributes": [
+        "2026-04-12T08:49:18.574Z"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "hyru1ebot",
+      "type": "associated_with"
+    },
+    {
+      "target": "hyru1ebot",
+      "type": "paired_with"
+    }
+  ]
+}

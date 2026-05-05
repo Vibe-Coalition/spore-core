@@ -1,0 +1,22 @@
+{
+  "nodeId": "pirate-coin",
+  "label": "Pirate Coin",
+  "type": "project",
+  "description": "Cryptocurrency group mentioned in the Telegram organization",
+  "aspects": [
+    {
+      "name": "category",
+      "importance": 7,
+      "attributes": [
+        "Cryptocurrency group"
+      ]
+    },
+    {
+      "name": "Membership",
+      "importance": 8,
+      "attributes": [
+        "19 members"
+      ]
+    }
+  ]
+}

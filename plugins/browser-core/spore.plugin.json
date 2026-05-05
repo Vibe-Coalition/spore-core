@@ -1,0 +1,9 @@
+{
+  "id": "browser-core",
+  "name": "Browser Tool",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": [],
+  "description": "Owns the `browser` tool surface (launch, navigate, click, type, scroll, screenshot, evaluate, snapshot, tab_*, close, status). Dispatches to whichever browser-backend plugin (zendriver, playwright, …) the operator has chosen via config.browserBackend or the per-call backend arg. Both backend plugins must be installed alongside this one for the corresponding selectors to work; uninstalling either backend just removes that selector — the tool keeps working with whatever's left."
+}

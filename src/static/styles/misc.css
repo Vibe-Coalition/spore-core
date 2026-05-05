@@ -30,8 +30,13 @@
     transition: background .15s;
   }
   .picker-dropdown .gp-item:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  .picker-dropdown .gp-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); border-left: 3px solid var(--accent); }
-  .picker-dropdown .gp-item .gp-name {
+	  .picker-dropdown .gp-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); border-left: 3px solid var(--accent); }
+	  .picker-dropdown .gp-item.viewing { background: color-mix(in srgb, var(--accent2, var(--accent)) 12%, transparent); border-left: 3px solid var(--accent2, var(--accent)); }
+	  .picker-dropdown .gp-item.protected {
+	    background: color-mix(in srgb, var(--accent) 7%, transparent);
+	    border-left: 3px solid color-mix(in srgb, var(--accent) 70%, var(--text-dim));
+	  }
+	  .picker-dropdown .gp-item .gp-name {
     font-size: .78rem; font-weight: 500; color: var(--text-bright); flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
@@ -39,10 +44,20 @@
     font-size: .62rem; color: var(--text-dim); font-family: var(--font-body);
     white-space: nowrap;
   }
-  .picker-dropdown .gp-item .gp-active-badge {
-    font-size: .55rem; background: var(--accent); color: #fff; padding: 1px 5px;
-    border-radius: 4px; font-weight: 600; letter-spacing: .03em;
-  }
+	  .picker-dropdown .gp-item .gp-active-badge {
+	    font-size: .55rem; background: var(--accent); color: #fff; padding: 1px 5px;
+	    border-radius: 4px; font-weight: 600; letter-spacing: .03em;
+	  }
+	  .picker-dropdown .gp-item.protected .gp-active-badge {
+	    background: color-mix(in srgb, var(--accent) 18%, transparent);
+	    color: var(--accent);
+	    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+	  }
+	  .picker-dropdown .gp-item.viewing .gp-active-badge {
+	    background: color-mix(in srgb, var(--accent2, var(--accent)) 18%, transparent);
+	    color: var(--accent2, var(--accent));
+	    border: 1px solid color-mix(in srgb, var(--accent2, var(--accent)) 35%, transparent);
+	  }
   .picker-dropdown .gp-item .gp-actions {
     display: flex; gap: 4px; opacity: 0; transition: opacity .15s;
   }
@@ -103,7 +118,7 @@
 
   /* ── Browser Live Preview Panel ── */
   #browser-preview {
-    display: none; position: fixed; z-index: 9999;
+    display: none; position: fixed; z-index: 70;
     width: 420px; border-radius: 10px; overflow: hidden;
     background: var(--surface); border: 1px solid var(--border);
     box-shadow: 0 8px 32px rgba(0,0,0,.5);
@@ -161,37 +176,50 @@
 
   /* ── Code Viewer Panel (docked + floating) ── */
   #code-viewer {
-    display: none; position: fixed; z-index: 9998;
-    width: 560px; height: 420px; border-radius: 10px; overflow: hidden;
-    background: var(--surface); border: 1px solid var(--border);
-    box-shadow: 0 12px 40px rgba(0,0,0,.45);
-    flex-direction: column; top: 60px; right: 24px;
-    opacity: 0; transition: opacity .15s ease;
+    display: none; position: fixed; z-index: 68;
+    width: min(760px, calc(100vw - 48px)); height: min(560px, calc(100vh - 96px));
+    min-width: 360px; min-height: 260px;
+    border-radius: 18px; overflow: hidden; box-sizing: border-box;
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 60px rgba(0,0,0,.38);
+    backdrop-filter: blur(14px);
+    flex-direction: column; top: 84px; right: 24px;
+    opacity: 0; transition: opacity .15s ease, transform .15s ease;
   }
+  #code-viewer, #code-viewer * { box-sizing: border-box; }
   #code-viewer.active { display: flex; opacity: 1; }
-  /* Docked mode: covers the entire canvas pane including controls */
+  /* Docked mode: an in-canvas panel, not a separate Graph/Code tab view. */
   #code-viewer.cv-docked {
-    position: absolute !important; inset: 0 !important;
-    width: 100% !important; height: 100% !important;
-    border-radius: 0; border: none; box-shadow: none; z-index: 50;
+    position: absolute !important; inset: 16px 16px 76px 16px !important;
+    width: auto !important; height: auto !important;
+    min-width: 0; min-height: 0;
+    border-radius: 18px;
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 60px rgba(0,0,0,.30);
+    z-index: 55;
   }
   @keyframes cv-fade-in { from { opacity: 0; } to { opacity: 1; } }
   #code-viewer.cv-docked.cv-entering { animation: cv-fade-in .2s ease forwards; }
   #code-viewer.cv-docked #code-viewer-header {
-    cursor: default; padding: 5px 12px;
-    background: var(--surface); border-bottom: 1px solid var(--border);
+    cursor: default;
   }
   #code-viewer.cv-docked #code-viewer-resize { display: none; }
   #code-viewer.cv-docked .cv-dock-btn { display: none; }
   #code-viewer:not(.cv-docked) .cv-float-indicator { display: none; }
   #code-viewer-header {
     display: flex; align-items: center; gap: 8px;
-    padding: 7px 12px; background: var(--element);
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--surface) 85%, transparent);
     cursor: grab; user-select: none; font-size: 12px; flex-shrink: 0;
     border-bottom: 1px solid var(--border);
+    min-width: 0;
   }
   #code-viewer-header:active { cursor: grabbing; }
-  #code-viewer-icon { color: var(--accent2); font-weight: 700; font-size: 13px; }
+  #code-viewer-icon {
+    color: var(--text-bright); font-weight: 500; font-size: .82rem;
+    letter-spacing: -.005em; text-transform: lowercase;
+  }
   #code-viewer-path {
     color: var(--text); font-size: 12px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; flex: 1;
@@ -199,7 +227,7 @@
   }
   .cv-badge {
     font-size: 9px; padding: 1px 6px; border-radius: 3px;
-    font-weight: 700; text-transform: uppercase; flex-shrink: 0;
+    font-weight: 700; text-transform: lowercase; flex-shrink: 0;
   }
   .cv-badge-new { background: #238636; color: #fff; }
   .cv-badge-edit { background: #1f6feb; color: #fff; }
@@ -211,23 +239,22 @@
   }
   #code-viewer-mode:hover { color: var(--text); border-color: var(--accent2); }
   #code-viewer-close {
-    background: none; border: none; color: var(--text-dim); cursor: pointer;
-    font-size: 16px; line-height: 1; padding: 0 4px; flex-shrink: 0;
+    background: transparent; border: none; color: var(--text-dim); cursor: pointer;
+    width: 26px; height: 26px; border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 16px; line-height: 1; padding: 0; flex-shrink: 0;
   }
-  #code-viewer-close:hover { color: var(--text); }
+  #code-viewer-close:hover {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+  }
   .cv-dock-btn {
     background: none; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer;
     font-size: 10px; padding: 1px 6px; border-radius: 3px; flex-shrink: 0;
     font-family: var(--font-body);
   }
   .cv-dock-btn:hover { color: var(--text); border-color: var(--accent2); }
-  #cv-pending-badge {
-    display: none; position: fixed; z-index: 9999; bottom: 16px; right: 16px;
-    background: var(--accent2, #7aa583); color: #fff; border-radius: 20px;
-    padding: 6px 14px; font-size: 12px; cursor: pointer; font-weight: 600;
-    box-shadow: 0 4px 16px rgba(0,0,0,.4); transition: transform .15s;
-  }
-  #cv-pending-badge:hover { transform: scale(1.05); }
+  #cv-pending-badge { font-family: var(--font-body); }
   #code-viewer-tabs {
     display: flex; gap: 0; background: var(--element); border-bottom: 1px solid var(--border);
     overflow-x: auto; flex-shrink: 0; min-height: 0;
@@ -246,7 +273,7 @@
   }
   .cv-tab-close:hover { opacity: 1; }
   #code-viewer-content {
-    flex: 1; overflow: auto; position: relative;
+    flex: 1; overflow: auto; position: relative; min-width: 0; min-height: 0;
     font-size: 12px; line-height: 1.6;
   }
   #code-viewer-content pre {

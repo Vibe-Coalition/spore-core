@@ -1,0 +1,42 @@
+{
+  "nodeId": "ref-bfl-api",
+  "label": "BFL / FLUX Image Generation",
+  "type": "reference",
+  "description": "Black Forest Labs API for image generation and editing via FLUX models.",
+  "aspects": [
+    {
+      "name": "essentials",
+      "importance": 10,
+      "attributes": [
+        "Domain: api.bfl.ai \u2014 NOT api.bfl.ml (that hangs)",
+        "Auth header: X-Key: YOUR_BFL_API_KEY (not Bearer)",
+        "Default model: flux-2-pro-preview (use for everything unless told otherwise)",
+        "Other models: flux-kontext-pro, flux-kontext-max, flux-pro-1.1, flux-2-pro",
+        "Submit: POST https://api.bfl.ai/v1/{model} with JSON body",
+        "Response has polling_url \u2014 ALWAYS use it (may point to regional node like api.us2.bfl.ai)",
+        "Poll the polling_url with X-Key header until status=\"Ready\"",
+        "Image URL at result.sample \u2014 NOT result.url or result.image_url",
+        "Signed URLs expire ~1hr \u2014 download or display promptly"
+      ]
+    },
+    {
+      "name": "parameters",
+      "importance": 8,
+      "attributes": [
+        "Required: prompt (string)",
+        "Optional: width, height, output_format (\"jpeg\" or \"png\"), seed",
+        "Image editing: add input_image param (URL, raw base64, or data URI all work)",
+        "Edit prompts: describe what CHANGED, not the full scene",
+        "Typical generation: 5-15 seconds. Poll every 3s, timeout at 60s."
+      ]
+    },
+    {
+      "name": "display_rule",
+      "importance": 9,
+      "attributes": [
+        "Always show generated images inline in chat: ![description](result.sample URL)",
+        "Do NOT just report a file path \u2014 the user wants to SEE the image"
+      ]
+    }
+  ]
+}

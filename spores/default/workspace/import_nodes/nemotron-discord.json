@@ -1,0 +1,29 @@
+{
+  "nodeId": "nemotron-discord",
+  "label": "Nemotron Discord",
+  "type": "project",
+  "description": "Nemotron Discord integration",
+  "aspects": [
+    {
+      "name": "documentation_status",
+      "importance": 7,
+      "attributes": [
+        "SKILL.md missing"
+      ]
+    },
+    {
+      "name": "description",
+      "importance": 8,
+      "attributes": [
+        "Nemotron Discord integration"
+      ]
+    },
+    {
+      "name": "usefulness",
+      "importance": 7,
+      "attributes": [
+        "\ud83e\udd37 Niche"
+      ]
+    }
+  ]
+}

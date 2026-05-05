@@ -2,8 +2,9 @@
 // in-tree class was: synthesize(text, opts) → Buffer, synthesizeOgg(text)
 // alias. Reads the API key + voice/model overrides from the plugin
 // slot (config.plugins.elevenlabs.*) first, then falls back to
-// host-level fields (config.xiApiKey + config.voice.ttsVoice etc.) so
-// existing instances keep working without re-entering credentials.
+// process.env.XI_API_KEY (and host-level voice settings like
+// config.voice.ttsVoice) so existing .env files keep working without
+// re-entering credentials.
 
 const https = require('https');
 
@@ -11,7 +12,7 @@ class ElevenLabsTTS {
   constructor(config) {
     const slot = config?.plugins?.elevenlabs || {};
     const voice = config?.voice || {};
-    this.apiKey = slot.apiKey || config?.xiApiKey || null;
+    this.apiKey = slot.apiKey || process.env.XI_API_KEY || null;
     if (!this.apiKey) throw new Error('ElevenLabs TTS: no API key (set plugins.elevenlabs.apiKey or XI_API_KEY)');
     this.voiceId = slot.voiceId || voice.ttsVoice || 'JBFqnCBsd6RMkjVDRZzb'; // 'George' — warm male
     this.modelId = slot.modelId || voice.ttsModel || 'eleven_turbo_v2_5';

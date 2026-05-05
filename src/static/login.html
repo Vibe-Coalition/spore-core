@@ -78,9 +78,8 @@
 
   // Theme — two-theme system mirrors graph-viewer.html. `dark` has empty
   // vars (the page :root carries the dark baseline). `light` overrides
-  // for the warm stone palette. Legacy stored names (midnight, paper,
-  // terminal, ember, arctic, neon, forest) are normalized: paper/arctic
-  // → light, everything else → dark.
+  // for the warm stone palette. Stale stored names from older multi-theme
+  // builds normalize to `dark` via normalizeThemeName().
   // Light Petri palette — values from dir-petri.jsx PETRI_THEMES.light,
   // surface/panel deepened ~4% to compensate for the same too-white
   // effect we tuned around in graph-viewer.html (prototype's literal
@@ -95,8 +94,7 @@
     },
   };
   function normalizeThemeName(name) {
-    if (name === 'light' || name === 'paper' || name === 'arctic') return 'light';
-    return 'dark';
+    return name === 'light' ? 'light' : 'dark';
   }
   const stored = (() => { try { return localStorage.getItem('spore-theme'); } catch { return null; } })();
   const themeName = normalizeThemeName(stored);

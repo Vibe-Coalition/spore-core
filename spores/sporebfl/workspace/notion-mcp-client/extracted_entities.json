@@ -1,0 +1,2597 @@
+{
+  "flux_models": [
+    "FLUX LoRA",
+    "FLUX VTO",
+    "FLUX.1",
+    "FLUX.1.1",
+    "FLUX.2",
+    "FLUX.2 [dev]",
+    "FLUX.2 [klein]",
+    "FLUX.2 [max]",
+    "FLUX.2.0",
+    "FLUX.2.1",
+    "FLUX.2.5",
+    "FLUX.3",
+    "FLUX.4"
+  ],
+  "products": {
+    "FLUX.2": {
+      "description": "FLUX 2 image generation model",
+      "page_id": "21bc3702-22d5-80b3-a07b-e4d00718332a"
+    },
+    "FLUX.2 Ultra": {
+      "description": "Ultra quality FLUX.2 variant",
+      "page_id": "2fcc3702-22d5-80df-82d2-f83862248d97"
+    },
+    "FLUX.2 [klein]": {
+      "description": "Smaller/efficient FLUX.2 variant",
+      "page_id": "2e9c3702-22d5-805a-be1f-f9955ca9a94e"
+    },
+    "FLUX.2 [max]": {
+      "description": "Top-tier quality image generation and editing",
+      "page_id": "2c6c3702-22d5-8069-b787-c98cce2fd640"
+    },
+    "FLUX.2.1": {
+      "description": "FLUX 2.1 model update",
+      "page_id": "334c3702-22d5-8085-8330-c6bdc698e225"
+    },
+    "FLUX.3": {
+      "description": "Next generation FLUX model",
+      "page_id": "30fc3702-22d5-80ba-8b75-fa15a9536678"
+    }
+  },
+  "companies": [
+    "Adobe",
+    "Amazon",
+    "Cloudflare",
+    "Microsoft",
+    "Snap"
+  ],
+  "teams": {
+    "Backend Sync": {
+      "pages": [
+        "17cc3702-22d5-803b-af51-c8acc31ba788"
+      ],
+      "members": []
+    },
+    "Backend Sync 01-04-2026": {
+      "pages": [
+        "335c3702-22d5-8065-b8e9-c59c47491763"
+      ],
+      "members": []
+    },
+    "Backend Sync 08-04-2026": {
+      "pages": [
+        "33cc3702-22d5-80ed-8599-eab64d933a97"
+      ],
+      "members": []
+    },
+    "Backend Sync 16-04-2026 ": {
+      "pages": [
+        "344c3702-22d5-8087-8c27-e736532bd14e"
+      ],
+      "members": []
+    },
+    "Backend Sync 18-03-2026": {
+      "pages": [
+        "e04c3702-22d5-82fa-b162-811138da8ed1"
+      ],
+      "members": []
+    },
+    "Backend Sync 25-03-2026": {
+      "pages": [
+        "32dc3702-22d5-80c5-8338-e6529fac2173"
+      ],
+      "members": []
+    },
+    "Booking Meeting Rooms": {
+      "pages": [
+        "32ec3702-22d5-8080-a662-eed3ef76a16c"
+      ],
+      "members": []
+    },
+    "FLUX 2.1 meeting": {
+      "pages": [
+        "334c3702-22d5-8085-8330-c6bdc698e225"
+      ],
+      "members": []
+    },
+    "GTM Team Meeting Notes": {
+      "pages": [
+        "311c3702-22d5-81fa-b2cb-cc446435cdad"
+      ],
+      "members": []
+    },
+    "Product <> FDE Weekly": {
+      "pages": [
+        "32ec3702-22d5-80b5-9b66-d055163a2d18"
+      ],
+      "members": []
+    },
+    "Product Eng Weekly": {
+      "pages": [
+        "27ec3702-22d5-80cb-98d2-d86d4e8b7995"
+      ],
+      "members": []
+    },
+    "Product Eng Weekly Sync - April 14": {
+      "pages": [
+        "334c3702-22d5-80f3-af53-ec86a80a608e"
+      ],
+      "members": []
+    },
+    "Product Weekly": {
+      "pages": [
+        "2a3c3702-22d5-8097-a7b2-c4c07dfde711"
+      ],
+      "members": []
+    },
+    "Robin Snap meeting brief - April 19, 2026": {
+      "pages": [
+        "327c3702-22d5-80bb-9741-ed8d504f84cd"
+      ],
+      "members": []
+    },
+    "Sales Weekly": {
+      "pages": [
+        "309c3702-22d5-816b-a3c8-c6a8fcb14564"
+      ],
+      "members": []
+    },
+    "Team Directory  and New data source": {
+      "pages": [
+        "173c3702-22d5-8056-98cd-e38aa235e4ae"
+      ],
+      "members": []
+    },
+    "Team Directory & Org chart": {
+      "pages": [
+        "17bc3702-22d5-80d7-b8a9-f0471ff142b5"
+      ],
+      "members": []
+    },
+    "Team Tasks": {
+      "pages": [
+        "48f58e73-ff9f-45f7-a300-f05c909b7e38"
+      ],
+      "members": []
+    },
+    "Team specific tools and access": {
+      "pages": [
+        "9bc20819-33c9-469a-a63c-d99723341c40"
+      ],
+      "members": []
+    },
+    "Vision for Training Cluster Team: Making 10,000+ GPU Training Reliable, Fast, and Effortless": {
+      "pages": [
+        "33dc3702-22d5-8066-b082-cd55981dae1a"
+      ],
+      "members": []
+    }
+  },
+  "people": {
+    "Aaron Schuster": {
+      "roles": [
+        "ads BD"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Abby Hamilton": {
+      "roles": [
+        "Pacific timezone"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Account Executive": {
+      "roles": [
+        "mid-level"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Account Lead": {
+      "roles": [
+        "Partnerships"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Account Ownership\n\tAmber": {
+      "roles": [
+        "RevOps"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Account Tiering Framework": {
+      "roles": [
+        "Sam"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Accounting Germany": {
+      "roles": [
+        "Wenzel & Decker"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Acrobat Studio": {
+      "roles": [
+        "2025"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Actual Revenue": {
+      "roles": [
+        "Research"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Adam Chen": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Adobe Boards": {
+      "roles": [
+        "Concepts"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Adobe Brain": {
+      "roles": [
+        "est. launch April 2026"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Adobe Experience Manager": {
+      "roles": [
+        "AEM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Adobe Experience Platform": {
+      "roles": [
+        "AEP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Adobe Firefly Foundry": {
+      "roles": [
+        "or any other product/feature name"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Adobe Foundry": {
+      "roles": [
+        "and whether there is any tie to Firefly in the scope of this agreement"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Adobe Max": {
+      "roles": [
+        "Oct 28th"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Advent Digital": {
+      "roles": [
+        "3 market submissions"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Agreement Study": {
+      "roles": [
+        "500 pairs",
+        "Mar 27, 2026"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Alexei Stolier": {
+      "roles": [
+        "key contract stakeholder"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Amazon Ads": {
+      "roles": [
+        "Small Group",
+        "API License"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Amazon Contract": {
+      "roles": [
+        "similar to Meta"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Amazon Kids": {
+      "roles": [
+        "early conversations"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Anthony Charbonnier": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Applied Scientist Lead": {
+      "roles": [
+        "new to team, joined last week"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Artem Lovan": {
+      "roles": [
+        "Cloud Solutions Architect"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Asset Studio": {
+      "roles": [
+        "coming soon"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Auto Aspect Ratio Inference": {
+      "roles": [
+        "Maksim"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Automotive Hero Shot": {
+      "roles": [
+        "Advertising"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Aysun Odabasi": {
+      "roles": [
+        "Delivery Manager, 11 years at Microsoft",
+        "Delivery Manager, 11 years at Microsoft"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Azure Blob": {
+      "roles": [
+        "`bfldeliveryprodeu*.blob.core.windows.net`"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Azure Blob Storage Pricing": {
+      "roles": [
+        "see below"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Azure Consumed Revenue": {
+      "roles": [
+        "ACR"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Azure Direct Models": {
+      "roles": [
+        "ADM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Azure Foundry": {
+      "roles": [
+        "MaaS"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Azure Kubernetes Service": {
+      "roles": [
+        "AKS"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Azure Team": {
+      "roles": [
+        "Matt Vegas + Locky Ainley"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Base Model": {
+      "roles": [
+        "Axel"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Be Done": {
+      "roles": [
+        "JTBD"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Bending Spoons": {
+      "roles": [
+        "Anthony \u2014 to be distributed as he focuses on Head of GTM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Black Forest Labs": {
+      "roles": [
+        "BFL",
+        "Matt, Jakob",
+        "Matt, Jakob",
+        "Matt",
+        "BFL"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Brand Brain": {
+      "roles": [
+        "DX"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Brand Context Protocol": {
+      "roles": [
+        "BCP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Candidate Presentation": {
+      "roles": [
+        "15 min",
+        "15 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Case Study": {
+      "roles": [
+        "Reseller Version"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Case Study Evaluation Rubric": {
+      "roles": [
+        "Internal Only, Do Not Share with Candidate"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Client Delivery Workflows": {
+      "roles": [
+        "service layer"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Client Deployments": {
+      "roles": [
+        "rev share"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Coding Round": {
+      "roles": [
+        "60min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Commercial License Agreement": {
+      "roles": [
+        "\u201dCLA\u201d"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Commercial Negotiations": {
+      "roles": [
+        "30%"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Company Size": {
+      "roles": [
+        "Employees"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Complex Strategic Deal Experience": {
+      "roles": [
+        "30%"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Compute Plan": {
+      "roles": [
+        "deprecated",
+        "deprecated"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Concept Slider": {
+      "roles": [
+        "directional LoRA"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Conference Room": {
+      "roles": [
+        "4-6 People, all with whiteboards"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Connect Stephen": {
+      "roles": [
+        "developer relations"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Content Authenticity Initiative": {
+      "roles": [
+        "CAI"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Content Moderation Vendor": {
+      "roles": [
+        "s",
+        "s"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Core Content": {
+      "roles": [
+        "to be verified"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Creative Agency": {
+      "roles": [
+        "Brand / Ideation"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Creative Cloud": {
+      "roles": [
+        "Photoshop, Illustrator, Express"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Creative Studio": {
+      "roles": [
+        "CRX team"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Creator Apps": {
+      "roles": [
+        "plenty more to add here"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Critical Bottleneck": {
+      "roles": [
+        "Pick ONE to solve in Q1"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Culture Fit": {
+      "roles": [
+        "30 min",
+        "30 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Culture Round": {
+      "roles": [
+        "45 min - 1 hr"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Current Channel Economics": {
+      "roles": [
+        "Monthly Averages, Last Quarter"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Custom Endpoints": {
+      "roles": [
+        "<mention-page url=\"https://www.notion.so/30bc370222d580ebba9cf9c25cf3555b\"/>"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Customer Dataset Examples": {
+      "roles": [
+        "Image-to-Image"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Customer Onboarding": {
+      "roles": [
+        "API/Playground"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Customer Success List": {
+      "roles": [
+        "[Licensing](https://app.attio.com/black-forest-labs/collection/6a27e785-5074-4ca2-809b-c408768e1d67/view/7868f881-ef93-463f-95af-9ce652c4cbed"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Dan Chung": {
+      "roles": [
+        "Partner Group Manager, Designer Org"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Daniel June": {
+      "roles": [
+        "DPO"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Data Act Addendum": {
+      "roles": [
+        "[Template](https://docs.google.com/document/d/1l8wtobnJFhRiBBlR74JRj8Iya1kIaAYiGWGS1oao1AU/edit?usp=drive_link",
+        "see above"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Data Eng": {
+      "roles": [
+        "training data"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Data Processing Addendum": {
+      "roles": [
+        "[Template](https://docs.google.com/document/d/1OZf287iP8t7djis4N7CdJVc4gh0muNti0N9kQU6BzT8/edit?usp=drive_link",
+        "[Template](https://docs.google.com/document/d/1qFQMr0OtWzo-nbrbyYfrBZax-ijRPZVLBxkkuE_GcC4/edit?usp=drive_link"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Data Processing Agreement": {
+      "roles": [
+        "DPA"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Data Sources": {
+      "roles": [
+        "You can use the \"view\" tool on the URL of any Data Source to see its full schema configuration."
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Dated Versions": {
+      "roles": [
+        "Snapshots"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Deal Lead": {
+      "roles": [
+        "Sales"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Deal Updates": {
+      "roles": [
+        "\\>\\$1M value"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Derek Johnson": {
+      "roles": [
+        "GM of PowerPoint",
+        "VP",
+        "PowerPoint GM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Design Doc": {
+      "roles": [
+        "if build from scratch"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Detailed Term Tracker": {
+      "roles": [
+        "left = most recent"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Dev Model": {
+      "roles": [
+        "for compliance and potential reseller transition"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Developer Relations": {
+      "roles": [
+        "old",
+        "2026",
+        "2026"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Digital Experience": {
+      "roles": [
+        "their B2B offering",
+        "DX",
+        "DX"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Digital Media": {
+      "roles": [
+        "includes Creative Cloud",
+        "DME",
+        "DME"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Director Technology Partnerships": {
+      "roles": [
+        "Content, Commerce & AI"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Disclosure Agreement": {
+      "roles": [
+        "NDA"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Discriminative Tasks": {
+      "roles": [
+        "Owner **\u274c"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Draft Update": {
+      "roles": [
+        "Not Sent"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Embedded Client Pricing Issue": {
+      "roles": [
+        "Envato"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Enagagement Level": {
+      "roles": [
+        "1-5"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "End Users": {
+      "roles": [
+        "or others acting on their behalf"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Engagement Framework": {
+      "roles": [
+        "Anthony"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Enhanced Prompts": {
+      "roles": [
+        "OpenRouter, same 480 pairs"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Enterprise Agreement": {
+      "roles": [
+        "EA"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Enterprise Playground Demo": {
+      "roles": [
+        "Deutsche Telekom"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Epic Games": {
+      "roles": [
+        "Unreal fab"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "European Champion": {
+      "roles": [
+        "confident without arrogance"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Evaluation Criteria": {
+      "roles": [
+        "in order of importance"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Executed Agreements": {
+      "roles": [
+        "unsorted"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Executed Partnership Agreements": {
+      "roles": [
+        "unsorted"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Executive Briefing Review": {
+      "roles": [
+        "EBR"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Existing Footage": {
+      "roles": [
+        "V2V Editing"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Existing Models": {
+      "roles": [
+        "FLUX 1.x, FLUX 2"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Existing Video": {
+      "roles": [
+        "V2V Editing"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Experience Platform": {
+      "roles": [
+        "AEP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Failure Scenario": {
+      "roles": [
+        "December 2026"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Fashion Virtual Model Walk": {
+      "roles": [
+        "Ecommerce"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Field Marketing": {
+      "roles": [
+        "defer to when we have more mature GTM engine"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Finalize Marketing Lead": {
+      "roles": [
+        "Brand, Content & Community"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Finalize Owais": {
+      "roles": [
+        "Growth Marketer/ PMM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Firefly Boards": {
+      "roles": [
+        "preset-based workflows",
+        "Beta"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Flux Kontext": {
+      "roles": [
+        "Context"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Flux Ultra": {
+      "roles": [
+        "4MP hi-res"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "For Launch Announcements": {
+      "roles": [
+        "Blog/Press"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Fortnite Creative": {
+      "roles": [
+        "Epic Games"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Forward Deployed Engineer": {
+      "roles": [
+        "FDE"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Frontier Audience": {
+      "roles": [
+        "small-scale external beta, as of \\~Feb 17"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Frontier Developers": {
+      "roles": [
+        "M/W/D"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Fully Sharded Data Parallel": {
+      "roles": [
+        "model sharding"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Gavin Campbell": {
+      "roles": [
+        "Internal Tools at Amazon"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Gemini Flash": {
+      "roles": [
+        "short/long at 50/50"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Generative Video": {
+      "roles": [
+        "Australia-based"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Gigi Henze": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Global Endpoint": {
+      "roles": [
+        "Recommended"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Go Deeper Priority": {
+      "roles": [
+        "More to add or subtract"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Growth Engineer": {
+      "roles": [
+        "s"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Guiding Principles": {
+      "roles": [
+        "Informed by Industry Trends"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Hannah Elsakr": {
+      "roles": [
+        "3rd party model strategy"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Hannah Elsker": {
+      "roles": [
+        "?"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Harsha Jetty": {
+      "roles": [
+        "Technical Customer Lead, Charlotte NC",
+        "Technical Customer Lead, Charlotte NC"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Head Win Rates": {
+      "roles": [
+        "excl. draws"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Hierarchical Reasoning Model": {
+      "roles": [
+        "HRM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Hiring Needs": {
+      "roles": [
+        "Next 6 Months"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Hosted Deployments": {
+      "roles": [
+        "emerging trend"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Hybrid Models": {
+      "roles": [
+        "rough draft"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Ian Bucke": {
+      "roles": [
+        "Nvidia leader"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Ideal Candidate Profile": {
+      "roles": [
+        "ICP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Image Validation": {
+      "roles": [
+        "like AI Toolkit"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Include Jason Grafey": {
+      "roles": [
+        "Nanditha\u2019s CVP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Include Naomi": {
+      "roles": [
+        "Foundry"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Industry Sales": {
+      "roles": [
+        "Daniel's corporate VP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Infrastructure Design": {
+      "roles": [
+        "60 Mins"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Infrastructure Engineer": {
+      "roles": [
+        "Kubernetes, Slurm, cluster management, reliability"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Infrastructure Update": {
+      "roles": [
+        "Ian"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Initial Coding": {
+      "roles": [
+        "60 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Internal Creative Tools": {
+      "roles": [
+        "employee-facing"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Internal Tools": {
+      "roles": [
+        "per client access fee"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Interview Guide": {
+      "roles": [
+        "Data Infra",
+        "Infrastructure",
+        "Infrastructure",
+        "Infrastructure",
+        "Infrastructure",
+        "Infrastructure",
+        "Infrastructure"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Intro Call": {
+      "roles": [
+        "45min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Jeff Bullwinkel": {
+      "roles": [
+        "CELA"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Jeff Levinson": {
+      "roles": [
+        "customer success lead"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Jepa Embeddings": {
+      "roles": [
+        "\\~108M examples"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Jesse Lopez": {
+      "roles": [
+        "Program Manager \\| Office 365 Incident Communication"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "John Nack": {
+      "roles": [
+        "handling evals",
+        "9/15 is last day at Microsoft"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Joint Opportunity": {
+      "roles": [
+        "FDE/Monetization"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Joint Transformer": {
+      "roles": [
+        "Cross-Modal Attention"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Key Outcomes": {
+      "roles": [
+        "First 6\u201312 Months"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Key Use Cases Identified": {
+      "roles": [
+        "ranked by priority"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Kiran Kumar Dodda": {
+      "roles": [
+        "Advanced Cloud Engineer - Critical Incident",
+        "Advanced Cloud Engineer - Critical Incident"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Large Conference Room": {
+      "roles": [
+        "10+ People"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Launch Partnership": {
+      "roles": [
+        "November target"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Lead Enrichment": {
+      "roles": [
+        "Clay Integration Do Not Edit"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Legal Hire": {
+      "roles": [
+        "Q2 2025"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Leticia Muiuane": {
+      "roles": [
+        "Customer Service Account Manager"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Lifestyle Context": {
+      "roles": [
+        "Advertising"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Lisa Campbell": {
+      "roles": [
+        "Nikhil and Lisa were at Dropbox together with Sanjana"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Litera Compare": {
+      "roles": [
+        "there seems to be a problem setting this up but we do have a license"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Malavika Pande": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Margin Calculator": {
+      "roles": [
+        "*work-in-progress!*"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Marketing Reflection": {
+      "roles": [
+        "Jan 2026"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Matt Hacker": {
+      "roles": [
+        "Strategic Engagement Manager"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Matt Kerner": {
+      "roles": [
+        "CTO for Global Partner & Industry Sales, Daniel's corporate VP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Matt Smallwood": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Matthew Hacker": {
+      "roles": [
+        "AM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Matthew Kerner": {
+      "roles": [
+        "CVP, Worldwide Sales & Solutions"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Media Agencies": {
+      "roles": [
+        "Holding Companies and Independents"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Mercado Libre": {
+      "roles": [
+        "finally\u00a0\ud83d\udd25"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Microsoft Customer Agreement": {
+      "roles": [
+        "MCA"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Microsoft Ignite": {
+      "roles": [
+        "mid-November"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Mike Herman": {
+      "roles": [
+        "Services and Support Leader for Americas"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Mike Herrmann": {
+      "roles": [
+        "Americas Service Leader"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Model Ecosystem": {
+      "roles": [
+        "APIs, SDKs"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Model Preview": {
+      "roles": [
+        "Mid-November Release"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Monetization Reality": {
+      "roles": [
+        "Foundry Only"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Month Term": {
+      "roles": [
+        "Auto-Renew"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Motion Detection": {
+      "roles": [
+        "\\~57M examples *before *Deduping"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "My Volume Assumptions": {
+      "roles": [
+        "Conservative"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Named Accounts": {
+      "roles": [
+        "Jakob"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Nano Banana": {
+      "roles": [
+        "Google"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Narrative Builder": {
+      "roles": [
+        "Deck Builder, Infographics"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Need Bella": {
+      "roles": [
+        "BD"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "New Joiner Onboarding Checklist": {
+      "roles": [
+        "1"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "New Media": {
+      "roles": [
+        "internal use only"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "New Models": {
+      "roles": [
+        "FLUX 3+"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Next Steps": {
+      "roles": [
+        "agreed on call"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Nidhi Chappelle": {
+      "roles": [
+        "CVP AI Infrastructure"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Nikhil Kothari": {
+      "roles": [
+        "Partnerships"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "North Star": {
+      "roles": [
+        "Q2+ target state"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Notable Players": {
+      "roles": [
+        "WIP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Notes Template": {
+      "roles": [
+        "called \u201dFLUX Use Case Qualification\u201d"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Olivia Morad": {
+      "roles": [
+        "Director of Product Marketing, Photoshop"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Omari Holtz": {
+      "roles": [
+        "Principal Cloud Solutions Architect",
+        "Principal Cloud Solutions Architect"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Omni Assist": {
+      "roles": [
+        "gen-AI overlay"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Onboarding Call": {
+      "roles": [
+        "to be used as qualification whether closer collab makes sense"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Onsite\nCoding Project": {
+      "roles": [
+        "75 mins"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Onsite Coding Assessment": {
+      "roles": [
+        "2-3 hrs",
+        "2-3 hrs",
+        "Infrastructure"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Open Source Business Model": {
+      "roles": [
+        "35%"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Open Weights": {
+      "roles": [
+        "\\$10K/customer/month",
+        "\\$10K/cust/month",
+        "\\$10K/cust/month",
+        "\\$10K/cust/month"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Open Weights Initiative": {
+      "roles": [
+        "Amanda"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Open Weights License Restructuring": {
+      "roles": [
+        "doc  <mention-page url=\"https://www.notion.so/304c370222d5802fb407da495ea60413\"/>"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Order Form": {
+      "roles": [
+        "[Template](https://docs.google.com/document/d/1EiqB-a2_AxPefCuvKR47SjoLPQv-LGOYZsXyZZlvcy8/edit?usp=drive_link",
+        "[Template](https://docs.google.com/document/d/1iE1_RyT3kAH_oumr9ozK8moJuuRcPbfE2Y7fSAux3Ck/edit?usp=drive_link",
+        "[Template](https://docs.google.com/document/d/18ObYfwN69R_XEDCGclksVDAFqENzcJfRIUs1c3egv6M/edit?usp=drive_link",
+        "[Template](https://docs.google.com/document/d/1D_GEXSh00Tu5KIjgj9QQMSwPWDjCiNuGW5CuUpVQBKc/edit?usp=drive_link"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Outbound Sales": {
+      "roles": [
+        "Dec 2025",
+        "Dec 2025"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Outreach Message Template": {
+      "roles": [
+        "for scheduling the session"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Overall Quality": {
+      "roles": [
+        "550 prompts, standard benchmark"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Overlay Swap": {
+      "roles": [
+        "V2V Editing"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Partner Catalyst": {
+      "roles": [
+        "Nandita + Daniel"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Partner Pipeline Management": {
+      "roles": [
+        "35%"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Partnership Interview": {
+      "roles": [
+        "during onsite"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Patrick Esser": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Patrick Hu": {
+      "roles": [
+        "BD"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Peer Interview": {
+      "roles": [
+        "Partnerships",
+        "Partnerships"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Pioneer Mindset": {
+      "roles": [
+        "model the unmodeled"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Pipeline Scheduling": {
+      "roles": [
+        "1F1B"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Platform Engineer": {
+      "roles": [
+        "Prometheus, Grafana, dashboards, monitoring systems"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Point Specific Examples": {
+      "roles": [
+        "All sub-10s operations in demo conditions"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Policy Refresh": {
+      "roles": [
+        "see above"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Polling Response": {
+      "roles": [
+        "Success"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Prime Video": {
+      "roles": [
+        "sports use case, self-hosted fine-tuned model"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Privacy Policy": {
+      "roles": [
+        "see also: [https://docs.google.com/document/d/1ZNv3qJ1ZhkU1zhGS_gfkpiCkQm8BBs3B1pvEcA4RWu4/edit?tab=t.0](https://docs.google.com/document/d/1ZNv3qJ1ZhkU1zhGS_gfkpiCkQm8BBs3B1pvEcA4RWu4/edit?tab=t.0"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Priyanka Sinha": {
+      "roles": [
+        "VP of Eng, PowerPoint"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Proactive Suggestions": {
+      "roles": [
+        "Icons, Slide Styling"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Problem Options": {
+      "roles": [
+        "Pick ONE per interview"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Procurement Internal Tooling": {
+      "roles": [
+        "new use case, requires Bedrock hosting"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Product Campaigns": {
+      "roles": [
+        "eg MS collab"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Product Image": {
+      "roles": [
+        "Advertising / Social"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Product Loop": {
+      "roles": [
+        "60% of acquisition"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Product Partnerships Team": {
+      "roles": [
+        "specifically support Designer + Clipchamp"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Prompt Moderation": {
+      "roles": [
+        "Safety",
+        "Safety"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Prompt Upsampling": {
+      "roles": [
+        "Maksim",
+        "PUP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Quality Scores Finalization": {
+      "roles": [
+        "\\~38M examples"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Quick Sync": {
+      "roles": [
+        "During AMZN Sync"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Rachel Hepworth": {
+      "roles": [
+        "ex CMO of Notion, advisor to Lovable, Luma, and more"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Radha Krishna": {
+      "roles": [
+        "Designer team engineering manager"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Rate Review Clause": {
+      "roles": [
+        "Annual"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Reference Quality": {
+      "roles": [
+        "500 prompts, Kontext benchmark"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Relentlessly Curious": {
+      "roles": [
+        "ask questions others haven't thought of"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Relevant Technical Knowledge": {
+      "roles": [
+        "let\u2019s break this up between API and dev hosting"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Remove John Nack": {
+      "roles": [
+        "no longer at Microsoft"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Requirements Gathering": {
+      "roles": [
+        "5-7min",
+        "5-7min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Research Announcements": {
+      "roles": [
+        "Twitter/X, LinkedIn"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Research Discussion": {
+      "roles": [
+        "30 min",
+        "30 Mins"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Resume Screen": {
+      "roles": [
+        "6 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Retail Consumer Goods": {
+      "roles": [
+        "if e-commerce traction exists"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Revenue Share Report": {
+      "roles": [
+        "Nov - December 2025"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Review Deployment Key": {
+      "roles": [
+        "[BFL Review Key](https://share.1password.com/s#jcvIJUtGe_lVg0wcVvZOYWV5ELmEJsPVdY4SgSae610"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Salesforce Outbound": {
+      "roles": [
+        "Matt + Sam"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Sample Prompts": {
+      "roles": [
+        "user -\\> upsampled",
+        "I2I",
+        "T2I"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "San Francisco": {
+      "roles": [
+        "USA"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "San Francisco Bay Area": {
+      "roles": [
+        "70% of top customers"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Sarah Cyro": {
+      "roles": [
+        "product"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Satya Nadella": {
+      "roles": [
+        "6 customers total"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Services Agreement": {
+      "roles": [
+        "[Template](https://docs.google.com/document/d/1GicU9C6DpJUX9vwXhkT4xxx3lqTSmNlJzX9Lak2nKAI/edit?usp=drive_link",
+        "[Template](https://docs.google.com/document/d/1etMohHDgqhtOrbsLAuw6urlpzFs-QIxBBIS2ri99EoU/edit?usp=drive_link"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Session Brief": {
+      "roles": [
+        "fill before the call"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Session Summary": {
+      "roles": [
+        "fill after the call"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Setup Requirements": {
+      "roles": [
+        "WIP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Shai Gibbs": {
+      "roles": [
+        "Sr Global Partner Marketing Manager"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Shinhan Bank": {
+      "roles": [
+        "KR"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Single Agency": {
+      "roles": [
+        "Subsidiary"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Small Office": {
+      "roles": [
+        "2-3 People, all with whiteboards"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Sony Music": {
+      "roles": [
+        "album art, promotional content"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Sony Pictures": {
+      "roles": [
+        "film marketing"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Source Growth Engineer": {
+      "roles": [
+        "Frontend"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Startup Infrastructure Generalist": {
+      "roles": [
+        "0\u21921 builder, owns infra end-to-end, strong debugging mindset"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Steam Workshop": {
+      "roles": [
+        "Valve"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Stephen Batifol": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Strategic Account Teams": {
+      "roles": [
+        "Proposal"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Strong Signals": {
+      "roles": [
+        "What \u201cgreat\u201d looks like"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Structure Studios": {
+      "roles": [
+        "3D rendering"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Success Metrics": {
+      "roles": [
+        "First Year"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "System Design": {
+      "roles": [
+        "45 min - 1 hr",
+        "45 min",
+        "Infrastructure",
+        "45 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Tao Wang": {
+      "roles": [],
+      "teams": [],
+      "projects": []
+    },
+    "Team Fit": {
+      "roles": [
+        "13 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Technical Customer Lead": {
+      "roles": [
+        "TCL"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Technical Depth Discussion Questions": {
+      "roles": [
+        "Interviewer 2"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Technical Discussion": {
+      "roles": [
+        "45 min",
+        "45 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Technical Expertise": {
+      "roles": [
+        "16 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Technical Project Discussion": {
+      "roles": [
+        "60 min",
+        "45 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Technical Strategist": {
+      "roles": [
+        "global team"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Technically Poetic": {
+      "roles": [
+        "precision doesn't mean boring"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Telco Media Gaming": {
+      "roles": [
+        "TMG"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Telephone Booth": {
+      "roles": [
+        "1 person"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Temporal Length Range": {
+      "roles": [
+        "if applicable",
+        "if applicable",
+        "if applicable",
+        "if applicable"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Text Accuracy": {
+      "roles": [
+        "infographics"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "The Engine": {
+      "roles": [
+        "Operations"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "The Latent Unifier": {
+      "roles": [
+        "The \"Glue\""
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "The Minimum Commit Binary": {
+      "roles": [
+        "8 min"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "The Tiny Recursive Model": {
+      "roles": [
+        "TRM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Three Core Narratives": {
+      "roles": [
+        "WIP"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Tiffany Kha": {
+      "roles": [
+        "AC Feedback"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Tiny Recursive Model": {
+      "roles": [
+        "TRM"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Tiny Recursive Models": {
+      "roles": [
+        "[https://arxiv.org/pdf/2510.04871](https://arxiv.org/pdf/2510.04871"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Top Model Capabilities": {
+      "roles": [
+        "ranked by importanvce"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Top Pain Points": {
+      "roles": [
+        "ranked by severity"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Total Digital Experience": {
+      "roles": [
+        "DX"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Total Digital Media": {
+      "roles": [
+        "DME"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Total Disk": {
+      "roles": [
+        "GB"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Total Impressions": {
+      "roles": [
+        "Social + Brand (Media, OOH"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Training Data Inventory": {
+      "roles": [
+        "to be moved to another location"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Training Performance Engineer": {
+      "roles": [
+        "GPU utilization, benchmarking, NCCL, training bottlenecks"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Transition Plan": {
+      "roles": [
+        "v2",
+        "v2",
+        "v2"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Varun Parmar": {
+      "roles": [
+        "GM, Gen Studio + Firefly ENT"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Video Captioning": {
+      "roles": [
+        "and others"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Video Customer Research": {
+      "roles": [
+        "<mention-page url=\"https://www.notion.so/ead7b97467bf450e889abcf3af7dc4d0\"/> \n\tAndy's framework adopted for structured [customer interviews](/317c370222d581819b87f70eb21df4cf?pvs=25"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Visual Examples": {
+      "roles": [
+        "Base vs LoRA at scale -1.0"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Visual Examples Promised": {
+      "roles": [
+        "follow up needed"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Volume Rebate": {
+      "roles": [
+        "retroactive"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Weekly Update": {
+      "roles": [
+        "Jan 31",
+        "Jan 31"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "What Agencies Actually Do": {
+      "roles": [
+        "Their Value"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Who We Are": {
+      "roles": [
+        "and Are Not"
+      ],
+      "teams": [],
+      "projects": []
+    },
+    "Work Through Ambiguity": {
+      "roles": [
+        "25%"
+      ],
+      "teams": [],
+      "projects": []
+    }
+  },
+  "hiring": {
+    "Coding \u2014 Interview Guide (Data Infra)": {
+      "page_id": "32fc3702-22d5-8080-97d5-ef38f990116c",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/32fc370222d5808097d5ef38f990116c as of 2026-03-26T16:26:32.741Z:\n<page url=\"https://www.notion.so/32fc370222d5808097d5ef38f990116c\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/32fc370222d5800fa01cfef771495be4\" title=\"Data Infrastructure \u2014 Hiring Guide\"/>\n<ancestor-2-page url=\"https://www.notion.so/1a1c370222d5807db2edf4324f3c7723\" title=\"JDs, SCORECARDS AND PROCESSES\"/>\n<ancestor-3-page url=\"https://www.notion."
+    },
+    "Customer Use Case Interview \u2014 Question Bank & Template": {
+      "page_id": "317c3702-22d5-8181-9b87-f70eb21df4cf",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/317c370222d581819b87f70eb21df4cf as of 2026-04-15T21:32:17.562Z:\n<page url=\"https://www.notion.so/317c370222d581819b87f70eb21df4cf\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/286c370222d580019979c0e9e023a5d7\" title=\"FLUX.3\"/>\n<ancestor-2-page url=\"https://www.notion.so/13ec370222d5801f82e4e449987adf58\" title=\"Research\"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370222d580cab1aae5ec0f8cac31\" title=\"\"/>\n<"
+    },
+    "FDE - Hiring process": {
+      "page_id": "29bc3702-22d5-80c3-bd0f-ddf80d1aaeb9",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/29bc370222d580c3bd0fddf80d1aaeb9 as of 2026-03-23T14:00:40.920Z:\n<page url=\"https://www.notion.so/29bc370222d580c3bd0fddf80d1aaeb9\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5807db2edf4324f3c7723\" title=\"JDs, SCORECARDS AND PROCESSES\"/>\n<ancestor-2-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370"
+    },
+    "Hiring": {
+      "page_id": "2cdc3702-22d5-8022-9bdf-d868771462bc",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/2cdc370222d580229bdfd868771462bc as of 2026-02-08T19:43:43.096Z:\n<page url=\"https://www.notion.so/2cdc370222d580229bdfd868771462bc\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/2eac370222d58078835ffb24d8389455\" title=\"\"/>\n<ancestor-2-page url=\"https://www.notion.so/2eac370222d580bd968bf7a963302929\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/252c370222d580bda20dda595dabb585\" title=\"Growth/Marketing \"/"
+    },
+    "Hiring Tracker": {
+      "page_id": "28fc3702-22d5-80f8-8cb1-c691cf2f5dc4",
+      "snippet": "<database url=\"{{https://www.notion.so/28fc370222d580f88cb1c691cf2f5dc4}}\" inline=\"false\" icon=\"\ud83d\udca5\">\nThe title of this Database is: \ud83d\udca5 Hiring Tracker\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-2-page url=\"https://www.notion.so/21bc370222d580268496de1d8a4ab2ec\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370222d5808facd7c952b579a4cd\" title=\"\"/>\n<ancestor-4-database url=\"https://www.notion.so/1"
+    },
+    "Inference optimisation - Hiring process": {
+      "page_id": "29bc3702-22d5-809e-9377-c476d48b9269",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/29bc370222d5809e9377c476d48b9269 as of 2026-03-06T08:16:22.885Z:\n<page url=\"https://www.notion.so/29bc370222d5809e9377c476d48b9269\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5807db2edf4324f3c7723\" title=\"JDs, SCORECARDS AND PROCESSES\"/>\n<ancestor-2-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370"
+    },
+    "Infrastructure Engineer \u2014 Hiring Guide\n": {
+      "page_id": "30ac3702-22d5-80a5-8e20-e697f506c23d",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/30ac370222d580a58e20e697f506c23d as of 2026-04-08T05:59:28.905Z:\n<page url=\"https://www.notion.so/30ac370222d580a58e20e697f506c23d\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5807db2edf4324f3c7723\" title=\"JDs, SCORECARDS AND PROCESSES\"/>\n<ancestor-2-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370"
+    },
+    "Interview prep docs for candidates": {
+      "page_id": "29bc3702-22d5-8071-b241-c96e2644846c",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/29bc370222d58071b241c96e2644846c as of 2026-04-17T13:08:27.173Z:\n<page url=\"https://www.notion.so/29bc370222d58071b241c96e2644846c\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-2-page url=\"https://www.notion.so/21bc370222d580268496de1d8a4ab2ec\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370222d5808facd7c952b579a4cd\" ti"
+    },
+    "Proposal: Recruitment ops hire": {
+      "page_id": "2a3c3702-22d5-8073-8f14-e2abd7d4f5cc",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/2a3c370222d580738f14e2abd7d4f5cc as of 2025-11-06T18:21:41.813Z:\n<page url=\"https://www.notion.so/2a3c370222d580738f14e2abd7d4f5cc\">\n<ancestor-path></ancestor-path>\n<properties>\n{\"title\":\"**Proposal: Recruitment ops hire**\"}\n</properties>\n<content>\n**Tl;dr**\nWe need a Recruitment Coordinator now to prevent recruiting bottlenecks from limiting our growth velocity.\n**Current state **\nRight now, recruiters are handling\n- Sourc"
+    },
+    "Research - Hiring process": {
+      "page_id": "29bc3702-22d5-8067-a5a3-f1db1b08658e",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/29bc370222d58067a5a3f1db1b08658e as of 2026-01-13T11:31:03.161Z:\n<page url=\"https://www.notion.so/29bc370222d58067a5a3f1db1b08658e\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5807db2edf4324f3c7723\" title=\"JDs, SCORECARDS AND PROCESSES\"/>\n<ancestor-2-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370"
+    },
+    "STRUCTURED HIRING": {
+      "page_id": "31ec3702-22d5-8050-98e3-df8c6ab10df4",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/31ec370222d5805098e3df8c6ab10df4 as of 2026-03-09T08:11:51.793Z:\n<page url=\"https://www.notion.so/31ec370222d5805098e3df8c6ab10df4\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-2-page url=\"https://www.notion.so/21bc370222d580268496de1d8a4ab2ec\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370222d5808facd7c952b579a4cd\" ti"
+    },
+    "Sales Hiring Plan \u2014 Q1/Q2 2026": {
+      "page_id": "30ac3702-22d5-815f-8325-d59a36f8c96a",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/30ac370222d5815f8325d59a36f8c96a as of 2026-02-19T12:35:44.676Z:\n<page url=\"https://www.notion.so/30ac370222d5815f8325d59a36f8c96a\" icon=\"\ud83e\udef5\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/26bc370222d580bfaf48f8f5356ee18d\" title=\"\"/>\n<ancestor-2-page url=\"https://www.notion.so/26bc370222d580e1ab70d49a85ef8012\" title=\"\"/>\n<ancestor-3-database url=\"https://www.notion.so/26bc370222d580609794fac1fa01d8d9\" title=\"GTM\"/>"
+    },
+    "Strategic Finance / FP&A Hiring": {
+      "page_id": "329c3702-22d5-81e4-8507-d7ec97cb736e",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/329c370222d581e48507d7ec97cb736e as of 2026-03-20T09:37:38.065Z:\n<page url=\"https://www.notion.so/329c370222d581e48507d7ec97cb736e\" icon=\"\ud83e\uddd1\u200d\ud83d\udcbc\">\n<ancestor-path>\n<parent-data-source url=\"collection://ea1e1da9-5fab-4aef-abda-6416365db6bd\" name=\"Project Tracker\"/>\n<ancestor-2-database url=\"https://www.notion.so/4d0765c9a7f149a7aacc4124cf502eef\" title=\"Project Tracker\"/>\n<ancestor-3-page url=\"https://www.notion.so/329c370222d581"
+    },
+    "Technical Project Discussion \u2014 Interview Guide (Infrastructure)": {
+      "page_id": "32fc3702-22d5-8050-8235-e658c1acd49f",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/32fc370222d580508235e658c1acd49f as of 2026-04-02T22:11:55.700Z:\n<page url=\"https://www.notion.so/32fc370222d580508235e658c1acd49f\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/32fc370222d5805c95d0ef480547b6ab\" title=\"Onsite\"/>\n<ancestor-2-page url=\"https://www.notion.so/30ac370222d580a58e20e697f506c23d\" title=\"Infrastructure Engineer \u2014 Hiring Guide\n\"/>\n<ancestor-3-page url=\"https://www.notion.so/1a1c370222d5807"
+    },
+    "Template- Hiring Kick-off document": {
+      "page_id": "30dc3702-22d5-8028-a35a-ef7abba02c8e",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/30dc370222d58028a35aef7abba02c8e as of 2026-04-17T13:05:15.134Z:\n<page url=\"https://www.notion.so/30dc370222d58028a35aef7abba02c8e\" icon=\"\ud83c\udd95\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5807db2edf4324f3c7723\" title=\"JDs, SCORECARDS AND PROCESSES\"/>\n<ancestor-2-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-3-page url=\"https://www.notion.s"
+    },
+    "Values Interview Guide": {
+      "page_id": "344c3702-22d5-81bb-a979-ed7cafa1348c",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/344c370222d581bba979ed7cafa1348c as of 2026-04-16T10:52:24.026Z:\n<page url=\"https://www.notion.so/344c370222d581bba979ed7cafa1348c\" icon=\"\ud83c\udf07\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-2-page url=\"https://www.notion.so/21bc370222d580268496de1d8a4ab2ec\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370222d5808facd7c952b57"
+    }
+  },
+  "projects": {
+    "API/Compute Infra Roadmap": {
+      "page_id": "2fec3702-22d5-804c-95a8-e8fef4796f87",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/2fec370222d5804c95a8e8fef4796f87 as of 2026-02-05T13:37:36.540Z:\n<page url=\"https://www.notion.so/2fec370222d5804c95a8e8fef4796f87\" icon=\"icons/golf_green\">\n<ancestor-path>\n<parent-data-source url=\"collection://2fec3702-22d5-808b-b369-000bcbfae155\" name=\"Decision and Actions\"/>\n<ancestor-2-database url=\"https://www.notion.so/2fec370222d5800ca5baf38d8dfdfa1a\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/278c370222d"
+    },
+    "Compute and Data tracker": {
+      "page_id": "2c4c3702-22d5-80c2-b8c6-c9ed65eb1f1a",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/2c4c370222d580c2b8c6c9ed65eb1f1a as of 2025-12-09T19:08:52.024Z:\n<page url=\"https://www.notion.so/2c4c370222d580c2b8c6c9ed65eb1f1a\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/2b1c370222d58024ac2bc4efba011a5c\" title=\"Research Infra\"/>\n<ancestor-2-page url=\"https://www.notion.so/21bc370222d580cab1aae5ec0f8cac31\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370222d5808facd7c952b579a4cd\" title=\"\"/>\n<"
+    },
+    "FLUX.3 Launch": {
+      "page_id": "336c3702-22d5-801f-8eb9-d59c038c05ed",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/336c370222d5801f8eb9d59c038c05ed as of 2026-04-16T08:28:05.114Z:\n<page url=\"https://www.notion.so/336c370222d5801f8eb9d59c038c05ed\" icon=\"\ud83d\udcaa\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/21bc370222d580f1b25bdafa8a548ec5\" title=\"\"/>\n<ancestor-2-page url=\"https://www.notion.so/21bc370222d580249a4ded94de5bc642\" title=\"\"/>\n<ancestor-3-database url=\"https://www.notion.so/11ec370222d58020ad93e98fe0cc4607\" title=\"Compan"
+    },
+    "FLUX.3 tracker": {
+      "page_id": "30fc3702-22d5-80ba-8b75-fa15a9536678",
+      "snippet": "<database url=\"{{https://www.notion.so/30fc370222d580ba8b75fa15a9536678}}\" inline=\"false\" icon=\"\ud83d\ude80\">\nThe title of this Database is: \ud83d\ude80 FLUX.3 tracker\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/320c370222d580b1b52bf0a9c1ca0479\" title=\"Project Tracking\"/>\n<ancestor-2-page url=\"https://www.notion.so/320c370222d58093b3f2c3b8bfad1802\" title=\"FLUX.3 Development Overview\"/>\n<ancestor-3-page url=\"https://www.notion.so/286c370222d580019979c0e9e023a5d7\" title=\"FLUX.3\"/>\n<ancestor-4-page url=\"ht"
+    },
+    "Hiring Tracker": {
+      "page_id": "28fc3702-22d5-80f8-8cb1-c691cf2f5dc4",
+      "snippet": "<database url=\"{{https://www.notion.so/28fc370222d580f88cb1c691cf2f5dc4}}\" inline=\"false\" icon=\"\ud83d\udca5\">\nThe title of this Database is: \ud83d\udca5 Hiring Tracker\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/1a1c370222d5802d92f1fc32471508f0\" title=\"People/Talent resources \"/>\n<ancestor-2-page url=\"https://www.notion.so/21bc370222d580268496de1d8a4ab2ec\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/21bc370222d5808facd7c952b579a4cd\" title=\"\"/>\n<ancestor-4-database url=\"https://www.notion.so/1"
+    },
+    "Launch doc template": {
+      "page_id": "2edc3702-22d5-80c9-b71c-cf97990818ce",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/2edc370222d580c9b71ccf97990818ce as of 2026-02-02T23:17:55.557Z:\n<page url=\"https://www.notion.so/2edc370222d580c9b71ccf97990818ce\" icon=\"icons/conifer-tree_gray\">\n<ancestor-path>\n<parent-data-source url=\"collection://93e86aee-7964-47ba-ab4d-04db5055124e\" name=\"Release Calendar\"/>\n<ancestor-2-database url=\"https://www.notion.so/f1ffd95f1d6e4c6fb376aa31312325d7\" title=\"Upcoming Product Launches\"/>\n<ancestor-3-page url=\"https"
+    },
+    "Martin Scorsese launch date decision doc": {
+      "page_id": "32fc3702-22d5-8095-b3fa-c9f27f6142ee",
+      "snippet": "Here is the result of \"view\" for the Page with URL https://www.notion.so/32fc370222d58095b3fac9f27f6142ee as of 2026-03-26T21:40:48.207Z:\n<page url=\"https://www.notion.so/32fc370222d58095b3fac9f27f6142ee\" icon=\"icons/movie-camera_gray\">\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/2eac370222d580b099d2dc0355a52411\" title=\"\"/>\n<ancestor-2-page url=\"https://www.notion.so/2eac370222d580bd968bf7a963302929\" title=\"\"/>\n<ancestor-3-page url=\"https://www.notion.so/252c370222d580bda20dda595dabb"
+    },
+    "Project Tracker": {
+      "page_id": "4d0765c9-a7f1-49a7-aacc-4124cf502eef",
+      "snippet": "<database url=\"{{https://www.notion.so/4d0765c9a7f149a7aacc4124cf502eef}}\" inline=\"false\">\nThe title of this Database is: Project Tracker\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/329c370222d58136b517c9c5eb4941bf\" title=\"\ud83d\udcca Finance Projects\"/>\n</ancestor-path>\nHere are the Database's Data Sources:\nYou can use the \"view\" tool on the URL of any Data Source to see its full schema configuration.\n<data-sources>\n<data-source url=\"{{collection://ea1e1da9-5fab-4aef-abda-6416365db6bd}}\">\nThe"
+    },
+    "Video  Data Tracker": {
+      "page_id": "316c3702-22d5-8026-b751-cc1c2468c2ca",
+      "snippet": "<database url=\"{{https://www.notion.so/316c370222d58026b751cc1c2468c2ca}}\" inline=\"true\">\nThe title of this Database is: Video  Data Tracker\n<ancestor-path>\n<parent-page url=\"https://www.notion.so/314c370222d58096b4c2f6a0b31e4488\" title=\"Flux3 Video Data \"/>\n<ancestor-2-page url=\"https://www.notion.so/286c370222d580019979c0e9e023a5d7\" title=\"FLUX.3\"/>\n<ancestor-3-page url=\"https://www.notion.so/13ec370222d5801f82e4e449987adf58\" title=\"Research\"/>\n<ancestor-4-page url=\"https://www.notion.so/21bc3"
+    }
+  }
+}

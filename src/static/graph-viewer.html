@@ -5,15 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Spore Core</title>
 <script src="brand.js"></script>
-<link rel="stylesheet" href="styles/base.css?v=20260429l">
-<link rel="stylesheet" href="styles/onboarding.css?v=20260429l">
-<link rel="stylesheet" href="styles/layout.css?v=20260429l">
-<link rel="stylesheet" href="styles/panes.css?v=20260429l">
-<link rel="stylesheet" href="styles/settings.css?v=20260429l">
-<link rel="stylesheet" href="styles/chat.css?v=20260429l">
-<link rel="stylesheet" href="styles/graph.css?v=20260429l">
-<link rel="stylesheet" href="styles/misc.css?v=20260429l">
-<link rel="stylesheet" href="styles/mobile.css?v=20260429l">
+<link rel="stylesheet" href="styles/base.css?v=260503-141408">
+<link rel="stylesheet" href="styles/onboarding.css?v=260503-141408">
+<link rel="stylesheet" href="styles/layout.css?v=260504-chatfloat">
+<link rel="stylesheet" href="styles/panes.css?v=260505-dockchips">
+<link rel="stylesheet" href="styles/settings.css?v=260505-docklayer">
+<link rel="stylesheet" href="styles/chat.css?v=260504-chatstatus">
+<link rel="stylesheet" href="styles/graph.css?v=260505-dockchips">
+<link rel="stylesheet" href="styles/misc.css?v=260505-docklayer">
+<link rel="stylesheet" href="styles/mobile.css?v=260503-141408">
 </head>
 <body>
 <!-- Onboarding Wizard Overlay -->
@@ -70,7 +70,7 @@
 
       <section class="ob-step" data-step="pp">
         <h3>Choose your providers</h3>
-        <div class="ob-desc">Pick which model providers this agent should use. Only providers you enabled in the Plugins step show up here. You'll fill in keys + test them in the next step.</div>
+        <div class="ob-desc">Pick which model providers this agent should use. Provider plugins are installed from these choices; you'll fill in keys + test them in the next step.</div>
         <div id="ob-pp-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:8px"></div>
         <div class="ob-error" id="ob-pp-error"></div>
       </section>
@@ -89,6 +89,26 @@
         <div class="ob-error" id="ob-models-error"></div>
       </section>
 
+      <section class="ob-step" data-step="a">
+        <h3>Agent effort</h3>
+        <div class="ob-desc">Choose the same effort dial available later in Settings. It controls token budgets, iteration caps, tool-result truncation, and sub-agent fan-out.</div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+          <label class="ob-choice-card">
+            <input type="radio" name="ob-agent-effort" value="quick" style="width:auto">
+            <span><strong>Quick</strong> — cheaper, lower iteration caps, best for lightweight chat.</span>
+          </label>
+          <label class="ob-choice-card">
+            <input type="radio" name="ob-agent-effort" value="balanced" checked style="width:auto">
+            <span><strong>Balanced</strong> — default budgets for normal use.</span>
+          </label>
+          <label class="ob-choice-card">
+            <input type="radio" name="ob-agent-effort" value="deep" style="width:auto">
+            <span><strong>Deep</strong> — more budget and sub-agent capacity for longer research/coding sessions.</span>
+          </label>
+        </div>
+        <div class="ob-note" id="ob-agent-effort-summary" style="margin-top:10px"></div>
+      </section>
+
       <section class="ob-step" data-step="7">
         <h3>Vision &amp; audio models (optional)</h3>
         <div class="ob-desc">Specialist tiers for image / video / audio understanding. Skip to use the planner tier for everything.</div>
@@ -96,15 +116,59 @@
       </section>
 
       <section class="ob-step" data-step="p">
-        <h3>Pick plugins</h3>
-        <div class="ob-desc">Spore Core ships these as optional plugins. Toggle each on or off — recommended ones are preselected. You can change this later in Settings → Plugins.</div>
+        <h3>Extra plugins</h3>
+        <div class="ob-desc">These are optional add-ons that do not have a dedicated setup step. Providers, embeddings, browser automation, search, channels, and Spore Code were handled earlier.</div>
         <div id="ob-plugin-list" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
         <div class="ob-error" id="ob-plugin-error"></div>
+        <div class="ob-desc" style="margin-top:16px">You're all set. Click Finish to save and start using your agent.</div>
+        <div class="ob-error" id="ob-finish-error"></div>
+      </section>
+
+      <section class="ob-step" data-step="e">
+        <h3>Embeddings</h3>
+        <div class="ob-desc">Embeddings power semantic graph search and retrieval. Pick one system now; you can switch later in Settings → Plugins.</div>
+        <div id="ob-embedding-options" style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+          <label class="ob-choice-card">
+            <input type="radio" name="ob-embedding" value="gemma" checked style="width:auto">
+            <span><strong>Local Gemma embeddings</strong> — no API key, private, downloads the model into /data on first use. Recommended.</span>
+          </label>
+          <label class="ob-choice-card">
+            <input type="radio" name="ob-embedding" value="gemini" style="width:auto">
+            <span><strong>Gemini embeddings</strong> — hosted embeddings via Google's API. Good when you want zero local model download.</span>
+          </label>
+          <label class="ob-choice-card">
+            <input type="radio" name="ob-embedding" value="none" style="width:auto">
+            <span><strong>No semantic embeddings</strong> — keyword/graph retrieval still works, vector search is disabled.</span>
+          </label>
+        </div>
+        <div id="ob-embedding-gemma-fields" style="margin-top:10px;padding:10px;border:1px solid var(--border);border-radius:8px">
+          <label for="ob-embed-gemma-dtype">Quantization</label>
+          <select id="ob-embed-gemma-dtype">
+            <option value="q4" selected>q4 (smallest, fastest)</option>
+            <option value="q8">q8 (balanced)</option>
+            <option value="fp32">fp32 (highest quality)</option>
+          </select>
+          <label for="ob-embed-gemma-dim">Output dimension</label>
+          <select id="ob-embed-gemma-dim">
+            <option value="768" selected>768 (best recall)</option>
+            <option value="512">512 (Matryoshka)</option>
+            <option value="256">256 (faster search)</option>
+            <option value="128">128 (fastest)</option>
+          </select>
+        </div>
+        <div id="ob-embedding-gemini-fields" style="display:none;margin-top:10px;padding:10px;border:1px solid var(--border);border-radius:8px">
+          <label for="ob-embed-gemini-key">Gemini API key</label>
+          <input type="password" id="ob-embed-gemini-key" placeholder="leave blank to reuse the Gemini provider key">
+          <label for="ob-embed-gemini-model">Embedding model</label>
+          <input type="text" id="ob-embed-gemini-model" value="gemini-embedding-2-preview">
+          <div class="ob-note">This installs gemini-embedder and gemini-provider. One Gemini key feeds both chat and embeddings.</div>
+        </div>
+        <div class="ob-error" id="ob-embedding-error"></div>
       </section>
 
       <section class="ob-step" data-step="8">
-        <h3>Voice &amp; web search (optional)</h3>
-        <div class="ob-desc">Turn on voice I/O and pick a web search provider. All optional.</div>
+        <h3>Voice &amp; search engines</h3>
+        <div class="ob-desc">Turn on voice I/O and choose which web search backend the agent should use.</div>
         <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin-top:4px">
           <input type="checkbox" id="ob-voice-enabled" style="width:auto"> Enable voice
         </label>
@@ -121,20 +185,31 @@
             <option value="openai">OpenAI</option>
             <option value="edge">Microsoft Edge</option>
           </select>
-          <div class="ob-note">Voice providers use the API keys you entered in step 4.</div>
+          <div class="ob-note">Voice providers use the provider/plugin keys you configured earlier.</div>
         </div>
         <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
-          <label for="ob-searxng-url">SearXNG URL (primary web search)</label>
-          <input type="text" id="ob-searxng-url" placeholder="http://searxng:8080">
-          <label for="ob-searxng-key">SearXNG API key (only if your instance requires one)</label>
-          <input type="password" id="ob-searxng-key" placeholder="optional Bearer token">
-          <label for="ob-brave-key">Brave API key (fallback)</label>
-          <input type="password" id="ob-brave-key" placeholder="BSAa...">
+          <label>Search engine</label>
+          <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+            <label class="ob-choice-card"><input type="radio" name="ob-search" value="searxng" checked style="width:auto"><span><strong>SearXNG</strong> — self-hosted/private search endpoint.</span></label>
+            <label class="ob-choice-card"><input type="radio" name="ob-search" value="brave" style="width:auto"><span><strong>Brave Search</strong> — hosted API key, no SearXNG service needed.</span></label>
+            <label class="ob-choice-card"><input type="radio" name="ob-search" value="both" style="width:auto"><span><strong>SearXNG + Brave fallback</strong> — try SearXNG first, Brave if empty/unavailable.</span></label>
+            <label class="ob-choice-card"><input type="radio" name="ob-search" value="none" style="width:auto"><span><strong>No web search</strong> — the agent will not use search unless configured later.</span></label>
+          </div>
+          <div id="ob-searxng-fields" style="margin-top:10px">
+            <label for="ob-searxng-url">SearXNG URL</label>
+            <input type="text" id="ob-searxng-url" placeholder="http://searxng:8080">
+            <label for="ob-searxng-key">SearXNG API key (only if your instance requires one)</label>
+            <input type="password" id="ob-searxng-key" placeholder="optional Bearer token">
+          </div>
+          <div id="ob-brave-fields" style="display:none;margin-top:10px">
+            <label for="ob-brave-key">Brave API key</label>
+            <input type="password" id="ob-brave-key" placeholder="BSAa...">
+          </div>
           <div class="ob-models-row" style="margin-top:10px">
             <button type="button" class="ob-test-btn" id="ob-websearch-test">test web search</button>
             <span class="ob-test-result" id="ob-websearch-result"></span>
           </div>
-          <div class="ob-note">SearXNG is tried first. Brave is used when SearXNG is unset or empty.</div>
+          <div class="ob-note">You can change search credentials later from Settings.</div>
         </div>
       </section>
 
@@ -154,16 +229,61 @@
       </section>
 
       <section class="ob-step" data-step="9">
-        <h3>Browser backend</h3>
-        <div class="ob-desc">Which browser engine should tools use by default?</div>
-        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin:12px 0 4px">
-          <input type="radio" name="ob-browser" value="zendriver" checked style="width:auto"> <strong>Zendriver</strong> — lightweight, recommended
+        <h3>Browser Automation</h3>
+        <div class="ob-desc">Pick the default browser backend for the <code>browser</code> tool. Setup installs browser-core plus the selected backend; you can enable the other backend later from Settings → Plugins.</div>
+        <div class="ob-browser-grid">
+          <label class="ob-choice-card ob-browser-card">
+            <input type="radio" name="ob-browser" value="zendriver" checked style="width:auto">
+            <span class="ob-browser-card-body">
+              <span class="ob-browser-title-row">
+                <strong>Zendriver</strong>
+                <span class="ob-pill">recommended</span>
+              </span>
+              <span class="ob-browser-summary">Stealth-patched Chromium for sites that punish obvious automation.</span>
+              <span class="ob-browser-meta">
+                <span>anti-bot resilient</span>
+                <span>real CDP events</span>
+                <span>best default</span>
+              </span>
+            </span>
+          </label>
+          <label class="ob-choice-card ob-browser-card">
+            <input type="radio" name="ob-browser" value="playwright" style="width:auto">
+            <span class="ob-browser-card-body">
+              <span class="ob-browser-title-row">
+                <strong>Playwright</strong>
+                <span class="ob-pill muted">debug-friendly</span>
+              </span>
+              <span class="ob-browser-summary">Standard Chromium automation with a smoother debugging and screencast workflow.</span>
+              <span class="ob-browser-meta">
+                <span>live preview</span>
+                <span>standard tooling</span>
+                <span>more detectable</span>
+              </span>
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <section class="ob-step" data-step="c">
+        <h3>Spore Code</h3>
+        <div class="ob-desc">Spore Code adds CLI session tracking, project context, plan-mode prompt sections, and codebase graph helpers.</div>
+        <label class="ob-choice-card" style="margin-top:12px">
+          <input type="checkbox" id="ob-spore-code-enabled" checked style="width:auto">
+          <span><strong>Install Spore Code</strong> — also installs its required session-graph dependency.</span>
         </label>
-        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--text);margin:4px 0">
-          <input type="radio" name="ob-browser" value="playwright" style="width:auto"> <strong>Playwright</strong> — fuller automation API
+        <label class="ob-choice-card" style="margin-top:10px">
+          <input type="checkbox" id="ob-enhanced-recall-enabled" style="width:auto">
+          <span><strong>Enable Enhanced Recall</strong> — before retrieval, the agent asks the recall model to decompose your request into better graph/search queries. This improves temporal and cross-session memory, but it adds one extra LLM round before the main answer.</span>
         </label>
-        <div class="ob-desc" style="margin-top:16px">You're all set. Click Finish to save and start using your agent.</div>
-        <div class="ob-error" id="ob-finish-error"></div>
+        <div class="ob-note" style="margin-top:8px">If no invite key exists, setup will generate one so Spore Code auth and guest self-registration work immediately. Turn this off if this instance is only for chat/graph use and should not expose coding workflow tools.</div>
+      </section>
+
+      <section class="ob-step" data-step="ch">
+        <h3>Channels</h3>
+        <div class="ob-desc">Web chat is always enabled, and CLI access is handled by Spore Code. Optional public chat integrations are plugins; each one owns its credentials, delivery style, and session policy.</div>
+        <div id="ob-channel-list" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+        <div class="ob-note" style="margin-top:8px">You can install or remove channel plugins later from Settings → Channels.</div>
       </section>
     </div>
     <div id="onboarding-foot">
@@ -190,6 +310,12 @@
       <button type="button" id="chat-collapse" title="Collapse chat sidebar" aria-label="Collapse chat sidebar">&#10094;</button>
       <button class="panel-collapse-btn" id="btn-toggle-graph-chat" title="Toggle graph" style="display:none">graph</button>
       <span class="ch-spacer"></span>
+      <button type="button" id="chat-float-toggle" class="floating-pane-btn chat-window-action" title="Undock chat" aria-label="Undock chat">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="9" height="9" rx="1.4"/><path d="M6 2.5h7.5V10"/><path d="M10.5 2.5h3v3"/></svg>
+      </button>
+      <button type="button" id="chat-window-maximize" class="floating-pane-btn chat-window-action" data-window-action="maximize" title="Maximize chat" aria-label="Maximize chat">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg>
+      </button>
       <button type="button" id="btn-clear-chat" title="Clear chat history" aria-label="Clear chat history">&#9003;</button>
       <span id="ws-status" class="disconnected" title="Disconnected" aria-label="Connection status"></span>
     </div>
@@ -248,11 +374,15 @@
         <span class="dock-icon">◎</span>
         <span class="dock-tooltip">Node</span>
       </button>
+      <button class="desktop-dock-btn dock-graphs-btn" id="dock-graphs" title="Switch knowledge graph" aria-haspopup="menu" aria-expanded="false">
+        <span class="dock-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" style="display:block"><circle cx="4" cy="4.5" r="1.8"/><circle cx="11.5" cy="5" r="1.8"/><circle cx="7.5" cy="11.5" r="1.8"/><path d="M5.7 4.6l4 .3M4.9 6l1.8 4M10.4 6.5l-1.8 3.5"/></svg></span>
+        <span class="dock-tooltip">Graphs</span>
+      </button>
       <button class="desktop-dock-btn" id="dock-files" title="Toggle files window">
         <span class="dock-icon">▤</span>
         <span class="dock-tooltip">Files</span>
       </button>
-      <button class="desktop-dock-btn" id="dock-logs" title="Toggle logs window">
+      <button class="desktop-dock-btn" id="dock-logs" title="Choose a log" aria-haspopup="menu" aria-expanded="false">
         <span class="dock-icon">≣</span>
         <span class="dock-tooltip">Logs</span>
       </button>
@@ -265,6 +395,7 @@
         <span class="dock-tooltip">Settings</span>
       </button>
     </div>
+    <div id="dock-graphs-menu" role="menu" aria-label="Quick graph switcher"></div>
   </div>
 
   <!-- Collapse tabs (shown when panels are collapsed) -->
@@ -287,6 +418,7 @@
       <button data-vm="list">list</button>
       <button data-vm="typemap">type map</button>
       <button data-vm="work">people &amp; projects</button>
+      <button id="cv-pending-badge" type="button" title="Open code viewer" hidden>code</button>
       <span class="vm-divider" aria-hidden="true"></span>
       <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">☀</button>
     </div>
@@ -334,13 +466,12 @@
     <!-- Code Viewer (docked in canvas or floating) -->
     <div id="code-viewer" class="cv-docked">
       <div id="code-viewer-header">
-        <span id="code-viewer-icon">{ }</span>
+        <span id="code-viewer-icon">code</span>
         <span id="code-viewer-path"></span>
         <span id="code-viewer-badge" class="cv-badge"></span>
         <select id="code-viewer-mode" title="Code viewer behavior">
-          <option value="auto">Auto</option>
-          <option value="on-request">On request</option>
-          <option value="off">Off</option>
+          <option value="on-request">on request</option>
+          <option value="off">off</option>
         </select>
         <button class="cv-dock-btn" id="cv-dock-btn" title="Dock back into graph pane">&#8689; dock</button>
         <button id="code-viewer-close" title="Close code viewer">&times;</button>
@@ -370,7 +501,16 @@
       <select id="filter-type" title="Filter by type">
         <option value="">all types</option>
       </select>
-      <button id="btn-center" title="Reset zoom">center</button>
+      <div id="timeline-filter" title="Filter nodes by creation time. Drag the left handle right to hide older nodes (isolate recent additions); drag the right handle left to also clip the newest end. Double-click to reset.">
+        <span class="tlf-label tlf-left">past</span>
+        <div class="tlf-track">
+          <div class="tlf-fill" id="tlf-fill"></div>
+          <input type="range" id="tlf-min" min="0" max="1000" value="0" step="1" aria-label="Earliest visible">
+          <input type="range" id="tlf-max" min="0" max="1000" value="1000" step="1" aria-label="Latest visible">
+        </div>
+        <span class="tlf-label tlf-right">now</span>
+        <span class="tlf-readout" id="tlf-readout"></span>
+      </div>
       <button id="btn-new-node" class="btn-new" title="Create new node">+ node</button>
       <div id="search"><input type="text" placeholder="search nodes..." id="search-input"></div>
       <div style="position:relative;display:inline-block" id="tools-menu-wrap">
@@ -378,7 +518,6 @@
         <div id="tools-menu" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px;z-index:999;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
           <div class="tools-menu-item" id="tmi-settings" title="Configure this agent">Settings</div>
           <div class="tools-menu-item" id="tmi-graphs" title="Switch knowledge graph">Graphs</div>
-          <div class="tools-menu-item" id="tmi-longmemeval" title="Run LongMemEval benchmark">LongMemEval</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           <div class="tools-menu-item" id="tmi-enhanced-recall" title="LLM-powered query decomposition for better memory retrieval" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer">
             <span>Enhanced Recall</span>
@@ -389,64 +528,7 @@
       </div>
     </div>
     <div id="stats"></div>
-    <!-- LongMemEval floating HUD -->
-    <div id="lme-hud">
-      <div class="lme-panel" id="lme-panel">
-        <div id="lme-config">
-          <div class="lme-title-row"><span class="lme-title">LongMemEval</span><button class="lme-x" onclick="lmeClose()">&times;</button></div>
-          <div class="lme-row"><label>Variant</label><select class="lme-select" id="lme-variant"><option value="oracle" selected>Oracle (~15 MB)</option><option value="s">Small (~277 MB)</option><option value="m">Medium (~2.7 GB)</option></select></div>
-          <div class="lme-row"><label>Max Q</label><input type="number" class="lme-input" id="lme-max-q" value="500" min="1" max="500" style="width:70px"><span style="font-size:.6rem;color:var(--text-dim)">/500 (stratified across types)</span></div>
-          <div class="lme-row" style="flex-wrap:wrap;gap:4px"><label style="width:100%">Question Types</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="temporal-reasoning" checked> Temporal</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="multi-session" checked> Multi-session</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="knowledge-update" checked> Knowledge Update</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-user" checked> Single User</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-assistant" checked> Single Asst</label>
-            <label class="lme-chip"><input type="checkbox" class="lme-type-cb" value="single-session-preference" checked> Preferences</label>
-          </div>
-          <div class="lme-row"><label>Learner</label><select class="lme-select" id="lme-learner-model"><option value="claude-haiku-4-5" selected>Haiku 4.5 ($1/$5)</option><option value="claude-sonnet-4-6">Sonnet 4.6 ($3/$15)</option></select></div>
-          <div class="lme-row"><label>Answering</label><select class="lme-select" id="lme-answer-model"><option value="claude-haiku-4-5">Haiku 4.5 ($1/$5)</option><option value="claude-sonnet-4-6" selected>Sonnet 4.6 ($3/$15)</option><option value="claude-opus-4-6">Opus 4.6 ($15/$75)</option></select></div>
-          <div class="lme-row"><label><input type="checkbox" id="lme-eval-only"> Eval only (skip ingestion)</label></div>
-          <div class="lme-row"><label><input type="checkbox" id="lme-force-reeval"> Fresh eval (ignore cached answers)</label></div>
-          <div class="lme-row" id="lme-er-status" style="font-size:.65rem;color:var(--text-dim)"></div>
-          <div class="lme-cost" id="lme-cost-est">~$3-5 &bull; ~30-45 min (oracle)</div>
-          <div class="lme-row" style="margin-top:4px"><button class="lme-btn lme-btn-go" onclick="lmeStart()">Start</button></div>
-        </div>
-        <div id="lme-progress" style="display:none">
-          <div class="lme-title-row">
-            <span class="lme-phase" id="lme-phase-label">STARTING</span>
-            <div style="display:flex;align-items:center;gap:2px">
-              <span class="lme-elapsed" id="lme-elapsed">00:00</span>
-              <button class="lme-expand-toggle" onclick="lmeToggleExpand()" title="Expand/collapse details">&#9660;</button>
-              <button class="lme-x" onclick="lmeClose()" title="Close">&times;</button>
-            </div>
-          </div>
-          <div class="lme-bar"><div class="lme-bar-fill" id="lme-bar" style="width:0%"></div></div>
-          <div class="lme-pct" id="lme-pct-label">0 / 0</div>
-          <div class="lme-stats">
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-sessions">0</div><div class="lme-st-l">Sessions</div></div>
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-nodes">0</div><div class="lme-st-l">Nodes</div></div>
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-questions">0</div><div class="lme-st-l">Answered</div></div>
-            <div class="lme-st"><div class="lme-st-v" id="lme-st-accuracy">--</div><div class="lme-st-l">Accuracy</div></div>
-          </div>
-          <div id="lme-expanded-stats">
-            <table class="lme-cat-table" id="lme-cat-table">
-              <thead><tr><th>Category</th><th>Pass</th><th style="text-align:right">Acc</th></tr></thead>
-              <tbody id="lme-cat-tbody"></tbody>
-            </table>
-            <div class="lme-eff-row">
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-latency">--</div><div class="lme-eff-l">Avg ms/q</div></div>
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-input">--</div><div class="lme-eff-l">Input tok</div></div>
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-output">--</div><div class="lme-eff-l">Output tok</div></div>
-              <div class="lme-eff"><div class="lme-eff-v" id="lme-eff-cost">--</div><div class="lme-eff-l">Est. cost</div></div>
-            </div>
-          </div>
-          <div class="lme-log" id="lme-log"></div>
-          <div style="margin-top:6px"><button class="lme-btn lme-btn-stop" onclick="lmeCancel()">Cancel</button></div>
-        </div>
-        <div id="lme-results" style="display:none"></div>
-      </div>
-    </div>
+    <!-- LongMemEval HUD moved to plugins/longmemeval (self-injects) -->
     <!-- Type Map drilldown window -->
     <div id="tm-window">
       <div id="tm-window-head" class="floating-pane-head">
@@ -741,36 +823,39 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <!-- Foundation (loaded first) -->
-<script defer src="scripts/bootstrap.js?v=20260429l"></script>
-<script defer src="scripts/core.js?v=20260429l"></script>
-<script defer src="scripts/auth.js?v=20260429l"></script>
-<script defer src="scripts/tools-menu.js?v=20260429l"></script>
+<script defer src="scripts/bootstrap.js?v=260503-141408"></script>
+<script defer src="scripts/core.js?v=260503-141408"></script>
+<script defer src="scripts/auth.js?v=260503-141408"></script>
+<script defer src="scripts/tools-menu.js?v=260503-141408"></script>
+
+<!-- Model library helper — must load before settings.js so the
+     populateSettingsPanel call site can use ModelLibrary.* freely. -->
+<script defer src="scripts/model-library.js?v=260504-modelfav"></script>
 
 <!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
      can find the original at top-level evaluation time. -->
-<script defer src="scripts/settings.js?v=20260429l"></script>
+<script defer src="scripts/settings.js?v=260505-graphacl"></script>
 
 <!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
-<script defer src="scripts/effects.js?v=20260429l"></script>
+<script defer src="scripts/effects.js?v=260503-141408"></script>
 
 <!-- Alternate views: list + type map -->
-<script defer src="scripts/extras.js?v=20260429l"></script>
+<script defer src="scripts/extras.js?v=260503-141408"></script>
 
 <!-- Feature modules — wire DOM events, no top-level cross-script deps -->
-<script defer src="scripts/terminal.js?v=20260429l"></script>
-<script defer src="scripts/longmemeval.js?v=20260429l"></script>
-<script defer src="scripts/shared-skills.js?v=20260429l"></script>
-<script defer src="scripts/graph-picker.js?v=20260429l"></script>
-<script defer src="scripts/files.js?v=20260429l"></script>
-<script defer src="scripts/right-panel.js?v=20260429l"></script>
-<script defer src="scripts/voice.js?v=20260429l"></script>
-<script defer src="scripts/onboarding.js?v=20260429l"></script>
-<script defer src="scripts/graph.js?v=20260429l"></script>
-<script defer src="scripts/chat.js?v=20260429l"></script>
-<script defer src="scripts/panels.js?v=20260429l"></script>
+<script defer src="scripts/terminal.js?v=260503-141408"></script>
+<script defer src="scripts/shared-skills.js?v=260503-141408"></script>
+<script defer src="scripts/graph-picker.js?v=260505-graphacl"></script>
+<script defer src="scripts/files.js?v=260503-141408"></script>
+<script defer src="scripts/right-panel.js?v=260504-logmenu"></script>
+<script defer src="scripts/voice.js?v=260503-141408"></script>
+<script defer src="scripts/onboarding.js?v=260504-recallob"></script>
+<script defer src="scripts/graph.js?v=260505-viewgraphfix"></script>
+<script defer src="scripts/chat.js?v=260505-viewgraphfix"></script>
+<script defer src="scripts/panels.js?v=260504-logmenu"></script>
 
 <!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
-<script defer src="scripts/boot.js?v=20260429l"></script>
+<script defer src="scripts/boot.js?v=260503-141408"></script>
 
 <!-- New Graph Modal -->
 <div id="graph-modal-overlay" onclick="if(event.target===this)closeNewGraphModal()">
@@ -840,6 +925,7 @@ build/
         <div class="settings-tab-pane" data-tab="backups"></div>
         <div class="settings-tab-pane" data-tab="cluster"></div>
         <div class="settings-tab-pane" data-tab="tools"></div>
+        <div class="settings-tab-pane" data-tab="channels"></div>
         <div class="settings-tab-pane" data-tab="plugins"></div>
         <div class="settings-tab-pane" data-tab="users"></div>
         <div class="settings-tab-pane" data-tab="advanced"></div>
@@ -855,12 +941,6 @@ build/
         <div id="settings-graphs-list" class="settings-graphs-list"></div>
         <button class="settings-btn-secondary" id="settings-new-graph">+ New graph</button>
         <div class="settings-note">Switch the active knowledge graph for this agent. Each graph has its own nodes, edges, and memory.</div>
-      </div>
-
-      <div class="settings-section wide" data-target-tab="tools">
-        <h4>Benchmarks</h4>
-        <button class="settings-btn-secondary" id="settings-launch-lme">Run LongMemEval benchmark</button>
-        <div class="settings-note">Launches the LongMemEval HUD. Requires Enhanced Recall for best results.</div>
       </div>
 
       <div class="settings-section wide" data-target-tab="plugins">
@@ -879,6 +959,17 @@ build/
             Shallow-clones into the user plugins dir. After clone, the plugin appears in the list above as "available" — click Install to load it.
           </div>
         </div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="channels">
+        <h4>Channels</h4>
+        <div class="settings-note">Web and CLI stay built in. Public chat integrations live as installable channel plugins so each one owns its auth, message routing, and session policy.</div>
+        <div id="settings-channels-list" class="settings-channels-list"></div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="channels">
+        <h4>Channel settings</h4>
+        <div id="settings-channels-panes"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="plugins">
@@ -921,23 +1012,28 @@ build/
       </div>
 
 
-      <div class="settings-section wide" data-target-tab="graph-memory">
-        <h4>Export / import</h4>
-          <div class="settings-note" style="margin-top:4px">Export this deployment's knowledge graph, general settings, and (optionally) provider configuration to carry to another Spore Core. Reference + agent self nodes are excluded from the graph; edges re-wire on import. Import takes a pre-import backup first.</div>
-
-          <div class="settings-hint" style="margin-top:10px">What to include in the export:</div>
-          <div class="settings-export-options">
-            <label class="settings-check-row"><input type="checkbox" id="settings-export-graph" checked><span>Knowledge graph</span></label>
-            <label class="settings-check-row"><input type="checkbox" id="settings-export-settings" checked><span>General settings</span></label>
-            <label class="settings-check-row"><input type="checkbox" id="settings-export-providers"><span>Providers <span class="settings-hint-inline">(URL + auth; keys redacted unless below is checked)</span></span></label>
-            <label class="settings-check-row" id="settings-export-secrets-wrap"><input type="checkbox" id="settings-export-secrets"><span>Include API keys <span class="settings-danger-inline">⚠ sensitive</span></span></label>
+      <div class="settings-section wide settings-portability-card" data-target-tab="backups">
+        <div class="settings-portability-head">
+          <div>
+            <h4>Export / import</h4>
+            <div class="settings-note">Move graph memory and settings between Spore Core deployments. Imports take a safety backup first.</div>
           </div>
-          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <button class="settings-btn-secondary" id="settings-graph-export" style="font-size:.68rem;padding:3px 8px">Export</button>
-            <button class="settings-btn-secondary" id="settings-graph-import" style="font-size:.68rem;padding:3px 8px">Import…</button>
-            <input type="file" id="settings-graph-import-file" accept=".json,application/json" style="display:none">
-          </div>
-          <div id="settings-graph-port-status" style="margin-top:6px;font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);white-space:pre-wrap"></div>
+          <div class="settings-portability-tag">portable snapshot</div>
+        </div>
+        <div class="settings-portability-callout">Reference nodes and the agent self node are excluded from graph exports; imported edges are re-wired to the target graph.</div>
+        <div class="settings-hint">Include in export</div>
+        <div class="settings-export-options">
+          <label class="settings-check-row"><input type="checkbox" id="settings-export-graph" checked><span>Knowledge graph</span></label>
+          <label class="settings-check-row"><input type="checkbox" id="settings-export-settings" checked><span>General settings</span></label>
+          <label class="settings-check-row"><input type="checkbox" id="settings-export-providers"><span>Providers <span class="settings-hint-inline">(URLs and auth settings)</span></span></label>
+          <label class="settings-check-row" id="settings-export-secrets-wrap"><input type="checkbox" id="settings-export-secrets"><span>Include API keys <span class="settings-danger-inline">sensitive</span></span></label>
+        </div>
+        <div class="settings-export-actions">
+          <button class="settings-btn-secondary settings-export-primary" id="settings-graph-export">Export bundle</button>
+          <button class="settings-btn-secondary" id="settings-graph-import">Import bundle...</button>
+          <input type="file" id="settings-graph-import-file" accept=".json,application/json" style="display:none">
+        </div>
+        <div id="settings-graph-port-status" class="settings-port-status"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="backups">
@@ -1009,13 +1105,13 @@ build/
         </div>
       </div>
 
-      <div class="settings-section" data-target-tab="agent">
+      <div class="settings-section" data-target-tab="graph-memory">
         <h4>Memory</h4>
         <div class="settings-check">
           <input id="settings-enhanced-recall" type="checkbox">
           <label for="settings-enhanced-recall" style="margin:0">Enable Enhanced Recall</label>
         </div>
-        <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session retrieval.</div>
+        <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session graph retrieval. This adds one extra LLM round before the main answer.</div>
       </div>
 
       <div class="settings-section" data-target-tab="agent">
@@ -1133,6 +1229,13 @@ build/
       </div>
 
       <div class="settings-section wide" data-target-tab="providers">
+        <h4>Model Library</h4>
+        <div id="settings-model-library-pane" class="settings-model-library">
+          <div class="ml-pane-empty">Loading…</div>
+        </div>
+      </div>
+
+      <div class="settings-section wide" data-target-tab="providers">
         <h4>Model Routing</h4>
         <div class="settings-model-grid">
           <div class="settings-model-row">
@@ -1238,35 +1341,44 @@ build/
         <div class="settings-note" id="settings-routing-note"></div>
       </div>
 
+      <!-- Vendor-specific providers (Anthropic, OpenAI, OpenRouter,
+           Gemini). Each plugin contributes one card with its own form
+           fields. Adding a provider plugin makes a new card appear
+           here automatically. The OAI-compatible section below
+           (Local + custom prefixes) is rendered separately because
+           those endpoints share the same OAI wire format and are
+           naturally a list rather than per-vendor. -->
       <div class="settings-section wide" data-target-tab="providers">
-        <h4>Providers</h4>
-        <!-- Provider groups render dynamically from data.providers.registered.
-             Each registered provider plugin contributes one card with its
-             own form fields (declared via api.registerSettingsPane schema)
-             and a test button. Adding a provider plugin makes a new card
-             appear here automatically. -->
+        <h4>Vendor providers</h4>
         <div class="settings-provider-block">
           <div id="settings-providers-dynamic"></div>
-          <div class="settings-provider-group">
-            <div class="settings-provider-head">
-              <strong>Custom OAI-Compatible Providers</strong>
-              <button type="button" class="settings-ghost-btn" onclick="addSettingsCustomProvider()">Add Provider</button>
-            </div>
-            <div id="settings-custom-providers"></div>
-          </div>
         </div>
         <div class="settings-note" id="settings-provider-note"></div>
       </div>
 
+      <!-- Unified OAI-compatible endpoints section. Every endpoint is a
+           named prefix (for example local/qwen or groq/llama) with the
+           same baseUrl + apiKey + auth-header shape. -->
+      <div class="settings-section wide" data-target-tab="providers">
+        <div class="settings-provider-head" style="margin-bottom:8px">
+          <h4 style="margin:0">OAI-compatible endpoints</h4>
+          <button type="button" class="settings-ghost-btn" onclick="addSettingsCustomProvider()">+ Add endpoint</button>
+        </div>
+        <div class="settings-note" style="margin-bottom:12px">Connect any OpenAI-compatible chat-completion endpoint — vLLM, LM Studio, Ollama, llama.cpp, self-hosted. Each endpoint gets a prefix you choose, and model routes use <code>prefix/model-id</code>.</div>
+        <div id="settings-providers-oai-local"></div>
+        <div id="settings-custom-providers"></div>
+      </div>
+
       <div class="settings-section wide" data-target-tab="advanced">
         <h4>Invite Key</h4>
-        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via Spore Code. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
+        <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via Spore Code. Installing Spore Code during onboarding generates one automatically if none exists. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
         <label for="settings-invite-key">Invite key</label>
         <div style="display:flex; gap:6px; align-items:stretch; margin-top:4px">
           <input id="settings-invite-key" type="password" placeholder="empty = self-register + Spore Code disabled" autocomplete="off" style="flex:1; min-width:0">
           <button type="button" class="settings-test-btn" id="settings-invite-key-show" title="Show / hide">show</button>
           <button type="button" class="settings-test-btn" id="settings-invite-key-copy" title="Copy to clipboard">copy</button>
           <button type="button" class="settings-test-btn" id="settings-invite-key-regen" title="Generate a new key (existing webapp guests + Spore Code users will need the new one)">regen</button>
+          <button type="button" class="settings-test-btn" id="settings-invite-key-clear" title="Disable invite auth">clear</button>
         </div>
         <div class="settings-note" id="settings-invite-key-note"></div>
       </div>
@@ -1346,9 +1458,6 @@ build/
     </div>
   </div>
 </div>
-
-<!-- Pending badge for on-request mode (stays outside canvas) -->
-<div id="cv-pending-badge" onclick="_cvShowFromBadge()" title="Click to open code viewer"></div>
 
 <!-- Browser Live Preview -->
 <div id="browser-preview">

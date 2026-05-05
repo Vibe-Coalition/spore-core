@@ -1,0 +1,14 @@
+{
+  "id": "discord",
+  "name": "Discord Channel",
+  "version": "1.0.0",
+  "kind": "gateway",
+  "entry": "./index.js",
+  "depends": [],
+  "category": "channels",
+  "channel": {
+    "platform": "discord",
+    "sessionModes": ["channel", "user"]
+  },
+  "description": "Discord bot gateway for messages, DMs, replies, reactions, attachments, task progress, and optional voice-channel join/leave support."
+}

@@ -1,0 +1,15 @@
+{
+  "nodeId": "web-fetch",
+  "label": "web_fetch",
+  "type": "concept",
+  "description": "Built-in Anima framework tool for fetching web pages",
+  "aspects": [
+    {
+      "name": "status",
+      "importance": 7,
+      "attributes": [
+        "experiencing frequent timeouts on most websites"
+      ]
+    }
+  ]
+}

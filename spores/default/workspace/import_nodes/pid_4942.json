@@ -1,0 +1,15 @@
+{
+  "nodeId": "pid_4942",
+  "label": "Background Process",
+  "type": "process",
+  "description": "Background process ID for Telegram login script execution",
+  "aspects": [
+    {
+      "name": "process_initialization",
+      "importance": 7,
+      "attributes": [
+        "nohup process started with PID 4942"
+      ]
+    }
+  ]
+}

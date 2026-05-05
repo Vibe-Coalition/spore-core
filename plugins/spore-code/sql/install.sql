@@ -170,10 +170,18 @@ WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-spore-code-context'
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'project_context'),
-       'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, OS, Arch. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.', 9, 'seed', '{{plugin_id}}'
+       'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, localTools, OS, Arch. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.', 9, 'seed', '{{plugin_id}}'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'project_context' AND a.content LIKE 'Spore Code sends a structured projectContext%');
+UPDATE attributes
+   SET content = 'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, localTools, OS, Arch. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.',
+       updated_at = CURRENT_TIMESTAMP
+ WHERE id IN (
+   SELECT a.id FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'project_context'
+     AND a.content LIKE 'Spore Code sends a structured projectContext%'
+ );
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'project_context'),
@@ -243,10 +251,18 @@ WHERE NOT EXISTS (
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
-       'Use grep/glob (native tools) instead of exec+grep/find for code search — structured results, no shell quoting issues. See ref-search-tools for caps and patterns.', 8, 'seed', '{{plugin_id}}'
+       'Use structured tools before exec: list_dir/read_many_files for project inspection, grep/glob for search, git_status/git_diff for source control state, run_tests for verification, and bg_list/bg_tail/bg_kill for long-running processes. These avoid shell quoting issues and keep results compact.', 8, 'seed', '{{plugin_id}}'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'Use grep/glob%');
+UPDATE attributes
+   SET content = 'Use structured tools before exec: list_dir/read_many_files for project inspection, grep/glob for search, git_status/git_diff for source control state, run_tests for verification, and bg_list/bg_tail/bg_kill for long-running processes. These avoid shell quoting issues and keep results compact.',
+       updated_at = CURRENT_TIMESTAMP
+ WHERE id IN (
+   SELECT a.id FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing'
+     AND (a.content LIKE 'Use grep/glob%' OR a.content LIKE 'Use structured tools before exec:%')
+ );
 
 -- ── from migrate-ref-spore-code-personas.sql ──────────────────────────────────────
 -- Add the agentic-planning persona attribute to ref-spore-code-context.mode

@@ -1,0 +1,15 @@
+{
+  "nodeId": "aviv-snowballer",
+  "label": "Aviv Snowballer",
+  "type": "person",
+  "description": "Contact in Snowball Family group",
+  "aspects": [
+    {
+      "name": "communication_style",
+      "importance": 8,
+      "attributes": [
+        "Part of Snowball Family group"
+      ]
+    }
+  ]
+}

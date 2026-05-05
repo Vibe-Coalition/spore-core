@@ -1,0 +1,21 @@
+{
+  "nodeId": "error_event_1",
+  "label": "Expired Code Error",
+  "type": "error",
+  "description": "Telegram login code expired due to multiple stacked codes",
+  "aspects": [
+    {
+      "name": "error_details",
+      "importance": 8,
+      "attributes": [
+        "The confirmation code has expired (caused by SignInRequest)"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "target": "message_stack_1",
+      "type": "caused_by"
+    }
+  ]
+}

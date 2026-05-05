@@ -21,7 +21,23 @@
 
 const graphEvents = require('../graph/events');
 
-const TYPE_BLOCKLIST_WHOLE_NODE = new Set(['self', 'agent', 'person']);
+const TYPE_BLOCKLIST_WHOLE_NODE = new Set(['self', 'agent', 'person', 'project', 'reference', 'system']);
+const PROTECTED_ATTR_ASPECTS = new Set([
+  'code_graph',
+  'manifest',
+  'architecture',
+  'configuration',
+  'project_config',
+  'dependencies',
+  'frameworks',
+  'api_endpoints',
+  'paths',
+  'development_setup',
+  'dev_environment',
+  'scripts_index',
+  'decisions_index',
+  'scratch_helpers',
+]);
 
 const MODES = {
   conservative: {
@@ -33,6 +49,8 @@ const MODES = {
     nodePruneMinAgeDays: 365,
     nodePruneMaxEdges: 0,
     batchSize: 3,
+    edgePruneEnabled: false,
+    edgePruneFalsePositiveMin: 1.1,    // disabled
   },
   moderate: {
     tempKeepFalseMin: 0.65,
@@ -43,6 +61,8 @@ const MODES = {
     nodePruneMinAgeDays: 14,
     nodePruneMaxEdges: 1,
     batchSize: 5,
+    edgePruneEnabled: true,
+    edgePruneFalsePositiveMin: 0.7,    // strict — only confidently bad edges
   },
   aggressive: {
     tempKeepFalseMin: 0.4,
@@ -53,8 +73,54 @@ const MODES = {
     nodePruneMinAgeDays: 7,
     nodePruneMaxEdges: 3,
     batchSize: 10,
+    edgePruneEnabled: true,
+    edgePruneFalsePositiveMin: 0.55,   // looser — sweep more dubious edges
   },
 };
+
+// Per-relation prior: probability that an INFERRED edge of this type is
+// actually correct. Low priors mean "we don't trust the model's guess
+// here without corroboration"; high priors mean "even an inferred call is
+// usually right." Numbers are tuned by hand against graphify's analyze.py
+// surprise-score weighting; operators can override via config.
+//
+// The complement (1 - prior) is the "false-positive likelihood" weight
+// that goes into the prune score. NULL relations or unlisted relations
+// get a default prior of 0.6 — neither aggressively pruned nor protected.
+const DEFAULT_RELATION_PRIOR = 0.6;
+const RELATION_CONFIDENCE_PRIORS = {
+  // structural / observed in source — high prior
+  contains: 0.95, has_capability: 0.95, has_tool: 0.95,
+  parent_of: 0.92, mentioned: 0.9, discovered_in: 0.9,
+  imports: 0.95, method: 0.95,
+  // explicit, often stated — fairly high
+  works_at: 0.85, works_on: 0.85, lives_in: 0.85, attended: 0.85,
+  attending: 0.85, owns: 0.85, created: 0.85, manages: 0.8,
+  enrolled_in: 0.85, purchased: 0.85, visited: 0.85,
+  // social / strong claim — medium-high
+  knows: 0.7, friends_with: 0.7, family_of: 0.75,
+  // weaker semantic — medium
+  uses: 0.7, depends_on: 0.85, interested_in: 0.6,
+  inspires: 0.55, similar_to: 0.5,
+  // generic catchall — low (an LLM-emitted "related_to" with no specifics
+  // is exactly the shape of a hallucinated link)
+  related_to: 0.4,
+};
+
+// Type families: edges crossing families and tagged INFERRED look like
+// resolver pollution rather than real signal. Mirrors the cross-language
+// rule in graphify/analyze.py:_LANG_FAMILY.
+const NODE_TYPE_FAMILY = {
+  person: 'social', organization: 'social', channel: 'social',
+  tool: 'system', system: 'system', capability: 'system', skill: 'system',
+  project: 'work', session: 'work', script: 'work', task: 'work',
+  concept: 'idea', lore: 'idea', rule: 'idea', anti: 'idea', voice: 'idea',
+  event: 'temporal', episode: 'temporal',
+};
+
+function _typeFamily(t) {
+  return NODE_TYPE_FAMILY[t] || 'other';
+}
 
 class Janitor {
   constructor(config, log, llmClient, db) {
@@ -70,6 +136,7 @@ class Janitor {
       tempsReviewed: 0, tempsTrashed: 0, tempsKept: 0,
       attrsReviewed: 0, attrsTrashed: 0,
       nodesReviewed: 0, nodesTrashed: 0,
+      edgesReviewed: 0, prunedByPrior: 0, prunedByTypeMismatch: 0,
       restored: 0, expired: 0, errors: 0,
       lastRunAt: null,
     };
@@ -174,6 +241,9 @@ class Janitor {
       if (mode.nodePruneEnabled) {
         await this._phaseWholeNodePrune(mode);
       }
+      if (mode.edgePruneEnabled) {
+        await this._phaseEdgePrune(mode);
+      }
       await this._phaseBinHousekeep();
 
       this.stats.cycles++;
@@ -196,6 +266,56 @@ class Janitor {
       this.stats.errors++;
       this.log.error('[janitor] Cycle error:', e.message);
       return null;
+    } finally {
+      this._running = false;
+    }
+  }
+
+  /**
+   * Conservative cleanup for managed/non-active graph scopes. This avoids the
+   * risky parts of the full janitor (attribute, whole-node, and inferred-edge
+   * pruning) while still letting temp scratch and recycle-bin state age out.
+   */
+  async runScopedJanitor({ role = 'custom', force = false } = {}) {
+    if (!this.db) return null;
+    if (this._running) {
+      this.log.debug('[janitor] Scoped skip — already running');
+      return null;
+    }
+    if (this.config.janitorEnabled === false) return null;
+
+    const normalizedRole = String(role || 'custom');
+    const policy = normalizedRole === 'general_kb'
+      ? 'bin'
+      : (normalizedRole === 'main' ? 'full' : 'temp');
+    if (policy === 'full') return this.runJanitor({ force });
+
+    if (!force) {
+      const minIntervalMs = (this.config.janitorIntervalMinutes || 360) * 60_000;
+      if (this._lastRunAt && (Date.now() - this._lastRunAt) < minIntervalMs) return null;
+    }
+
+    this._running = true;
+    this._lastRunAt = Date.now();
+    const before = { ...this.stats };
+    try {
+      const mode = MODES.conservative;
+      this.log.info(`[janitor] Scoped cycle — role=${normalizedRole}, policy=${policy}`);
+      if (policy === 'temp') {
+        await this._phaseTempReview(mode);
+      }
+      await this._phaseBinHousekeep();
+      this.stats.cycles++;
+      this.stats.lastRunAt = new Date().toISOString();
+      return {
+        policy,
+        tempsTrashed: this.stats.tempsTrashed - before.tempsTrashed,
+        expired: this.stats.expired - before.expired,
+      };
+    } catch (e) {
+      this.stats.errors++;
+      this.log.error('[janitor] Scoped cycle error:', e.message);
+      return { error: e.message };
     } finally {
       this._running = false;
     }
@@ -309,7 +429,8 @@ Delete guidance: crawl/error logs from completed runs, one-off scratch nodes, st
     for (const node of picked) {
       this.stats.attrsReviewed++;
       try {
-        const aspects = this.db.prepare('SELECT id, name FROM aspects WHERE node_id = ? ORDER BY weight DESC').all(node.id);
+        const aspects = this.db.prepare('SELECT id, name FROM aspects WHERE node_id = ? ORDER BY weight DESC').all(node.id)
+          .filter(a => !PROTECTED_ATTR_ASPECTS.has(String(a.name || '').toLowerCase()));
         const perAspect = aspects.map(a => {
           const attrs = this.db.prepare('SELECT id, content FROM attributes WHERE aspect_id = ? ORDER BY importance DESC').all(a.id);
           return { aspectName: a.name, attrs };
@@ -348,6 +469,7 @@ Return {"prune":[]} if nothing should be pruned.`;
           `).get(attrId);
           if (!row) continue;
           if (row.node_id !== node.id) continue;
+          if (PROTECTED_ATTR_ASPECTS.has(String(row.aspect_name || '').toLowerCase())) continue;
           if (mode.attrRequireAsOfMarker && !/\bas of\s+\d{4}-\d{2}-\d{2}\b/i.test(String(row.content))) continue;
 
           this._trashAttribute(row, 'janitor-prune', String(it.reason || '').slice(0, 240), conf);
@@ -484,6 +606,86 @@ ${edgeLines || '    (no edges)'}`;
     }
   }
 
+  // ── Phase 2c — Per-Relation Edge Pruning (moderate/aggressive) ────────
+  //
+  // Targets `inferred` and `ambiguous` edges that scored badly on a
+  // composite false-positive heuristic:
+  //   fp_score = (1 - prior(relation)) + cross_family_penalty
+  // where:
+  //   prior(relation) ∈ [0, 1] from RELATION_CONFIDENCE_PRIORS (default 0.6)
+  //   cross_family_penalty = 0.4 when source/target types belong to
+  //     different families (NODE_TYPE_FAMILY), 0 otherwise.
+  // An edge is pruned when fp_score >= mode.edgePruneFalsePositiveMin.
+  //
+  // Edges aren't recycle-bin'd today (no schema for it); they're hard-
+  // deleted. Pre-release this is acceptable — the learner will re-emit
+  // any edge it still believes in next time the relevant context shows
+  // up. graphEvents emit so the UI updates.
+  async _phaseEdgePrune(mode) {
+    if (!this.db) return;
+    try {
+      const candidates = this.db.prepare(`
+        SELECT e.id, e.source, e.target, e.type, e.confidence,
+               n_src.type AS src_type, n_tgt.type AS tgt_type,
+               n_src.label AS src_label, n_tgt.label AS tgt_label
+        FROM edges e
+        LEFT JOIN nodes n_src ON n_src.id = e.source
+        LEFT JOIN nodes n_tgt ON n_tgt.id = e.target
+        WHERE e.confidence IN ('inferred', 'ambiguous')
+        ORDER BY e.created DESC
+        LIMIT 200
+      `).all();
+
+      if (candidates.length === 0) return;
+
+      const graphEvents = require('../graph/events');
+      let pruned = 0;
+      for (const e of candidates) {
+        this.stats.edgesReviewed++;
+        const prior = (Object.prototype.hasOwnProperty.call(RELATION_CONFIDENCE_PRIORS, e.type)
+          ? RELATION_CONFIDENCE_PRIORS[e.type]
+          : DEFAULT_RELATION_PRIOR);
+        let fpScore = 1 - prior;
+        const crossFamily = _typeFamily(e.src_type) !== _typeFamily(e.tgt_type);
+        let typeMismatch = false;
+        if (crossFamily && _typeFamily(e.src_type) !== 'other' && _typeFamily(e.tgt_type) !== 'other') {
+          fpScore += 0.4;
+          typeMismatch = true;
+        }
+        // Ambiguous edges get a small extra push — they're already flagged
+        // by the learner as uncertain. Inferred-only stays at the prior.
+        if (e.confidence === 'ambiguous') fpScore += 0.1;
+
+        if (fpScore < mode.edgePruneFalsePositiveMin) continue;
+
+        try {
+          this.db.prepare('DELETE FROM edges WHERE id = ?').run(e.id);
+          pruned++;
+          if (typeMismatch) this.stats.prunedByTypeMismatch++;
+          else this.stats.prunedByPrior++;
+          graphEvents.emit('change', {
+            op: 'edge:delete',
+            edge: { source: e.source, target: e.target, type: e.type, confidence: e.confidence },
+            reason: typeMismatch ? 'cross-family-mismatch' : 'low-prior',
+            source: 'janitor',
+          });
+          this.log.debug?.(`[janitor] Pruned edge ${e.src_label || e.source} --${e.type}--> ${e.tgt_label || e.target} (fp=${fpScore.toFixed(2)}, prior=${prior}${typeMismatch ? ', mismatch' : ''})`);
+        } catch (err) {
+          this.log.warn(`[janitor] Edge prune ${e.id}: ${err.message}`);
+        }
+      }
+
+      if (pruned > 0) {
+        const byMismatchThisCycle = this.stats.prunedByTypeMismatch - (this._lastEdgePruneMismatch || 0);
+        const byPriorThisCycle = pruned - byMismatchThisCycle;
+        this._lastEdgePruneMismatch = this.stats.prunedByTypeMismatch;
+        this.log.info(`[janitor] Edge prune: ${pruned}/${candidates.length} (prior:${byPriorThisCycle} mismatch:${byMismatchThisCycle})`);
+      }
+    } catch (e) {
+      this.log.warn(`[janitor] Edge prune phase: ${e.message}`);
+    }
+  }
+
   // ── Phase 3 — Housekeeping ─────────────────────────────────────────────
 
   async _phaseBinHousekeep() {
@@ -495,6 +697,19 @@ ${edgeLines || '    (no edges)'}`;
       }
     } catch (e) {
       this.log.warn(`[janitor] bin housekeeping: ${e.message}`);
+    }
+
+    // GC learner_processed dedup table — entries older than 30 days no
+    // longer protect anything useful (a turn replayed a month later may
+    // legitimately produce different extraction with new graph context),
+    // so let them age out and reclaim space.
+    try {
+      const res = this.db.prepare("DELETE FROM learner_processed WHERE processed_at < datetime('now', '-30 days')").run();
+      if (res?.changes > 0) {
+        this.log.info(`[janitor] Aged out ${res.changes} learner-processed row(s)`);
+      }
+    } catch (e) {
+      this.log.warn(`[janitor] learner_processed housekeeping: ${e.message}`);
     }
   }
 
@@ -643,13 +858,13 @@ ${edgeLines || '    (no edges)'}`;
             at.source_excerpt || null, at.source_episode_id || null
           );
         }
-        const insEdge = this.db.prepare('INSERT INTO edges (source, target, type, weight, created, extracted_with) VALUES (?, ?, ?, ?, ?, ?)');
+        const insEdge = this.db.prepare('INSERT INTO edges (source, target, type, weight, created, extracted_with, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)');
         let edgesRestored = 0, edgesSkipped = 0;
         for (const e of edges) {
           const other = e.source === node.id ? e.target : e.source;
           const otherExists = this.db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(other);
           if (!otherExists) { edgesSkipped++; continue; }
-          insEdge.run(e.source, e.target, e.type, e.weight ?? 1.0, e.created || new Date().toISOString(), e.extracted_with || null);
+          insEdge.run(e.source, e.target, e.type, e.weight ?? 1.0, e.created || new Date().toISOString(), e.extracted_with || null, e.confidence || null);
           edgesRestored++;
         }
         const insAlias = this.db.prepare('INSERT INTO aliases (node_id, alias) VALUES (?, ?)');
