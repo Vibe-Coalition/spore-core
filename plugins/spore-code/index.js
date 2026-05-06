@@ -25,11 +25,13 @@
 //       - wsClose: ungraceful-close distillation chain
 //   • afterToolExec middleware: temp-tagging on graph_update creates.
 //
-// The /auth handler validates against config.inviteKey (a host-level
-// setting in core, NOT a plugin slot). Webapp self-register uses the
-// same key; both flows read it directly from this.config.
+// The /auth handler accepts either config.inviteKey (a host-level setting
+// in core, NOT a plugin slot) or a local web account password from
+// webapp-users.json.
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { coreRequire, modelForTier } = require('../core-require');
 const { projectIdentityFromContext } = coreRequire('graph/scopes');
 const graphEvents = coreRequire('graph/events');
@@ -112,6 +114,81 @@ function inviteKeyMatches(typed, stored) {
   try { return crypto.timingSafeEqual(a, b); } catch { return false; }
 }
 
+function resolveDataDir(api) {
+  const host = api.getHostConfig?.() || {};
+  return api._appContext?.config?.dataDir || host.dataDir || process.env.SPORE_DATA_DIR || '/data';
+}
+
+function loadWebappUsers(api) {
+  const file = path.join(resolveDataDir(api), 'webapp-users.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function verifyWebappPassword(password, salt, storedHash) {
+  if (!password || !salt || !storedHash) return false;
+  const computed = crypto.pbkdf2Sync(String(password), String(salt), 100000, 64, 'sha512').toString('hex');
+  if (computed.length !== String(storedHash).length) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(String(storedHash))); } catch { return false; }
+}
+
+function wantsPasswordAuth(parsed) {
+  const method = String(parsed?.authMethod || parsed?.auth_method || parsed?.method || '').trim().toLowerCase();
+  return method === 'password' || method === 'account' || (!!parsed?.password && !parsed?.key);
+}
+
+function authenticateAccountPassword(api, username, password) {
+  const host = api.getHostConfig?.() || {};
+  if (host.webAuthUser && host.webAuthPass && username === host.webAuthUser && password === host.webAuthPass) {
+    return { ok: true, username, role: 'creator' };
+  }
+  const user = loadWebappUsers(api).find(u => String(u?.username || '') === username);
+  if (user?.blocked) {
+    return { ok: false, status: 403, error: 'Your account has been blocked. Contact the operator.' };
+  }
+  if (!user || !verifyWebappPassword(password, user.salt, user.hash)) {
+    return { ok: false, status: 401, error: 'Invalid credentials' };
+  }
+  return { ok: true, username: user.username, role: user.role || 'webapp' };
+}
+
+function issueCliToken(api, res, username, authKind) {
+  // Issue a Bearer token via the host's web-session map. The WebSocket
+  // auth handshake (in core, src/gateways/web.js) reads this map to
+  // validate `Bearer <token>` headers, so the plugin and core share
+  // session storage even though the auth endpoint moved to the plugin.
+  // The WebGateway is hung off `tools.gateway`, not registered with the
+  // GatewayManager (only Discord/Telegram/Slack live there). Try tools.gateway
+  // first; fall back to a hypothetical 'web' GW registration for forward-compat.
+  const webGw = api._appContext?.tools?.gateway || api._appContext?.gateways?.getGateway?.('web');
+  const webSessions = webGw?._webSessions;
+  if (!webSessions) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Web gateway not ready' }));
+    return;
+  }
+
+  const cleanUser = String(username || '').trim();
+  const sporeSid = crypto.randomBytes(16).toString('hex');
+  webSessions.set(sporeSid, {
+    user: cleanUser,
+    // 'cli' is core's generic CLI-class role — core's WS handler treats
+    // any session with type 'cli' as a CLI client (sessionId-keyed
+    // history, no graph-event broadcast, etc.). Plugin-specific role
+    // names like 'spore-code' would couple core to this plugin.
+    type: 'cli',
+    auth: authKind,
+    created: Date.now(),
+  });
+  api.getLogger().info(`Auth OK for user: ${cleanUser}${authKind ? ` (${authKind})` : ''}`);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true, token: sporeSid, user: cleanUser }));
+}
+
 // ── HTTP route handlers ─────────────────────────────────────────────
 
 async function handleAuth(api, req, res) {
@@ -132,15 +209,27 @@ async function handleAuth(api, req, res) {
   }
   const { username, key } = parsed || {};
 
+  if (!username || typeof username !== 'string' || username.length > 64 || !/^[a-zA-Z0-9_.-]+$/.test(username)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid username (alphanumeric/_.-, max 64 chars)' }));
+    return;
+  }
+
+  if (wantsPasswordAuth(parsed)) {
+    const auth = authenticateAccountPassword(api, username, String(parsed.password || ''));
+    if (!auth.ok) {
+      res.writeHead(auth.status || 401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: auth.error || 'Invalid credentials' }));
+      return;
+    }
+    issueCliToken(api, res, auth.username, 'password');
+    return;
+  }
+
   const inviteKey = resolveInviteKey(api);
   if (!inviteKey) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'No Spore Core invite key set on this instance', code: 'INVITE_KEY_NOT_CONFIGURED' }));
-    return;
-  }
-  if (!username || typeof username !== 'string' || username.length > 32 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid username (alphanumeric, max 32 chars)' }));
     return;
   }
   if (!inviteKeyMatches(key, inviteKey)) {
@@ -148,35 +237,7 @@ async function handleAuth(api, req, res) {
     res.end(JSON.stringify({ error: 'Invalid invite key' }));
     return;
   }
-
-  // Issue a Bearer token via the host's web-session map. The WebSocket
-  // auth handshake (in core, src/gateways/web.js) reads this map to
-  // validate `Bearer <token>` headers, so the plugin and core share
-  // session storage even though the auth endpoint moved to the plugin.
-  // The WebGateway is hung off `tools.gateway`, not registered with the
-  // GatewayManager (only Discord/Telegram/Slack live there). Try tools.gateway
-  // first; fall back to a hypothetical 'web' GW registration for forward-compat.
-  const webGw = api._appContext?.tools?.gateway || api._appContext?.gateways?.getGateway?.('web');
-  const webSessions = webGw?._webSessions;
-  if (!webSessions) {
-    res.writeHead(503, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Web gateway not ready' }));
-    return;
-  }
-
-  const sporeSid = crypto.randomBytes(16).toString('hex');
-  webSessions.set(sporeSid, {
-    user: username.toLowerCase().trim(),
-    // 'cli' is core's generic CLI-class role — core's WS handler treats
-    // any session with type 'cli' as a CLI client (sessionId-keyed
-    // history, no graph-event broadcast, etc.). Plugin-specific role
-    // names like 'spore-code' would couple core to this plugin.
-    type: 'cli',
-    created: Date.now(),
-  });
-  api.getLogger().info(`Auth OK for user: ${username}`);
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, token: sporeSid, user: username }));
+  issueCliToken(api, res, username, 'invite');
 }
 
 async function handleSessions(api, req, res) {
@@ -1963,4 +2024,12 @@ module.exports = function register(api) {
   });
 
   api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/spore-code alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
+};
+
+module.exports._test = {
+  handleAuth,
+  inviteKeyMatches,
+  verifyWebappPassword,
+  wantsPasswordAuth,
+  authenticateAccountPassword,
 };
