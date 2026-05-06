@@ -13,6 +13,16 @@ const crypto = require('crypto');
 const graphEvents = require('../graph/events');
 const { WebSettingsService } = require('./web/settings-service');
 
+function _redactSecrets(value) {
+  let s = String(value ?? '');
+  if (!s) return s;
+  s = s.replace(/(sk-|sk-proj-)[A-Za-z0-9_-]{12,}/g, '$1[redacted]');
+  s = s.replace(/\bspc_[A-Za-z0-9_-]{16,}\b/g, 'spc_[redacted]');
+  s = s.replace(/\bBearer\s+[A-Za-z0-9_.-]{16,}/gi, 'Bearer [redacted]');
+  s = s.replace(/(password|pass|token|secret|api[_-]?key|authorization|inviteKey|invite_key)\s*[:=]\s*["']?[^"',\s}]{6,}/gi, '$1=[redacted]');
+  return s;
+}
+
 /** Pick the newer of two file paths (by mtime). Skips null/missing paths. */
 function _newerFile(a, b) {
   const aOk = a && fs.existsSync(a);
@@ -175,12 +185,22 @@ function _projectUserFromIdentityKey(identityKey) {
   return match ? match[1] : null;
 }
 
+function _webUserFromIdentityKey(identityKey) {
+  const match = String(identityKey || '').match(/^web-user:(.+)$/i);
+  return match ? match[1] : null;
+}
+
 function _graphProjectCandidates(graph) {
   return [
     graph?.slug,
     graph?.identityKey,
     graph?.projectKey,
     graph?.projectSlug,
+    graph?.owner,
+    graph?.createdFor,
+    graph?.webappUser,
+    graph?.username,
+    graph?.userId,
     graph?.name,
     graph?.projectName,
     graph?.projectRoot,
@@ -220,6 +240,8 @@ function _graphMetadataAllowsUser(graph, username) {
   }
   const identityUser = _projectUserFromIdentityKey(graph.identityKey);
   if (identityUser) values.push(identityUser);
+  const webIdentityUser = _webUserFromIdentityKey(graph.identityKey);
+  if (webIdentityUser) values.push(webIdentityUser);
   return _graphAccessMatches(values, userCandidates);
 }
 
@@ -239,13 +261,56 @@ function _canGraphAuthViewGraph(graph, authContext, registry) {
   if (!graph) return false;
   if (_graphAuthIsCreator(authContext)) return true;
   if (_isDefaultOrGeneralGraph(graph, registry)) return true;
-  if (graph.role !== 'project') return false;
+  if (graph.role !== 'project' && graph.role !== 'user') return false;
   const username = authContext?.username || authContext?.user || authContext?.userRecord?.username || null;
   return _userRecordAllowsGraph(authContext?.userRecord, graph) || _graphMetadataAllowsUser(graph, username);
 }
 
-function _shapeGraphForAuth(graph, authContext, registry) {
+function _graphAuthUsername(authContext) {
+  return authContext?.username || authContext?.user || authContext?.userRecord?.username || null;
+}
+
+function _scopedUserGraphSlugForAuth(authContext, registry) {
+  if (!registry || _graphAuthIsCreator(authContext)) return null;
+  const role = String(authContext?.role || authContext?.type || '').toLowerCase();
+  if (role !== 'webapp') return null;
+  const username = _graphAuthUsername(authContext);
+  if (!username) return null;
+  const recordSlug = authContext?.userRecord?.userGraphSlug;
+  if (recordSlug && registry.get?.(recordSlug) && _canGraphAuthViewGraph(registry.get(recordSlug), authContext, registry)) {
+    return recordSlug;
+  }
+  try {
+    if (typeof registry.ensureUserGraph === 'function') {
+      return registry.ensureUserGraph(`web-user:${_safeGraphUserPart(username)}`, {
+        name: `${username} Memory`,
+        description: `Private web memory for ${username}`,
+        source: 'webapp',
+        createdBy: 'webapp',
+        username,
+        userId: username,
+        webappUser: username,
+        owner: username,
+      });
+    }
+  } catch { /* fall through to metadata search */ }
+  const graphs = typeof registry.list === 'function' ? registry.list() : Object.values(registry._registry || {});
+  const found = graphs.find(g => g?.role === 'user' && _graphMetadataAllowsUser(g, username));
+  return found?.slug || null;
+}
+
+function _shapeGraphForAuth(graph, authContext, registry, opts = {}) {
   const shaped = { ...(graph || {}) };
+  const scopedGraphSlug = opts.scopedGraphSlug || _scopedUserGraphSlugForAuth(authContext, registry);
+  const scopedActive = !!(scopedGraphSlug && shaped.slug === scopedGraphSlug);
+  shaped.globalActive = shaped.active === true;
+  if (scopedActive) {
+    shaped.scopedActive = true;
+    shaped.active = true;
+    shaped.access = shaped.access || 'scoped';
+  } else if (!_graphAuthIsCreator(authContext) && scopedGraphSlug && shaped.globalActive) {
+    shaped.active = false;
+  }
   if (!_graphAuthIsCreator(authContext)) {
     delete shaped.dbPath;
     shaped.readOnly = true;
@@ -253,8 +318,836 @@ function _shapeGraphForAuth(graph, authContext, registry) {
     shaped.canActivate = false;
     shaped.inspectOnly = true;
     shaped.access = _canGraphAuthViewGraph(graph, authContext, registry) ? 'read' : 'none';
+    if (scopedActive) {
+      shaped.access = 'scoped';
+      shaped.currentScope = true;
+      shaped.readOnly = false;
+      shaped.canEditNodes = true;
+    }
   }
   return shaped;
+}
+
+const GRAPH_INTERNAL_NODE_IDS = ['spore-activity-log', 'spore-token-log'];
+const GRAPH_OVERVIEW_NODE_LIMIT = 650;
+const GRAPH_OVERVIEW_EDGE_LIMIT = 1200;
+const GRAPH_SLICE_NODE_LIMIT = 450;
+const GRAPH_SLICE_EDGE_LIMIT = 1200;
+const GRAPH_WEBGL_NODE_LIMIT = 250000;
+const GRAPH_WEBGL_EDGE_LIMIT = 1000000;
+const GRAPH_AUTO_WEBGL_NODE_THRESHOLD = 500;
+const GRAPH_SHARED_LAYOUT_VERSION = 'spore-centered-petri-v1';
+
+function _graphIntParam(params, name, fallback, min, max) {
+  const rawValue = params?.get?.(name);
+  if (rawValue === undefined || rawValue === null || rawValue === '') return fallback;
+  const raw = Number(rawValue);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(raw)));
+}
+
+function _graphJsonExtra(value) {
+  if (!value || value === '{}') return null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function _graphLayoutHash32(value) {
+  let hash = 2166136261;
+  const text = String(value || '');
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function _graphLayoutHashUnit(value, salt = 0) {
+  return (_graphLayoutHash32(`${value}:${salt}`) >>> 0) / 4294967295;
+}
+
+function _graphLayoutGap(nodeCount) {
+  if (nodeCount > 80000) return 6.5;
+  if (nodeCount > 25000) return 7.5;
+  if (nodeCount > 8000) return 9;
+  if (nodeCount > 2000) return 13;
+  if (nodeCount > 600) return 20;
+  if (nodeCount > 150) return 30;
+  return 58;
+}
+
+function _graphIsSporeCenterEntry(entry) {
+  const id = String(entry?.id || '').toLowerCase();
+  const type = String(entry?.type || '').toLowerCase();
+  return type === 'self' || id === 'self' || id === 'spore' || id === 'spore-core' || id.includes('spore-self');
+}
+
+function _graphComputeSharedLayout(rows = []) {
+  const entries = (rows || [])
+    .filter(row => row?.id)
+    .map(row => ({
+      id: String(row.id),
+      type: String(row.type || 'unknown'),
+      cluster: row.cluster == null ? '' : String(row.cluster),
+      hash: _graphLayoutHash32(row.id),
+    }));
+  const total = entries.length;
+  const positions = new Map();
+  if (!total) {
+    return { positions, gap: 0, columns: 0, rows: 0 };
+  }
+
+  const centerIndex = entries.findIndex(_graphIsSporeCenterEntry);
+  const center = centerIndex >= 0 ? entries.splice(centerIndex, 1)[0] : entries.shift();
+  positions.set(center.id, { x: 0, y: 0 });
+
+  entries.sort((a, b) => {
+    if (a.hash !== b.hash) return a.hash - b.hash;
+    if (a.id < b.id) return -1;
+    if (a.id > b.id) return 1;
+    return 0;
+  });
+
+  const typeCounts = new Map();
+  for (const entry of entries) typeCounts.set(entry.type, (typeCounts.get(entry.type) || 0) + 1);
+  const typeList = Array.from(typeCounts.entries())
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+    .map(([type]) => type);
+  const typeIndex = new Map(typeList.map((type, index) => [type, index]));
+  const gap = _graphLayoutGap(total);
+  const centerClear = total > 2000 ? gap * 5.5 : (total > 150 ? gap * 4.2 : gap * 2.15);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  let maxRadius = 0;
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const rank = index + 1;
+    const typeSlot = typeIndex.get(entry.type) || 0;
+    const typeBias = typeList.length > 1 ? (typeSlot / typeList.length) * Math.PI * 2 : 0;
+    const clusterBias = entry.cluster ? (_graphLayoutHashUnit(entry.cluster, 2) - 0.5) * 0.62 : 0;
+    const angle = (rank * goldenAngle * 0.68) + (typeBias * 0.32) + clusterBias + (_graphLayoutHashUnit(entry.id, 3) - 0.5) * 0.18;
+    const radiusScale = 0.9 + _graphLayoutHashUnit(entry.type, 4) * 0.16;
+    const radius = centerClear + Math.sqrt(rank - 0.35) * gap * radiusScale;
+    const jitter = Math.min(gap * 0.16, 5.5);
+    const jx = (_graphLayoutHashUnit(entry.id, 5) - 0.5) * jitter;
+    const jy = (_graphLayoutHashUnit(entry.id, 6) - 0.5) * jitter;
+    if (radius > maxRadius) maxRadius = radius;
+    positions.set(entry.id, {
+      x: Math.round((Math.cos(angle) * radius + jx) * 100) / 100,
+      y: Math.round((Math.sin(angle) * radius + jy) * 100) / 100,
+    });
+  }
+
+  return { positions, gap, columns: 0, rows: Math.max(1, Math.ceil(maxRadius / Math.max(1, gap))) };
+}
+
+function _graphApplySharedLayout(nodes, layout) {
+  const positions = layout?.positions || layout;
+  if (!positions?.size) return nodes || [];
+  for (const node of nodes || []) {
+    const point = positions.get(String(node?.id || ''));
+    if (!point) continue;
+    node.x = point.x;
+    node.y = point.y;
+  }
+  return nodes || [];
+}
+
+function _graphVisibleLayoutRows(db) {
+  try {
+    return db.prepare(
+      `SELECT
+         n.id,
+         COALESCE(n.type, 'unknown') AS type,
+         gm.group_id AS cluster
+       FROM nodes n
+       LEFT JOIN (
+         SELECT m.node_id, MIN(m.group_id) AS group_id
+         FROM node_group_members m
+         JOIN node_groups g ON g.id = m.group_id
+         WHERE g.superseded_at IS NULL
+         GROUP BY m.node_id
+       ) gm ON gm.node_id = n.id
+       WHERE ${_graphVisibleNodeWhere('n')}
+       ORDER BY n.id ASC`
+    ).all(...GRAPH_INTERNAL_NODE_IDS);
+  } catch {
+    return db.prepare(
+      `SELECT
+         n.id,
+         COALESCE(n.type, 'unknown') AS type,
+         NULL AS cluster
+       FROM nodes n
+       WHERE ${_graphVisibleNodeWhere('n')}
+       ORDER BY n.id ASC`
+    ).all(...GRAPH_INTERNAL_NODE_IDS);
+  }
+}
+
+function _graphBuildVisibleLayout(db) {
+  return _graphComputeSharedLayout(_graphVisibleLayoutRows(db));
+}
+
+function _graphLayoutMeta(layout) {
+  return {
+    layout: GRAPH_SHARED_LAYOUT_VERSION,
+    layoutGap: layout?.gap || 0,
+    layoutColumns: layout?.columns || 0,
+    layoutRows: layout?.rows || 0,
+  };
+}
+
+function _graphAspectKey(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function _graphAttrKey(attr) {
+  const content = typeof attr === 'string' ? attr : attr?.content;
+  return String(content || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function _graphDedupeAspects(aspects = []) {
+  const out = [];
+  const byName = new Map();
+  for (const aspect of aspects || []) {
+    const key = _graphAspectKey(aspect?.name);
+    if (!key) continue;
+    let merged = byName.get(key);
+    if (!merged) {
+      merged = {
+        ...aspect,
+        name: String(aspect.name || '').trim(),
+        weight: Number(aspect.weight) || 5,
+        attributes: [],
+        duplicateIds: [],
+      };
+      byName.set(key, merged);
+      out.push(merged);
+    } else {
+      merged.weight = Math.max(Number(merged.weight) || 5, Number(aspect.weight) || 5);
+    }
+    if (aspect?.id != null && !merged.duplicateIds.includes(aspect.id)) merged.duplicateIds.push(aspect.id);
+    const seenAttrs = merged._seenAttrs || (merged._seenAttrs = new Set());
+    for (const attr of aspect?.attributes || []) {
+      const attrKey = _graphAttrKey(attr);
+      if (!attrKey || seenAttrs.has(attrKey)) continue;
+      seenAttrs.add(attrKey);
+      merged.attributes.push(attr);
+    }
+  }
+  for (const aspect of out) {
+    aspect.duplicateCount = aspect.duplicateIds.length;
+    delete aspect._seenAttrs;
+  }
+  return out;
+}
+
+function _graphShapeNode(row, details = {}) {
+  return {
+    id: row.id,
+    label: row.label,
+    type: row.type,
+    description: row.description || '',
+    importance: row.importance,
+    mentions: row.mentions || 0,
+    created: row.created || null,
+    updated: row.updated || null,
+    aliases: details.aliases || [],
+    aspects: _graphDedupeAspects(details.aspects || []),
+    extra: _graphJsonExtra(row.extra),
+    degree: row.degree_score ?? row.degree ?? undefined,
+  };
+}
+
+function _graphVisibleNodeWhere(alias = 'n') {
+  return `${alias}.id NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})`;
+}
+
+function _graphVisibleCounts(db) {
+  const nodeCount = db.prepare(`SELECT COUNT(*) AS c FROM nodes n WHERE ${_graphVisibleNodeWhere('n')}`).get(...GRAPH_INTERNAL_NODE_IDS)?.c || 0;
+  const edgeCount = db.prepare(
+    `SELECT COUNT(*) AS c FROM edges
+     WHERE source NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})
+       AND target NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})`
+  ).get(...GRAPH_INTERNAL_NODE_IDS, ...GRAPH_INTERNAL_NODE_IDS)?.c || 0;
+  return { nodeCount, edgeCount };
+}
+
+function _graphTypeCounts(db) {
+  return db.prepare(
+    `SELECT COALESCE(type, 'unknown') AS type, COUNT(*) AS count
+     FROM nodes n
+     WHERE ${_graphVisibleNodeWhere('n')}
+     GROUP BY COALESCE(type, 'unknown')
+     ORDER BY count DESC, type ASC`
+  ).all(...GRAPH_INTERNAL_NODE_IDS);
+}
+
+function _graphAggregateTypeId(type) {
+  return `type:${encodeURIComponent(String(type || 'unknown'))}`;
+}
+
+function _graphTypeFromAggregateId(id) {
+  const raw = String(id || '');
+  if (!raw.startsWith('type:')) return null;
+  try {
+    return decodeURIComponent(raw.slice(5)) || 'unknown';
+  } catch {
+    return raw.slice(5) || 'unknown';
+  }
+}
+
+function _graphAggregateTypeEdges(db, limit) {
+  const nodeTypes = new Map();
+  const nodesStmt = db.prepare(
+    `SELECT id, COALESCE(type, 'unknown') AS type
+     FROM nodes n
+     WHERE ${_graphVisibleNodeWhere('n')}`
+  );
+  for (const row of nodesStmt.iterate(...GRAPH_INTERNAL_NODE_IDS)) {
+    nodeTypes.set(row.id, row.type || 'unknown');
+  }
+
+  const pairs = new Map();
+  const internalEdges = new Map();
+  let representedEdgeCount = 0;
+  const edgeStmt = db.prepare(
+    `SELECT source, target, type, weight
+     FROM edges
+     WHERE source NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})
+       AND target NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})`
+  );
+  for (const edge of edgeStmt.iterate(...GRAPH_INTERNAL_NODE_IDS, ...GRAPH_INTERNAL_NODE_IDS)) {
+    const sourceType = nodeTypes.get(edge.source);
+    const targetType = nodeTypes.get(edge.target);
+    if (!sourceType || !targetType) continue;
+    representedEdgeCount++;
+    if (sourceType === targetType) {
+      internalEdges.set(sourceType, (internalEdges.get(sourceType) || 0) + 1);
+      continue;
+    }
+    const key = `${sourceType}\u0000${targetType}`;
+    let row = pairs.get(key);
+    if (!row) {
+      row = { source_type: sourceType, target_type: targetType, count: 0, total_weight: 0 };
+      pairs.set(key, row);
+    }
+    row.count++;
+    row.total_weight += Number(edge.weight) || 1;
+  }
+
+  const sortedRows = Array.from(pairs.values()).sort((a, b) =>
+    (b.count - a.count) ||
+    (b.total_weight - a.total_weight) ||
+    String(a.source_type).localeCompare(String(b.source_type)) ||
+    String(a.target_type).localeCompare(String(b.target_type))
+  );
+  const edgeLimit = Math.max(0, Number(limit) || sortedRows.length);
+  return {
+    edgeRows: sortedRows.slice(0, edgeLimit),
+    internalEdges,
+    representedEdgeCount,
+    edgePairCount: sortedRows.length,
+    truncated: sortedRows.length > edgeLimit,
+  };
+}
+
+function _graphRowsByIds(db, ids) {
+  const orderedIds = Array.from(new Set((ids || []).filter(Boolean)));
+  if (!orderedIds.length) return [];
+  const q = orderedIds.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT * FROM nodes WHERE id IN (${q})`).all(...orderedIds);
+  const byId = new Map(rows.map(r => [r.id, r]));
+  return orderedIds.map(id => byId.get(id)).filter(Boolean);
+}
+
+function _graphCollapseVisualEdges(edges = []) {
+  const byKey = new Map();
+  for (const edge of edges || []) {
+    const source = edge?.source;
+    const target = edge?.target;
+    if (!source || !target) continue;
+    const type = edge.type || 'related';
+    const key = `${source}\u0000${target}\u0000${type}`;
+    let merged = byKey.get(key);
+    if (!merged) {
+      merged = {
+        source,
+        target,
+        type,
+        weight: 1,
+        count: 0,
+        totalWeight: 0,
+      };
+      byKey.set(key, merged);
+    }
+    const weight = Number(edge.weight) || 1;
+    merged.weight = Math.max(merged.weight, weight);
+    merged.count += Number(edge.count) || 1;
+    merged.totalWeight += Number(edge.totalWeight) || weight;
+  }
+  return Array.from(byKey.values()).map(edge => ({
+    source: edge.source,
+    target: edge.target,
+    type: edge.type,
+    weight: edge.weight || 1,
+    ...(edge.count > 1 ? {
+      count: edge.count,
+      representedCount: edge.count,
+      totalWeight: edge.totalWeight,
+    } : {}),
+  }));
+}
+
+function _graphEdgesForNodeSet(db, ids, limit) {
+  const nodeIds = Array.from(new Set((ids || []).filter(Boolean)));
+  if (nodeIds.length < 2) return [];
+  const q = nodeIds.map(() => '?').join(',');
+  const edges = db.prepare(
+    `SELECT source, target, type, weight
+     FROM edges
+     WHERE source IN (${q}) AND target IN (${q})
+     ORDER BY COALESCE(weight, 1) DESC, id DESC
+     LIMIT ?`
+  ).all(...nodeIds, ...nodeIds, limit)
+    .map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 }));
+  return _graphCollapseVisualEdges(edges);
+}
+
+function _graphBuildFullPayload(db, meta = {}) {
+  let nodes = db.prepare(`SELECT * FROM nodes n WHERE ${_graphVisibleNodeWhere('n')}`).all(...GRAPH_INTERNAL_NODE_IDS);
+  let edges = db.prepare(
+    `SELECT source, target, type, weight FROM edges
+     WHERE source NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})
+       AND target NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})`
+  ).all(...GRAPH_INTERNAL_NODE_IDS, ...GRAPH_INTERNAL_NODE_IDS);
+  const aspects = db.prepare('SELECT * FROM aspects').all();
+  const attrs = db.prepare('SELECT * FROM attributes').all();
+  const aliases = db.prepare('SELECT * FROM aliases').all();
+  const visibleIds = new Set(nodes.map(n => n.id));
+  const visibleAspects = aspects.filter(a => visibleIds.has(a.node_id));
+  const visibleAspectIds = new Set(visibleAspects.map(a => a.id));
+  const visibleAttrs = attrs.filter(a => visibleAspectIds.has(a.aspect_id));
+  const visibleAliases = aliases.filter(a => visibleIds.has(a.node_id));
+
+  const attrsByAspect = {};
+  for (const a of visibleAttrs) {
+    (attrsByAspect[a.aspect_id] ||= []).push({
+      id: a.id,
+      content: a.content,
+      importance: a.importance,
+      eventDate: a.event_date || null,
+      source: a.source || null,
+      extracted_with: a.extracted_with || null,
+    });
+  }
+  const aspectsByNode = {};
+  for (const a of visibleAspects) {
+    (aspectsByNode[a.node_id] ||= []).push({
+      id: a.id,
+      name: a.name,
+      weight: a.weight,
+      attributes: attrsByAspect[a.id] || [],
+    });
+  }
+  const aliasesByNode = {};
+  for (const a of visibleAliases) (aliasesByNode[a.node_id] ||= []).push(a.alias);
+
+  const layout = _graphBuildVisibleLayout(db);
+  const shapedNodes = nodes.map(n => _graphShapeNode(n, {
+    aliases: aliasesByNode[n.id] || [],
+    aspects: aspectsByNode[n.id] || [],
+  }));
+  _graphApplySharedLayout(shapedNodes, layout);
+  const shapedEdges = _graphCollapseVisualEdges(edges);
+  const counts = _graphVisibleCounts(db);
+
+  return {
+    ...(meta.graph ? { graph: meta.graph } : {}),
+    nodes: shapedNodes,
+    edges: shapedEdges,
+    aspects: visibleAspects,
+    attributes: visibleAttrs,
+    aliases: visibleAliases,
+    meta: {
+      ...counts,
+      mode: 'full',
+      displayedNodeCount: nodes.length,
+      displayedEdgeCount: shapedEdges.length,
+      representedEdgeCount: counts.edgeCount,
+      dedupedEdgeCount: Math.max(0, counts.edgeCount - shapedEdges.length),
+      truncated: false,
+      ..._graphLayoutMeta(layout),
+      ...(meta.extra || {}),
+    },
+  };
+}
+
+function _graphBuildOverviewPayload(db, opts = {}) {
+  const edgeLimit = opts.edgeLimit || GRAPH_OVERVIEW_EDGE_LIMIT;
+  const counts = _graphVisibleCounts(db);
+  const typeCounts = _graphTypeCounts(db);
+  const edgeSummary = _graphAggregateTypeEdges(db, edgeLimit);
+  const internalEdges = edgeSummary.internalEdges;
+  const nodes = typeCounts.map(row => {
+    const type = row.type || 'unknown';
+    const count = row.count || 0;
+    return {
+      id: _graphAggregateTypeId(type),
+      label: `${type} (${count})`,
+      type,
+      description: `Type group containing ${count} ${type} node${count === 1 ? '' : 's'}.`,
+      importance: Math.max(3, Math.min(10, 3 + Math.log10(count + 1) * 2)),
+      mentions: count,
+      aliases: [],
+      aspects: [],
+      extra: {
+        aggregate: true,
+        aggregateKind: 'type',
+        type,
+        memberCount: count,
+        internalEdgeCount: internalEdges.get(type) || 0,
+      },
+    };
+  });
+  const layout = _graphComputeSharedLayout(nodes.map(node => ({
+    id: node.id,
+    type: node.type,
+    cluster: node.type,
+  })));
+  _graphApplySharedLayout(nodes, layout);
+  const edges = edgeSummary.edgeRows.map(row => ({
+    source: _graphAggregateTypeId(row.source_type),
+    target: _graphAggregateTypeId(row.target_type),
+    type: 'aggregate_edges',
+    weight: Math.max(1, Math.log1p(row.count || 1)),
+    count: row.count || 0,
+  }));
+  return {
+    ...(opts.graph ? { graph: opts.graph } : {}),
+    nodes,
+    edges,
+    meta: {
+      ...counts,
+      mode: 'overview',
+      overviewKind: 'type-aggregate',
+      aggregated: true,
+      representedNodeCount: counts.nodeCount,
+      representedEdgeCount: counts.edgeCount,
+      displayedNodeCount: nodes.length,
+      displayedEdgeCount: edges.length,
+      truncated: false,
+      ..._graphLayoutMeta(layout),
+      nodeLimit: null,
+      edgeLimit,
+      typeCounts,
+      aggregateEdgeLimit: edgeLimit,
+      aggregateEdgePairCount: edgeSummary.edgePairCount,
+      aggregateEdgesTruncated: edgeSummary.truncated,
+      ...(opts.extra || {}),
+    },
+  };
+}
+
+function _graphBuildTypeSlicePayload(db, type, opts = {}) {
+  const nodeLimit = opts.nodeLimit || GRAPH_SLICE_NODE_LIMIT;
+  const edgeLimit = opts.edgeLimit || GRAPH_SLICE_EDGE_LIMIT;
+  const normalizedType = type || 'unknown';
+  const typeCount = db.prepare(
+    `SELECT COUNT(*) AS c
+     FROM nodes n
+     WHERE ${_graphVisibleNodeWhere('n')}
+       AND COALESCE(n.type, 'unknown') = ?`
+  ).get(...GRAPH_INTERNAL_NODE_IDS, normalizedType)?.c || 0;
+  const rows = db.prepare(
+    `WITH degree AS (
+       SELECT id, SUM(c) AS degree FROM (
+         SELECT source AS id, COUNT(*) AS c FROM edges GROUP BY source
+         UNION ALL
+         SELECT target AS id, COUNT(*) AS c FROM edges GROUP BY target
+       ) GROUP BY id
+     )
+     SELECT n.*, COALESCE(degree.degree, 0) AS degree_score
+     FROM nodes n
+     LEFT JOIN degree ON degree.id = n.id
+     WHERE ${_graphVisibleNodeWhere('n')}
+       AND COALESCE(n.type, 'unknown') = ?
+     ORDER BY
+       COALESCE(n.importance, 0) DESC,
+       COALESCE(degree.degree, 0) DESC,
+       COALESCE(n.mentions, 0) DESC,
+       COALESCE(n.updated, n.created, '') DESC,
+       n.id ASC
+     LIMIT ?`
+  ).all(...GRAPH_INTERNAL_NODE_IDS, normalizedType, nodeLimit);
+  const nodeIds = rows.map(n => n.id);
+  const edges = _graphEdgesForNodeSet(db, nodeIds, edgeLimit);
+  const counts = _graphVisibleCounts(db);
+  const layout = _graphBuildVisibleLayout(db);
+  const shapedNodes = rows.map(n => _graphShapeNode(n));
+  _graphApplySharedLayout(shapedNodes, layout);
+  return {
+    ...(opts.graph ? { graph: opts.graph } : {}),
+    nodes: shapedNodes,
+    edges,
+    meta: {
+      ...counts,
+      mode: 'slice',
+      sliceKind: 'type',
+      root: _graphAggregateTypeId(normalizedType),
+      rootType: normalizedType,
+      representedNodeCount: typeCount,
+      displayedNodeCount: rows.length,
+      displayedEdgeCount: edges.length,
+      truncated: rows.length < typeCount || edges.length >= edgeLimit,
+      ..._graphLayoutMeta(layout),
+      nodeLimit,
+      edgeLimit,
+      typeCounts: _graphTypeCounts(db),
+      ...(opts.extra || {}),
+    },
+  };
+}
+
+function _graphBuildWebglPayload(db, opts = {}) {
+  const nodeLimit = opts.nodeLimit || GRAPH_WEBGL_NODE_LIMIT;
+  const edgeLimit = opts.edgeLimit || GRAPH_WEBGL_EDGE_LIMIT;
+  const counts = _graphVisibleCounts(db);
+  let nodeRows;
+  try {
+    nodeRows = db.prepare(
+      `SELECT
+         n.id,
+         n.label,
+         COALESCE(n.type, 'unknown') AS type,
+         COALESCE(n.importance, 5) AS importance,
+         COALESCE(n.mentions, 0) AS mentions,
+         gm.group_id AS cluster
+       FROM nodes n
+       LEFT JOIN (
+         SELECT m.node_id, MIN(m.group_id) AS group_id
+         FROM node_group_members m
+         JOIN node_groups g ON g.id = m.group_id
+         WHERE g.superseded_at IS NULL
+         GROUP BY m.node_id
+       ) gm ON gm.node_id = n.id
+       WHERE ${_graphVisibleNodeWhere('n')}
+       ORDER BY n.id ASC
+       LIMIT ?`
+    ).all(...GRAPH_INTERNAL_NODE_IDS, nodeLimit);
+  } catch {
+    nodeRows = db.prepare(
+      `SELECT
+         n.id,
+         n.label,
+         COALESCE(n.type, 'unknown') AS type,
+         COALESCE(n.importance, 5) AS importance,
+         COALESCE(n.mentions, 0) AS mentions,
+         NULL AS cluster
+       FROM nodes n
+       WHERE ${_graphVisibleNodeWhere('n')}
+       ORDER BY n.id ASC
+       LIMIT ?`
+    ).all(...GRAPH_INTERNAL_NODE_IDS, nodeLimit);
+  }
+
+  const nodeIndex = new Map();
+  const layout = _graphComputeSharedLayout(nodeRows);
+  const nodes = nodeRows.map((row, index) => {
+    nodeIndex.set(row.id, index);
+    const node = {
+      id: row.id,
+      label: row.label || row.id,
+      type: row.type || 'unknown',
+      importance: row.importance || 5,
+      mentions: row.mentions || 0,
+      cluster: row.cluster == null ? null : row.cluster,
+    };
+    const point = layout.positions.get(String(row.id));
+    if (point) {
+      node.x = point.x;
+      node.y = point.y;
+    }
+    return node;
+  });
+
+  const edges = [];
+  const edgeStmt = db.prepare(
+    `SELECT source, target, type, weight
+     FROM edges
+     WHERE source NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})
+       AND target NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})`
+  );
+  for (const edge of edgeStmt.iterate(...GRAPH_INTERNAL_NODE_IDS, ...GRAPH_INTERNAL_NODE_IDS)) {
+    const source = nodeIndex.get(edge.source);
+    const target = nodeIndex.get(edge.target);
+    if (source === undefined || target === undefined) continue;
+    edges.push([source, target, Number(edge.weight) || 1, edge.type || 'linked']);
+    if (edges.length >= edgeLimit) break;
+  }
+
+  return {
+    ...(opts.graph ? { graph: opts.graph } : {}),
+    nodes,
+    edges,
+    meta: {
+      ...counts,
+      mode: 'webgl',
+      renderer: 'webgl',
+      displayedNodeCount: nodes.length,
+      displayedEdgeCount: edges.length,
+      representedNodeCount: counts.nodeCount,
+      representedEdgeCount: counts.edgeCount,
+      truncated: nodes.length < counts.nodeCount || edges.length < counts.edgeCount,
+      ..._graphLayoutMeta(layout),
+      nodeLimit,
+      edgeLimit,
+      typeCounts: _graphTypeCounts(db),
+      ...(opts.extra || {}),
+    },
+  };
+}
+
+function _graphBuildSlicePayload(db, rootId, opts = {}) {
+  const nodeLimit = opts.nodeLimit || GRAPH_SLICE_NODE_LIMIT;
+  const edgeLimit = opts.edgeLimit || GRAPH_SLICE_EDGE_LIMIT;
+  const aggregateType = _graphTypeFromAggregateId(rootId);
+  if (aggregateType) return _graphBuildTypeSlicePayload(db, aggregateType, opts);
+  const root = rootId ? db.prepare(`SELECT * FROM nodes n WHERE id = ? AND ${_graphVisibleNodeWhere('n')}`).get(rootId, ...GRAPH_INTERNAL_NODE_IDS) : null;
+  if (!root) {
+    return _graphBuildOverviewPayload(db, {
+      ...opts,
+      extra: { ...(opts.extra || {}), root: rootId || null, rootMissing: !!rootId },
+    });
+  }
+  const incident = db.prepare(
+    `SELECT source, target, type, weight
+     FROM edges
+     WHERE source = ? OR target = ?
+     ORDER BY COALESCE(weight, 1) DESC, id DESC
+     LIMIT ?`
+  ).all(rootId, rootId, Math.max(edgeLimit, nodeLimit * 2));
+  const ids = [rootId];
+  for (const e of incident) {
+    if (ids.length >= nodeLimit) break;
+    const other = e.source === rootId ? e.target : e.source;
+    if (other && !GRAPH_INTERNAL_NODE_IDS.includes(other) && !ids.includes(other)) ids.push(other);
+  }
+  const nodes = _graphRowsByIds(db, ids);
+  const nodeIds = nodes.map(n => n.id);
+  const edges = _graphEdgesForNodeSet(db, nodeIds, edgeLimit);
+  const counts = _graphVisibleCounts(db);
+  const layout = _graphBuildVisibleLayout(db);
+  const shapedNodes = nodes.map(n => _graphShapeNode(n));
+  _graphApplySharedLayout(shapedNodes, layout);
+  return {
+    ...(opts.graph ? { graph: opts.graph } : {}),
+    nodes: shapedNodes,
+    edges,
+    meta: {
+      ...counts,
+      mode: 'slice',
+      root: rootId,
+      displayedNodeCount: nodes.length,
+      displayedEdgeCount: edges.length,
+      truncated: nodes.length < counts.nodeCount || edges.length < counts.edgeCount,
+      ..._graphLayoutMeta(layout),
+      nodeLimit,
+      edgeLimit,
+      typeCounts: _graphTypeCounts(db),
+      ...(opts.extra || {}),
+    },
+  };
+}
+
+function _graphBuildPayload(db, params, meta = {}) {
+  const mode = String(params?.get?.('mode') || 'auto').toLowerCase();
+  if (mode === 'auto') {
+    const counts = _graphVisibleCounts(db);
+    const nodeLimit = _graphIntParam(params, 'nodeLimit', GRAPH_WEBGL_NODE_LIMIT, 1000, 500000);
+    const edgeLimit = _graphIntParam(params, 'edgeLimit', GRAPH_WEBGL_EDGE_LIMIT, 1000, 2000000);
+    const extra = {
+      requestedMode: 'auto',
+      autoRendererThreshold: GRAPH_AUTO_WEBGL_NODE_THRESHOLD,
+    };
+    if (counts.nodeCount > GRAPH_AUTO_WEBGL_NODE_THRESHOLD) {
+      return _graphBuildWebglPayload(db, {
+        graph: meta.graph,
+        nodeLimit,
+        edgeLimit,
+        extra,
+      });
+    }
+    return _graphBuildFullPayload(db, {
+      graph: meta.graph,
+      extra: { ...extra, renderer: 'svg' },
+    });
+  }
+  if (mode === 'webgl') {
+    return _graphBuildWebglPayload(db, {
+      graph: meta.graph,
+      nodeLimit: _graphIntParam(params, 'nodeLimit', GRAPH_WEBGL_NODE_LIMIT, 1000, 500000),
+      edgeLimit: _graphIntParam(params, 'edgeLimit', GRAPH_WEBGL_EDGE_LIMIT, 1000, 2000000),
+    });
+  }
+  if (mode === 'overview') {
+    return _graphBuildOverviewPayload(db, {
+      graph: meta.graph,
+      nodeLimit: _graphIntParam(params, 'nodeLimit', GRAPH_OVERVIEW_NODE_LIMIT, 50, 1500),
+      edgeLimit: _graphIntParam(params, 'edgeLimit', GRAPH_OVERVIEW_EDGE_LIMIT, 50, 4000),
+    });
+  }
+  if (mode === 'slice') {
+    return _graphBuildSlicePayload(db, String(params?.get?.('root') || '').trim(), {
+      graph: meta.graph,
+      nodeLimit: _graphIntParam(params, 'nodeLimit', GRAPH_SLICE_NODE_LIMIT, 25, 1200),
+      edgeLimit: _graphIntParam(params, 'edgeLimit', GRAPH_SLICE_EDGE_LIMIT, 25, 4000),
+    });
+  }
+  return _graphBuildFullPayload(db, { graph: meta.graph });
+}
+
+function _graphBuildNodeDetails(db, nodeId, meta = {}) {
+  const node = db.prepare(`SELECT * FROM nodes n WHERE id = ? AND ${_graphVisibleNodeWhere('n')}`).get(nodeId, ...GRAPH_INTERNAL_NODE_IDS);
+  if (!node) return null;
+  const aliases = db.prepare('SELECT alias FROM aliases WHERE node_id = ? ORDER BY alias').all(nodeId).map(a => a.alias);
+  const aspects = db.prepare('SELECT * FROM aspects WHERE node_id = ? ORDER BY weight DESC, name ASC').all(nodeId);
+  const attrs = aspects.length
+    ? db.prepare(`SELECT * FROM attributes WHERE aspect_id IN (${aspects.map(() => '?').join(',')}) ORDER BY importance DESC, id ASC`).all(...aspects.map(a => a.id))
+    : [];
+  const attrsByAspect = {};
+  for (const a of attrs) {
+    (attrsByAspect[a.aspect_id] ||= []).push({
+      id: a.id,
+      content: a.content,
+      importance: a.importance,
+      eventDate: a.event_date || null,
+      source: a.source || null,
+      extracted_with: a.extracted_with || null,
+    });
+  }
+  const edges = _graphCollapseVisualEdges(db.prepare(
+    `SELECT source, target, type, weight
+     FROM edges
+     WHERE source = ? OR target = ?
+     ORDER BY COALESCE(weight, 1) DESC, id DESC
+     LIMIT 500`
+  ).all(nodeId, nodeId).map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })));
+  const neighborIds = Array.from(new Set(edges.map(e => e.source === nodeId ? e.target : e.source).filter(id => id && !GRAPH_INTERNAL_NODE_IDS.includes(id)))).slice(0, 500);
+  const neighbors = _graphRowsByIds(db, neighborIds).map(n => _graphShapeNode(n));
+  return {
+    ...(meta.graph ? { graph: meta.graph } : {}),
+    node: _graphShapeNode(node, {
+      aliases,
+      aspects: aspects.map(a => ({
+        id: a.id,
+        name: a.name,
+        weight: a.weight,
+        attributes: attrsByAspect[a.id] || [],
+      })),
+    }),
+    edges,
+    neighbors,
+    meta: { mode: 'node', nodeId, neighborCount: neighbors.length, edgeCount: edges.length },
+  };
 }
 
 // ── Provider / model smoke-test helpers ──
@@ -548,7 +1441,7 @@ const _TIER_PROMPTS = {
 };
 
 async function _probeModelTier(tier, body, appConfig) {
-  const { createClientForModel, detectBackend } = require('../providers');
+  const { MultiProvider } = require('../providers');
   const { provider, model, providers } = body || {};
   if (!model) return { ok: false, error: 'missing model' };
 
@@ -581,7 +1474,7 @@ async function _probeModelTier(tier, body, appConfig) {
 
   const t0 = Date.now();
   try {
-    const client = createClientForModel(effectiveModel, cfg);
+    const client = new MultiProvider(cfg);
     const messages = [{ role: 'user', content: spec.user }];
     // Honor a per-model maxTokens override. Priority:
     //   1. body.maxTokens (what the operator just typed in the tier row,
@@ -602,7 +1495,12 @@ async function _probeModelTier(tier, body, appConfig) {
       Number(body?.maxTokens) ||
       Number(savedLim?.maxTokens) ||
       0;
-    let params = { model: effectiveModel, max_tokens: perModelMax > 0 ? perModelMax : 8192, messages };
+    let params = {
+      model: effectiveModel,
+      max_tokens: perModelMax > 0 ? perModelMax : 8192,
+      messages,
+      _usageMeta: { source: 'provider-test', route: `model-test:${tier}`, trigger: 'model-test' },
+    };
     // Reasoning effort: prefer body override (live UI value), else saved.
     const effort = body?.reasoningEffort || savedLim?.reasoningEffort || null;
     if (effort && effort !== 'auto') {
@@ -667,7 +1565,7 @@ async function _probeModelTier(tier, body, appConfig) {
 }
 
 async function _probeVLMTier(tier, effectiveModel, cfg) {
-  const { createClientForModel } = require('../providers');
+  const { MultiProvider } = require('../providers');
   const mapping = {
     imageVlm: { file: 'test-image.png', mime: 'image/png', prompt: 'What color is the main shape in this image? Answer with one word.' },
     videoVlm: { file: 'test-video.mp4', mime: 'video/mp4', prompt: 'Briefly describe what this video shows in one sentence.' },
@@ -696,8 +1594,13 @@ async function _probeVLMTier(tier, effectiveModel, cfg) {
 
   const t0 = Date.now();
   try {
-    const client = createClientForModel(effectiveModel, cfg);
-    const params = { model: effectiveModel, max_tokens: 1024, messages: [{ role: 'user', content }] };
+    const client = new MultiProvider(cfg);
+    const params = {
+      model: effectiveModel,
+      max_tokens: 1024,
+      messages: [{ role: 'user', content }],
+      _usageMeta: { source: 'provider-test', route: `model-test:${tier}`, trigger: 'model-test' },
+    };
     const r = await client.messages.create(params);
     const text = (r.content || []).find(b => b.type === 'text')?.text || '';
     return { ok: true, latency_ms: Date.now() - t0, model: effectiveModel, excerpt: text.slice(0, 200) };
@@ -1069,6 +1972,16 @@ class WebGateway {
     }
     db.exec('PRAGMA foreign_keys=ON');
 
+    // General Knowledge owns plugin reference nodes. After a General KB
+    // reset, wipe plugin_installs with the graph data and then let the
+    // plugin manager re-apply the installed reference bundles here.
+    try {
+      const mgr = this.tools?._pluginManager;
+      if (mgr?._runReferenceNodeInstalls) mgr._runReferenceNodeInstalls();
+    } catch (e) {
+      this.log.warn(`[reset-general-kb] plugin ref-node reinstall failed: ${e.message}`);
+    }
+
     const after = {
       nodes: count('nodes'),
       aspects: count('aspects'),
@@ -1305,7 +2218,7 @@ class WebGateway {
    * approve buttons reach the right operator's tabs only.
    *
    * Routing:
-   *   'dm:<userId>'               — webapp DM: every WS with ws._user===userId
+   *   'dm:<userId>'               — webapp DM: every web WS for the user
    *   'shared:dm:web:<userId>'    — same (multi-platform buildKey form)
    *   'channel:web:control-panel' — shared; route to every web creator
    *   '<mode>-<ts>-<rand>' (merge/link/child/wakeup/etc.) — route to operator
@@ -1324,8 +2237,10 @@ class WebGateway {
     const channelMatch = rawKey.match(/^(?:(?:shared|private):)?channel:(.+)$/);
     if (channelMatch) {
       tryKeys.add(channelMatch[1]);
-      const platformMatch = channelMatch[1].match(/^[a-z]+:(.+)$/i);
-      if (platformMatch) tryKeys.add(platformMatch[1]);
+      const platformMatch = channelMatch[1].match(/^([a-z][a-z0-9_-]*):(.+)$/i);
+      if (platformMatch && ['cli', 'web'].includes(platformMatch[1].toLowerCase())) {
+        tryKeys.add(platformMatch[2]);
+      }
     }
     for (const tryKey of tryKeys) {
       const set = this._sessionClients?.get(tryKey);
@@ -1339,16 +2254,26 @@ class WebGateway {
       if (count) return count;
     }
 
-    // DM path: resolve the userId from the key and match every WS client
-    // (all of that user's tabs).
+    // DM path: resolve the userId from the key and match web app tabs for
+    // that user. CLI sessions share the same authenticated user id, but they
+    // have their own session channel and should not receive web DM wakeups.
     let targetUser = null;
-    const dmMatch = sessionKey.match(/^(?:shared:|private:)?dm:(?:[a-z]+:)?(.+)$/);
-    if (dmMatch) targetUser = dmMatch[1];
-    else if (/^(merge|link|child|wakeup)[-_]/.test(sessionKey)) targetUser = 'operator';
+    const dmMatch = rawKey.match(/^(?:(?:shared|private):)?dm:(.+)$/);
+    if (dmMatch) {
+      const rest = dmMatch[1];
+      const platformMatch = rest.match(/^([a-z][a-z0-9_-]*):(.+)$/i);
+      if (platformMatch) {
+        if (platformMatch[1].toLowerCase() !== 'web') return 0;
+        targetUser = platformMatch[2];
+      } else {
+        targetUser = rest;
+      }
+    } else if (/^(merge|link|child|wakeup)[-_]/.test(rawKey)) targetUser = 'operator';
     if (!targetUser) return 0;
     let count = 0;
     for (const wsClient of this._wss?.clients || []) {
       if (wsClient.readyState !== 1) continue;
+      if (wsClient._role === 'cli') continue;
       if (wsClient._user === targetUser) {
         try { wsClient.send(data); count++; } catch (e) { this.log.warn('[web] wsClient.send failed: ' + e.message); }
       }
@@ -1709,11 +2634,11 @@ class WebGateway {
           );
           const parsed = JSON.parse(val);
           if (parsed.value) env[keyName] = parsed.value;
-        } catch (e) { this.log.warn('[web] execSync failed: ' + e.message); }
-      }
-    } catch (e) {
-      this.log.warn(`[backend] Failed to fetch vault keys: ${e.message}`);
-    }
+	        } catch (e) { this.log.warn('[web] execSync failed: ' + _redactSecrets(e.message)); }
+	      }
+	    } catch (e) {
+	      this.log.warn(`[backend] Failed to fetch vault keys: ${_redactSecrets(e.message)}`);
+	    }
     return env;
   }
 
@@ -1765,13 +2690,13 @@ class WebGateway {
     const childPid = child.pid;
     let lastStdout = '';
     let lastStderr = '';
-    child.stdout?.on('data', (d) => {
-      lastStdout = d.toString().slice(-500);
-      this.log.debug(`[backend:stdout] ${lastStdout.trim()}`);
-    });
-    child.stderr?.on('data', (d) => {
-      lastStderr = d.toString().slice(-500);
-      this.log.debug(`[backend:stderr] ${lastStderr.trim()}`);
+	    child.stdout?.on('data', (d) => {
+	      lastStdout = _redactSecrets(d.toString().slice(-500));
+	      this.log.debug(`[backend:stdout] ${lastStdout.trim()}`);
+	    });
+	    child.stderr?.on('data', (d) => {
+	      lastStderr = _redactSecrets(d.toString().slice(-500));
+	      this.log.debug(`[backend:stderr] ${lastStderr.trim()}`);
     });
 
     child.on('exit', (code, signal) => {
@@ -1800,7 +2725,7 @@ class WebGateway {
     const pubUrl = this._currentPublicBaseUrl();
     const displayUrl = pubUrl || `http://localhost:${webPort}`;
 
-    this.log.info(`[backend] Started (pid=${childPid}, port=${backendPort}), ${vaultKeyNames.length} vault key(s) injected${vaultKeyNames.length ? ': ' + vaultKeyNames.join(', ') : ''}`);
+	    this.log.info(`[backend] Started (pid=${childPid}, port=${backendPort}), ${vaultKeyNames.length} vault key(s) injected`);
 
     return {
       started: true,
@@ -1812,7 +2737,8 @@ class WebGateway {
       command,
       url: `${displayUrl}/`,
       publicUrl: pubUrl || null,
-      vaultKeysInjected: vaultKeyNames,
+	      vaultKeysInjected: vaultKeyNames.map(() => '[redacted]'),
+	      vaultKeysInjectedCount: vaultKeyNames.length,
       routing: {
         note: 'Traefik strips the path prefix before requests reach your server. Your backend sees paths relative to root.',
         externalBase: pubUrl || displayUrl,
@@ -1905,8 +2831,16 @@ class WebGateway {
     const LOGIN_MAX_ATTEMPTS = 5;
     const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
-    const _checkLoginRate = (req) => {
-      const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+	    const _clientIpForRateLimit = (req) => {
+	      const remote = req.socket.remoteAddress || 'unknown';
+	      const trustedProxy = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1' || process.env.SPORE_TRUST_PROXY === 'true';
+	      return trustedProxy
+	        ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || remote)
+	        : remote;
+	    };
+
+	    const _checkLoginRate = (req) => {
+	      const ip = _clientIpForRateLimit(req);
       const now = Date.now();
       const entry = _loginAttempts.get(ip);
       if (entry) {
@@ -1916,8 +2850,8 @@ class WebGateway {
       return true;
     };
 
-    const _recordLoginAttempt = (req) => {
-      const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+	    const _recordLoginAttempt = (req) => {
+	      const ip = _clientIpForRateLimit(req);
       if (!_loginAttempts.has(ip)) _loginAttempts.set(ip, { attempts: [] });
       _loginAttempts.get(ip).attempts.push(Date.now());
     };
@@ -1966,9 +2900,9 @@ class WebGateway {
       const mgrToken = cookies['manager_session'];
       if (!mgrToken) return false;
       try {
-        const http_ = require('http');
-        const payload = JSON.stringify({ token: mgrToken, animaId, webappOnly });
-        const url = new URL(managerUrl + '/api/auth/verify-session');
+	        const payload = JSON.stringify({ token: mgrToken, animaId, webappOnly });
+	        const url = new URL(managerUrl + '/api/auth/verify-session');
+	        const http_ = url.protocol === 'https:' ? require('https') : require('http');
         const result = await new Promise((resolve, reject) => {
           const r = http_.request({
             hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST',
@@ -2049,6 +2983,47 @@ class WebGateway {
     const WEBAPP_USERS_PATH = path.join(this.config.dataDir, 'webapp-users.json');
     const loadWebappUsers = () => {
       try { return JSON.parse(fs.readFileSync(WEBAPP_USERS_PATH, 'utf8')); } catch { return []; }
+    };
+    const ensureWebUserGraph = (username, meta = {}) => {
+      const clean = String(username || '').trim();
+      if (!clean) return null;
+      const userPart = _safeGraphUserPart(clean);
+      if (!userPart) return null;
+      const registry = this.tools?._graphRegistry;
+      if (!registry?.ensureUserGraph) return null;
+      try {
+        return registry.ensureUserGraph(`web-user:${userPart}`, {
+          name: `${clean} Memory`,
+          description: `Private web memory for ${clean}`,
+          source: 'webapp',
+          createdBy: 'webapp',
+          owner: clean,
+          createdFor: clean,
+          webappUser: clean,
+          username: clean,
+          userId: clean,
+          ...meta,
+        });
+      } catch (e) {
+        this.log.warn?.(`[web] Failed to ensure user graph for ${clean}: ${e.message}`);
+        return null;
+      }
+    };
+    const ensureWebUserGraphForRecord = (record, meta = {}) => {
+      if (!record?.username) return null;
+      if ((record.role || 'webapp') !== 'webapp') return record.userGraphSlug || null;
+      return ensureWebUserGraph(record.username, meta);
+    };
+    const ensureAndPersistWebUserGraph = (username, meta = {}) => {
+      const users = loadWebappUsers();
+      const idx = users.findIndex(u => u?.username === username);
+      if (idx < 0 || (users[idx].role || 'webapp') !== 'webapp') return null;
+      const slug = ensureWebUserGraphForRecord(users[idx], meta);
+      if (slug && users[idx].userGraphSlug !== slug) {
+        users[idx].userGraphSlug = slug;
+        _writeJsonAtomic(WEBAPP_USERS_PATH, users);
+      }
+      return slug;
     };
     const verifyWebappPassword = (password, salt, storedHash) => {
       const computed = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
@@ -2316,6 +3291,9 @@ class WebGateway {
               if (req._loginRoleHint === 'webapp') loginRole = 'webapp';
               else loginRole = req._mgrRole === 'super' ? 'admin' : 'creator';
               const cookieName = loginRole === 'webapp' ? 'spore_webapp' : 'spore_session';
+              const userGraphSlug = loginRole === 'webapp'
+                ? ensureAndPersistWebUserGraph(verifiedUser, { reason: 'auth-login' })
+                : null;
               _sessions.set(sid, { user: verifiedUser, created: Date.now(), type: loginRole });
               const secure = cookieSecureAttr(req);
               // Webapp users haven't run the user wizard yet → flag it.
@@ -2330,7 +3308,7 @@ class WebGateway {
                 'Content-Type': 'application/json',
                 'Set-Cookie': `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
               });
-              res.end(JSON.stringify({ ok: true, user: verifiedUser, role: loginRole, wizardNeeded }));
+              res.end(JSON.stringify({ ok: true, user: verifiedUser, role: loginRole, wizardNeeded, userGraphSlug }));
             }
           } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Bad request' })); }
         });
@@ -2385,8 +3363,11 @@ class WebGateway {
             wizardNeeded = !prefs[username]?.wizardCompleted;
           } catch { wizardNeeded = role === 'webapp'; }
         }
+        const userGraphSlug = valid && role === 'webapp' && username
+          ? ensureAndPersistWebUserGraph(username, { reason: 'auth-check' })
+          : null;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ authenticated: valid, needsAuth, role, hasWebappUsers, username, wizardNeeded }));
+        res.end(JSON.stringify({ authenticated: valid, needsAuth, role, hasWebappUsers, username, wizardNeeded, userGraphSlug }));
         return;
       }
 
@@ -2421,6 +3402,9 @@ class WebGateway {
             const role = user.role === 'creator' ? 'creator' : 'webapp';
             const cookieName = role === 'creator' ? 'spore_session' : 'spore_webapp';
             const otherCookieName = cookieName === 'spore_session' ? 'spore_webapp' : 'spore_session';
+            const userGraphSlug = role === 'webapp'
+              ? ensureAndPersistWebUserGraph(username, { reason: 'webapp-login' })
+              : null;
             // Invalidate any lingering session under the other cookie so a user
             // logging in as webapp can't inherit a previous creator identity
             // (which would route chats into the wrong dm:<user> session and
@@ -2437,7 +3421,7 @@ class WebGateway {
                 `${otherCookieName}=; Path=/; HttpOnly; Max-Age=0`,
               ],
             });
-            res.end(JSON.stringify({ ok: true, user: username, role }));
+            res.end(JSON.stringify({ ok: true, user: username, role, userGraphSlug }));
           } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Bad request' })); }
         });
         return;
@@ -2513,7 +3497,7 @@ class WebGateway {
         // routes to a stealth backend by default.
         const RECOMMENDED_ON = new Set([
           'session-graph', 'spore-code', 'embedder-gemma',
-          'browser-core', 'zendriver',
+          'browser-core', 'zendriver', 'ssh-sidecar',
         ]);
         const enriched = available.map(p => {
           const pr = providerByPluginId.get(p.id);
@@ -2611,7 +3595,10 @@ class WebGateway {
             res.writeHead(409, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'User already exists' })); return;
           }
-          next = existing.concat([{ username, hash, salt, created: Date.now(), role: 'webapp' }]);
+          const userGraphSlug = ensureWebUserGraph(username, { reason: 'created-by-creator' });
+          const record = { username, hash, salt, created: Date.now(), role: 'webapp' };
+          if (userGraphSlug) record.userGraphSlug = userGraphSlug;
+          next = existing.concat([record]);
         }
         _writeJsonAtomic(WEBAPP_USERS_PATH, next);
         const isFirstUser = !onboardingDone;
@@ -2631,7 +3618,7 @@ class WebGateway {
             `${otherCookieName}=; Path=/; HttpOnly; Max-Age=0`,
           ],
         });
-        res.end(JSON.stringify({ ok: true, user: username, role: sessType }));
+        res.end(JSON.stringify({ ok: true, user: username, role: sessType, userGraphSlug: sessType === 'webapp' ? next.find(u => u.username === username)?.userGraphSlug || null : null }));
         return;
       }
 
@@ -2639,8 +3626,13 @@ class WebGateway {
       // webapp user without operator intervention. Always issues a
       // 'webapp' role session (never creator). When config.inviteKey
       // is empty, self-register is disabled (503).
-      if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
-        let body = '';
+	      if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
+	        if (!_checkLoginRate(req)) {
+	          res.writeHead(429, { 'Content-Type': 'application/json' });
+	          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
+	          return;
+	        }
+	        let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
         let parsed;
         try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
@@ -2650,9 +3642,10 @@ class WebGateway {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
         }
-        // Accept inviteKey (direct field name) or teamKey (older login UI).
-        const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
-        if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
+	        // Accept inviteKey (direct field name) or teamKey (older login UI).
+	        const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
+	        _recordLoginAttempt(req);
+	        if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid invite key' })); return;
         }
@@ -2681,6 +3674,7 @@ class WebGateway {
           const sid = crypto.randomBytes(32).toString('hex');
           const otherCookies = parseCookies(req);
           if (otherCookies['spore_session'] && _sessions.has(otherCookies['spore_session'])) _sessions.delete(otherCookies['spore_session']);
+          const userGraphSlug = ensureAndPersistWebUserGraph(username, { reason: 'self-register-resume', selfRegistered: !!dup.selfRegistered });
           _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
           const secure = cookieSecureAttr(req);
           res.writeHead(200, {
@@ -2696,12 +3690,15 @@ class WebGateway {
             const prefs = JSON.parse(fs.readFileSync(path.join(this.config.dataDir, 'preferences.json'), 'utf8'));
             if (prefs[username]?.wizardCompleted) wizardNeeded = false;
           } catch { /* silent: malformed JSON → fallback */ }
-          res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded, resumed: true }));
+          res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded, resumed: true, userGraphSlug }));
           return;
         }
         const salt = crypto.randomBytes(16).toString('hex');
         const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
-        existing.push({ username, hash, salt, created: Date.now(), role: 'webapp', selfRegistered: true });
+        const userGraphSlug = ensureWebUserGraph(username, { reason: 'self-register', selfRegistered: true });
+        const record = { username, hash, salt, created: Date.now(), role: 'webapp', selfRegistered: true };
+        if (userGraphSlug) record.userGraphSlug = userGraphSlug;
+        existing.push(record);
         _writeJsonAtomic(WEBAPP_USERS_PATH, existing);
         const sid = crypto.randomBytes(32).toString('hex');
         const otherCookies = parseCookies(req);
@@ -2715,7 +3712,7 @@ class WebGateway {
             `spore_session=; Path=/; HttpOnly; Max-Age=0`,
           ],
         });
-        res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded: true }));
+        res.end(JSON.stringify({ ok: true, user: username, role: 'webapp', wizardNeeded: true, userGraphSlug }));
         return;
       }
 
@@ -2727,6 +3724,7 @@ class WebGateway {
           role: u.role || 'webapp',
           blocked: !!u.blocked,
           selfRegistered: !!u.selfRegistered,
+          userGraphSlug: u.userGraphSlug || null,
           created: u.created || null,
           passwordUpdatedAt: u.passwordUpdatedAt || null,
         }));
@@ -2785,9 +3783,13 @@ class WebGateway {
             for (const [k, v] of _sessions) { if (v?.user === target) _sessions.delete(k); }
           }
         }
+        const userGraphSlug = (users[idx].role || 'webapp') === 'webapp'
+          ? ensureWebUserGraphForRecord(users[idx], { reason: 'user-admin-update' })
+          : users[idx].userGraphSlug || null;
+        if (userGraphSlug) users[idx].userGraphSlug = userGraphSlug;
         _writeJsonAtomic(WEBAPP_USERS_PATH, users);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, user: { username: users[idx].username, role: users[idx].role, blocked: !!users[idx].blocked } }));
+        res.end(JSON.stringify({ ok: true, user: { username: users[idx].username, role: users[idx].role, blocked: !!users[idx].blocked, userGraphSlug: users[idx].userGraphSlug || null } }));
         return;
       }
 
@@ -2925,6 +3927,44 @@ class WebGateway {
           const pluginActions = parsed.pluginActions;
           const mgr = this.tools?._pluginManager;
           if (pluginActions && typeof pluginActions === 'object' && mgr) {
+            const requestedEnabled = new Set(
+              (Array.isArray(pluginActions.enabled) ? pluginActions.enabled : [])
+                .concat(Object.keys(pluginActions.configs || {}))
+                .filter(Boolean)
+            );
+            if (requestedEnabled.size > 0) {
+              const pluginMetaById = new Map();
+              for (const p of mgr.listAvailable?.() || []) if (p?.id) pluginMetaById.set(p.id, p);
+              for (const p of mgr.listInstalled?.() || []) if (p?.id && !pluginMetaById.has(p.id)) pluginMetaById.set(p.id, p);
+              const depsOf = (pluginId) => {
+                const raw = pluginMetaById.get(pluginId)?.depends || pluginMetaById.get(pluginId)?.dependencies || [];
+                return Array.isArray(raw) ? raw.filter(Boolean) : [];
+              };
+              const includeDeps = (pluginId, seen = new Set()) => {
+                if (!pluginId || seen.has(pluginId)) return;
+                seen.add(pluginId);
+                for (const dep of depsOf(pluginId)) includeDeps(dep, seen);
+                requestedEnabled.add(pluginId);
+              };
+              for (const pluginId of Array.from(requestedEnabled)) includeDeps(pluginId);
+              const installDepth = (pluginId, seen = new Set()) => {
+                if (seen.has(pluginId)) return 0;
+                seen.add(pluginId);
+                return 1 + Math.max(0, ...depsOf(pluginId).map(dep => installDepth(dep, seen)));
+              };
+              const sortedEnabledIds = Array.from(requestedEnabled).sort((a, b) => installDepth(a) - installDepth(b));
+              for (const pluginId of sortedEnabledIds) {
+                if (mgr.plugins?.has?.(pluginId)) continue;
+                try {
+                  await mgr.installPlugin({ id: pluginId });
+                  this.log.info(`[onboarding] installed ${pluginId}`);
+                } catch (e) {
+                  throw new Error(`Plugin install (${pluginId}) failed: ${e.message}`);
+                }
+              }
+            }
+          }
+          if (pluginActions && typeof pluginActions === 'object' && mgr) {
             const configs = pluginActions.configs || {};
             for (const [pluginId, partial] of Object.entries(configs)) {
               if (!partial || typeof partial !== 'object') continue;
@@ -2949,9 +3989,12 @@ class WebGateway {
               return;
             }
           }
-          // 1a. Plugin selections — wizard sends `pluginActions: { disabled: [...], configs: { id: {...} } }`.
-          // For each disabled id: hot-uninstall (which also adds to plugins-disabled.json so
-          // subsequent boots skip it). For each config: persist into config.plugins[id].
+          // 1a. Plugin selections — wizard sends
+          // `pluginActions: { enabled: [...], disabled: [...], configs: { id: {...} } }`.
+          // Enabled ids are hot-installed above before provider validation.
+          // For each disabled id: hot-uninstall (which also adds to
+          // plugins-disabled.json so subsequent boots skip it). For each
+          // config: persist into config.plugins[id].
           // The key is intentionally `pluginActions`, NOT `plugins` — the latter would land
           // in _persistSettingsPatch's body.plugins branch, which treats every top-level key
           // as a plugin id and writes `disabled` and `configs` as synthetic plugin slots.
@@ -2987,6 +4030,9 @@ class WebGateway {
                 }
               }
               for (const pluginId of Object.keys(pluginActions.configs || {})) {
+                protectWithDeps(pluginId);
+              }
+              for (const pluginId of pluginActions.enabled || []) {
                 protectWithDeps(pluginId);
               }
               const providerKeys = parsed.providers || {};
@@ -3180,11 +4226,14 @@ class WebGateway {
       {
         const mgr = this.tools?._pluginManager;
         const alias = mgr?.resolvePathAlias?.(urlPath);
-        if (alias) {
-          if (alias.cors) {
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+	          if (alias) {
+	            if (alias.cors) {
+	              if (allowedOrigin) {
+	                res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+	                res.setHeader('Access-Control-Allow-Credentials', 'true');
+	              }
+	              res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+	              res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
             if (req.method === 'OPTIONS') {
               res.writeHead(204);
               res.end();
@@ -3227,8 +4276,24 @@ class WebGateway {
 
       if (urlPath === '/api/ws-token') {
         const sid = getSessionFromReq(req);
+        const sess = sid ? _sessions.get(sid) : null;
+        if (sess && Date.now() - sess.created < SESSION_TTL && sess.user) {
+          const ticket = crypto.randomBytes(16).toString('hex');
+          _sessions.set(ticket, {
+            user: sess.user,
+            type: sess.type,
+            created: Date.now(),
+            expiresAt: Date.now() + 60 * 1000,
+            singleUse: true,
+            wsTicket: true,
+            sourceSession: sid,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ token: ticket }));
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ token: sid || '' }));
+        res.end(JSON.stringify({ token: '' }));
         return;
       }
 
@@ -3445,6 +4510,15 @@ class WebGateway {
           return;
         }
       }
+
+	      if (urlPath === '/api/settings/invite-key/reveal' && req.method === 'POST') {
+	        if (!(await checkAuth(req, res))) return;
+	        const inviteKey = this.config.inviteKey || '';
+	        this.log.warn('[security] Invite key revealed by creator/admin session');
+	        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+	        res.end(JSON.stringify({ ok: true, inviteKey, inviteKeySet: !!inviteKey }));
+	        return;
+	      }
 
       // ── Channel pairing API ──────────────────────────────────────
       // Browser Settings runs on the web gateway origin, while the
@@ -3807,7 +4881,7 @@ class WebGateway {
         return;
       }
 
-      if (urlPath === '/api/tokens' || urlPath === '/api/activity-log' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch') || urlPath.startsWith('/api/benchmark') || urlPath.startsWith('/api/queue')) {
+      if (urlPath.startsWith('/api/tokens') || urlPath === '/api/activity-log' || urlPath.startsWith('/api/maintainer') || urlPath.startsWith('/api/janitor') || urlPath.startsWith('/api/backups') || urlPath.startsWith('/api/email') || urlPath.startsWith('/api/providers') || urlPath.startsWith('/api/models') || urlPath.startsWith('/api/websearch') || urlPath.startsWith('/api/benchmark') || urlPath.startsWith('/api/queue')) {
         // Wizard bootstrap: allow the wizard's read-only/test endpoints
         // through WITHOUT auth when no webapp users exist yet AND the
         // wizard hasn't completed. This lets us defer user-account
@@ -3909,6 +4983,9 @@ class WebGateway {
             theme: _normalizeThemeName(prefs[username]?.theme),
             displayName: prefs[username]?.displayName || '',
             username,
+            tutorialSeen: prefs[username]?.tutorialSeen || {},
+            tutorialVersion: prefs[username]?.tutorialVersion || {},
+            tutorialSeenAt: prefs[username]?.tutorialSeenAt || null,
           }));
           return;
         }
@@ -3940,12 +5017,40 @@ class WebGateway {
               prefs[username].wizardCompleted = true;
               prefs[username].wizardCompletedAt = Date.now();
             }
+            if (parsed.tutorialSeen && typeof parsed.tutorialSeen === 'object') {
+              const current = (prefs[username].tutorialSeen && typeof prefs[username].tutorialSeen === 'object')
+                ? prefs[username].tutorialSeen
+                : {};
+              const allowedTourKeys = ['admin', 'user'];
+              for (const key of allowedTourKeys) {
+                if (Object.prototype.hasOwnProperty.call(parsed.tutorialSeen, key)) {
+                  current[key] = parsed.tutorialSeen[key] === true;
+                }
+              }
+              prefs[username].tutorialSeen = current;
+              prefs[username].tutorialSeenAt = Date.now();
+            }
+            if (parsed.tutorialVersion && typeof parsed.tutorialVersion === 'object') {
+              const current = (prefs[username].tutorialVersion && typeof prefs[username].tutorialVersion === 'object')
+                ? prefs[username].tutorialVersion
+                : {};
+              const allowedTourKeys = ['admin', 'user'];
+              for (const key of allowedTourKeys) {
+                if (Object.prototype.hasOwnProperty.call(parsed.tutorialVersion, key)) {
+                  const n = Number(parsed.tutorialVersion[key]);
+                  if (Number.isFinite(n) && n > 0) current[key] = Math.floor(n);
+                }
+              }
+              prefs[username].tutorialVersion = current;
+            }
             fs.writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2));
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
               ok: true,
               theme: prefs[username].theme,
               displayName: prefs[username].displayName || '',
+              tutorialSeen: prefs[username].tutorialSeen || {},
+              tutorialVersion: prefs[username].tutorialVersion || {},
             }));
           } catch { res.writeHead(400); res.end('{"error":"invalid body"}'); }
           return;
@@ -4509,10 +5614,39 @@ class WebGateway {
         try { client.ping(); } catch (e) { this.log.warn('[web] client.ping failed: ' + e.message); }
       }
     }, PING_INTERVAL);
-    wss.on('close', () => clearInterval(pingTimer));
+	    wss.on('close', () => clearInterval(pingTimer));
 
-    httpServer.on('upgrade', (req, socket, head) => {
-      const url = new URL(req.url, `http://${req.headers.host}`);
+	    const hasWebappUsers = () => {
+	      try {
+	        const p = path.join(this.config.dataDir, 'webapp-users.json');
+	        return fs.existsSync(p) && JSON.parse(fs.readFileSync(p, 'utf8')).length > 0;
+	      } catch { return false; }
+	    };
+	    const authConfigured = () => !!(authUser && authPass) || !!(this.config.managerUrl && this.config.managerServiceKey) || hasWebappUsers();
+	    const rejectUpgrade = (socket, code, message) => {
+	      try {
+	        socket.write(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+	      } catch {}
+	      socket.destroy();
+	    };
+	    const localHostnames = new Set(['localhost', '127.0.0.1', '::1']);
+	    const originAllowed = (req) => {
+	      const origin = req.headers.origin;
+	      if (!origin) return true; // CLI/native clients do not send Origin.
+	      try {
+	        const o = new URL(origin);
+	        const hostHeader = String(req.headers.host || '').split(':')[0];
+	        if (localHostnames.has(o.hostname)) return true;
+	        if (hostHeader && o.hostname === hostHeader) return true;
+	        const pub = this._currentPublicBaseUrl?.();
+	        if (pub && o.hostname === new URL(pub).hostname) return true;
+	        if (this.config.ingressDomain && o.hostname === this.config.ingressDomain) return true;
+	      } catch {}
+	      return false;
+	    };
+
+	    httpServer.on('upgrade', (req, socket, head) => {
+	      const url = new URL(req.url, `http://${req.headers.host}`);
 
       if (url.pathname === '/ws/app') {
         if (authUser && authPass) {
@@ -4555,42 +5689,45 @@ class WebGateway {
         socket.destroy(); return;
       }
 
-      if (url.pathname !== '/ws') { socket.destroy(); return; }
+	      if (url.pathname !== '/ws') { socket.destroy(); return; }
+	      if (!originAllowed(req)) { rejectUpgrade(socket, 403, 'Forbidden'); return; }
 
-      const webSessions = this._webSessions || new Map();
-      const token = url.searchParams.get('token');
-      let wsRole = null;
-      if (token && webSessions.has(token)) {
-        const sess = webSessions.get(token);
-        if (Date.now() - sess.created < SESSION_TTL) {
-          wsRole = sess.type || null;
-        } else {
-          webSessions.delete(token);
-          socket.destroy(); return;
+	      const webSessions = this._webSessions || new Map();
+	      const token = url.searchParams.get('token');
+	      let wsRole = null;
+	      let wsUser = null;
+	      let tokenSession = null;
+	      if (token && webSessions.has(token)) {
+	        const sess = webSessions.get(token);
+	        const expiresAt = sess.expiresAt || (sess.created + SESSION_TTL);
+	        if (Date.now() < expiresAt) {
+	          wsRole = sess.type || null;
+	          wsUser = sess.user || null;
+	          tokenSession = sess;
+	        } else {
+	          webSessions.delete(token);
+	          socket.destroy(); return;
         }
       } else if (authUser && authPass && token) {
         const decoded = Buffer.from(token, 'base64').toString();
         const [u, ...pParts] = decoded.split(':');
         if (u !== authUser || pParts.join(':') !== authPass) { socket.destroy(); return; }
         wsRole = 'creator';
-      } else if (authUser && authPass) {
-        socket.destroy(); return;
-      } else if (token) {
-        socket.destroy(); return;
-      }
+	      } else if (authUser && authPass) {
+	        socket.destroy(); return;
+	      } else if (token) {
+	        socket.destroy(); return;
+	      } else if (authConfigured()) {
+	        rejectUpgrade(socket, 401, 'Unauthorized'); return;
+	      }
 
-      let wsUser = null;
-      if (token && webSessions.has(token)) {
-        const sess = webSessions.get(token);
-        wsUser = sess.user || null;
-      }
-
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        ws._role = wsRole;
-        ws._user = wsUser;
-        ws._sessionToken = token || null;
-        wss.emit('connection', ws, req);
-      });
+	      wss.handleUpgrade(req, socket, head, (ws) => {
+	        ws._role = wsRole;
+	        ws._user = wsUser;
+	        ws._sessionToken = token || null;
+	        if (token && tokenSession?.singleUse) webSessions.delete(token);
+	        wss.emit('connection', ws, req);
+	      });
     });
 
     wss.on('connection', (ws) => {
@@ -4729,19 +5866,43 @@ class WebGateway {
       };
       graphEvents.on('change', onGraphEvent);
 
-      ws.on('message', async (raw) => {
-        let msg;
-        try { msg = JSON.parse(raw); } catch { return; }
+	      ws.on('message', async (raw) => {
+	        let msg;
+	        try { msg = JSON.parse(raw); } catch { return; }
+	        const msgType = typeof msg.type === 'string' ? msg.type : '';
+	        const isAuthenticated = !!(ws._user || ws._role);
+	        const isCreatorWs = ws._role === 'creator' || ws._role === 'admin';
+	        const requireAuthenticated = () => {
+	          if (isAuthenticated || !authConfigured()) return true;
+	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Authentication required', code: 'auth-required' })); } catch {}
+	          return false;
+	        };
+	        const requireCreatorWs = () => {
+	          if (isCreatorWs) return true;
+	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Creator authentication required', code: 'creator-required' })); } catch {}
+	          return false;
+	        };
+	        if (msgType !== 'ping' && !requireAuthenticated()) return;
+	        if (msgType === 'code:save' && !requireCreatorWs()) return;
+	        if (msgType.startsWith('terminal:') && !requireCreatorWs()) return;
+	        if ((msgType === 'tool:ack' || msgType === 'tool:result' || msgType === 'tool:awaiting-approval' || msgType === 'perm:current-mode') && ws._role !== 'cli') {
+	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
+	          return;
+	        }
 
-        // Plugin WS dispatch — message types of the form `plugin:<pluginId>:<msgType>`
+	        // Plugin WS dispatch — message types of the form `plugin:<pluginId>:<msgType>`
         // route to handlers registered via api.registerWsHandler. The pluginId
         // namespace prevents collisions with built-in types like 'chat:submit'.
         if (typeof msg.type === 'string' && msg.type.startsWith('plugin:')) {
-          const mgr = this.tools?._pluginManager;
-          const resolved = mgr?.resolveWsHandler?.(msg.type);
-          if (resolved) {
-            try {
-              await resolved.handler(ws, msg, { user: ws._user, sessionId: msg.sessionId, log: this.log });
+	          const mgr = this.tools?._pluginManager;
+	          const resolved = mgr?.resolveWsHandler?.(msg.type);
+	          if (resolved) {
+	            if (resolved.pluginId === 'spore-code' && ws._role !== 'cli') {
+	              try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
+	              return;
+	            }
+	            try {
+	              await resolved.handler(ws, msg, { user: ws._user, sessionId: msg.sessionId, log: this.log });
             } catch (e) {
               this.log.warn(`[plugins] WS handler ${msg.type} threw: ${e.message}`);
             }
@@ -4760,10 +5921,14 @@ class WebGateway {
         // those handlers need the gateway-internal _sessionClients
         // fan-out map.
         if (typeof msg.type === 'string' && msg.type.includes(':') && msg.type !== 'tool:result' && msg.type !== 'tool:approval-resolved') {
-          const mgr = this.tools?._pluginManager;
-          const resolved = mgr?.resolveBareWsHandler?.(msg.type);
-          if (resolved) {
-            try {
+	          const mgr = this.tools?._pluginManager;
+	          const resolved = mgr?.resolveBareWsHandler?.(msg.type);
+	          if (resolved) {
+	            if (resolved.pluginId === 'spore-code' && ws._role !== 'cli') {
+	              try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
+	              return;
+	            }
+	            try {
               await resolved.handler(ws, msg, { user: ws._user, sessionId: msg.sessionId, log: this.log });
             } catch (e) {
               this.log.warn(`[plugins] WS handler ${msg.type} (plugin:${resolved.pluginId}) threw: ${e.message}`);
@@ -5621,24 +6786,31 @@ class WebGateway {
           });
         } else if (msg.type === 'terminal:keystore:status') {
           const mgr = this._ensureSSHManager();
-          ws.send(JSON.stringify({
-            type: 'terminal:keystore:status',
-            unlocked: mgr?.keystoreUnlocked || false,
-            source: mgr?.keystoreSource || null,
-          }));
+          if (mgr?.waitForSidecarReady) await mgr.waitForSidecarReady(300);
+          this._sendTerminalKeystoreStatus(ws, mgr);
         } else if (msg.type === 'terminal:keystore:unlock') {
           const mgr = this._ensureSSHManager();
           if (!mgr) { ws.send(JSON.stringify({ type: 'terminal:error', error: 'SSH manager not available' })); return; }
           try {
+            if (mgr.waitForSidecarReady && await mgr.waitForSidecarReady(100)) {
+              ws.send(JSON.stringify({ type: 'terminal:keystore:unlocked', success: true, mode: 'sidecar', sidecarReady: true }));
+              this._sendTerminalKeystoreStatus(ws, mgr);
+              return;
+            }
             mgr.unlockKeystore(msg.passphrase);
-            ws.send(JSON.stringify({ type: 'terminal:keystore:unlocked', success: true }));
+            ws.send(JSON.stringify({ type: 'terminal:keystore:unlocked', success: true, mode: 'local' }));
+            this._sendTerminalKeystoreStatus(ws, mgr);
           } catch (e) {
             ws.send(JSON.stringify({ type: 'terminal:keystore:unlocked', success: false, error: e.message }));
           }
         } else if (msg.type === 'terminal:keystore:lock') {
           const mgr = this._ensureSSHManager();
+          if (mgr?.isSidecarReady?.()) {
+            this._sendTerminalKeystoreStatus(ws, mgr);
+            return;
+          }
           if (mgr) mgr.lockKeystore();
-          ws.send(JSON.stringify({ type: 'terminal:keystore:status', unlocked: false, source: null }));
+          this._sendTerminalKeystoreStatus(ws, mgr);
         }
       });
 
@@ -5709,6 +6881,27 @@ class WebGateway {
       this.log.warn(`[ssh] SSHManager init failed: ${e.message}`);
       return null;
     }
+  }
+
+  _terminalKeystoreStatus(mgr) {
+    const status = mgr?.getStatus?.() || {};
+    const sidecarReady = status.sidecarReady === true && status.localMode !== true;
+    return {
+      type: 'terminal:keystore:status',
+      mode: sidecarReady ? 'sidecar' : 'local',
+      unlocked: sidecarReady ? true : !!(status.keystoreUnlocked ?? mgr?.keystoreUnlocked),
+      source: sidecarReady ? 'ssh-sidecar' : (status.keystoreSource ?? mgr?.keystoreSource ?? null),
+      sidecarEnabled: status.sidecarEnabled === true,
+      sidecarReady,
+      localMode: status.localMode !== false,
+      socketPresent: status.socketPresent === true,
+      socketPath: status.socketPath || null,
+      hostCount: Number.isFinite(status.hostCount) ? status.hostCount : 0,
+    };
+  }
+
+  _sendTerminalKeystoreStatus(ws, mgr) {
+    ws.send(JSON.stringify(this._terminalKeystoreStatus(mgr)));
   }
 
   // ── Terminal Handlers ───────────────────────────────────────────────
@@ -5925,7 +7118,7 @@ class WebGateway {
               const envFallback = process.env[vaultKeyName];
               if (!envFallback) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: `Vault key ${vaultKeyName} not found for proxy route "${name}"` }));
+	                res.end(JSON.stringify({ error: `Required vault key not found for proxy route "${name}"` }));
                 return;
               }
               headers[headerName] = headerVal.replace(`$VAULT:${vaultKeyName}`, envFallback);
@@ -5937,7 +7130,7 @@ class WebGateway {
             const envVal = process.env[envKey];
             if (!envVal) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: `Env var ${envKey} not set for proxy route "${name}"` }));
+	              res.end(JSON.stringify({ error: `Required env credential not set for proxy route "${name}"` }));
               return;
             }
             headers[headerName] = envVal;
@@ -6019,7 +7212,8 @@ class WebGateway {
     };
     const canManageGraphs = _graphAuthIsCreator(authContext);
     const canViewGraph = (graph) => _canGraphAuthViewGraph(graph, authContext, registry);
-    const shapeGraph = (graph) => _shapeGraphForAuth(graph, authContext, registry);
+    const scopedGraphSlug = _scopedUserGraphSlugForAuth(authContext, registry);
+    const shapeGraph = (graph) => _shapeGraphForAuth(graph, authContext, registry, { scopedGraphSlug });
     const requireGraphManager = () => {
       if (canManageGraphs) return true;
       jsonRes({ error: 'Creator authentication required' }, 403);
@@ -6030,7 +7224,7 @@ class WebGateway {
       const graphs = registry.list()
         .filter(g => canViewGraph(g))
         .map(g => shapeGraph(g));
-      return jsonRes({ graphs, readOnly: !canManageGraphs });
+      return jsonRes({ graphs, readOnly: !canManageGraphs, scopedGraphSlug: scopedGraphSlug || null });
     }
 
     if (urlPath === '/api/graphs' && req.method === 'POST') {
@@ -6117,73 +7311,13 @@ class WebGateway {
       try {
         const { DatabaseSync } = require('node:sqlite');
         graphDb = new DatabaseSync(dbPath, { readOnly: true });
-        let nodes = graphDb.prepare('SELECT * FROM nodes').all();
-        let edges = graphDb.prepare('SELECT source, target, type, weight FROM edges').all();
-        const aspects = graphDb.prepare('SELECT * FROM aspects').all();
-        const attrs = graphDb.prepare('SELECT * FROM attributes').all();
-        const aliases = graphDb.prepare('SELECT * FROM aliases').all();
-        const internalLogNodeIds = new Set(['spore-activity-log', 'spore-token-log']);
-        nodes = nodes.filter(n => !internalLogNodeIds.has(n.id));
-        const visibleIds = new Set(nodes.map(n => n.id));
-        const visibleAspects = aspects.filter(a => visibleIds.has(a.node_id));
-        const visibleAspectIds = new Set(visibleAspects.map(a => a.id));
-        edges = edges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target));
-        const visibleAttrs = attrs.filter(a => visibleAspectIds.has(a.aspect_id));
-        const visibleAliases = aliases.filter(a => visibleIds.has(a.node_id));
-        const attrsByAspect = {};
-        for (const a of visibleAttrs) {
-          (attrsByAspect[a.aspect_id] ||= []).push({
-            id: a.id,
-            content: a.content,
-            importance: a.importance,
-            eventDate: a.event_date || null,
-            source: a.source || null,
-            extracted_with: a.extracted_with || null,
-          });
-        }
-        const aspectsByNode = {};
-        for (const a of visibleAspects) {
-          (aspectsByNode[a.node_id] ||= []).push({
-            id: a.id,
-            name: a.name,
-            weight: a.weight,
-            attributes: attrsByAspect[a.id] || [],
-          });
-        }
-        const aliasesByNode = {};
-        for (const a of visibleAliases) {
-          (aliasesByNode[a.node_id] ||= []).push(a.alias);
-        }
         const graphMeta = shapeGraph({
           ...registry.get(slug),
           active: slug === registry.getActiveSlug(),
           inspectOnly: registry.isActivationLocked?.(slug) || false,
         });
-        return jsonRes({
-          graph: graphMeta,
-          nodes: nodes.map(n => {
-            let extra = null;
-            try { if (n.extra && n.extra !== '{}') extra = JSON.parse(n.extra); } catch { /* malformed extra: keep null */ }
-            return {
-              id: n.id,
-              label: n.label,
-              type: n.type,
-              description: n.description || '',
-              importance: n.importance,
-              mentions: n.mentions || 0,
-              created: n.created || null,
-              updated: n.updated || null,
-              aliases: aliasesByNode[n.id] || [],
-              aspects: aspectsByNode[n.id] || [],
-              extra,
-            };
-          }),
-          edges: edges.map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })),
-          aspects: visibleAspects,
-          attributes: visibleAttrs,
-          aliases: visibleAliases,
-          meta: { nodeCount: nodes.length, edgeCount: edges.length },
-        });
+        const query = new URL(req.url || '', 'http://localhost').searchParams;
+        return jsonRes(_graphBuildPayload(graphDb, query, { graph: graphMeta }));
       } catch (e) {
         return jsonRes({ error: e.message }, 500);
       } finally {
@@ -6258,26 +7392,29 @@ class WebGateway {
       req._graphApiScopeApplied = true;
       let scopedDb = db;
       let graphSlug = null;
+      const authContext = req._graphApiAuthContext || { type: 'creator', role: 'creator', creator: true };
+      const registry = this.tools?._graphRegistry;
+      const scopedDefaultSlug = _scopedUserGraphSlugForAuth(authContext, registry);
       try {
         const u = new URL(req.url || urlPath, 'http://localhost');
         graphSlug = String(u.searchParams.get('scopeGraph') || u.searchParams.get('graphSlug') || '').trim() || null;
       } catch {}
+      if (!graphSlug && scopedDefaultSlug) graphSlug = scopedDefaultSlug;
       if (graphSlug) {
         try {
-          const registry = this.tools?._graphRegistry;
           const entry = registry?.get?.(graphSlug);
           if (!entry) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: `Graph "${graphSlug}" not found` }));
             return;
           }
-          const authContext = req._graphApiAuthContext || { type: 'creator', role: 'creator', creator: true };
           if (!_canGraphAuthViewGraph(entry, authContext, registry)) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Forbidden' }));
             return;
           }
-          if (!_graphAuthIsCreator(authContext) && req.method !== 'GET') {
+          const isScopedWriteGraph = !!(scopedDefaultSlug && graphSlug === scopedDefaultSlug && entry.role === 'user');
+          if (!_graphAuthIsCreator(authContext) && req.method !== 'GET' && !isScopedWriteGraph) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Read-only graph access' }));
             return;
@@ -6293,6 +7430,7 @@ class WebGateway {
             }
           }
           req._graphApiSlug = graphSlug;
+          req._graphApiGraphEntry = entry;
         } catch (e) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e.message }));
@@ -6306,40 +7444,27 @@ class WebGateway {
 
     const MAX_BODY = 1024 * 256;
     const json = () => new Promise((resolve, reject) => { let b = ''; req.on('data', c => { b += c; if (b.length > MAX_BODY) { req.destroy(); reject(new Error('Request body too large')); } }); req.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } }); });
+    const graphMetaForResponse = () => {
+      const registry = this.tools?._graphRegistry;
+      if (!registry) return null;
+      const authContext = req._graphApiAuthContext || { type: 'creator', role: 'creator', creator: true };
+      const scopedGraphSlug = _scopedUserGraphSlugForAuth(authContext, registry);
+      const slug = req._graphApiSlug || scopedGraphSlug || registry.getActiveSlug?.();
+      const entry = req._graphApiGraphEntry || (slug ? registry.get?.(slug) : null);
+      if (!entry) return null;
+      return _shapeGraphForAuth({
+        ...entry,
+        active: slug === registry.getActiveSlug?.(),
+        inspectOnly: registry.isActivationLocked?.(entry) || false,
+      }, authContext, registry, { scopedGraphSlug });
+    };
 
     if (urlPath === '/api/graph' && req.method === 'GET') {
       try {
-        let nodes = db.prepare('SELECT * FROM nodes').all();
-        let edges = db.prepare('SELECT source, target, type, weight FROM edges').all();
-        const aspects = db.prepare('SELECT * FROM aspects').all();
-        const attrs = db.prepare('SELECT * FROM attributes').all();
-        const aliases = db.prepare('SELECT * FROM aliases').all();
-        const internalLogNodeIds = new Set(['spore-activity-log', 'spore-token-log']);
-        nodes = nodes.filter(n => !internalLogNodeIds.has(n.id));
-        const visibleNodeIds = new Set(nodes.map(n => n.id));
-        edges = edges.filter(e => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target));
-        const attrsByAspect = {};
-        for (const a of attrs) { (attrsByAspect[a.aspect_id] ||= []).push({ id: a.id, content: a.content, importance: a.importance, eventDate: a.event_date || null }); }
-        const aspectsByNode = {};
-        for (const a of aspects) {
-          if (!visibleNodeIds.has(a.node_id)) continue;
-          (aspectsByNode[a.node_id] ||= []).push({ id: a.id, name: a.name, weight: a.weight, attributes: attrsByAspect[a.id] || [] });
-        }
-        const aliasesByNode = {};
-        for (const a of aliases) {
-          if (!visibleNodeIds.has(a.node_id)) continue;
-          (aliasesByNode[a.node_id] ||= []).push(a.alias);
-        }
+        const query = new URL(req.url || '', 'http://localhost').searchParams;
+        const payload = _graphBuildPayload(db, query, { graph: graphMetaForResponse() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          nodes: nodes.map(n => {
-            let extra = null;
-            try { if (n.extra && n.extra !== '{}') extra = JSON.parse(n.extra); } catch { /* silent: malformed JSON → fallback */ }
-            return { id: n.id, label: n.label, type: n.type, description: n.description || '', importance: n.importance, mentions: n.mentions || 0, created: n.created || null, updated: n.updated || null, aliases: aliasesByNode[n.id] || [], aspects: aspectsByNode[n.id] || [], extra };
-          }),
-          edges: edges.map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })),
-          meta: { nodeCount: nodes.length, edgeCount: edges.length },
-        }));
+        res.end(JSON.stringify(payload));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -6407,7 +7532,15 @@ class WebGateway {
           return;
         }
         this._maintRunJob = { state: 'running', started: Date.now(), error: null, result: null };
-        maintainer.runMaintenance({ force: true })
+        Promise.resolve()
+          .then(async () => {
+            const result = { active: await maintainer.runMaintenance({ force: true }) };
+            const distiller = this.tools?._channelDistiller;
+            if (distiller?.run) {
+              result.scopedDistill = await distiller.run({ force: true });
+            }
+            return result;
+          })
           .then(r => { this._maintRunJob = { state: 'done', started: this._maintRunJob.started, completed: Date.now(), result: r }; })
           .catch(e => { this._maintRunJob = { state: 'error', started: this._maintRunJob.started, completed: Date.now(), error: e?.message || String(e) }; });
         res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -7266,6 +8399,31 @@ class WebGateway {
       return;
     }
 
+    if (urlPath === '/api/tokens/pricing' && req.method === 'GET') {
+      try {
+        const feed = require('../graph/feed');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pricing: this.config.tokenPricing || {}, effective: feed.readTokenPricing() }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
+    if (urlPath === '/api/tokens/pricing' && req.method === 'PUT') {
+      try {
+        const body = await _readJsonBody(req);
+        const pricing = body?.pricing;
+        if (!pricing || typeof pricing !== 'object' || Array.isArray(pricing)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'pricing object required' }));
+          return;
+        }
+        const out = this._settingsService.applyCanonicalPatch({ tokenPricing: pricing }, { actor: 'tokens-dashboard' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, pricing: out.settings?.tokenPricing || pricing }));
+      } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+      return;
+    }
+
     if (urlPath === '/api/tokens' && req.method === 'GET') {
       try {
         const feed = require('../graph/feed');
@@ -7544,6 +8702,24 @@ class WebGateway {
 
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionKey, sourceId, targetId }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    if (urlPath.startsWith('/api/graph/node/') && req.method === 'GET') {
+      const nodeId = decodeURIComponent(urlPath.split('/api/graph/node/')[1] || '');
+      try {
+        const payload = _graphBuildNodeDetails(db, nodeId, { graph: graphMetaForResponse() });
+        if (!payload) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Node not found' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));

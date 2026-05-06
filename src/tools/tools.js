@@ -74,7 +74,7 @@ const CLI_NEW_LOCAL_TOOL_NAMES = new Set([
 // catalog reclaims ~1800 tokens per prompt and prevents the agent from
 // reaching for tools it can't usefully invoke (web_serve is refused locally
 // by the Go binary; spore_*/spore_message target the multi-agent mesh;
-// remote_*/ssh_tunnel are for sidecar-machine flows; message_* are
+// remote_*/ssh_tunnel are server-side SSH flows; message_* are
 // Discord/Telegram surfaces distinct from the cli TUI; env_manage /
 // startup_tasks / data_poller / list_custom_tools are SPORE-server admin).
 // Keep useful server-side capabilities such as browser, graph_*, query_about,
@@ -627,7 +627,7 @@ class ToolSystem {
       },
       {
         name: 'schedule_wakeup',
-        description: 'Defer a follow-up by asking the harness to re-enter this session with your chosen prompt after N seconds. Use when you need to check back on something after a known wait (a deploy finishing, a SLURM job starting, a rate-limit resetting). Releases this session immediately — do NOT loop with `sleep`. Minimum 60s, maximum 3600s.',
+        description: 'Defer a follow-up by asking the harness to re-enter this session with your chosen prompt after N seconds. Use when you need to check back on something after a known wait (a deploy finishing, a SLURM job starting, a rate-limit resetting). Releases this session immediately — do NOT loop with `sleep`. Schedule at most one wakeup per task; duplicate pending wakeups are suppressed. For polling, tell the next turn to reply exactly NO_REPLY when there is nothing user-visible to report. Minimum 60s, maximum 3600s.',
         input_schema: {
           type: 'object',
           properties: {
@@ -989,11 +989,11 @@ class ToolSystem {
       },
       {
         name: 'env_manage',
-        description: 'Manage environment variables and the secure credential vault. Local env vars live in .env; shared API keys live in the manager vault (encrypted, never stored locally). Use action "vault_list" to see vault keys, "vault_get" to retrieve a vault key to a temp file. PREFERRED: use web_fetch with `credential` parameter for API calls — it routes through the vault proxy without exposing keys. For local env, use "list"/"get"/"set"/"delete" as before.',
+        description: 'Manage environment variables and inspect the secure credential vault. Secret values are never returned to the agent. Use server-side provider plugins or web_fetch credential routing for API calls.',
         input_schema: {
           type: 'object',
           properties: {
-            action: { type: 'string', enum: ['list', 'get', 'get_raw', 'set', 'delete', 'vault_list', 'vault_get'], description: 'list: show local env vars (masked). get: get a local key (masked). get_raw: get local key to temp file. set: set a local key. delete: remove a local key. vault_list: list keys in the secure manager vault. vault_get: fetch a vault key to a temp file (auto-deleted in 5 min).' },
+            action: { type: 'string', enum: ['list', 'get', 'set', 'delete', 'vault_list'], description: 'list: show local env vars (masked). get: get a local key (masked). set: set a local key. delete: remove a local key. vault_list: list vault key metadata without values.' },
             key: { type: 'string', description: 'Environment variable or vault key name (for get/set/delete/vault_get)' },
             value: { type: 'string', description: 'Value to set (for set action)' },
           },
@@ -1147,12 +1147,16 @@ class ToolSystem {
 
 _getRemoteToolDefinitions() {
     const mgr = this._ensureSSHManager();
-    if (!mgr || !mgr.hosts || mgr.hosts.length === 0) return [];
-    const hostList = mgr.hosts.map(h => `${h.id} (${h.name || h.hostname})`).join(', ');
+    const hosts = (mgr?.getKnownHosts?.() || mgr?.hosts || []).filter(h => h?.id);
+    if (!mgr || hosts.length === 0) return [];
+    const hostIds = hosts.map(h => h.id).join(', ');
+    const hostList = hosts.map(h => `${h.id} (${h.name || h.hostname})`).join(', ');
     return [
       {
         name: 'remote_exec',
         description: `Execute a command on a remote SSH host. Available hosts: ${hostList}. Returns stdout, stderr, and exit code.
+
+Use this for saved SSH hosts, including Tailscale peers reached through the ssh-sidecar. Do not shell out to ssh or tailscale ssh from local exec for configured hosts; those bypass the sidecar and may hit a different Tailscale SSH/host-key path.
 
 For long-running jobs (SLURM submissions, training runs, anything over ~30s) pass a tmux_session name — the command runs inside a named tmux session on the remote host and survives SSH disconnects. Re-read output later with remote_tail; kill with remote_tmux_kill. Session names are auto-prefixed with "${this.config.clusterTmuxPrefix || 'spore'}-" so cleanup is safe.
 
@@ -1160,7 +1164,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
             command: { type: 'string', description: 'Shell command to execute' },
             workdir: { type: 'string', description: 'Remote working directory (optional)' },
             timeout: { type: 'number', description: 'Timeout in ms (default 30000, max 120000)' },
@@ -1176,7 +1180,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
             tmux_session: { type: 'string', description: 'Session name (prefix auto-applied if missing).' },
             lines: { type: 'number', description: 'Number of lines of scrollback to capture (default 200, max 2000).' },
           },
@@ -1189,7 +1193,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
             tmux_session: { type: 'string', description: 'Session name (prefix auto-applied if missing).' },
           },
           required: ['host', 'tmux_session'],
@@ -1197,11 +1201,11 @@ Set wait:false when you've submitted a long background job and just want to retu
       },
       {
         name: 'remote_read_file',
-        description: `Read a file from a remote SSH host via SFTP. Available hosts: ${hostList}. Supports offset/limit for partial reads.`,
+        description: `Read a file from a saved remote SSH host via sidecar-backed SFTP. Available hosts: ${hostList}. Supports offset/limit for partial reads.`,
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
             path: { type: 'string', description: 'Absolute path on the remote host' },
             offset: { type: 'number', description: 'Line offset (0-based, optional)' },
             limit: { type: 'number', description: 'Max lines to return (optional)' },
@@ -1211,11 +1215,11 @@ Set wait:false when you've submitted a long background job and just want to retu
       },
       {
         name: 'remote_write_file',
-        description: `Write/create a file on a remote SSH host via SFTP. Available hosts: ${hostList}.`,
+        description: `Write/create a file on a saved remote SSH host via sidecar-backed SFTP. Available hosts: ${hostList}.`,
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
             path: { type: 'string', description: 'Absolute path on the remote host' },
             content: { type: 'string', description: 'File content to write' },
             append: { type: 'boolean', description: 'Append instead of overwrite (default false)' },
@@ -1223,21 +1227,21 @@ Set wait:false when you've submitted a long background job and just want to retu
           required: ['host', 'path', 'content'],
         },
       },
-      {
+      ...(mgr.supportsTunnels?.() === false ? [] : [{
         name: 'ssh_tunnel',
         description: `Create or manage SSH port tunnels. Forwards a remote port to localhost so you can access remote services (TensorBoard, Jupyter, inference servers) through the web proxy. Available hosts: ${hostList}.`,
         input_schema: {
           type: 'object',
           properties: {
             action: { type: 'string', enum: ['create', 'close', 'list'], description: 'create = new tunnel, close = tear down by localPort, list = show active tunnels' },
-            host: { type: 'string', description: `Host ID for create — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            host: { type: 'string', description: `Host ID for create — one of: ${hostIds}` },
             remoteHost: { type: 'string', description: 'Remote hostname to forward to (default: localhost)' },
             remotePort: { type: 'number', description: 'Remote port to forward (required for create)' },
             localPort: { type: 'number', description: 'Local port 19000-19999 (auto-assigned if omitted)' },
           },
           required: ['action'],
         },
-      },
+      }]),
       {
         name: 'startup_tasks',
         description: 'Manage persistent background tasks that automatically restart when the container reboots. Use this for long-running collectors, watchers, servers, or background jobs that should survive restarts. Detailed cron/startup guidance lives in ref-cron-runtime and ref-tool-workflows.',
@@ -1261,7 +1265,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           type: 'object',
           properties: {
             action: { type: 'string', enum: ['start', 'stop', 'list', 'templates'], description: 'start = begin polling, stop = stop a poller, list = show active pollers, templates = show available templates' },
-            host: { type: 'string', description: `Host ID (for start) — one of: ${mgr.hosts.map(h => h.id).join(', ')}` },
+            host: { type: 'string', description: `Host ID (for start) — one of: ${hostIds}` },
             template: { type: 'string', description: 'Predefined command template ID (for start)' },
             interval: { type: 'number', description: 'Poll interval in seconds (minimum 60, default 120)' },
             pollerId: { type: 'string', description: 'Poller ID (for stop)' },
@@ -3597,24 +3601,46 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return { status: 'update_queued', taskId, message: 'Instructions queued — the sub-agent will see them on its next step.' };
   }
 
+  _routePlatform(route = {}) {
+    const explicit = String(route.platform || '').toLowerCase();
+    if (explicit) return explicit;
+    for (const value of [route.sessionKey, route.channelId]) {
+      const text = String(value || '');
+      if (!text) continue;
+      let match = text.match(/^(?:(?:shared|private):)?(?:dm|channel):([a-z][a-z0-9_-]*):/i);
+      if (match) return match[1].toLowerCase();
+      match = text.match(/^([a-z][a-z0-9_-]*):/i);
+      if (match && ['web', 'cli', 'telegram', 'slack', 'discord', 'email'].includes(match[1].toLowerCase())) {
+        return match[1].toLowerCase();
+      }
+    }
+    return '';
+  }
+
   _isCliRoute(route = {}) {
-    return route.platform === 'cli'
+    return this._routePlatform(route) === 'cli'
       || String(route.sessionKey || '').startsWith('channel:cli:')
       || String(route.channelId || '').startsWith('cli:');
+  }
+
+  _isWebRoute(route = {}) {
+    const platform = this._routePlatform(route);
+    return !platform || platform === 'web';
   }
 
   _sessionRouteKeys(route = {}) {
     const keys = [];
     const add = (v) => { if (v && !keys.includes(v)) keys.push(v); };
+    const platform = this._routePlatform(route);
     add(route.sessionKey);
     if (route.channelId) {
       add(route.channelId);
       add(`channel:${route.channelId}`);
-      if (route.platform) add(`shared:channel:${route.platform}:${route.channelId}`);
+      if (platform) add(`shared:channel:${platform}:${route.channelId}`);
     }
-    if (route.userId && !this._isCliRoute(route)) {
+    if (route.userId && this._isWebRoute(route) && !this._isCliRoute(route)) {
       add(`dm:${route.userId}`);
-      if (route.platform) add(`shared:dm:${route.platform}:${route.userId}`);
+      if (platform) add(`shared:dm:${platform}:${route.userId}`);
     }
     return keys;
   }
@@ -3639,10 +3665,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
     }
 
-    // Never global-broadcast CLI/project frames: that leaks project-session
-    // progress/results into the generic web app. Web/non-channel flows retain
-    // the old global fallback so existing browser-only flows keep working.
-    if (opts.fallbackGlobal !== false && !this._isCliRoute(route)) {
+    // Never global-broadcast channel/project frames: that leaks task progress
+    // into the generic web app. Browser-only flows retain the old fallback.
+    if (opts.fallbackGlobal !== false && this._isWebRoute(route) && !this._isCliRoute(route)) {
       this.broadcast(msg);
       return -1;
     }
@@ -6052,10 +6077,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   // ── Web Server ──────────────────────────────────────────────────────
 
   async _envManageTool({ action, key, value }) {
-    // Vault actions: route through manager
-    if (action === 'vault_list' || action === 'vault_get') {
-      return this._vaultEnvAction(action, key);
-    }
+	    // Vault actions: route through manager. Raw vault reads are intentionally
+	    // not exposed to the agent; use provider plugins or credential proxying.
+	    if (action === 'vault_list') {
+	      return this._vaultEnvAction(action, key);
+	    }
+	    if (action === 'get_raw' || action === 'vault_get') {
+	      return { error: 'Raw secret retrieval is disabled. Use server-side credential routing or provider plugins instead.' };
+	    }
 
     const SENSITIVE = /KEY|SECRET|TOKEN|PASS|CREDENTIALS/i;
     const SPORE_VARS = /^(SPORE_|ANTHROPIC_|OPENAI_|DEEPGRAM_|ELEVENLABS_|XI_|DISCORD_|SLACK_|TELEGRAM_|GOOGLE_|GEMINI_|REPLICATE_|STABILITY_|FAL_|TOGETHER_|BRAVE_|SEARXNG_|PERPLEXITY_|GROQ_|MISTRAL_|COHERE_|HUGGINGFACE_)/;
@@ -6093,25 +6122,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       };
     }
 
-    if (action === 'get') {
-      if (!key) return { error: 'key required' };
-      const v = process.env[key];
-      return { key, found: v !== undefined, value: v !== undefined ? maskValue(key, v) : '(not set)',
-        note: 'Value is masked for display. Use action "get_raw" to get the unmasked value for use in scripts. Never display raw keys to users.' };
-    }
-
-    if (action === 'get_raw') {
-      if (!key) return { error: 'key required' };
-      const v = process.env[key];
-      if (v === undefined) return { key, found: false, value: null };
-      const tmpPath = `/tmp/.env-${key}-${Date.now()}`;
-      try {
-        fs.writeFileSync(tmpPath, v, { mode: 0o600 });
-        setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch { /* silent: best-effort cleanup */ } }, 300_000);
-      } catch (e) { return { error: `Failed to write temp file: ${e.message}` }; }
-      return { key, found: true, path: tmpPath,
-        note: `Value written to ${tmpPath} (auto-deleted in 5 min). Read it in your script: $(cat ${tmpPath}). NEVER cat/read this file in a tool call — use it inline in exec commands.` };
-    }
+	    if (action === 'get') {
+	      if (!key) return { error: 'key required' };
+	      const v = process.env[key];
+	      return { key, found: v !== undefined, value: v !== undefined ? maskValue(key, v) : '(not set)',
+	        note: 'Value is masked. Raw secret retrieval is disabled for agent tools.' };
+	    }
 
     if (action === 'set' || action === 'delete') {
       if (!key) return { error: 'key required' };
@@ -6181,7 +6197,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
               const keys = (parsed.keys || []).map(k => ({
                 name: k.name, scope: k.scope, description: k.description,
               }));
-              resolve({ keys, note: 'These are vault keys stored on the manager. Use vault_get to retrieve a key, or use web_fetch with credential parameter for API calls.' });
+	              resolve({ keys, note: 'These are vault keys stored on the manager. Secret values are not exposed to agent tools; use credential-routed API calls instead.' });
             } catch { resolve({ error: 'Failed to parse vault response' }); }
           });
         });
@@ -6189,36 +6205,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       });
     }
 
-    if (action === 'vault_get') {
-      if (!key) return { error: 'key required for vault_get' };
-      return new Promise((resolve) => {
-        const proto = managerUrl.startsWith('https') ? https : http;
-        const reqUrl = `${managerUrl}/api/vault/key?name=${encodeURIComponent(key)}`;
-        const req = proto.get(reqUrl, {
-          headers: { 'X-Service-Key': serviceKey, 'X-SPORE-Id': this.config.agentId || 'unknown' },
-          timeout: 10000,
-        }, (res) => {
-          let data = '';
-          res.on('data', c => { data += c; });
-          res.on('end', () => {
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.error) { resolve({ error: parsed.error }); return; }
-              const tmpPath = `/tmp/.vault-${key}-${Date.now()}`;
-              try {
-                fs.writeFileSync(tmpPath, parsed.value, { mode: 0o600 });
-                setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch { /* silent: best-effort cleanup */ } }, 300_000);
-              } catch (e) { resolve({ error: `Failed to write temp file: ${e.message}` }); return; }
-              resolve({ key, found: true, path: tmpPath,
-                note: `Vault key written to ${tmpPath} (auto-deleted in 5 min). Read it in your script: $(cat ${tmpPath}). PREFERRED: use web_fetch with credential:"${key}" to make authenticated API calls without handling keys directly.` });
-            } catch { resolve({ error: 'Failed to parse vault response' }); }
-          });
-        });
-        req.on('error', (e) => resolve({ error: `Vault request failed: ${e.message}` }));
-      });
-    }
-
-    return { error: `Unknown vault action: ${action}` };
+	    return { error: `Unknown vault action: ${action}` };
   }
 
   // _browserTool removed — the browser tool is now registered by the
@@ -7422,10 +7409,64 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   // ── Phase 1: schedule_wakeup ──────────────────────────────────────
+  _wakeupTextTokens(text) {
+    const stop = new Set([
+      'the', 'and', 'for', 'with', 'from', 'that', 'this', 'when', 'then', 'than',
+      'you', 'yam', 'user', 'agent', 'check', 'wakeup', 'wakeups', 'schedule',
+      'set', 'another', 'more', 'one', 'only', 'report', 'notify', 'reply',
+      'silent', 'silently', 'done', 'running', 'still', 'offline', 'online',
+      'results', 'result', 'share', 'read', 'task', 'after', 'before',
+    ]);
+    return new Set(
+      String(text || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9_./:-]+/g, ' ')
+        .split(/\s+/)
+        .map(token => token.trim())
+        .filter(token => token.length > 2 && !stop.has(token))
+    );
+  }
+
+  _wakeupTextSimilarity(left, right) {
+    const a = this._wakeupTextTokens(left);
+    const b = this._wakeupTextTokens(right);
+    if (!a.size || !b.size) return 0;
+    let shared = 0;
+    for (const token of a) if (b.has(token)) shared++;
+    return shared / Math.min(a.size, b.size);
+  }
+
+  _findSimilarPendingWakeup(db, sessionKey, prompt, reason, fireAt, nowTs) {
+    if (!db || !sessionKey) return null;
+    const rows = db.prepare(
+      `SELECT id, fire_at, prompt, reason, created
+       FROM wakeups
+       WHERE session_key=?
+         AND fired=0
+         AND failed=0
+         AND fire_at>=?
+         AND fire_at<=?
+       ORDER BY created DESC
+       LIMIT 30`
+    ).all(sessionKey, nowTs - 10000, nowTs + 2 * 3600 * 1000);
+    const reasonKey = String(reason || '').trim().toLowerCase();
+    for (const row of rows) {
+      const rowReason = String(row.reason || '').trim().toLowerCase();
+      if (reasonKey && rowReason && reasonKey === rowReason) return row;
+      const fireDelta = Math.abs(Number(row.fire_at || 0) - fireAt);
+      const created = Number(row.created || 0);
+      const similarity = this._wakeupTextSimilarity(prompt, row.prompt);
+      if (fireDelta <= 10 * 60 * 1000 && similarity >= 0.4) return row;
+      if (created >= nowTs - 3 * 60 * 1000 && similarity >= 0.25) return row;
+    }
+    return null;
+  }
+
   _scheduleWakeupTool({ delaySeconds, prompt, reason }) {
     const sessions = this._sessions;
     if (!sessions?.db) return { error: 'Session manager not available' };
-    if (!this._ctxSessionKey()) return { error: 'No active session to wake up' };
+    const sessionKey = this._ctxSessionKey();
+    if (!sessionKey) return { error: 'No active session to wake up' };
     const ctx = this._ctx();
     if (!ctx) return { error: 'No session context — cannot record wakeup' };
     const secs = Math.max(60, Math.min(Number(delaySeconds) || 60, 3600));
@@ -7433,11 +7474,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const fireAt = now + secs * 1000;
     const p = String(prompt || '').trim();
     if (!p) return { error: 'prompt is required' };
+    const duplicate = this._findSimilarPendingWakeup(sessions.db, sessionKey, p, reason, fireAt, now);
+    if (duplicate) {
+      const duplicateDelay = Math.max(0, Math.round((Number(duplicate.fire_at || 0) - now) / 1000));
+      this.log.info(`[wakeup] duplicate schedule suppressed id=${duplicate.id} for ${sessionKey}`);
+      return {
+        ok: true,
+        wakeupId: duplicate.id,
+        fireAt: Number(duplicate.fire_at || 0),
+        delaySeconds: duplicateDelay,
+        duplicate: true,
+      };
+    }
     const info = sessions.db.prepare(
       `INSERT INTO wakeups (session_key, channel_id, channel_name, user_id, user_name, platform, is_dm, project_context, memory_envelope, fire_at, prompt, reason, created)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
-      this._ctxSessionKey(),
+      sessionKey,
       ctx.channelId || null, ctx.channelName || null,
       ctx.userId || null, ctx.userName || null,
       ctx.platform || 'web',
@@ -7459,7 +7512,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
             trigger: 'wakeup',
             platform: ctx.platform || 'web',
             isDm: ctx.isDm !== false,
-            sessionKey: this._ctxSessionKey(),
+            sessionKey,
             projectContext: ctx.projectContext || null,
             memoryEnvelope: ctx.memoryEnvelope || null,
           },
@@ -7470,7 +7523,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           lane: 'deferred',
           priority: 65,
           route: 'wakeup',
-          sessionKey: this._ctxSessionKey(),
+          sessionKey,
           graph: ctx.memoryEnvelope?.primarySlug || ctx.memoryEnvelope?.writeScopes?.defaultSlug || null,
         });
         const jobId = job?.jobId || null;
@@ -7481,7 +7534,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         this.log.warn(`[wakeup] queue submit failed, legacy sweep will pick it up: ${e.message}`);
       }
     }
-    this.log.info(`[wakeup] scheduled id=${info.lastInsertRowid} in ${secs}s for ${this._ctxSessionKey()}`);
+    this.log.info(`[wakeup] scheduled id=${info.lastInsertRowid} in ${secs}s for ${sessionKey}`);
     return { ok: true, wakeupId: info.lastInsertRowid, fireAt, delaySeconds: secs };
   }
 

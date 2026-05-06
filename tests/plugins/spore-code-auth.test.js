@@ -41,8 +41,10 @@ function makeApi(dataDir, host = {}) {
   };
 }
 
-function makeReq(body) {
-  return Readable.from([JSON.stringify(body)]);
+function makeReq(body, headers = {}) {
+  const req = Readable.from([JSON.stringify(body || {})]);
+  req.headers = headers;
+  return req;
 }
 
 function makeRes() {
@@ -118,6 +120,70 @@ test('spore-code password auth reports credentials errors, not invite key errors
 
     assert.equal(res.statusCode, 401);
     assert.equal(JSON.parse(res.body).error, 'Invalid credentials');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('spore-code auth can mint a device token and exchange it for a ws ticket', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
+  try {
+    writeUser(dataDir, 'yam', 'secret-password');
+    const { api, webSessions } = makeApi(dataDir, { inviteKey: '' });
+    const authRes = makeRes();
+
+    await sporeCode._test.handleAuth(api, makeReq({
+      username: 'yam',
+      authMethod: 'password',
+      password: 'secret-password',
+      issueDevice: true,
+    }), authRes);
+
+    assert.equal(authRes.statusCode, 200);
+    const authPayload = JSON.parse(authRes.body);
+    assert.match(authPayload.deviceToken, /^spc_/);
+    assert.ok(authPayload.deviceId);
+
+    const sessionRes = makeRes();
+    await sporeCode._test.handleDeviceSession(api, makeReq({}, {
+      authorization: `Bearer ${authPayload.deviceToken}`,
+    }), sessionRes);
+
+    assert.equal(sessionRes.statusCode, 200);
+    const sessionPayload = JSON.parse(sessionRes.body);
+    assert.equal(sessionPayload.ok, true);
+    assert.equal(webSessions.get(sessionPayload.token).user, 'yam');
+    assert.equal(webSessions.get(sessionPayload.token).auth, 'device');
+    assert.equal(webSessions.get(sessionPayload.token).singleUse, true);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('spore-code logout revokes device tokens', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
+  try {
+    const { api } = makeApi(dataDir, { inviteKey: 'invite-key' });
+    const authRes = makeRes();
+    await sporeCode._test.handleAuth(api, makeReq({
+      username: 'cli-user',
+      key: 'invite-key',
+      issueDevice: true,
+    }), authRes);
+    const authPayload = JSON.parse(authRes.body);
+
+    const logoutRes = makeRes();
+    await sporeCode._test.handleLogout(api, makeReq({}, {
+      authorization: `Bearer ${authPayload.deviceToken}`,
+    }), logoutRes);
+    assert.equal(logoutRes.statusCode, 200);
+    assert.equal(JSON.parse(logoutRes.body).revoked, true);
+
+    const sessionRes = makeRes();
+    await sporeCode._test.handleDeviceSession(api, makeReq({}, {
+      authorization: `Bearer ${authPayload.deviceToken}`,
+    }), sessionRes);
+    assert.equal(sessionRes.statusCode, 401);
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }

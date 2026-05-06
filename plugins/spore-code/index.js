@@ -40,6 +40,11 @@ const SESSION_GRAPH_SLUGS = new Map();
 const SESSION_PROJECT_KEYS = new Map();
 const SESSION_CLIENT_TOOLS = new Map();
 const SESSION_CLIENT_VERSIONS = new Map();
+const AUTH_ATTEMPTS = new Map();
+const AUTH_RATE_LIMIT = { max: 5, windowMs: 15 * 60 * 1000 };
+const WS_TICKET_TTL_MS = 60 * 1000;
+const DEVICE_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DEVICE_ABSOLUTE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 const LEGACY_SPORE_CODE_TOOLS = new Set([
   'index_codebase', 'search_symbols', 'trace_calls', 'get_snippet',
@@ -114,6 +119,120 @@ function inviteKeyMatches(typed, stored) {
   try { return crypto.timingSafeEqual(a, b); } catch { return false; }
 }
 
+function requestIp(req) {
+  return req?.socket?.remoteAddress || 'unknown';
+}
+
+function isLocalRequest(req) {
+  const addr = String(req?.socket?.remoteAddress || '');
+  return !addr || addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function isSecureRequest(req) {
+  if (!req?.socket) return true; // direct unit tests
+  if (req.socket.encrypted) return true;
+  const proto = String(req.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return proto === 'https';
+}
+
+function insecureAuthAllowed(req) {
+  if (isSecureRequest(req) || isLocalRequest(req)) return true;
+  return /^(1|true|yes)$/i.test(String(process.env.SPORE_ALLOW_INSECURE_AUTH || process.env.SPORE_CODE_ALLOW_INSECURE_AUTH || ''));
+}
+
+function checkAuthRate(req, username, method) {
+  const now = Date.now();
+  const key = `${requestIp(req)}:${String(username || '').toLowerCase()}:${String(method || 'auth')}`;
+  const entry = AUTH_ATTEMPTS.get(key) || [];
+  const fresh = entry.filter(t => now - t < AUTH_RATE_LIMIT.windowMs);
+  if (fresh.length >= AUTH_RATE_LIMIT.max) {
+    AUTH_ATTEMPTS.set(key, fresh);
+    return false;
+  }
+  fresh.push(now);
+  AUTH_ATTEMPTS.set(key, fresh);
+  return true;
+}
+
+function deviceStorePath(api) {
+  return path.join(resolveDataDir(api), 'spore-code-devices.json');
+}
+
+function readDeviceStore(api) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(deviceStorePath(api), 'utf8'));
+    if (parsed && Array.isArray(parsed.devices)) return parsed;
+  } catch {}
+  return { version: 1, devices: [] };
+}
+
+function writeDeviceStore(api, store) {
+  const file = deviceStorePath(api);
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch {}
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(tmp, 0o600); } catch {}
+  fs.renameSync(tmp, file);
+}
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function mintDeviceToken(api, username, authKind) {
+  const now = Date.now();
+  const token = `spc_${crypto.randomBytes(32).toString('base64url')}`;
+  const deviceId = crypto.randomBytes(12).toString('hex');
+  const store = readDeviceStore(api);
+  store.devices = (store.devices || []).filter(d => !d.revokedAt && now - (d.lastUsedAt || d.createdAt || 0) < DEVICE_IDLE_TTL_MS && now - (d.createdAt || 0) < DEVICE_ABSOLUTE_TTL_MS);
+  store.devices.push({
+    id: deviceId,
+    user: String(username || '').trim(),
+    tokenHash: hashToken(token),
+    auth: authKind || 'unknown',
+    createdAt: now,
+    lastUsedAt: now,
+  });
+  writeDeviceStore(api, store);
+  return { deviceId, deviceToken: token, deviceExpiresAt: now + DEVICE_ABSOLUTE_TTL_MS };
+}
+
+function validateDeviceToken(api, token) {
+  if (!token) return { ok: false, error: 'Invalid or missing device token' };
+  const now = Date.now();
+  const digest = hashToken(token);
+  const store = readDeviceStore(api);
+  let changed = false;
+  const devices = Array.isArray(store.devices) ? store.devices : [];
+  const device = devices.find(d => d?.tokenHash === digest);
+  if (!device || device.revokedAt) return { ok: false, error: 'Invalid or revoked device token' };
+  if (now - (device.lastUsedAt || device.createdAt || 0) >= DEVICE_IDLE_TTL_MS || now - (device.createdAt || 0) >= DEVICE_ABSOLUTE_TTL_MS) {
+    device.revokedAt = now;
+    changed = true;
+    writeDeviceStore(api, store);
+    return { ok: false, error: 'Device token expired' };
+  }
+  device.lastUsedAt = now;
+  changed = true;
+  if (changed) writeDeviceStore(api, store);
+  return { ok: true, username: device.user, auth: device.auth || 'device', deviceId: device.id };
+}
+
+function revokeDeviceToken(api, token) {
+  const digest = hashToken(token);
+  const store = readDeviceStore(api);
+  const device = (store.devices || []).find(d => d?.tokenHash === digest);
+  if (!device) return false;
+  device.revokedAt = Date.now();
+  writeDeviceStore(api, store);
+  return true;
+}
+
+function bearerToken(req) {
+  const authHeader = req.headers?.authorization || req.headers?.Authorization || '';
+  return String(authHeader).startsWith('Bearer ') ? String(authHeader).slice(7).trim() : null;
+}
+
 function resolveDataDir(api) {
   const host = api.getHostConfig?.() || {};
   return api._appContext?.config?.dataDir || host.dataDir || process.env.SPORE_DATA_DIR || '/data';
@@ -156,7 +275,7 @@ function authenticateAccountPassword(api, username, password) {
   return { ok: true, username: user.username, role: user.role || 'webapp' };
 }
 
-function issueCliToken(api, res, username, authKind) {
+function issueCliToken(api, res, username, authKind, opts = {}) {
   // Issue a Bearer token via the host's web-session map. The WebSocket
   // auth handshake (in core, src/gateways/web.js) reads this map to
   // validate `Bearer <token>` headers, so the plugin and core share
@@ -183,15 +302,24 @@ function issueCliToken(api, res, username, authKind) {
     type: 'cli',
     auth: authKind,
     created: Date.now(),
+    expiresAt: Date.now() + (opts.ttlMs || WS_TICKET_TTL_MS),
+    singleUse: opts.singleUse !== false,
+    wsTicket: true,
+    deviceId: opts.deviceId || null,
   });
   api.getLogger().info(`Auth OK for user: ${cleanUser}${authKind ? ` (${authKind})` : ''}`);
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, token: sporeSid, user: cleanUser }));
+  res.end(JSON.stringify({ ok: true, token: sporeSid, user: cleanUser, ...(opts.extra || {}) }));
 }
 
 // ── HTTP route handlers ─────────────────────────────────────────────
 
 async function handleAuth(api, req, res) {
+  if (!insecureAuthAllowed(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    return;
+  }
   let body = '';
   for await (const chunk of req) {
     body += chunk;
@@ -208,6 +336,7 @@ async function handleAuth(api, req, res) {
     return;
   }
   const { username, key } = parsed || {};
+  const issueDevice = parsed?.issueDevice === true || parsed?.issue_device === true;
 
   if (!username || typeof username !== 'string' || username.length > 64 || !/^[a-zA-Z0-9_.-]+$/.test(username)) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -216,16 +345,27 @@ async function handleAuth(api, req, res) {
   }
 
   if (wantsPasswordAuth(parsed)) {
+    if (!checkAuthRate(req, username, 'password')) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Too many authentication attempts. Try again later.' }));
+      return;
+    }
     const auth = authenticateAccountPassword(api, username, String(parsed.password || ''));
     if (!auth.ok) {
       res.writeHead(auth.status || 401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: auth.error || 'Invalid credentials' }));
       return;
     }
-    issueCliToken(api, res, auth.username, 'password');
+    const extra = issueDevice ? mintDeviceToken(api, auth.username, 'password') : {};
+    issueCliToken(api, res, auth.username, 'password', { extra });
     return;
   }
 
+  if (!checkAuthRate(req, username, 'invite')) {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Too many authentication attempts. Try again later.' }));
+    return;
+  }
   const inviteKey = resolveInviteKey(api);
   if (!inviteKey) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -237,7 +377,41 @@ async function handleAuth(api, req, res) {
     res.end(JSON.stringify({ error: 'Invalid invite key' }));
     return;
   }
-  issueCliToken(api, res, username, 'invite');
+  const extra = issueDevice ? mintDeviceToken(api, username, 'invite') : {};
+  issueCliToken(api, res, username, 'invite', { extra });
+}
+
+async function handleDeviceSession(api, req, res) {
+  if (!insecureAuthAllowed(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    return;
+  }
+  const token = bearerToken(req);
+  const auth = validateDeviceToken(api, token);
+  if (!auth.ok) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: auth.error || 'Invalid device token' }));
+    return;
+  }
+  issueCliToken(api, res, auth.username, 'device', { deviceId: auth.deviceId });
+}
+
+async function handleLogout(api, req, res) {
+  if (!insecureAuthAllowed(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    return;
+  }
+  const token = bearerToken(req);
+  if (!token) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, revoked: false }));
+    return;
+  }
+  const revoked = revokeDeviceToken(api, token);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true, revoked }));
 }
 
 async function handleSessions(api, req, res) {
@@ -253,9 +427,12 @@ async function handleSessions(api, req, res) {
   }
 
   // Bearer token validation
-  const authHeader = req.headers['authorization'] || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  const session = token ? webSessions.get(token) : null;
+  const token = bearerToken(req);
+  let session = token ? webSessions.get(token) : null;
+  if (!session || session.type !== 'cli') {
+    const device = validateDeviceToken(api, token);
+    if (device.ok) session = { user: device.username, type: 'cli', auth: 'device', deviceId: device.deviceId };
+  }
   if (!session || session.type !== 'cli') {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid or missing token' }));
@@ -1450,6 +1627,8 @@ module.exports = function register(api) {
   // Bearer-token validation in-handler so it's also public from the
   // dispatcher's perspective.
   api.registerWebRoute('POST', '/auth',     { public: true, handler: (req, res) => handleAuth(api, req, res) });
+  api.registerWebRoute('POST', '/session',  { public: true, handler: (req, res) => handleDeviceSession(api, req, res) });
+  api.registerWebRoute('POST', '/logout',   { public: true, handler: (req, res) => handleLogout(api, req, res) });
   api.registerWebRoute('GET',  '/sessions', { public: true, handler: (req, res) => handleSessions(api, req, res) });
 
   // Public-URL alias: /api/spore-code/* → /api/plugins/spore-code/*.
@@ -1893,12 +2072,10 @@ module.exports = function register(api) {
   // true to skip; any other return is treated as "don't skip". Core's
   // graph/context.js consults this before kicking off Enhanced Recall.
   api.registerLifecycleHook('shouldSkipRecall', ({ opts, queryType }) => {
-    return opts?.platform === 'cli'
-      && queryType !== 'aggregation'
-      && (
-        heuristicsLib.looksLikeCodingTurn(opts?.messageContent)
-        || heuristicsLib.looksLikeCapabilityQuestion(opts?.messageContent)
-      );
+    if (opts?.platform !== 'cli') return false;
+    if (heuristicsLib.looksLikeCapabilityQuestion(opts?.messageContent)) return true;
+    return queryType !== 'aggregation'
+      && heuristicsLib.looksLikeCodingTurn(opts?.messageContent);
   });
 
   api.registerLifecycleHook('resolveMemoryScope', ({ opts, envelope }) => {
@@ -2028,7 +2205,11 @@ module.exports = function register(api) {
 
 module.exports._test = {
   handleAuth,
+  handleDeviceSession,
+  handleLogout,
   inviteKeyMatches,
+  validateDeviceToken,
+  revokeDeviceToken,
   verifyWebappPassword,
   wantsPasswordAuth,
   authenticateAccountPassword,
