@@ -600,6 +600,29 @@
     font-family: var(--font-mono, monospace); font-size: .62rem;
     resize: vertical; word-break: break-all;
   }
+  .routing-presets-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding-bottom: 8px; margin-bottom: 12px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .routing-presets-bar label {
+    font-size: .72rem; color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: .06em; white-space: nowrap;
+  }
+  .routing-presets-bar select {
+    flex: 1; max-width: 220px; padding: 6px 10px; font-size: .78rem;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text-bright); cursor: pointer;
+  }
+  .routing-presets-bar button {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 12px; font-size: .68rem; cursor: pointer;
+    text-transform: uppercase; letter-spacing: .04em; white-space: nowrap;
+  }
+  .routing-presets-bar button:hover { border-color: var(--border-active); background: rgba(var(--hl-rgb),.06); }
+  .routing-presets-bar button.preset-delete { color: #e55; border-color: rgba(200,60,60,.25); }
+  .routing-presets-bar button.preset-delete:hover { background: rgba(200,60,60,.08); border-color: rgba(200,60,60,.5); }
+
   .settings-model-grid { display: grid; gap: 12px; }
   .settings-model-row {
     display: grid; grid-template-columns: 100px 150px minmax(0, 1fr) 80px 80px 80px 90px auto; gap: 8px; align-items: end;

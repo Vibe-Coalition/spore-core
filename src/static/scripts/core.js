@@ -1086,7 +1086,9 @@ function populateSettingsPanel(data) {
   _populateUsersSection();
   const pluginsBlock = data.plugins || { enabled: false, hotReload: false, panes: [], dockItems: [], installed: [] };
   _populatePluginsTab(pluginsBlock);
-  if (typeof _populateChannelsTab === 'function') _populateChannelsTab(pluginsBlock);
+    // Initialize routing presets dropdown (after tier rows are populated)
+  if (window.RoutingPresets?.initPresetBar) window.RoutingPresets.initPresetBar();
+if (typeof _populateChannelsTab === 'function') _populateChannelsTab(pluginsBlock);
 }
 
 const TYPE_COLORS = {

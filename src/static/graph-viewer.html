@@ -1277,6 +1277,12 @@ build/
 
       <div class="settings-section wide" data-target-tab="providers">
         <h4>Model Routing</h4>
+        <div class="routing-presets-bar">
+          <label>Presets</label>
+          <select id="routing-preset-select"><option value="">— select preset —</option></select>
+          <button id="routing-preset-save" title="Save current routing as a named preset">Save</button>
+          <button id="routing-preset-delete" class="preset-delete" title="Delete selected preset">Delete</button>
+        </div>
         <div class="settings-model-grid">
           <div class="settings-model-row">
             <div class="settings-model-name">Casual</div>
@@ -1511,5 +1517,6 @@ build/
   <div id="browser-preview-resize"></div>
 </div>
 
-</body>
+    <script src="scripts/routing-presets.js"></script>
+  </body>
 </html>

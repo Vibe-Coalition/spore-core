@@ -8877,6 +8877,75 @@ class WebGateway {
       return;
     }
 
+    // ── Routing presets ──
+    // GET    /api/models/routing-presets           → list all presets
+    // GET    /api/models/routing-presets/:name     → get preset by name
+    // PUT    /api/models/routing-presets/:name     → save (upsert) preset
+    // DELETE /api/models/routing-presets/:name     → delete preset
+    if (urlPath.startsWith('/api/models/routing-presets')) {
+      const rp = require('../settings/routing-presets');
+
+      if (urlPath === '/api/models/routing-presets' && req.method === 'GET') {
+        try {
+          const presets = rp.list();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, presets }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+        return;
+      }
+
+      const nameMatch = urlPath.match(/^\/api\/models\/routing-presets\/(.+)$/);
+      if (nameMatch) {
+        const name = decodeURIComponent(nameMatch[1]);
+
+        if (req.method === 'GET') {
+          try {
+            const preset = rp.get(name);
+            if (!preset) { res.writeHead(404); res.end(JSON.stringify({ error: 'not found' })); return; }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...preset }));
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+          }
+          return;
+        }
+
+        if (req.method === 'PUT') {
+          try {
+            const body = await _readJsonBody(req);
+            if (!body.config) throw new Error('config is required');
+            const out = rp.save(name, body.config);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...out }));
+          } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+          }
+          return;
+        }
+
+        if (req.method === 'DELETE') {
+          try {
+            const removed = rp.remove(name);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, removed }));
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+          }
+          return;
+        }
+      }
+
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+      return;
+    }
+
     // ── Model tier smoke tests ──
     if (urlPath.startsWith('/api/models/') && urlPath.endsWith('/test') && req.method === 'POST') {
       const tier = urlPath.slice('/api/models/'.length, -'/test'.length);
