@@ -8882,6 +8882,7 @@ class WebGateway {
     // GET    /api/models/routing-presets/:name     → get preset by name
     // PUT    /api/models/routing-presets/:name     → save (upsert) preset
     // DELETE /api/models/routing-presets/:name     → delete preset
+    // POST   /api/models/routing-presets/:name/apply → apply preset to live settings
     if (urlPath.startsWith('/api/models/routing-presets')) {
       const rp = require('../settings/routing-presets');
 
@@ -8940,6 +8941,48 @@ class WebGateway {
           return;
         }
       }
+
+      // POST /api/models/routing-presets/:name/apply → apply preset to live settings
+        const applyMatch = urlPath.match(/^\/api\/models\/routing-presets\/([^\/]+)\/apply$/);
+        if (applyMatch) {
+          if (req.method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'method not allowed' }));
+            return;
+          }
+          const applyName = decodeURIComponent(applyMatch[1]);
+          try {
+            const preset = rp.get(applyName);
+            if (!preset) {
+              res.writeHead(404, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'preset not found', name: applyName }));
+              return;
+            }
+            const cfg = preset.config;
+            const patch = {};
+            if (cfg.models) {
+              patch.models = {};
+              for (const [tier, val] of Object.entries(cfg.models)) {
+                if (val && val.provider && val.model) {
+                  patch.models[tier] = val.provider + '/' + val.model;
+                } else if (val) {
+                  patch.models[tier] = String(val);
+                }
+              }
+            }
+            if (cfg.modelLimits) {
+              patch.modelLimits = cfg.modelLimits;
+            }
+            await this._settingsService.applyCanonicalPatch(patch);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, applied: applyName }));
+            return;
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+            return;
+          }
+        }
 
       res.writeHead(405, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'method not allowed' }));
