@@ -88,6 +88,58 @@ test('spore-code auth accepts local account password without invite key', async 
   }
 });
 
+test('spore-code recall skip keeps scoped project and shared KB recall enabled', () => {
+  const scopedOpts = {
+    platform: 'cli',
+    messageContent: 'start the expo server and print me the qr code here',
+    projectContext: { cwd: 'C:\\Users\\esfle\\kimi_test2', source: 'spore-code' },
+    memoryEnvelope: {
+      mode: 'codebase-session',
+      readScopes: [
+        { slug: 'project-abc', role: 'project' },
+        { slug: 'spore-knowledge-base', role: 'general_kb' },
+      ],
+    },
+  };
+
+  assert.equal(sporeCode._test.shouldSkipRecallForSporeCode({
+    opts: scopedOpts,
+    queryType: 'specific',
+  }), false);
+
+  assert.equal(sporeCode._test.shouldSkipRecallForSporeCode({
+    opts: { ...scopedOpts, messageContent: 'fix src/App.tsx and run tests', memoryEnvelope: null },
+    queryType: 'specific',
+  }), true);
+
+  assert.equal(sporeCode._test.shouldSkipRecallForSporeCode({
+    opts: { ...scopedOpts, messageContent: 'what tools can you use?' },
+    queryType: 'specific',
+  }), true);
+});
+
+test('spore-code project context tells cli agents to execute recalled skills as playbooks', () => {
+  const api = {
+    _appContext: {},
+    getLogger: () => ({ info() {}, warn() {}, debug() {}, error() {} }),
+  };
+
+  const section = sporeCode._test.buildProjectContextSection(api, {
+    platform: 'cli',
+    projectContext: {
+      project: 'acorn-companion',
+      cwd: 'C:\\Users\\esfle\\kimi_test2',
+      scope: 'strict',
+      os: 'windows',
+      arch: 'x64',
+    },
+  });
+
+  assert.match(section, /Reusable Skill Execution Contract/);
+  assert.match(section, /default playbook/);
+  assert.match(section, /avoid rediscovering or rewriting helpers/);
+});
+
 test('spore-code auth keeps invite key login working', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
   try {

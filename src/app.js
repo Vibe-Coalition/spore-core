@@ -20,7 +20,7 @@ const { GraphContext, setEmbedderManager } = require('./graph');
 const { SessionManager } = require('./agent');
 const { ToolSystem } = require('./tools');
 const { AgentLoop } = require('./agent');
-const { Learner, Maintainer, Janitor, ChannelDistiller, BackupWorker, GraphMaintenanceCoordinator } = require('./workers');
+const { Learner, Maintainer, Janitor, ChannelDistiller, BackupWorker, GraphMaintenanceCoordinator, GeneralKbResearchWorker } = require('./workers');
 const { GatewayManager } = require('./gateways');
 const { PluginManager } = require('./plugins');
 const { RuntimeJobQueue } = require('./runtime');
@@ -523,6 +523,9 @@ async function boot() {
   });
   log.info(`Graph maintenance coordinator initialized (interval=${config.graphMaintenanceIntervalMinutes || 120}m)`);
 
+  const generalKbResearch = new GeneralKbResearchWorker(config, log, llmClient, learner, graphRegistry);
+  log.info(`General KB research worker initialized (interval=${config.generalKbResearchIntervalHours || 24}h)`);
+
   const sessions = new SessionManager(config, log, learner);
   if (!sessions.init()) {
     log.error('Failed to initialize session manager. Exiting.');
@@ -536,6 +539,7 @@ async function boot() {
   tools._channelDistiller = channelDistiller;
   tools._backup = backup;
   tools._graphMaintenance = graphMaintenance;
+  tools._generalKbResearch = generalKbResearch;
   tools._sessions = sessions;
   tools._graphRegistry = graphRegistry;
 
@@ -546,7 +550,7 @@ async function boot() {
   }
   agent.graphContext = graph;
   tools._agent = agent;
-  graphMaintenance.agent = agent;
+  generalKbResearch.agent = agent;
 
   let runtimeQueue = null;
   if (config.runtimeQueueEnabled !== false) {
@@ -558,11 +562,12 @@ async function boot() {
       janitor,
       backup,
       graphMaintenance,
+      generalKbResearch,
       channelDistiller,
     });
     tools._jobQueue = runtimeQueue;
     agent._jobQueue = runtimeQueue;
-    graphMaintenance.queue = runtimeQueue;
+    generalKbResearch.queue = runtimeQueue;
   } else {
     log.warn('Runtime job queue disabled; falling back to legacy direct worker execution.');
   }
@@ -928,6 +933,26 @@ async function boot() {
     } catch (e) { log.error('[boot-channel-distill] Error:', e.message); }
   }, channelDistillerBootDelay);
 
+  // General KB research is intentionally separate from graph maintenance.
+  // It queues long web-research agent work on the background lane so the
+  // maintenance lane can keep producing embeddings, clusters, and overviews.
+  const generalKbResearchIntervalMs = Math.max(15 * 60_000, (Number(config.generalKbResearchIntervalHours) || 24) * 60 * 60_000);
+  const generalKbResearchBootDelay = Math.max(15 * 60_000, maintainerDelay + 2 * 60_000);
+  const runGeneralKbResearchCycle = async (reason) => {
+    if (config.generalKbResearchEnabled === false) return;
+    try {
+      const result = await generalKbResearch.enqueue({ reason });
+      if (result?.ok) log.info(`[general-kb-research] queued ${result.queued} node(s) (${reason})`);
+      else if (result?.skipped) log.debug?.(`[general-kb-research] skipped ${result.skipped} (${reason})`);
+      else if (result?.error) log.warn(`[general-kb-research] ${result.error}`);
+    } catch (e) {
+      log.error(`[general-kb-research] ${reason} error:`, e.message);
+    }
+  };
+  const generalKbResearchTimer = setInterval(() => runGeneralKbResearchCycle('interval'), generalKbResearchIntervalMs);
+  log.info(`[general-kb-research] Scheduled every ${Math.round(generalKbResearchIntervalMs / 60000)}m, first cycle in ${Math.round(generalKbResearchBootDelay / 60000)}m`);
+  setTimeout(() => runGeneralKbResearchCycle('boot'), generalKbResearchBootDelay);
+
   const backupIntervalMs = Math.max(1, Number(config.graphBackupIntervalMinutes) || 60) * 60_000;
   const backupTimer = setInterval(async () => {
     if (config.graphBackupEnabled === false) return;
@@ -960,6 +985,7 @@ async function boot() {
       clearInterval(wakeupSweepTimer);
       clearInterval(janitorTimer);
       clearInterval(channelDistillerTimer);
+      clearInterval(generalKbResearchTimer);
       clearInterval(backupTimer);
       try { runtimeQueue?.stop?.(); } catch (e) { console.warn('[app] runtimeQueue.stop failed: ' + e.message); }
       try { backup.stop(); } catch (e) { console.warn('[app] backup.stop failed: ' + e.message); }

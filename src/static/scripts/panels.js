@@ -944,6 +944,7 @@ async function _maintRefreshStatus() {
     }
   } catch (e) { el.textContent = 'status unavailable'; }
 }
+
 // ── Janitor ───────────────────────────────────────────────────────────
 let _janPollTimer = null;
 

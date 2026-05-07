@@ -1361,6 +1361,10 @@
     fill: var(--text-dim);
     transition: opacity 140ms ease, fill 200ms ease;
   }
+  #graph-svg.labels-settling .node-label,
+  #graph-svg.labels-settling .node-sub-label {
+    visibility: hidden;
+  }
   .node-sub-label { opacity: 0; }
   .node-deleting .node-shape { stroke: var(--danger) !important; fill: var(--danger) !important; fill-opacity: 0.3 !important; }
   .node-deleting .node-glyph,

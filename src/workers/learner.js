@@ -531,7 +531,7 @@ class Learner {
         .replace('{GRAPH_CONTEXT}', graphSummary)
         .replace('{OBSERVATION_TIME_UTC}', lastObservedAt);
 
-      if (this._sharedProjects.length > 0) {
+      if (this._sharedProjects.length > 0 && !mergedOpts.memoryEnvelope) {
         basePrompt = this._injectProjectRouting(basePrompt);
       }
       if (mergedOpts.memoryEnvelope) {
@@ -907,10 +907,17 @@ The JSON schema for updates becomes:
 
   _injectMemoryScopeRouting(prompt, envelope) {
     const scopes = envelope?.writeScopes || {};
+    const scopedDefault = scopes.defaultSlug && scopes.defaultSlug !== scopes.personalSlug;
     const lines = [];
     lines.push('## Memory write routing');
     lines.push('For EACH entity, aspect, update, edge, and gap, add a "target" field when it should go outside the default session memory.');
-    lines.push(`- "local" — main/global graph for agent identity, global system config, and facts/preferences explicitly meant to apply across all users and channels.`);
+    if (scopedDefault) {
+      lines.push(`- "graph:${scopes.defaultSlug}" — current scoped session graph. Use this for current user, project, channel, task, workflow, and conversation facts.`);
+      lines.push('- Do not write speaker/person facts to "local" in scoped sessions. The runtime treats omitted targets as the scoped graph.');
+      lines.push('- "local" is reserved for rare core agent identity or system-wide configuration facts explicitly meant to apply across every graph.');
+    } else {
+      lines.push(`- "local" — main/global graph for agent identity, global system config, and facts/preferences explicitly meant to apply across all users and channels.`);
+    }
     if (scopes.userSlug) {
       lines.push(`- "graph:${scopes.userSlug}" — current authenticated web user's graph. Use for this user's preferences, personal facts, app workflows, recurring requests, task context, and private commitments.`);
       lines.push('- Never write another web user\'s private preferences, tasks, schedules, or conversation facts into this graph.');
@@ -928,11 +935,62 @@ The JSON schema for updates becomes:
     lines.push('Schema additions:');
     lines.push('{ "id": "...", "label": "...", "type": "...", "description": "...", "ephemeral": false, "target": "local|graph:<slug>" }');
     lines.push('{ "nodeId": "...", "name": "...", "attributes": [...], "importance": 7, "eventDate": null, "target": "local|graph:<slug>" }');
+    lines.push('For edges, keep "target" as the target node id; routing follows the scoped graph unless you set "writeTarget".');
 
     return prompt.replace(
       'Return ONLY valid JSON:',
       `${lines.join('\n')}\n\nReturn ONLY valid JSON:`
     );
+  }
+
+  _scopedDefaultWriteTarget(opts = {}) {
+    const scopes = opts.memoryEnvelope?.writeScopes || {};
+    if (scopes.defaultSlug && scopes.defaultSlug !== scopes.personalSlug) {
+      return `graph:${scopes.defaultSlug}`;
+    }
+    return null;
+  }
+
+  _routeScopedMemoryTarget(item, opts, defaultTarget, kind = null) {
+    const rawTarget = kind === 'edges'
+      ? String(item?.writeTarget || item?.routeTarget || item?.scopeTarget || '').trim()
+      : (item && typeof item.target === 'string' ? item.target.trim() : '');
+    const target = rawTarget || defaultTarget;
+    const scopedDefault = this._scopedDefaultWriteTarget(opts);
+    if (scopedDefault && (!target || target === 'local')) return scopedDefault;
+    return target || defaultTarget;
+  }
+
+  _normalizeEntityRef(value) {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, '-');
+  }
+
+  _isBenchmarkSpeakerRef(value, opts = {}) {
+    if (!opts.projectContext?.benchmark) return false;
+    const ref = this._normalizeEntityRef(value);
+    if (!ref) return false;
+    const candidates = [opts.userId, opts.userName]
+      .map(v => this._normalizeEntityRef(v))
+      .filter(Boolean);
+    return candidates.includes(ref);
+  }
+
+  _shouldSuppressBenchmarkActorWrite(kind, item, opts = {}) {
+    if (!opts.projectContext?.benchmark || !item || typeof item !== 'object') return false;
+    if (kind === 'entities') {
+      return String(item.type || '').toLowerCase() === 'person'
+        && (this._isBenchmarkSpeakerRef(item.id, opts) || this._isBenchmarkSpeakerRef(item.label, opts));
+    }
+    if (kind === 'aspects' || kind === 'updates' || kind === 'gaps') {
+      return this._isBenchmarkSpeakerRef(item.nodeId, opts);
+    }
+    if (kind === 'edges') {
+      return this._isBenchmarkSpeakerRef(item.source, opts) || this._isBenchmarkSpeakerRef(item.target, opts);
+    }
+    if (kind === 'hyperedges' && Array.isArray(item.members)) {
+      return item.members.some(m => this._isBenchmarkSpeakerRef(m?.node_id, opts));
+    }
+    return false;
   }
 
   _buildExchange(userMsg, assistantMsg, opts, observedAtIso) {
@@ -1214,8 +1272,9 @@ The JSON schema for updates becomes:
 
   /**
    * Get the appropriate DB handle for a write target.
-   * Returns { db, isShared, slug } — defaults to local graph if target is
-   * missing, "local", or refers to an unknown project.
+   * Returns { db, isShared, slug }. Missing explicit graph targets are marked
+   * missing instead of falling back to local/default; stale scoped learner jobs
+   * can outlive a deleted project/channel graph and must not pollute default.
    */
   _getTargetDb(target) {
     if (!target || target === 'local') {
@@ -1226,7 +1285,7 @@ The JSON schema for updates becomes:
       const slug = graphMatch[1];
       const db = this.getGraphDb(slug);
       if (db) return { db, isShared: false, slug, isScopedGraph: true };
-      return { db: this.db, isShared: false, slug: null };
+      return { db: null, isShared: false, slug, isScopedGraph: true, missing: true };
     }
     if (this._sharedProjects.length === 0) {
       return { db: this.db, isShared: false, slug: null };
@@ -1244,22 +1303,48 @@ The JSON schema for updates becomes:
       const defaultTarget = scopes.defaultSlug && scopes.defaultSlug !== scopes.personalSlug
         ? `graph:${scopes.defaultSlug}`
         : 'local';
-      const bucketFor = (item) => item?.target || defaultTarget;
+      const bucketFor = (item, kind) => this._routeScopedMemoryTarget(item, opts, defaultTarget, kind);
       const buckets = new Map();
       const add = (target, kind, item) => {
         if (!buckets.has(target)) buckets.set(target, { entities: [], aspects: [], updates: [], edges: [], gaps: [], hyperedges: [] });
-        buckets.get(target)[kind].push(item);
+        const routedItem = item && typeof item === 'object' && kind !== 'edges' ? { ...item, target } : item;
+        buckets.get(target)[kind].push(routedItem);
       };
-      for (const ent of extraction.entities || []) add(bucketFor(ent), 'entities', ent);
-      for (const asp of extraction.aspects || []) add(bucketFor(asp), 'aspects', asp);
-      for (const upd of extraction.updates || []) add(bucketFor(upd), 'updates', upd);
-      for (const edge of extraction.edges || []) add(bucketFor(edge), 'edges', edge);
-      for (const gap of extraction.gaps || []) add(bucketFor(gap), 'gaps', gap);
-      for (const h of extraction.hyperedges || []) add(bucketFor(h), 'hyperedges', h);
+      for (const ent of extraction.entities || []) {
+        if (!this._shouldSuppressBenchmarkActorWrite('entities', ent, opts)) add(bucketFor(ent, 'entities'), 'entities', ent);
+      }
+      for (const asp of extraction.aspects || []) {
+        if (!this._shouldSuppressBenchmarkActorWrite('aspects', asp, opts)) add(bucketFor(asp, 'aspects'), 'aspects', asp);
+      }
+      for (const upd of extraction.updates || []) {
+        if (!this._shouldSuppressBenchmarkActorWrite('updates', upd, opts)) add(bucketFor(upd, 'updates'), 'updates', upd);
+      }
+      for (const edge of extraction.edges || []) {
+        if (!this._shouldSuppressBenchmarkActorWrite('edges', edge, opts)) add(bucketFor(edge, 'edges'), 'edges', edge);
+      }
+      for (const gap of extraction.gaps || []) {
+        if (!this._shouldSuppressBenchmarkActorWrite('gaps', gap, opts)) add(bucketFor(gap, 'gaps'), 'gaps', gap);
+      }
+      for (const h of extraction.hyperedges || []) {
+        if (!this._shouldSuppressBenchmarkActorWrite('hyperedges', h, opts)) add(bucketFor(h, 'hyperedges'), 'hyperedges', h);
+      }
 
       const total = { entities: 0, aspects: 0, updates: 0, edges: 0, gaps: 0, total: 0, newNodeIds: [], writeTargets: [] };
       for (const [target, scopedExtraction] of buckets.entries()) {
         const targetDb = this._getTargetDb(target);
+        if (!targetDb.db) {
+          const skipped = ['entities', 'aspects', 'updates', 'edges', 'gaps', 'hyperedges']
+            .reduce((sum, key) => sum + (scopedExtraction[key]?.length || 0), 0);
+          this.log.warn?.(`[learner] Skipped scoped write to missing graph "${targetDb.slug || target}" (${skipped} item(s)); not falling back to default`);
+          total.writeTargets.push({
+            target,
+            slug: targetDb.slug || null,
+            total: 0,
+            skipped: true,
+            reason: 'missing_graph',
+          });
+          continue;
+        }
         const originalDb = this.db;
         this._defaultWriteDb = targetDb.db;
         this._mainWriteDb = originalDb;

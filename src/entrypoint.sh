@@ -38,10 +38,11 @@ chown_smart /data
 chown_smart /workspace
 chown_smart /app/tools
 chown_smart /app/plugins
-# Group-write so the manager container (UID 1000, GID 2000 supplementary) can
-# update .env and spore.json through the shared bind mount. Cheap on /data
-# (~100 files); never run on /workspace since cache files don't need it.
-chmod -R g+rw /data 2>/dev/null || true
+# Group-write only the top of /data and the few control files the manager
+# updates. Recursive chmod on /data can stall boot once graph backups, SQLite
+# journals, or benchmark artifacts accumulate.
+chmod g+rw /data 2>/dev/null || true
+chmod g+rw /data/.env /data/spore.json /data/settings.db /data/sessions.db /data/graph.db 2>/dev/null || true
 
 # ── Shared volumes — group-writable for all spore instances ────────
 if [ -d /shared/skills ]; then

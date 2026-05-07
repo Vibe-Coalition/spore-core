@@ -9,9 +9,9 @@
 <link rel="stylesheet" href="styles/onboarding.css?v=20260429c">
 <link rel="stylesheet" href="styles/layout.css?v=260504-chatfloat">
 <link rel="stylesheet" href="styles/panes.css?v=260506-sshcompact">
-<link rel="stylesheet" href="styles/settings.css?v=260506-settings-light-accent">
+<link rel="stylesheet" href="styles/settings.css?v=260507-graph-groups">
 <link rel="stylesheet" href="styles/chat.css?v=260504-chatstatus">
-<link rel="stylesheet" href="styles/graph.css?v=260506-edgecollapse1">
+<link rel="stylesheet" href="styles/graph.css?v=260507-label-settle">
 <link rel="stylesheet" href="styles/misc.css?v=260505-docklayer">
 <link rel="stylesheet" href="styles/mobile.css?v=20260429c">
 <!-- mobile-shell.css overrides everything above when body.mobile-shell.
@@ -844,7 +844,7 @@
 
 <!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
      can find the original at top-level evaluation time. -->
-<script defer src="scripts/settings.js?v=260506-settings-search2"></script>
+<script defer src="scripts/settings.js?v=260507-graph-groups"></script>
 
 <!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
 <script defer src="scripts/effects.js?v=260506-selfstatic1"></script>
@@ -860,9 +860,9 @@
 <script defer src="scripts/right-panel.js?v=260504-logmenu"></script>
 <script defer src="scripts/voice.js?v=260506-busy-followup"></script>
 <script defer src="scripts/onboarding.js?v=260506-sidecar-extra"></script>
-<script defer src="scripts/graph.js?v=260506-eventcoalesce1"></script>
+<script defer src="scripts/graph.js?v=260507-label-settle"></script>
 <script defer src="scripts/chat.js?v=260506-empty-assistant-row"></script>
-<script defer src="scripts/panels.js?v=260506-webglresize"></script>
+<script defer src="scripts/panels.js?v=260507-inline-kb-research"></script>
 
 <!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
 <script defer src="scripts/boot.js?v=20260429c"></script>
@@ -957,7 +957,9 @@ build/
       <div class="settings-section wide" data-target-tab="graph-memory">
         <h4>Knowledge Graph</h4>
         <div id="settings-graphs-list" class="settings-graphs-list"></div>
-        <button class="settings-btn-secondary" id="settings-new-graph">+ New graph</button>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="settings-btn-secondary" id="settings-new-graph">+ New graph</button>
+        </div>
         <div class="settings-note">Switch the active knowledge graph for this agent. Each graph has its own nodes, edges, and memory.</div>
       </div>
 

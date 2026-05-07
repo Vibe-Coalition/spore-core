@@ -29,6 +29,52 @@
   #settings-pane .settings-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
   #settings-pane .settings-body::-webkit-scrollbar-thumb:hover { background: var(--border-active, var(--accent2)); }
   .settings-graphs-list { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+  .settings-graph-group {
+    border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface) 60%, transparent);
+    overflow: hidden;
+  }
+  .settings-graph-group[open] {
+    background: color-mix(in srgb, var(--surface) 72%, transparent);
+  }
+  .settings-graph-group-summary {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 8px;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: .66rem;
+    color: var(--text);
+    user-select: none;
+  }
+  .settings-graph-group-summary::-webkit-details-marker { display: none; }
+  .settings-graph-group-summary::before {
+    content: '';
+    width: 0; height: 0;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    border-left: 5px solid currentColor;
+    opacity: .7;
+    transition: transform .12s ease, opacity .12s ease;
+  }
+  .settings-graph-group[open] > .settings-graph-group-summary::before { transform: rotate(90deg); opacity: 1; }
+  .settings-graph-group-summary:hover { color: var(--accent2); }
+  .settings-graph-group-summary .sgg-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .settings-graph-group-summary .sgg-count {
+    flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: .58rem;
+  }
+  .settings-graph-group-rows {
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 0 6px 6px;
+  }
   .settings-graph-row {
     display: flex; align-items: center; gap: 8px; padding: 6px 8px;
     border: 1px solid var(--border); border-radius: 6px; background: rgba(var(--hl-rgb),.02);

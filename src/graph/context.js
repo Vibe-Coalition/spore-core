@@ -556,11 +556,12 @@ class GraphContext {
     const queries = [opts.messageContent];
     const eventGraphs = scopes.map(s => s.slug).filter(Boolean);
     const eventScope = eventGraphs.length ? { graphs: eventGraphs } : {};
+    this.log.info(`[graph] Scoped Recall (${env.mode || 'unknown'}): searching "${opts.messageContent.slice(0, 80)}..."`);
+    try { graphEvents.emit('change', { op: 'recall:start', source: 'scoped-recall', detail: `${env.mode || 'scoped'} · "${opts.messageContent.slice(0, 50)}"`, ...eventScope }); } catch {}
 
     if (this.config.enhancedRecall && opts._llmClient) {
       try {
         this.log.info(`[graph] Scoped Enhanced Recall (${env.mode || 'unknown'}): decomposing "${opts.messageContent.slice(0, 80)}..."`);
-        try { graphEvents.emit('change', { op: 'recall:start', source: 'scoped-recall', detail: `${env.mode || 'scoped'} · "${opts.messageContent.slice(0, 50)}"`, ...eventScope }); } catch {}
         const decomposed = await this._llmDecomposeQuery(opts._llmClient, opts.messageContent);
         for (const q of decomposed?.subQueries || []) {
           if (q && typeof q === 'string' && !queries.includes(q)) queries.push(q);
@@ -581,7 +582,8 @@ class GraphContext {
       channel: 'Channel/Thread Memory',
       user: 'Web User Memory',
     };
-    const sections = ['## Scoped Recall Bundle', '_Memory is separated by origin. Treat project, channel, or web user memory as local truth for this session; reusable engineering memory as patterns that may apply; user/system preferences as operator preference/config._'];
+    const sections = ['## Scoped Recall Bundle', '_Memory is separated by origin. Treat project, channel, or web user memory as local truth for this session; reusable engineering memory as operational playbooks when it matches the request; user/system preferences as operator preference/config._'];
+    const prioritySections = [];
     const accessed = [];
 
     for (const scope of scopes) {
@@ -612,6 +614,11 @@ class GraphContext {
         const results = Array.from(found.values())
           .sort((a, b) => (b._hybridScore || 0) - (a._hybridScore || 0))
           .slice(0, Math.max(6, Number(scope.budget) || 10));
+
+        if (scope.role === 'general_kb') {
+          const skillBrief = this._buildScopedSkillBrief(results, opts.messageContent);
+          if (skillBrief) prioritySections.push(skillBrief);
+        }
 
         let text = null;
         if (results.length) {
@@ -650,7 +657,166 @@ class GraphContext {
     if (accessed.length) {
       try { graphEvents.emit('change', { op: 'node:accessed', nodeIds: accessed, source: 'scoped-recall', ...eventScope }); } catch {}
     }
-    return sections.length > 2 ? sections.join('\n') : null;
+    if (sections.length <= 2 && prioritySections.length === 0) return null;
+    return [sections[0], sections[1], ...prioritySections, ...sections.slice(2)].join('\n');
+  }
+
+  _buildScopedSkillBrief(results = [], query = '') {
+    const actionableTypes = new Set([
+      'skill', 'library', 'tool', 'framework', 'package', 'api', 'service',
+      'plugin', 'workflow', 'pattern', 'command', 'concept',
+    ]);
+    const aspectWeights = new Map([
+      ['steps', 4],
+      ['workflow', 4],
+      ['default_workflow', 4],
+      ['procedure', 4],
+      ['runbook', 4],
+      ['how_to', 4],
+      ['commands', 4],
+      ['command', 4],
+      ['replay', 4],
+      ['snippet', 3],
+      ['snippets', 3],
+      ['examples', 3],
+      ['usage', 3],
+      ['recommended_usage', 3],
+      ['implementation', 3],
+      ['gotchas', 3],
+      ['pitfalls', 3],
+      ['constraints', 3],
+      ['troubleshooting', 3],
+      ['validation', 3],
+      ['verification', 3],
+      ['reusable_lessons', 3],
+      ['summary', 2],
+      ['applicability', 2],
+      ['source_notes', 2],
+    ]);
+    const scoreNode = (node) => {
+      const type = String(node?.type || '').toLowerCase();
+      if (!node || !actionableTypes.has(type)) return 0;
+      let score = type === 'skill' ? 8 : 0;
+      const seenAspects = new Set();
+      for (const asp of node.aspects || []) {
+        const name = String(asp.name || '').toLowerCase();
+        if (!name || seenAspects.has(name)) continue;
+        seenAspects.add(name);
+        score += aspectWeights.get(name) || 0;
+      }
+      return score;
+    };
+    const queryTerms = (() => {
+      const raw = String(query || '').toLowerCase();
+      const stop = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'here', 'me', 'you', 'your']);
+      const terms = raw
+        .replace(/[^a-z0-9_ -]+/g, ' ')
+        .split(/\s+/)
+        .map(s => s.trim())
+        .filter(s => s.length >= 2 && !stop.has(s));
+      if (/\bqr\s+code\b/.test(raw) || /\bqr-code\b/.test(raw)) terms.push('qrcode');
+      if (/\blan\b/.test(raw)) terms.push('local', 'wifi');
+      return [...new Set(terms)].slice(0, 12);
+    })();
+    const requestScore = (node) => {
+      if (!queryTerms.length || !node) return 0;
+      const label = `${node.label || ''} ${node.id || ''}`.toLowerCase();
+      const description = String(node.description || '').toLowerCase();
+      const attrs = (node.aspects || [])
+        .flatMap(asp => (asp.attributes || []).map(attr => attr.content || ''))
+        .join(' ')
+        .toLowerCase();
+      let score = 0;
+      for (const term of queryTerms) {
+        if (!term) continue;
+        if (label === term || label.includes(` ${term} `) || label.includes(term)) score += 4;
+        else if (description.includes(term)) score += 2;
+        else if (attrs.includes(term)) score += 1;
+      }
+      if (queryTerms.includes('qrcode') && /\bqr\s*code\b|qrcode/.test(`${label} ${description} ${attrs}`)) score += 8;
+      return Math.min(24, score);
+    };
+    const playbooks = (results || [])
+      .map((node, idx) => ({ node, idx, score: scoreNode(node), request: requestScore(node) }))
+      .filter(entry => String(entry.node?.type || '').toLowerCase() === 'skill' || entry.score >= 5)
+      .sort((a, b) => (
+        b.request - a.request
+        || b.score - a.score
+        || (b.node._hybridScore || 0) - (a.node._hybridScore || 0)
+        || (b.node.importance || 0) - (a.node.importance || 0)
+        || a.idx - b.idx
+      ))
+      .slice(0, 5)
+      .map(entry => entry.node);
+    if (!playbooks.length) return null;
+    const lines = [
+      '\n### Reusable Skill Execution Contract',
+      'The reusable items below were recalled from the General Knowledge Base because they match the current request. Treat the top applicable item as a playbook, not background trivia.',
+      '- Before the first mutating command, server/process launch, or new helper script, choose the most relevant reusable item and parameterize its placeholders from the current project/session.',
+      '- If the user asks for multiple deliverables, map each deliverable to the matching recalled item; do not satisfy one part while rediscovering or ignoring another.',
+      '- Do not rediscover steps already covered by the chosen item. Only inspect local project facts needed to fill placeholders, confirm preconditions, or verify results.',
+      '- Prefer saved replay snippets, commands, usage notes, and procedures over writing a fresh helper. If a snippet needs adaptation, adapt the smallest part and keep the workflow intact.',
+      '- If a command is documented as a fallback, do not run it first. Run fallback commands only after their stated precondition is observed or the user explicitly asks for that fallback.',
+      '- If the user asks for LAN/local output, avoid VPN/Tailscale/overlay addresses unless the user explicitly asks for a VPN or remote-network address.',
+      '- For a small one-shot operational request, avoid task bookkeeping until it is genuinely needed; execute the chosen reusable item directly and verify.',
+      '- If you intentionally skip or deviate from a recalled reusable item, state the reason before acting or in the next progress note.',
+      '- In the final response, say which shared reusable item you used and list any meaningful deviations.',
+      '',
+      '### High-Signal Reusable Knowledge',
+    ];
+    const attrsFor = (node, names, limit) => {
+      const wanted = new Set(names);
+      const out = [];
+      const seen = new Set();
+      for (const asp of node.aspects || []) {
+        if (!wanted.has(String(asp.name || '').toLowerCase())) continue;
+        for (const attr of asp.attributes || []) {
+          const content = String(attr.content || '').trim();
+          const key = content.toLowerCase();
+          if (content && !seen.has(key)) {
+            seen.add(key);
+            out.push(content);
+          }
+          if (out.length >= limit) return out;
+        }
+      }
+      return out;
+    };
+    const pushList = (heading, items, limit = items.length) => {
+      const shown = items.slice(0, limit);
+      if (!shown.length) return;
+      lines.push(`  - ${heading}:`);
+      shown.forEach((item, idx) => {
+        const normalized = String(item || '').trim();
+        if (!normalized) return;
+        const prefix = heading === 'Default workflow' ? `${idx + 1}.` : '-';
+        const body = normalized.includes('\n')
+          ? normalized.split('\n').map((line, lineIdx) => lineIdx === 0 ? line : `      ${line}`).join('\n')
+          : normalized;
+        lines.push(`    ${prefix} ${body}`);
+      });
+    };
+    for (const item of playbooks) {
+      const type = item.type ? ` ${item.type}` : '';
+      lines.push(`- **${item.label || item.id}** (${item.id}${type}): ${(item.description || '').trim()}`);
+      const applicability = attrsFor(item, ['applicability'], 2);
+      const usage = attrsFor(item, ['summary', 'usage', 'recommended_usage', 'implementation', 'source_notes'], 4);
+      const lessons = attrsFor(item, ['reusable_lessons'], 4);
+      const commands = attrsFor(item, ['commands', 'command'], 4);
+      const steps = attrsFor(item, ['steps', 'workflow', 'default_workflow', 'procedure', 'runbook', 'how_to'], 6);
+      const replay = attrsFor(item, ['replay', 'snippet', 'snippets', 'examples'], 3);
+      const gotchas = attrsFor(item, ['gotchas', 'pitfalls', 'constraints', 'troubleshooting'], 4);
+      const validation = attrsFor(item, ['validation', 'verification'], 4);
+      if (applicability.length) pushList('Applies when', applicability);
+      if (usage.length) pushList('Usage notes', usage);
+      if (lessons.length) pushList('Reusable lessons', lessons);
+      if (steps.length) pushList('Default workflow', steps);
+      if (commands.length) pushList('Commands to reuse', commands);
+      if (replay.length) pushList('Replay snippets', replay);
+      if (gotchas.length) pushList('Known gotchas', gotchas);
+      if (validation.length) pushList('Validation', validation);
+    }
+    return lines.join('\n');
   }
 
   async buildSystemPromptAsync(opts = {}) {

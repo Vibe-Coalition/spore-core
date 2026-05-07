@@ -1839,6 +1839,106 @@ class WebGateway {
     return this.tools?._agent?.processMessage(opts);
   }
 
+  _loadSessionGraphSessionsLib() {
+    const candidates = [
+      path.join(__dirname, '..', 'plugins', 'session-graph', 'lib', 'sessions.js'),
+      path.join(__dirname, '..', '..', 'plugins', 'session-graph', 'lib', 'sessions.js'),
+    ];
+    for (const candidate of candidates) {
+      try {
+        if (fs.existsSync(candidate)) return require(candidate);
+      } catch {}
+    }
+    return null;
+  }
+
+  _waitForLearnerDrain(learner, timeoutMs = 8000) {
+    const started = Date.now();
+    return new Promise(resolve => {
+      const tick = () => {
+        const queueDepth = Array.isArray(learner?._queue) ? learner._queue.length : 0;
+        if (!learner?._running && queueDepth === 0) return resolve();
+        if (Date.now() - started >= timeoutMs) return resolve();
+        setTimeout(tick, 150);
+      };
+      tick();
+    });
+  }
+
+  _pendingSessionIdsForGraphDb(db) {
+    if (!db) return [];
+    let rows = [];
+    try {
+      rows = db.prepare(`
+        SELECT n.id, n.extra,
+               COALESCE((
+                 SELECT a.content
+                   FROM aspects asp
+                   JOIN attributes a ON a.aspect_id = asp.id
+                  WHERE asp.node_id = n.id
+                    AND asp.name = 'lifecycle'
+                    AND a.content LIKE 'turn_count:%'
+                  ORDER BY a.id DESC
+                  LIMIT 1
+               ), 'turn_count: 0') AS turn_count,
+               EXISTS(
+                 SELECT 1 FROM aspects asp
+                  WHERE asp.node_id = n.id AND asp.name = 'rounds'
+               ) AS has_rounds
+          FROM nodes n
+         WHERE n.type = 'session'
+      `).all();
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const row of rows) {
+      let extra = {};
+      try { extra = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+      if (extra.distilled_at || extra.distilling || extra.archived_at) continue;
+      const turns = Number(String(row.turn_count || '').match(/turn_count:\s*(\d+)/)?.[1] || 0);
+      if (!row.has_rounds && turns <= 0) continue;
+      const sid = extra.sessionId || String(row.id || '').replace(/^session-/, '');
+      if (sid) out.push(String(sid));
+    }
+    return [...new Set(out)];
+  }
+
+  async _flushGraphSessionsBeforeDelete(slug) {
+    const sessions = this._loadSessionGraphSessionsLib();
+    const baseLearner = this.tools?.learner || this.tools?._agent?.learner || null;
+    const llmClient = this.tools?.llmClient;
+    if (!sessions || !baseLearner?.getGraphDb || !llmClient || !slug) return { flushed: 0, skipped: true };
+
+    const db = baseLearner.getGraphDb(slug);
+    if (!db) return { flushed: 0, skipped: true, reason: 'missing_graph_db' };
+    const pending = this._pendingSessionIdsForGraphDb(db);
+    if (!pending.length) return { flushed: 0 };
+
+    const learner = Object.create(baseLearner);
+    learner.db = db;
+    learner._graphSlug = slug;
+    learner._graphRegistry = baseLearner._graphRegistry || this.tools?._graphRegistry || learner._graphRegistry;
+
+    this.log.info(`[multi-graph] Distilling ${pending.length} pending session(s) before deleting "${slug}"`);
+    await this._waitForLearnerDrain(baseLearner);
+
+    let flushed = 0;
+    const errors = [];
+    for (const sid of pending) {
+      try {
+        graphEvents.withGraph({ graph: slug }, () => sessions.finalizeSessionNode(learner, sid, { endedAt: new Date().toISOString() }));
+        await graphEvents.withGraph({ graph: slug }, () => sessions.summarizeSessionNode(learner, llmClient, this.config, sid, this.log));
+        await graphEvents.withGraph({ graph: slug }, () => sessions.distillSession(learner, llmClient, this.config, sid, this.log));
+        flushed++;
+      } catch (e) {
+        errors.push(`${sid}: ${e.message}`);
+        this.log.warn(`[multi-graph] pending session distill failed before deleting ${slug}: ${sid}: ${e.message}`);
+      }
+    }
+    return { flushed, pending: pending.length, errors };
+  }
+
   _decorateGraphEventForClient(evt = {}) {
     const out = { ...(evt || {}) };
     try {
@@ -7699,6 +7799,37 @@ class WebGateway {
       }
     }
 
+    if (action === 'research/status' && req.method === 'GET') {
+      if (!requireGraphManager()) return;
+      const g = registry.get(slug);
+      if (!g) return jsonRes({ error: 'Not found' }, 404);
+      if (g.role !== 'general_kb') return jsonRes({ error: 'Research status is only available for the General Knowledge Base' }, 400);
+      const worker = this.tools?._generalKbResearch;
+      if (!worker) return jsonRes({ error: 'general KB research worker not available' }, 503);
+      return jsonRes({ graph: shapeGraph(g), research: worker.getStats?.() || null });
+    }
+
+    if (action === 'research/run' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
+      try {
+        const g = registry.get(slug);
+        if (!g) return jsonRes({ error: 'Not found' }, 404);
+        if (g.role !== 'general_kb') return jsonRes({ error: 'Research can only be run against the General Knowledge Base graph' }, 400);
+        const worker = this.tools?._generalKbResearch;
+        if (!worker) return jsonRes({ error: 'general KB research worker not available' }, 503);
+        const body = await jsonBody().catch(() => ({}));
+        const result = await worker.enqueue({
+          slug,
+          force: body.force !== false,
+          batchSize: body.batchSize || null,
+          reason: body.reason || 'manual',
+        });
+        return jsonRes(result, result?.ok ? 202 : (result?.skipped ? 200 : 400));
+      } catch (e) {
+        return jsonRes({ error: e.message }, 500);
+      }
+    }
+
     if (action === 'data' && req.method === 'GET') {
       const g = registry.get(slug);
       if (!g) return jsonRes({ error: 'Not found' }, 404);
@@ -7764,10 +7895,11 @@ class WebGateway {
       if (!requireGraphManager()) return;
       try {
         const learner = this.tools?.learner || this.tools?._agent?.learner || null;
+        const sessionFlush = await this._flushGraphSessionsBeforeDelete(slug);
         learner?.closeGraphDb?.(slug);
         registry.delete(slug);
         graphEvents.emit('change', { op: 'graph:deleted', slug, graph: slug, source: 'multi-graph' });
-        return jsonRes({ ok: true });
+        return jsonRes({ ok: true, sessionFlush });
       } catch (e) {
         return jsonRes({ error: e.message }, 400);
       }
@@ -7964,6 +8096,7 @@ class WebGateway {
           model: maintainer?.model || null,
           stats: maintainer?.stats || {},
           graphMaintenance: this.tools?._graphMaintenance?.getStats?.() || null,
+          generalKbResearch: this.tools?._generalKbResearch?.getStats?.() || null,
           counts: { openGaps, dormantGaps, answeredGaps, reflections, derivedFacts: derived },
         }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }

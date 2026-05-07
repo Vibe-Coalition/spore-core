@@ -527,6 +527,18 @@ const checkpointsLib = require('../session-graph/lib/checkpoints');
 const heuristicsLib  = require('../session-graph/lib/heuristics');
 const scriptsLib     = require('../session-graph/lib/scripts');
 
+function shouldSkipRecallForSporeCode({ opts, queryType } = {}) {
+  if (opts?.platform !== 'cli') return false;
+  if (heuristicsLib.looksLikeCapabilityQuestion(opts?.messageContent)) return true;
+  // Scoped project sessions need their project graph + General KB recall even
+  // for normal coding turns. The old blanket coding-turn skip made a freshly
+  // recreated project miss lessons that had just been distilled into the shared
+  // KB.
+  if (opts?.memoryEnvelope?.readScopes?.length) return false;
+  return queryType !== 'aggregation'
+    && heuristicsLib.looksLikeCodingTurn(opts?.messageContent);
+}
+
 function projectGraphForContext(api, userId, pc = {}) {
   const registry = api._appContext?.tools?._graphRegistry;
   const learner = api._appContext?.learner;
@@ -956,6 +968,7 @@ function buildProjectContextSection(api, opts) {
   const parts = [];
   parts.push(`## Project Context — ${pc.project || 'project'}`);
   parts.push('Project operating rules are loaded from this project graph in the Scoped Recall Bundle. Follow those refs for runtime access, sandboxing, shell quoting, dev servers, helper scripts, listing/output filtering, plan/execute flow, and verification.');
+  parts.push('If the Scoped Recall Bundle contains a "Reusable Skill Execution Contract", treat the top applicable shared skill as the default playbook: parameterize it, run it, verify it, and avoid rediscovering or rewriting helpers unless a step fails or the project facts prove it does not apply.');
   if (pc.cwd) parts.push(`- CWD: ${pc.cwd}`);
   if (pc.os || pc.arch) parts.push(`- Platform: ${pc.os || '?'}/${pc.arch || '?'}`);
   if (pc.projectType) parts.push(`- Project type: ${pc.projectType}`);
@@ -2109,10 +2122,7 @@ module.exports = function register(api) {
   // true to skip; any other return is treated as "don't skip". Core's
   // graph/context.js consults this before kicking off Enhanced Recall.
   api.registerLifecycleHook('shouldSkipRecall', ({ opts, queryType }) => {
-    if (opts?.platform !== 'cli') return false;
-    if (heuristicsLib.looksLikeCapabilityQuestion(opts?.messageContent)) return true;
-    return queryType !== 'aggregation'
-      && heuristicsLib.looksLikeCodingTurn(opts?.messageContent);
+    return shouldSkipRecallForSporeCode({ opts, queryType });
   });
 
   api.registerLifecycleHook('resolveMemoryScope', ({ opts, envelope }) => {
@@ -2247,7 +2257,9 @@ module.exports._test = {
   inviteKeyMatches,
   validateDeviceToken,
   revokeDeviceToken,
+  shouldSkipRecallForSporeCode,
   verifyWebappPassword,
   wantsPasswordAuth,
   authenticateAccountPassword,
+  buildProjectContextSection,
 };

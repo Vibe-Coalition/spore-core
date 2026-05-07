@@ -154,6 +154,29 @@ const SMALL_SHARED_LAYOUT_COMPACT_LIMIT = 72;
 const SHARED_LAYOUT_SETTLE_MAX_TICKS = 420;
 window._graphViewState = window._graphViewState || { mode: 'auto', root: null };
 
+function _cancelSvgLabelLayoutTimer() {
+  if (typeof _labelLayoutTimer !== 'undefined' && _labelLayoutTimer) {
+    clearTimeout(_labelLayoutTimer);
+    _labelLayoutTimer = null;
+  }
+}
+
+function _beginSvgLabelRefresh() {
+  _cancelSvgLabelLayoutTimer();
+  _lastSvgLabelLayoutKey = '';
+  if (svg) svg.classed('labels-settling', true);
+}
+
+function _finishSvgLabelRefresh() {
+  _cancelSvgLabelLayoutTimer();
+  _lastSvgLabelLayoutKey = '';
+  if (typeof _scheduleLabelLayout === 'function') _scheduleLabelLayout(true);
+  const svgRef = svg;
+  requestAnimationFrame(() => {
+    if (svgRef?.node?.()) svgRef.classed('labels-settling', false);
+  });
+}
+
 function _setGraphViewState(mode, root = null) {
   window._graphViewState = {
     mode: mode || 'auto',
@@ -1064,6 +1087,7 @@ function _refreshActiveGraphFilters() {
 
 function mergeGraph(newData, anims) {
   _lastSvgLabelLayoutKey = '';
+  _beginSvgLabelRefresh();
   const usesSharedLayout = _graphUsesSharedLayout(newData) || _graphUsesSharedLayout(graphData);
   const oldIds = new Set(graphData.nodes.map(n => n.id));
   const newIds = new Set(newData.nodes.map(n => n.id));
@@ -1272,6 +1296,7 @@ function mergeGraph(newData, anims) {
 
   _restoreGraphSelection();
   _refreshCurrentAltView();
+  _finishSvgLabelRefresh();
 }
 
 function updateStats() {
@@ -3330,6 +3355,7 @@ function initWebglGraph(data, opts = {}) {
     simulation = null;
   }
   svg = d3.select('#graph-svg');
+  _beginSvgLabelRefresh();
   svg.selectAll('*').remove();
 
   const canvas = document.getElementById('graph-webgl');
@@ -3922,6 +3948,7 @@ function initGraph(data, opts = {}) {
   _refreshActiveGraphFilters();
   _scheduleViewportCulling(true);
   _refreshCurrentAltView();
+  _finishSvgLabelRefresh();
 }
 
 // ── Node Selection / Editor Panel ──

@@ -711,10 +711,10 @@ test('codebase-session scoped recall includes general kb provenance nodes', asyn
     INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
-    'terminal-qr-rendering',
+    'skill-terminal-qr-rendering',
     'Terminal QR rendering',
-    'concept',
-    'Reusable QR code rendering lesson for chat and terminal interfaces.',
+    'skill',
+    'Reusable QR code rendering workflow for chat and terminal interfaces.',
     8,
     'general-kb',
     'session-distill',
@@ -722,13 +722,55 @@ test('codebase-session scoped recall includes general kb provenance nodes', asyn
   const aspect = db.prepare(`
     INSERT INTO aspects (node_id, name, weight, extracted_with)
     VALUES (?, ?, ?, ?)
-  `).run('terminal-qr-rendering', 'reusable_lessons', 8, 'session-distill').lastInsertRowid;
+  `).run('skill-terminal-qr-rendering', 'gotchas', 8, 'session-distill').lastInsertRowid;
   db.prepare(`
     INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
     VALUES (?, ?, ?, ?, ?)
   `).run(
     aspect,
     'When printing Expo QR codes in chat, avoid half-block small mode; use dense full-block output so the code remains scannable.',
+    9,
+    'session-distill',
+    'session-distill',
+  );
+  const commands = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES (?, ?, ?, ?)
+  `).run('skill-terminal-qr-rendering', 'commands', 8, 'session-distill').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    commands,
+    'node qr-gen.js exp://<LAN_IP>:8081',
+    9,
+    'session-distill',
+    'session-distill',
+  );
+  const steps = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES (?, ?, ?, ?)
+  `).run('skill-terminal-qr-rendering', 'steps', 8, 'session-distill').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    steps,
+    'Render the exact exp:// LAN URL as a dense terminal QR before trying image-only output.',
+    9,
+    'session-distill',
+    'session-distill',
+  );
+  const validation = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES (?, ?, ?, ?)
+  `).run('skill-terminal-qr-rendering', 'validation', 8, 'session-distill').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    validation,
+    'The final response includes the exact exp:// LAN URL and a scannable QR block.',
     9,
     'session-distill',
     'session-distill',
@@ -744,6 +786,9 @@ test('codebase-session scoped recall includes general kb provenance nodes', asyn
     info() {}, warn() {}, error() {}, debug() {},
   });
   assert.equal(graph.init(), true);
+  const events = [];
+  const handler = evt => events.push(evt);
+  graphEvents.on('change', handler);
   try {
     const bundle = await graph._buildScopedRecallBundle({
       messageContent: 'start this expo server and print me the qr code',
@@ -759,12 +804,165 @@ test('codebase-session scoped recall includes general kb provenance nodes', asyn
       },
     });
 
+    assert.ok(events.some(e => e.op === 'recall:start' && e.source === 'scoped-recall'));
+    assert.match(bundle, /Reusable Skill Execution Contract/);
+    assert.match(bundle, /playbook, not background trivia/);
+    assert.match(bundle, /Before the first mutating command/);
+    assert.match(bundle, /avoid task bookkeeping/);
+    assert.match(bundle, /High-Signal Reusable Knowledge/);
     assert.match(bundle, /Reusable Engineering Memory/);
     assert.match(bundle, /Terminal QR rendering/);
+    assert.match(bundle, /Default workflow/);
+    assert.match(bundle, /Commands to reuse/);
+    assert.match(bundle, /Validation/);
+    assert.match(bundle, /shared reusable item you used/);
+    assert.match(bundle, /node qr-gen\.js/);
     assert.match(bundle, /dense full-block output/);
+  } finally {
+    graphEvents.off('change', handler);
+    graph.db?.close();
+  }
+});
+
+test('codebase-session scoped recall promotes reusable library nodes as playbooks', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-kb-library-recall-'));
+  const dbPath = path.join(dir, 'spore-knowledge-base.db');
+  const db = newDb(dbPath);
+  db.prepare(`
+    INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'qrcode-npm',
+    'qrcode',
+    'library',
+    'Node.js library for generating QR codes in terminal, SVG, and other formats.',
+    8,
+    'general-kb',
+    'session-distill',
+  );
+  const summary = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES (?, ?, ?, ?)
+  `).run('qrcode-npm', 'summary', 8, 'session-distill').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    summary,
+    "npm package 'qrcode'; supports QRCode.toString(url, {type:'terminal', small:true}, callback) for terminal output.",
+    9,
+    'session-distill',
+    'session-distill',
+  );
+  const applicability = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES (?, ?, ?, ?)
+  `).run('qrcode-npm', 'applicability', 7, 'session-distill').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    applicability,
+    'Reusable when a project needs terminal-visible QR output and ANSI rendering may not display correctly.',
+    8,
+    'session-distill',
+    'session-distill',
+  );
+  const lessons = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES (?, ?, ?, ?)
+  `).run('qrcode-npm', 'reusable_lessons', 8, 'session-distill').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    lessons,
+    'If terminal ANSI output is not rendering, use QRCode.create() and print a plain block-character QR instead of rediscovering a custom renderer from scratch.',
+    9,
+    'session-distill',
+    'session-distill',
+  );
+  db.close();
+
+  const graph = new GraphContext({
+    graphDbPath: dbPath,
+    sharedGraphsDir: dir,
+    agentId: 'spore',
+    enhancedRecall: false,
+  }, quietLog());
+  assert.equal(graph.init(), true);
+  try {
+    const bundle = await graph._buildScopedRecallBundle({
+      messageContent: 'start expo and print a qrcode in the terminal without ansi',
+      memoryEnvelope: {
+        mode: 'codebase-session',
+        readScopes: [{
+          slug: 'spore-knowledge-base',
+          role: 'general_kb',
+          label: 'Reusable Engineering Memory',
+          dbPath,
+          budget: 8,
+        }],
+      },
+    });
+
+    assert.match(bundle, /Reusable Skill Execution Contract/);
+    assert.match(bundle, /top applicable item/);
+    assert.match(bundle, /High-Signal Reusable Knowledge/);
+    assert.match(bundle, /qrcode-npm library/);
+    assert.match(bundle, /Usage notes/);
+    assert.match(bundle, /Reusable lessons/);
+    assert.match(bundle, /QRCode\.toString/);
+    assert.match(bundle, /QRCode\.create\(\)/);
+    assert.match(bundle, /instead of rediscovering/);
   } finally {
     graph.db?.close();
   }
+});
+
+test('scoped reusable contract ranks query-matched QR knowledge above generic fallback skills', () => {
+  const graph = new GraphContext({
+    graphDbPath: ':memory:',
+    agentId: 'spore',
+    enhancedRecall: false,
+  }, quietLog());
+
+  const bundle = graph._buildScopedSkillBrief([
+    {
+      id: 'skill-start-expo-dev-server-with-tunnel-fallback',
+      label: 'Start Expo Dev Server with Tunnel Fallback',
+      type: 'skill',
+      description: 'Start an Expo dev server, falling back to --tunnel if standard start fails.',
+      importance: 7,
+      _hybridScore: 0.9,
+      aspects: [
+        { name: 'commands', attributes: [{ content: 'npx expo start --tunnel' }] },
+        { name: 'steps', attributes: [
+          { content: 'Try `npx expo start` first.' },
+          { content: 'If it fails with network binding errors, re-run with `npx expo start --tunnel`.' },
+        ] },
+        { name: 'validation', attributes: [{ content: 'curl -s http://localhost:8081/status' }] },
+      ],
+    },
+    {
+      id: 'qrcode-npm',
+      label: 'qrcode',
+      type: 'library',
+      description: 'Node.js library for generating QR codes in terminal, SVG, and other formats.',
+      importance: 6,
+      _hybridScore: 0.8,
+      aspects: [
+        { name: 'summary', attributes: [{ content: "QRCode.toString(url, {type:'terminal', small:true}, callback) for terminal output." }] },
+        { name: 'reusable_lessons', attributes: [{ content: 'Use QRCode.create() and plain block characters when ANSI terminal output does not render.' }] },
+      ],
+    },
+  ], 'start the expo server and print me the qr code');
+
+  assert.match(bundle, /If the user asks for multiple deliverables/);
+  assert.match(bundle, /fallback commands only after their stated precondition/);
+  assert.match(bundle, /avoid VPN\/Tailscale\/overlay addresses/);
+  assert.ok(bundle.indexOf('qrcode-npm library') < bundle.indexOf('skill-start-expo-dev-server-with-tunnel-fallback skill'));
+  assert.match(bundle, /QRCode\.create\(\)/);
 });
 
 test('cli codebase prompts hide saved SSH and cluster access', async () => {
@@ -1067,6 +1265,202 @@ test('learner refreshes cached graph db handle after delete and recreate', () =>
   assert.notEqual(second, first);
   assert.ok(second.prepare("SELECT id FROM nodes WHERE id = 'ref-project-runtime'").get());
   learner.close();
+});
+
+test('learner routes explicit local writes to the scoped project graph', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-learner-scoped-local-'));
+  const registry = new GraphRegistry(dir, { agentId: 'spore', displayName: 'Spore' }, quietLog());
+  registry.init();
+
+  const projectContext = {
+    cwd: '/work/express-request-id',
+    project: 'express-request-id',
+    gitRemote: 'https://github.com/example/express-request-id',
+    source: 'spore-code',
+  };
+  const env = resolveDefaultMemoryEnvelope({
+    registry,
+    opts: {
+      platform: 'cli',
+      userRole: 'cli',
+      userId: 'mara',
+      userName: 'Mara',
+      projectContext,
+    },
+  });
+
+  const learner = new Learner({ agentId: 'spore' }, quietLog(), null);
+  learner.db = new DatabaseSync(registry.getDbPath(registry.getMainSlug()));
+  learner._graphRegistry = registry;
+
+  try {
+    const wrote = learner._writeToGraph({
+      entities: [
+        { id: 'mara', label: 'Mara', type: 'person', description: 'Developer working on the project', target: 'local' },
+        { id: 'request-id-middleware', label: 'Request ID middleware', type: 'concept', description: 'Project middleware feature', target: 'local' },
+      ],
+      aspects: [{
+        nodeId: 'request-id-middleware',
+        name: 'implementation',
+        attributes: ['The project middleware preserves incoming X-Request-Id values and generates one when absent.'],
+        importance: 8,
+        target: 'local',
+      }],
+      updates: [],
+      edges: [{ source: 'mara', target: 'request-id-middleware', type: 'requested', confidence: 'extracted' }],
+      gaps: [],
+      hyperedges: [],
+    }, {
+      platform: 'cli',
+      userRole: 'cli',
+      userId: 'mara',
+      userName: 'Mara',
+      projectContext,
+      memoryEnvelope: env,
+    });
+
+    const projectDb = learner.getGraphDb(env.primarySlug);
+    assert.ok(wrote.writeTargets.some(t => t.slug === env.primarySlug && t.total > 0));
+    assert.equal(learner.db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id IN ('mara', 'request-id-middleware')").get().c, 0);
+    assert.equal(projectDb.prepare("SELECT type FROM nodes WHERE id = 'mara'").get().type, 'person');
+    assert.equal(projectDb.prepare("SELECT type FROM nodes WHERE id = 'request-id-middleware'").get().type, 'concept');
+    assert.ok(projectDb.prepare(`
+      SELECT 1 FROM attributes a
+      JOIN aspects asp ON asp.id = a.aspect_id
+      WHERE asp.node_id = 'request-id-middleware'
+        AND asp.name = 'implementation'
+        AND a.content LIKE '%X-Request-Id%'
+    `).get());
+    assert.ok(projectDb.prepare(`
+      SELECT 1 FROM edges
+      WHERE source = 'mara' AND target = 'request-id-middleware' AND type = 'requested'
+    `).get());
+  } finally {
+    learner.close();
+  }
+});
+
+test('learner drops stale scoped writes when the project graph was deleted', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-learner-stale-project-'));
+  const registry = new GraphRegistry(dir, { agentId: 'spore', displayName: 'Spore' }, quietLog());
+  registry.init();
+
+  const projectContext = {
+    cwd: '/work/acorn-companion',
+    project: 'acorn-companion',
+    gitRemote: 'https://github.com/example/acorn-companion',
+    source: 'spore-code',
+  };
+  const env = resolveDefaultMemoryEnvelope({
+    registry,
+    opts: {
+      platform: 'cli',
+      userRole: 'cli',
+      userId: 'yam',
+      userName: 'yam',
+      projectContext,
+    },
+  });
+
+  const learner = new Learner({ agentId: 'spore' }, quietLog(), null);
+  learner.db = new DatabaseSync(registry.getDbPath(registry.getMainSlug()));
+  learner._graphRegistry = registry;
+
+  try {
+    registry.delete(env.primarySlug);
+
+    const wrote = learner._writeToGraph({
+      entities: [
+        { id: 'yam', label: 'yam', type: 'person', description: 'Project user', target: 'local' },
+        { id: 'expo-dev-server', label: 'Expo Dev Server', type: 'system', description: 'Project-only server state', target: 'local' },
+      ],
+      aspects: [{
+        nodeId: 'expo-dev-server',
+        name: 'server_status',
+        attributes: ['Expo Metro was running on localhost:8081 for this deleted project graph.'],
+        importance: 6,
+        target: 'local',
+      }],
+      updates: [],
+      edges: [{ source: 'yam', target: 'expo-dev-server', type: 'used', confidence: 'extracted' }],
+      gaps: [],
+      hyperedges: [],
+    }, {
+      platform: 'cli',
+      userRole: 'cli',
+      userId: 'yam',
+      userName: 'yam',
+      projectContext,
+      memoryEnvelope: env,
+    });
+
+    assert.equal(wrote.total, 0);
+    assert.ok(wrote.writeTargets.some(t => t.slug === env.primarySlug && t.skipped && t.reason === 'missing_graph'));
+    assert.equal(learner.db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id IN ('yam', 'expo-dev-server')").get().c, 0);
+    assert.equal(learner.db.prepare("SELECT COUNT(*) AS c FROM attributes WHERE content LIKE '%Expo Metro was running%'").get().c, 0);
+    assert.equal(learner.getGraphDb(env.primarySlug), null);
+  } finally {
+    learner.close();
+  }
+});
+
+test('learner suppresses synthetic benchmark speaker person nodes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-learner-benchmark-speaker-'));
+  const registry = new GraphRegistry(dir, { agentId: 'spore', displayName: 'Spore' }, quietLog());
+  registry.init();
+
+  const projectContext = {
+    cwd: '/data/spore-code-benchmark/runs/scb-test/express-request-id',
+    project: 'express-request-id',
+    source: 'spore-code',
+    benchmark: { runId: 'scb-test', scenarioId: 'express-request-id', taskId: 'initial-change' },
+  };
+  const env = resolveDefaultMemoryEnvelope({
+    registry,
+    opts: {
+      platform: 'cli',
+      userRole: 'cli',
+      userId: 'Mara',
+      userName: 'Mara',
+      projectContext,
+    },
+  });
+
+  const learner = new Learner({ agentId: 'spore' }, quietLog(), null);
+  learner.db = new DatabaseSync(registry.getDbPath(registry.getMainSlug()));
+  learner._graphRegistry = registry;
+
+  try {
+    learner._writeToGraph({
+      entities: [
+        { id: 'mara', label: 'Mara', type: 'person', description: 'Synthetic benchmark actor', target: 'local' },
+        { id: 'request-id-middleware', label: 'Request ID middleware', type: 'concept', description: 'Project middleware feature', target: 'local' },
+      ],
+      aspects: [
+        { nodeId: 'mara', name: 'work', attributes: ['Mara requested the benchmark task.'], importance: 6, target: 'local' },
+        { nodeId: 'request-id-middleware', name: 'implementation', attributes: ['Request ID middleware was added for the repo.'], importance: 8, target: 'local' },
+      ],
+      updates: [],
+      edges: [{ source: 'mara', target: 'request-id-middleware', type: 'requested', confidence: 'extracted' }],
+      gaps: [],
+      hyperedges: [],
+    }, {
+      platform: 'cli',
+      userRole: 'cli',
+      userId: 'Mara',
+      userName: 'Mara',
+      projectContext,
+      memoryEnvelope: env,
+    });
+
+    const projectDb = learner.getGraphDb(env.primarySlug);
+    assert.equal(learner.db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id = 'mara'").get().c, 0);
+    assert.equal(projectDb.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id = 'mara'").get().c, 0);
+    assert.equal(projectDb.prepare("SELECT type FROM nodes WHERE id = 'request-id-middleware'").get().type, 'concept');
+    assert.equal(projectDb.prepare("SELECT COUNT(*) AS c FROM edges WHERE source = 'mara' OR target = 'mara'").get().c, 0);
+  } finally {
+    learner.close();
+  }
 });
 
 test('graph registry protected delete requires explicit override', () => {

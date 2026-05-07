@@ -1025,7 +1025,7 @@ function _settingsEnsureGraphRuntimeControls() {
         <div class="settings-runtime-card-title">General KB research</div>
         <label class="settings-check" for="settings-general-kb-research-enabled">
           <input id="settings-general-kb-research-enabled" type="checkbox">
-          <span>enabled</span>
+          <span>scheduled</span>
         </label>
       </div>
       <div class="settings-runtime-grid">
@@ -1038,7 +1038,7 @@ function _settingsEnsureGraphRuntimeControls() {
           <input id="settings-general-kb-research-batch" type="number" min="1" step="1" placeholder="1">
         </div>
       </div>
-      <div class="settings-runtime-note">Only targets the General Knowledge Base graph. It enriches under-researched nodes with usage guidance and supporting detail.</div>
+      <div class="settings-runtime-note">Scheduled runs are independent from graph maintenance and only target the General Knowledge Base graph. Use the General Knowledge Base row's research action for an immediate manual run.</div>
     </div>
   `;
   const janitorRow = document.getElementById('settings-janitor-run')?.closest('div');
@@ -1803,6 +1803,43 @@ function closeSettingsPanel() {
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
 }
 
+const SETTINGS_GRAPH_GROUPS_KEY = 'spore.settings.graphGroups.v1';
+
+function _settingsReadGraphGroupState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SETTINGS_GRAPH_GROUPS_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function _settingsWriteGraphGroupState(key, open) {
+  if (!key) return;
+  const state = _settingsReadGraphGroupState();
+  state[key] = !!open;
+  try { localStorage.setItem(SETTINGS_GRAPH_GROUPS_KEY, JSON.stringify(state)); } catch {}
+}
+
+function _settingsGraphRole(graph) {
+  return String(graph?.role || '').toLowerCase();
+}
+
+function _settingsGraphIsViewed(graph) {
+  return typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === graph?.slug && !graph?.active;
+}
+
+function _settingsGraphIsManagedMemoryRole(role) {
+  return role === 'project' || role === 'user' || role === 'channel' || role === 'general_kb';
+}
+
+function _settingsGraphBadgeLabel(graph, inspectOnly) {
+  if (!inspectOnly) return '';
+  const role = _settingsGraphRole(graph);
+  if (role === 'project' || role === 'user' || role === 'channel') return role;
+  return 'system';
+}
+
 async function renderSettingsGraphsList() {
   const container = document.getElementById('settings-graphs-list');
   if (!container) return;
@@ -1815,7 +1852,8 @@ async function renderSettingsGraphsList() {
       container.innerHTML = '<div class="settings-scroll-empty">No graphs yet</div>';
       return;
     }
-    container.innerHTML = graphs.map(g => {
+    const renderGraphRow = (g) => {
+      const role = _settingsGraphRole(g);
       const nodes = g.nodeCount != null ? g.nodeCount : '?';
       const backlog = Number(g.embeddingBacklog || 0);
       const maintenanceLabel = g.maintenanceStatus === 'running'
@@ -1832,39 +1870,73 @@ async function renderSettingsGraphsList() {
           : ((g.communityState === 'unclustered' || backlog > 0 || !g.lastMaintainedAt) ? 'stale' : 'ok'));
       const inspectOnly = typeof _isInspectOnlyGraph === 'function'
         ? _isInspectOnlyGraph(g)
-        : !!(g.inspectOnly || g.activationLocked || g.managed || g.protected || g.role === 'project' || g.role === 'general_kb');
+        : !!(g.inspectOnly || g.activationLocked || g.managed || g.protected || _settingsGraphIsManagedMemoryRole(role));
       const canManage = g?.canManage !== false && !g?.readOnly && (typeof _isCreatorRole !== 'function' || _isCreatorRole());
-      const viewing = typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === g.slug && !g.active;
-      const canDelete = canManage && !g.active && !g.protected && g.role !== 'main' && g.role !== 'general_kb';
-      const canReset = canManage && g.role === 'general_kb';
+      const viewing = _settingsGraphIsViewed(g);
+      const canDelete = canManage && !g.active && !g.protected && role !== 'main' && role !== 'general_kb';
+      const canReset = canManage && role === 'general_kb';
+      const canResearchGeneralKb = canManage && (role === 'general_kb' || g.slug === 'spore-knowledge-base');
+      const badgeLabel = _settingsGraphBadgeLabel(g, inspectOnly);
       return `<div class="settings-graph-row${g.active ? ' active' : ''}${viewing ? ' viewing' : ''}${inspectOnly ? ' protected' : ''}" data-slug="${esc(g.slug)}" title="${esc(g.description || g.name)}">
         <div class="sg-main">
           <span class="sg-name">${esc(g.name)}</span>
-          <span class="sg-count">${nodes}n${g.role ? ` · ${esc(g.role)}` : ''}</span>
+          <span class="sg-count">${nodes}n${role ? ` · ${esc(role)}` : ''}</span>
           ${g.active ? '<span class="sg-badge">active</span>' : ''}
           ${viewing ? '<span class="sg-badge">viewing</span>' : ''}
-          ${inspectOnly ? `<span class="sg-badge">${g.role === 'project' ? 'project' : 'system'}</span>` : ''}
+          ${badgeLabel ? `<span class="sg-badge">${esc(badgeLabel)}</span>` : ''}
           <span class="sg-maintenance ${maintenanceTone}" title="${esc(g.maintenanceError || maintenanceLabel)}">${esc(maintenanceLabel)}</span>
         </div>
         <div class="sg-actions">
           ${canManage ? `<button type="button" class="sg-action" data-graph-maintain="${esc(g.slug)}">maintain</button>` : ''}
+          ${canResearchGeneralKb ? `<button type="button" class="sg-action" data-graph-research-general-kb="${esc(g.slug)}">research</button>` : ''}
           ${canReset ? `<button type="button" class="sg-action" data-graph-reset="${esc(g.slug)}">reset</button>` : ''}
           ${canDelete ? `<button type="button" class="sg-action danger" data-graph-delete="${esc(g.slug)}">delete</button>` : ''}
         </div>
       </div>`;
-    }).join('');
+    };
+    const grouped = new Set();
+    const groupState = _settingsReadGraphGroupState();
+    const groupDefs = [
+      { key: 'project', title: 'Project graphs' },
+      { key: 'user', title: 'User graphs' },
+      { key: 'channel', title: 'Channel graphs' },
+    ];
+    const renderGroup = (def) => {
+      const items = graphs.filter(g => _settingsGraphRole(g) === def.key);
+      if (!items.length) return '';
+      for (const graph of items) grouped.add(graph.slug);
+      const nodeTotal = items.reduce((sum, graph) => sum + Number(graph.nodeCount || 0), 0);
+      const hasSelectedGraph = items.some(g => g.active || _settingsGraphIsViewed(g));
+      const savedOpen = groupState[def.key];
+      const open = hasSelectedGraph || (typeof savedOpen === 'boolean' ? savedOpen : false);
+      const graphLabel = items.length === 1 ? 'graph' : 'graphs';
+      return `<details class="settings-graph-group" data-graph-group="${esc(def.key)}"${open ? ' open' : ''}>
+        <summary class="settings-graph-group-summary">
+          <span class="sgg-title">${esc(def.title)}</span>
+          <span class="sgg-count">${items.length} ${graphLabel} · ${nodeTotal}n</span>
+        </summary>
+        <div class="settings-graph-group-rows">${items.map(renderGraphRow).join('')}</div>
+      </details>`;
+    };
+    const groupedRows = groupDefs.map(renderGroup).join('');
+    const coreRows = graphs.filter(g => !grouped.has(g.slug)).map(renderGraphRow).join('');
+    container.innerHTML = [coreRows, groupedRows].filter(Boolean).join('');
     container.querySelectorAll('.settings-graph-row').forEach(el => {
       el.addEventListener('click', (e) => {
         if (e.target.closest('button')) return;
         const slug = el.dataset.slug;
         const g = graphs.find(x => x.slug === slug);
+        const role = _settingsGraphRole(g);
         const inspectOnly = typeof _isInspectOnlyGraph === 'function'
           ? _isInspectOnlyGraph(g)
-          : !!(g?.inspectOnly || g?.activationLocked || g?.managed || g?.protected || g?.role === 'project' || g?.role === 'general_kb');
+          : !!(g?.inspectOnly || g?.activationLocked || g?.managed || g?.protected || _settingsGraphIsManagedMemoryRole(role));
         if (inspectOnly && typeof inspectGraph === 'function') inspectGraph(slug);
         else if (g?.active && typeof viewActiveGraph === 'function') viewActiveGraph(slug);
         else if (g && !g.active && typeof switchToGraph === 'function') switchToGraph(slug);
       });
+    });
+    container.querySelectorAll('.settings-graph-group').forEach(el => {
+      el.addEventListener('toggle', () => _settingsWriteGraphGroupState(el.dataset.graphGroup, el.open));
     });
     container.querySelectorAll('[data-graph-delete]').forEach(btn => {
       btn.addEventListener('click', () => _deleteSettingsGraph(btn.dataset.graphDelete, graphs.find(g => g.slug === btn.dataset.graphDelete)));
@@ -1874,6 +1946,9 @@ async function renderSettingsGraphsList() {
     });
     container.querySelectorAll('[data-graph-maintain]').forEach(btn => {
       btn.addEventListener('click', () => _maintainSettingsGraph(btn.dataset.graphMaintain, graphs.find(g => g.slug === btn.dataset.graphMaintain)));
+    });
+    container.querySelectorAll('[data-graph-research-general-kb]').forEach(btn => {
+      btn.addEventListener('click', () => _researchSettingsGeneralKb(btn.dataset.graphResearchGeneralKb, graphs.find(g => g.slug === btn.dataset.graphResearchGeneralKb), btn));
     });
   } catch (e) {
     container.innerHTML = `<div class="settings-scroll-empty settings-status-danger">Failed: ${esc(e.message)}</div>`;
@@ -1898,6 +1973,41 @@ async function _maintainSettingsGraph(slug, graph) {
   } catch (e) {
     toast(`Maintenance failed: ${e.message || e}`, true);
     await renderSettingsGraphsList();
+  }
+}
+
+async function _researchSettingsGeneralKb(slug, graph, button) {
+  if (!slug) return;
+  const name = graph?.name || slug;
+  const batchInput = document.getElementById('settings-general-kb-research-batch');
+  const batchSize = Math.max(1, parseInt((batchInput?.value || '1').trim(), 10) || 1);
+  const originalText = button?.textContent || 'research';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'queueing';
+  }
+  try {
+    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/research/run`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true, reason: 'manual', batchSize }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+    if (data.ok) {
+      toast(`Queued ${data.queued || 0} ${name} research node${data.queued === 1 ? '' : 's'}`);
+    } else if (data.skipped) {
+      toast(`Research skipped: ${data.skipped}`);
+    } else {
+      toast('No research work queued');
+    }
+    await renderSettingsGraphsList();
+  } catch (e) {
+    toast(`Research failed: ${e.message || e}`, true);
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
   }
 }
 

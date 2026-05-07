@@ -193,7 +193,7 @@ test('recovers queued persistent jobs after restart', async () => {
   }
 });
 
-test('recovers general KB research jobs through the coordinator handler', async () => {
+test('recovers general KB research jobs through the dedicated research handler', async () => {
   const fixture = makeDb();
   const firstQueue = makeQueue(fixture.sessions);
 
@@ -213,8 +213,8 @@ test('recovers general KB research jobs through the coordinator handler', async 
 
   let observed = null;
   const secondQueue = makeQueue(fixture.sessions, {
-    graphMaintenance: {
-      runGeneralKbResearchJob(payload) {
+    generalKbResearch: {
+      runJob(payload) {
         observed = payload;
         return { ok: true, nodes: payload.nodeIds };
       },
