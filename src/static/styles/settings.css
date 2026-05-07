@@ -960,6 +960,7 @@
     background: rgba(var(--hl-rgb),.025);
     padding: 12px 14px;
     display: flex; flex-direction: column; gap: 8px;
+    overflow: hidden;
     transition: border-color .12s;
   }
   .ml-card:hover { border-color: var(--border-active); }
@@ -987,6 +988,7 @@
   .ml-card-meta span { white-space: nowrap; }
   .ml-card-actions {
     display: flex; gap: 6px; justify-content: flex-end;
+    flex-wrap: wrap;
     margin-top: 2px; padding-top: 8px;
     border-top: 1px solid var(--border-subtle);
   }
