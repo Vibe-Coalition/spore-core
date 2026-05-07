@@ -8,11 +8,17 @@
  * Follows the same module pattern as model-library.js.
  */
 
-const db = require('./db');
+const dbModule = require('./db');
 
 // ── helpers ──────────────────────────────────────────────
 
 function _now() { return Date.now(); }
+
+function _db() {
+  const inst = dbModule.instance();
+  if (!inst) throw new Error('[routing-presets] settings DB not open — call loader.boot() first');
+  return inst.db;
+}
 
 function _serialize(name, config) {
   return {
@@ -45,7 +51,7 @@ function _summary(row) {
 // ── public API ───────────────────────────────────────────
 
 function list() {
-  const d = db.instance();
+  const d = _db();
   const rows = d.prepare(
     'SELECT name, created_at, updated_at FROM routing_presets ORDER BY updated_at DESC'
   ).all();
@@ -53,7 +59,7 @@ function list() {
 }
 
 function get(name) {
-  const d = db.instance();
+  const d = _db();
   const row = d.prepare(
     'SELECT * FROM routing_presets WHERE name = ?'
   ).get(name);
@@ -61,7 +67,7 @@ function get(name) {
 }
 
 function save(name, config) {
-  const d = db.instance();
+  const d = _db();
   // Preserve created_at on REPLACE so updates don't reset it
   const existing = d.prepare(
     'SELECT created_at FROM routing_presets WHERE name = ?'
@@ -75,7 +81,7 @@ function save(name, config) {
 }
 
 function remove(name) {
-  const d = db.instance();
+  const d = _db();
   const info = d.prepare('DELETE FROM routing_presets WHERE name = ?').run(name);
   return info.changes > 0;
 }
