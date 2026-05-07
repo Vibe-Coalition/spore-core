@@ -6193,6 +6193,7 @@ class WebGateway {
           type: 'capabilities',
           projectContext: true,
           sporeVersion: 'v0.1.0',
+          agentDisplayName: this.config.displayName || this.config.agentId || undefined,
         }));
       } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
 
