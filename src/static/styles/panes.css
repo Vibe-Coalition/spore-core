@@ -820,13 +820,16 @@
   }
   .aspect-card .aspect-header {
     display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+    min-width: 0; gap: 6px;
   }
   .aspect-card .aspect-name {
     font-family: var(--font-body); font-size: 0.75rem;
     font-weight: 600; color: var(--accent3);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
   }
   .aspect-card .aspect-weight {
     font-family: var(--font-body); font-size: 0.6rem; color: var(--text-dim);
+    flex-shrink: 0; white-space: nowrap;
   }
   .attr-item {
     font-size: 0.8rem; color: var(--text); padding: 4px 0;
