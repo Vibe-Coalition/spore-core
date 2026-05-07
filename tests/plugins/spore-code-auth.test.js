@@ -28,6 +28,7 @@ function writeUser(dataDir, username, password, extra = {}) {
 
 function makeApi(dataDir, host = {}) {
   const webSessions = new Map();
+  const pluginConfig = host.plugins?.['spore-code'] || {};
   return {
     webSessions,
     api: {
@@ -36,6 +37,7 @@ function makeApi(dataDir, host = {}) {
         tools: { gateway: { _webSessions: webSessions } },
       },
       getHostConfig: () => ({ dataDir, ...host }),
+      getConfig: () => ({ ...pluginConfig }),
       getLogger: () => ({ info() {}, warn() {}, debug() {}, error() {} }),
     },
   };
@@ -144,6 +146,27 @@ test('spore-code auth allows private LAN HTTP but rejects public HTTP', async ()
       key: 'invite-key',
     }, {}, { remoteAddress: '203.0.113.10' }), publicRes);
     assert.equal(publicRes.statusCode, 403);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('spore-code auth setting can allow public HTTP explicitly', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
+  try {
+    const { api } = makeApi(dataDir, {
+      inviteKey: 'invite-key',
+      plugins: { 'spore-code': { allowInsecureAuth: true } },
+    });
+
+    const res = makeRes();
+    await sporeCode._test.handleAuth(api, makeReq({
+      username: 'cli-user',
+      key: 'invite-key',
+    }, {}, { remoteAddress: '203.0.113.10' }), res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(JSON.parse(res.body).ok, true);
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }

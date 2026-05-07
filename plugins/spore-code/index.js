@@ -155,9 +155,16 @@ function isSecureRequest(req) {
   return proto === 'https';
 }
 
-function insecureAuthAllowed(req) {
+function pluginAllowsInsecureAuth(api) {
+  const slot = api?.getConfig?.() || api?.getHostConfig?.()?.plugins?.['spore-code'] || {};
+  const setting = slot.allowInsecureAuth === true || slot.allowInsecureAuth === 'true' || slot.allowInsecureAuth === 1 || slot.allowInsecureAuth === '1';
+  const env = /^(1|true|yes)$/i.test(String(process.env.SPORE_ALLOW_INSECURE_AUTH || process.env.SPORE_CODE_ALLOW_INSECURE_AUTH || ''));
+  return setting || env;
+}
+
+function insecureAuthAllowed(api, req) {
   if (isSecureRequest(req) || isLocalRequest(req)) return true;
-  return /^(1|true|yes)$/i.test(String(process.env.SPORE_ALLOW_INSECURE_AUTH || process.env.SPORE_CODE_ALLOW_INSECURE_AUTH || ''));
+  return pluginAllowsInsecureAuth(api);
 }
 
 function checkAuthRate(req, username, method) {
@@ -335,7 +342,7 @@ function issueCliToken(api, res, username, authKind, opts = {}) {
 // ── HTTP route handlers ─────────────────────────────────────────────
 
 async function handleAuth(api, req, res) {
-  if (!insecureAuthAllowed(req)) {
+  if (!insecureAuthAllowed(api, req)) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
     return;
@@ -402,7 +409,7 @@ async function handleAuth(api, req, res) {
 }
 
 async function handleDeviceSession(api, req, res) {
-  if (!insecureAuthAllowed(req)) {
+  if (!insecureAuthAllowed(api, req)) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
     return;
@@ -418,7 +425,7 @@ async function handleDeviceSession(api, req, res) {
 }
 
 async function handleLogout(api, req, res) {
-  if (!insecureAuthAllowed(req)) {
+  if (!insecureAuthAllowed(api, req)) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
     return;
@@ -2080,12 +2087,22 @@ module.exports = function register(api) {
     maybePruneStaleScripts(scopedApi, opts);
   });
 
-  // No plugin settings pane — the SPORE invite key (used by both this
-  // plugin's /auth handler AND the webapp self-register endpoint) is
-  // a host-level setting in core's config.inviteKey. The settings UI
-  // surfaces it under Advanced → Invite Key, not in the Plugins tab.
-  // No webappSelfRegisterCheck hook either — core's self-register
-  // reads config.inviteKey directly.
+  // The SPORE invite key remains a host-level setting in core because both
+  // this plugin's /auth handler and the webapp self-register endpoint use it.
+  // The Plugins tab owns Spore Code-specific transport policy.
+  api.registerSettingsPane({
+    title: 'Spore Code',
+    description: 'CLI pairing and authentication controls for Spore Code clients.',
+    schema: [
+      {
+        key: 'allowInsecureAuth',
+        label: 'Allow insecure HTTP authentication',
+        type: 'toggle',
+        default: false,
+        help: 'Dangerous. Allows invite keys, account passwords, and device tokens over non-HTTPS public network paths. Localhost and private LAN HTTP are already allowed without this.',
+      },
+    ],
+  });
 
   // shouldSkipRecall lifecycle hook — short-circuits the expensive
   // per-turn recall pipeline for cli-platform coding turns. Returns
