@@ -2,6 +2,53 @@
 -- live in the always-included prompt. Re-running is a no-op.
 
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
+VALUES ('knowledge-graph', 'Knowledge Graph', 'system',
+  'SQLite knowledge graph. Nodes, aspects, attributes, edges. Persists across restarts and grows with every conversation.', 8, 'seed');
+
+INSERT INTO aspects (node_id, name, weight, extracted_with)
+SELECT 'knowledge-graph', 'how_it_works', 8, 'seed'
+WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id = 'knowledge-graph' AND name = 'how_it_works');
+
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT (SELECT id FROM aspects WHERE node_id = 'knowledge-graph' AND name = 'how_it_works' ORDER BY id LIMIT 1),
+       'A separate protected General Knowledge Base graph exists at slug spore-knowledge-base. Query it with graph_query({ graph: "spore-knowledge-base", mode: "overview", limit: 20, offset: 0 }) for reusable tool, workflow, provider, plugin, UI, and app-behavior knowledge.', 9, 'seed', 'seed'
+WHERE NOT EXISTS (
+  SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+  WHERE asp.node_id = 'knowledge-graph' AND asp.name = 'how_it_works' AND a.content LIKE 'A separate protected General Knowledge Base graph exists at slug spore-knowledge-base%'
+);
+
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT (SELECT id FROM aspects WHERE node_id = 'knowledge-graph' AND name = 'how_it_works' ORDER BY id LIMIT 1),
+       'Use graph_query({ mode: "graphs" }) to list available graph scopes. Do not inspect /data/graphs or _registry.json with shell commands for normal graph discovery.', 9, 'seed', 'seed'
+WHERE NOT EXISTS (
+  SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+  WHERE asp.node_id = 'knowledge-graph' AND asp.name = 'how_it_works' AND a.content LIKE 'Use graph_query({ mode: "graphs" }) to list available graph scopes%'
+);
+
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT (SELECT id FROM aspects WHERE node_id = 'knowledge-graph' AND name = 'how_it_works' ORDER BY id LIMIT 1),
+       'When the user asks about shared graph knowledge, reusable lessons, or graph-distilled skills, inspect the General Knowledge Base directly. Use graph_query({ graph: "spore-knowledge-base", type: "skill" }) for stored skill nodes, or graph_query({ graph: "spore-knowledge-base", query: "skill" }) for broader skill-related matches. Do not describe the General Knowledge Base as empty if overview/type results returned nodes.', 9, 'seed', 'seed'
+WHERE NOT EXISTS (
+  SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+  WHERE asp.node_id = 'knowledge-graph' AND asp.name = 'how_it_works' AND a.content LIKE 'When the user asks about shared graph knowledge, reusable lessons, or graph-distilled skills%'
+);
+
+-- The old ref-cross-agent-messaging node described a graph-inbox protocol
+-- that no longer exists as a first-class messaging system. The old
+-- ref-token-efficiency node was generic tool hygiene that belongs here.
+DELETE FROM edges
+ WHERE source IN ('ref-cross-agent-messaging', 'ref-token-efficiency')
+    OR target IN ('ref-cross-agent-messaging', 'ref-token-efficiency');
+DELETE FROM attributes
+ WHERE aspect_id IN (
+   SELECT id FROM aspects
+    WHERE node_id IN ('ref-cross-agent-messaging', 'ref-token-efficiency')
+ );
+DELETE FROM aspects WHERE node_id IN ('ref-cross-agent-messaging', 'ref-token-efficiency');
+DELETE FROM aliases WHERE node_id IN ('ref-cross-agent-messaging', 'ref-token-efficiency');
+DELETE FROM nodes WHERE id IN ('ref-cross-agent-messaging', 'ref-token-efficiency');
+
+INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
 VALUES ('ref-tool-workflows', 'Tool Workflows', 'reference',
   'Operational patterns for choosing tools, asking the operator, waiting, tracking work, and avoiding waste.', 9, 'seed');
 
@@ -77,6 +124,14 @@ WHERE NOT EXISTS (
   WHERE asp.node_id = 'ref-tool-workflows' AND asp.name = 'efficiency' AND a.content LIKE 'Each tool call costs tokens%'
 );
 
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'efficiency' ORDER BY id LIMIT 1),
+       'Keep tool use lean: do not re-read files or docs you just used, do not refetch stable facts, and delegate genuinely heavy independent work.', 8, 'seed', 'seed'
+WHERE NOT EXISTS (
+  SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+  WHERE asp.node_id = 'ref-tool-workflows' AND asp.name = 'efficiency' AND a.content LIKE 'Keep tool use lean:%'
+);
+
 INSERT INTO aspects (node_id, name, weight, extracted_with)
 SELECT 'ref-tool-workflows', 'asking_waiting_tracking', 9, 'seed'
 WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'asking_waiting_tracking');
@@ -119,6 +174,18 @@ SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = '
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-tool-workflows' AND asp.name = 'asking_waiting_tracking' AND a.content LIKE 'Never poll delegated tasks%'
+);
+
+UPDATE attributes
+SET content = 'Use delegate_task for sub-agent work, spore_message for a configured multi-spore mesh, and message_send for real channel delivery; do not create graph-inbox nodes as a messaging protocol.'
+WHERE content = 'Use delegate_task for sub-agent work and message_send for real channel delivery; do not create graph-inbox nodes as a messaging protocol.';
+
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'asking_waiting_tracking' ORDER BY id LIMIT 1),
+       'Use delegate_task for sub-agent work, spore_message for a configured multi-spore mesh, and message_send for real channel delivery; do not create graph-inbox nodes as a messaging protocol.', 8, 'seed', 'seed'
+WHERE NOT EXISTS (
+  SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+  WHERE asp.node_id = 'ref-tool-workflows' AND asp.name = 'asking_waiting_tracking' AND a.content LIKE 'Use delegate_task for sub-agent work%do not create graph-inbox nodes%'
 );
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)

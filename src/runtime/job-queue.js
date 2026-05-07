@@ -165,6 +165,7 @@ class RuntimeJobQueue {
       priority: Number(meta.priority ?? DEFAULT_PRIORITIES[lane] ?? 1),
       status: 'queued',
       sessionKey: meta.sessionKey || null,
+      lockSession: meta.lockSession !== undefined ? !!meta.lockSession : this._defaultLockSession(kind),
       route: meta.route || kind,
       graph: meta.graph || null,
       runAt: Number(meta.runAt || created),
@@ -178,6 +179,7 @@ class RuntimeJobQueue {
 
     if (persistent) {
       this._insertPersistent(job);
+      if (this._isUserFacingJob(job)) this._preemptLowerPriorityWork(job);
       if (meta.awaitResult) {
         const promise = new Promise((resolve, reject) => {
           this._resolvers.set(id, { resolve, reject });
@@ -193,6 +195,7 @@ class RuntimeJobQueue {
       this._memoryJobs.set(id, job);
       this._resolvers.set(id, { resolve, reject });
     });
+    if (this._isUserFacingJob(job)) this._preemptLowerPriorityWork(job);
     this._schedulePump();
     return promise;
   }
@@ -277,7 +280,8 @@ class RuntimeJobQueue {
   shouldYield(job) {
     const lane = typeof job === 'string' ? this._running.get(job)?.lane : job?.lane;
     if (lane === 'interactive' || lane === 'channel') return false;
-    return this._hasQueuedInteractive();
+    const id = typeof job === 'string' ? job : job?.id;
+    return this._hasQueuedOrRunningUserFacing(id);
   }
 
   _registerDefaultHandlers() {
@@ -286,7 +290,10 @@ class RuntimeJobQueue {
     this.registerHandler('learner.extract', payload => {
       const learner = this.learner || this.workerDeps.learner;
       if (!learner?.extractAndLearn) return { skipped: 'learner-unavailable' };
-      return learner.extractAndLearn(payload.userMessage, payload.assistantResponse, payload.opts || {});
+      return learner.extractAndLearn(payload.userMessage, payload.assistantResponse, {
+        ...(payload.opts || {}),
+        queueJob: payload.queueJob || null,
+      });
     }, { lane: 'learner', priority: 40, maxAttempts: 1 });
     this.registerHandler('maintenance.run', payload => this.workerDeps.maintainer?.runMaintenance?.(payload?.opts || {}), { lane: 'maintenance', priority: 25 });
     this.registerHandler('janitor.run', payload => this.workerDeps.janitor?.runJanitor?.(payload?.opts || {}), { lane: 'maintenance', priority: 20 });
@@ -342,6 +349,7 @@ class RuntimeJobQueue {
     const platform = String(opts?.platform || '').toLowerCase();
     if (platform !== 'web' && platform !== 'cli') return null;
     if (opts.onTextDelta || opts.onToolUse || opts.onStatus) return null;
+    if (this._wakeupShouldStayQuiet(opts)) return null;
 
     const tools = this.tools || this.workerDeps.tools || null;
     const broadcaster = tools?._getSessionBroadcaster?.();
@@ -356,7 +364,11 @@ class RuntimeJobQueue {
       const msg = opts.channelId && !payload.sessionId ? { ...payload, sessionId: opts.channelId } : payload;
       let delivered = 0;
       for (const key of uniqueKeys) {
-        try { delivered += Number(broadcaster(key, msg) || 0); } catch (e) { this.log.warn(`[wakeup] session delivery failed for ${key}: ${e.message}`); }
+        try {
+          const count = Number(broadcaster(key, msg) || 0);
+          delivered += count;
+          if (count > 0) break;
+        } catch (e) { this.log.warn(`[wakeup] session delivery failed for ${key}: ${e.message}`); }
       }
       return delivered;
     };
@@ -374,11 +386,55 @@ class RuntimeJobQueue {
     return send;
   }
 
+  _wakeupShouldStayQuiet(opts) {
+    const text = String(opts?.content || opts?.prompt || '');
+    if (!text) return false;
+    return /\b(silent|silently|no noise|do not notify|don't notify|do not reply|don't reply|reply exactly no_reply)\b/i.test(text)
+      || /\bonly (?:report|notify|reply)\b/i.test(text)
+      || /\b(?:report|notify) [^.]{0,80}\bonly when\b/i.test(text)
+      || /\bif (?:still|not|nothing|no|offline|unreachable)[^.]{0,120}\b(?:set|schedule) (?:one more|another)\b/i.test(text);
+  }
+
+  _wakeupTextIsNoReply(text) {
+    const value = String(text || '').trim();
+    return !value || value === 'NO_REPLY' || /\bNO_REPLY\b/.test(value);
+  }
+
+  _wakeupResultLooksQuiet(text) {
+    const value = String(text || '').trim().toLowerCase();
+    if (!value) return true;
+    return /\b(still running|not done|not finished|offline|unreachable|no results|not ready|nothing to report|check back|try again|set another|one more wakeup|timer|wait)\b/.test(value)
+      || /\b(i'll|i will)\b[^.]{0,80}\b(check|wait|try|schedule|set)\b/.test(value);
+  }
+
+  _deliverWakeupWebResult(opts, text) {
+    const tools = this.tools || this.workerDeps.tools || null;
+    const broadcaster = tools?._getSessionBroadcaster?.();
+    if (typeof broadcaster !== 'function') return;
+    const sessionKey = opts.sessionKey || (opts.userId ? `dm:${opts.userId}` : null);
+    if (!sessionKey) return;
+    const sessionId = opts.channelId || opts.sessionKey || 'web:control-panel';
+    const messages = [
+      { type: 'chat:start', sessionId },
+      { type: 'chat:delta', sessionId, text },
+      { type: 'chat:done', sessionId, text },
+    ];
+    for (const msg of messages) {
+      try { broadcaster(sessionKey, msg); } catch (e) { this.log.warn(`[wakeup] web result delivery failed: ${e.message}`); }
+    }
+  }
+
   async _deliverWakeupChannelResult(opts, result) {
     const text = result?.text;
-    if (!text || text.trim() === 'NO_REPLY' || text.includes('NO_REPLY')) return;
+    if (this._wakeupTextIsNoReply(text)) return;
+    const quiet = this._wakeupShouldStayQuiet(opts);
+    if (quiet && this._wakeupResultLooksQuiet(text)) return;
     const platform = String(opts?.platform || '').toLowerCase();
-    if (!platform || platform === 'web' || platform === 'cli') return;
+    if (platform === 'web') {
+      this._deliverWakeupWebResult(opts, text);
+      return;
+    }
+    if (!platform || platform === 'cli') return;
     const manager = (this.tools || this.workerDeps.tools)?.platformManager;
     const gateway = manager?.getGateway?.(platform);
     if (!gateway?.sendMessage || !opts.channelId) return;
@@ -503,8 +559,9 @@ class RuntimeJobQueue {
   _canStart(job) {
     if (!this.handlers.has(job.kind)) return true; // start so it can fail visibly
     if (this._runningCount(job.lane) >= this._laneLimit(job.lane)) return false;
-    if (job.sessionKey && (this._runningSessions.has(job.sessionKey) || this.agent?.activeRuns?.has?.(job.sessionKey))) return false;
-    if (!this._isInteractiveLane(job.lane) && this._hasQueuedInteractive()) return false;
+    if (this._kindIsExclusive(job.kind) && this._runningKindCount(job.kind) > 0) return false;
+    if (this._jobLocksSession(job) && job.sessionKey && (this._runningSessions.has(job.sessionKey) || this.agent?.activeRuns?.has?.(job.sessionKey))) return false;
+    if (!this._isUserFacingJob(job) && this._hasQueuedOrRunningUserFacing()) return false;
     return true;
   }
 
@@ -518,11 +575,18 @@ class RuntimeJobQueue {
         id: job.id,
         lane: job.lane,
         kind: job.kind,
+        priority: job.priority,
+        route: job.route,
+        userFacing: this._isUserFacingJob(job),
+        signal: null,
         shouldYield: () => this.shouldYield(job),
       },
     };
+    const ac = new AbortController();
+    job.abortController = ac;
+    job.payload.queueJob.signal = ac.signal;
     this._running.set(job.id, job);
-    if (job.sessionKey) this._runningSessions.add(job.sessionKey);
+    if (this._jobLocksSession(job) && job.sessionKey) this._runningSessions.add(job.sessionKey);
     if (job.persistent) {
       this.db.prepare("UPDATE runtime_jobs SET status='running', attempts=attempts+1, started_at=?, updated_at=? WHERE id=?")
         .run(job.startedAt, job.updated, job.id);
@@ -574,6 +638,21 @@ class RuntimeJobQueue {
   _fail(job, error) {
     this._release(job);
     const message = String(error?.message || error || 'job failed').slice(0, 1000);
+    if (job.preempted && !this._isUserFacingJob(job)) {
+      this.stats.yielded++;
+      job.status = 'queued';
+      job.runAt = now() + 1500;
+      job.error = null;
+      if (job.persistent) {
+        this.db.prepare("UPDATE runtime_jobs SET status='queued', error=NULL, run_at=?, updated_at=?, started_at=NULL WHERE id=?")
+          .run(job.runAt, now(), job.id);
+      } else {
+        this._memoryJobs.set(job.id, job);
+      }
+      this._emit('queue:yield', job, { detail: job.preemptReason || 'preempted by user-facing work' });
+      this._schedulePump();
+      return;
+    }
     job.attempts = Number(job.attempts || 0) + 1;
     const retry = job.persistent && job.attempts < job.maxAttempts;
     if (retry) {
@@ -604,7 +683,7 @@ class RuntimeJobQueue {
 
   _release(job) {
     this._running.delete(job.id);
-    if (job.sessionKey) this._runningSessions.delete(job.sessionKey);
+    if (this._jobLocksSession(job) && job.sessionKey) this._runningSessions.delete(job.sessionKey);
   }
 
   _rowToJob(row) {
@@ -615,6 +694,7 @@ class RuntimeJobQueue {
       priority: row.priority,
       status: row.status,
       sessionKey: row.session_key,
+      lockSession: this._defaultLockSession(row.kind),
       route: row.route,
       graph: row.graph,
       runAt: row.run_at,
@@ -645,8 +725,45 @@ class RuntimeJobQueue {
     return count;
   }
 
+  _runningKindCount(kind) {
+    let count = 0;
+    for (const job of this._running.values()) if (job.kind === kind) count++;
+    return count;
+  }
+
+  _kindIsExclusive(kind) {
+    return kind === 'learner.extract';
+  }
+
   _isInteractiveLane(lane) {
     return lane === 'interactive' || lane === 'channel';
+  }
+
+  _isUserFacingJob(jobOrLane) {
+    const lane = typeof jobOrLane === 'string' ? jobOrLane : jobOrLane?.lane;
+    return this._isInteractiveLane(lane);
+  }
+
+  _defaultLockSession(kind) {
+    return kind !== 'learner.extract';
+  }
+
+  _jobLocksSession(job) {
+    if (!job) return false;
+    if (job.lockSession !== undefined) return !!job.lockSession;
+    return this._defaultLockSession(job.kind);
+  }
+
+  _preemptLowerPriorityWork(userJob) {
+    for (const running of this._running.values()) {
+      if (this._isUserFacingJob(running)) continue;
+      if (Number(running.priority || 0) >= Number(userJob.priority || 0)) continue;
+      if (!running.abortController || running.abortController.signal?.aborted) continue;
+      running.preempted = true;
+      running.preemptReason = `preempted by ${userJob.route || userJob.kind}`;
+      try { running.abortController.abort(new Error(running.preemptReason)); } catch {}
+      this._emit('queue:preempt', running, { detail: running.preemptReason });
+    }
   }
 
   _hasQueuedInteractive() {
@@ -656,6 +773,22 @@ class RuntimeJobQueue {
     if (!this.db) return false;
     try {
       return !!this.db.prepare("SELECT 1 FROM runtime_jobs WHERE status='queued' AND lane IN ('interactive','channel') AND run_at<=? LIMIT 1").get(now());
+    } catch {
+      return false;
+    }
+  }
+
+  _hasQueuedOrRunningUserFacing(exceptId = null) {
+    for (const job of this._running.values()) {
+      if (job.id !== exceptId && this._isUserFacingJob(job)) return true;
+    }
+    const t = now();
+    for (const job of this._memoryJobs.values()) {
+      if (job.id !== exceptId && job.status === 'queued' && this._isUserFacingJob(job) && job.runAt <= t) return true;
+    }
+    if (!this.db) return false;
+    try {
+      return !!this.db.prepare("SELECT 1 FROM runtime_jobs WHERE id IS NOT ? AND status='queued' AND lane IN ('interactive','channel') AND run_at<=? LIMIT 1").get(exceptId, t);
     } catch {
       return false;
     }
@@ -693,6 +826,7 @@ class RuntimeJobQueue {
       sessionKey: job.sessionKey,
       route: job.route,
       graph: job.graph,
+      lockSession: this._jobLocksSession(job),
       runAt: job.runAt,
       attempts: job.attempts,
       maxAttempts: job.maxAttempts,

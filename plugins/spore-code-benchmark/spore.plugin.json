@@ -1,0 +1,9 @@
+{
+  "id": "spore-code-benchmark",
+  "name": "Spore Code Benchmark",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entry": "./index.js",
+  "depends": ["spore-code"],
+  "description": "Runs live Spore Code coding benchmarks across public repositories. Each scenario uses a disposable clone, simulated CLI websocket session, local tool executor, verification commands, post-session memory settle, planner experience summaries, optional LLM judge, and cross-session canary scanning for leakage."
+}

@@ -1371,18 +1371,6 @@ async function _obRenderChannelsStep() {
     const saved = _obData.plugins?.[p.id];
     const cb = document.getElementById(`ob-channel-on-${p.id}`);
     if (cb) cb.checked = !!saved?.enabled;
-    for (const f of (p.pane?.schema || [])) {
-      if (!f?.key || f.key === 'enabled') continue;
-      const input = document.getElementById(`ob-channel-${p.id}-${f.key}`);
-      if (!input) continue;
-      const savedValue = saved?.config?.[f.key];
-      const paneValue = p.pane?.values?.[f.key];
-      const value = savedValue !== undefined ? savedValue
-        : (paneValue !== undefined && paneValue !== null ? paneValue
-          : (f.default !== undefined ? f.default : ''));
-      if (f.type === 'toggle') input.checked = !!value;
-      else if (f.type !== 'password') input.value = Array.isArray(value) ? value.join(', ') : String(value ?? '');
-    }
   }
 }
 
@@ -1390,49 +1378,15 @@ function _obRenderChannelCard(p) {
   const id = _settingsEscapeHtml(p.id);
   const name = _settingsEscapeHtml(p.name || p.id);
   const desc = _settingsEscapeHtml(_obPluginDescription(p));
-  const fields = [];
-  for (const f of (p.pane?.schema || [])) {
-    if (!f?.key || f.key === 'enabled') continue;
-    const fieldId = `ob-channel-${p.id}-${_settingsEscapeHtml(f.key)}`;
-    const key = _settingsEscapeHtml(f.key);
-    const label = _settingsEscapeHtml(f.label || f.key);
-    const help = f.help ? `<div class="ob-note" style="margin-top:3px">${_settingsEscapeHtml(f.help)}</div>` : '';
-    const paneValue = p.pane?.values?.[f.key];
-    const value = paneValue !== undefined && paneValue !== null ? paneValue : (f.default !== undefined ? f.default : '');
-    if (f.type === 'password') {
-      const placeholder = p.pane?.meta?.[f.key]?.isSet ? 'stored - leave blank to keep' : (f.placeholder || '');
-      fields.push(`<label for="${fieldId}" style="margin-top:8px">${label}</label>
-        <input type="password" id="${fieldId}" placeholder="${_settingsEscapeHtml(placeholder)}" data-channel-plugin="${id}" data-channel-key="${key}" data-channel-secret="1">${help}`);
-    } else if (f.type === 'number') {
-      fields.push(`<label for="${fieldId}" style="margin-top:8px">${label}</label>
-        <input type="number" id="${fieldId}" value="${_settingsEscapeHtml(String(value ?? ''))}" data-channel-plugin="${id}" data-channel-key="${key}">${help}`);
-    } else if (f.type === 'select') {
-      const opts = (f.options || []).map(o => {
-        const v = typeof o === 'object' ? o.value : o;
-        const l = typeof o === 'object' ? (o.label || o.value) : o;
-        return `<option value="${_settingsEscapeHtml(v)}"${String(v) === String(value) ? ' selected' : ''}>${_settingsEscapeHtml(l)}</option>`;
-      }).join('');
-      fields.push(`<label for="${fieldId}" style="margin-top:8px">${label}</label>
-        <select id="${fieldId}" data-channel-plugin="${id}" data-channel-key="${key}">${opts}</select>${help}`);
-    } else if (f.type === 'toggle') {
-      fields.push(`<label class="ob-choice-card" style="margin-top:8px">
-        <input type="checkbox" id="${fieldId}" ${value ? 'checked' : ''} data-channel-plugin="${id}" data-channel-key="${key}" style="width:auto">
-        <span>${label}${help}</span>
-      </label>`);
-    } else {
-      fields.push(`<label for="${fieldId}" style="margin-top:8px">${label}</label>
-        <input type="text" id="${fieldId}" value="${_settingsEscapeHtml(Array.isArray(value) ? value.join(', ') : String(value ?? ''))}" data-channel-plugin="${id}" data-channel-key="${key}">${help}`);
-    }
-  }
   return `<div class="ob-plugin-card ob-channel-card" style="border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--bg-soft)">
     <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;text-transform:none;letter-spacing:0;font-size:.9rem;color:var(--text)">
       <input type="checkbox" id="ob-channel-on-${id}" data-channel-toggle="${id}" style="width:auto;margin-top:3px">
       <div style="flex:1;min-width:0">
         <div><strong>${name}</strong> <span class="settings-note" style="opacity:.55">channel plugin</span></div>
         <div class="settings-note" style="opacity:.7;margin-top:3px">${desc}</div>
+        <div class="settings-note" style="opacity:.65;margin-top:5px">Install now, then configure credentials and session behavior in Settings -&gt; Channels.</div>
       </div>
     </label>
-    ${fields.length ? `<div data-channel-form="${id}" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">${fields.join('')}</div>` : ''}
   </div>`;
 }
 
@@ -1442,25 +1396,7 @@ function _obSnapshotChannelsStep() {
   for (const p of _obPluginsCache.filter(_obIsChannelPlugin)) {
     const cb = document.getElementById(`ob-channel-on-${p.id}`);
     const enabled = cb ? cb.checked : false;
-    const config = { enabled };
-    for (const f of (p.pane?.schema || [])) {
-      if (!f?.key || f.key === 'enabled') continue;
-      const input = document.getElementById(`ob-channel-${p.id}-${f.key}`);
-      if (!input) continue;
-      let value;
-      if (f.type === 'toggle') value = !!input.checked;
-      else if (f.type === 'number') {
-        if (input.value === '') continue;
-        const n = Number(input.value);
-        if (!Number.isFinite(n)) continue;
-        value = n;
-      } else {
-        value = (input.value || '').trim();
-        if (!value && (f.secret || f.type === 'password')) continue;
-      }
-      config[f.key] = value;
-    }
-    _obEnsurePluginSelection(p.id, enabled, config);
+    _obEnsurePluginSelection(p.id, enabled);
   }
 }
 
@@ -1980,13 +1916,13 @@ function _obCollectPayload() {
   const displayName = document.getElementById('ob-display-name').value.trim();
   const nicknames = document.getElementById('ob-nicknames').value.split(',').map(s => s.trim()).filter(Boolean);
   // Plugin selections — collected by _obSnapshotPluginPicker on Next-from-step-p.
-  // Wizard sends `pluginActions: { disabled: [...], configs: { id: {...} } }`.
+  // Wizard sends `pluginActions: { enabled: [...], disabled: [...], configs: { id: {...} } }`.
   // Key is intentionally NOT `plugins`: the server's _persistSettingsPatch
   // body.plugins handler treats every top-level key as a plugin id, and
   // would write `disabled` and `configs` as synthetic plugin slots in
   // spore.json. Renaming keeps the wizard's intent-based payload (install
   // these / disable those) separate from per-plugin slot patches.
-  const pluginActionsPayload = { disabled: [], configs: {} };
+  const pluginActionsPayload = { enabled: [], disabled: [], configs: {} };
   const providers = {};
   for (const entry of _obProviderEntries) {
     if (entry.kind !== 'builtin') continue;
@@ -2005,6 +1941,7 @@ function _obCollectPayload() {
       }
       if (Object.keys(cfg).length) {
         pluginActionsPayload.configs[pluginId] = { ...(pluginActionsPayload.configs[pluginId] || {}), ...cfg };
+        pluginActionsPayload.enabled.push(pluginId);
       }
     }
   }
@@ -2052,10 +1989,15 @@ function _obCollectPayload() {
   const browserBackend = _obData.browserBackend || document.querySelector('input[name="ob-browser"]:checked')?.value || 'zendriver';
   for (const [id, sel] of Object.entries(_obData.plugins || {})) {
     if (!sel.enabled) pluginActionsPayload.disabled.push(id);
-    else if (sel.config && Object.keys(sel.config).length > 0) {
-      pluginActionsPayload.configs[id] = { ...(pluginActionsPayload.configs[id] || {}), ...sel.config };
+    else {
+      pluginActionsPayload.enabled.push(id);
+      if (sel.config && Object.keys(sel.config).length > 0) {
+        pluginActionsPayload.configs[id] = { ...(pluginActionsPayload.configs[id] || {}), ...sel.config };
+      }
     }
   }
+  pluginActionsPayload.enabled = Array.from(new Set(pluginActionsPayload.enabled.filter(Boolean)));
+  pluginActionsPayload.disabled = Array.from(new Set(pluginActionsPayload.disabled.filter(id => id && !pluginActionsPayload.enabled.includes(id))));
   return {
     theme: _obData.theme,
     displayName, nicknames,

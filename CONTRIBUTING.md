@@ -72,7 +72,7 @@ src/                  Core application (Docker build context)
   static/
     graph-viewer.html Web panel UI (graph viz, chat, terminal, file browser)
 
-sidecar/              SSH credential isolation (separate container, no network)
+plugins/ssh-sidecar/  SSH credential isolation plugin + sidecar Docker runtime
 manager/              Multi-user admin dashboard
 animas/               Per-agent instances (gitignored except .template/)
 docs/                 Extended documentation
@@ -118,8 +118,8 @@ for d in animas/*/; do (cd "$d" && docker compose up -d --build -V); done
 ### If you change the sidecar
 
 ```bash
-docker build -t anima-ssh-sidecar:latest sidecar/
-for d in animas/*/; do (cd "$d" && docker compose restart); done
+docker build -t spore-ssh-sidecar:latest plugins/ssh-sidecar/sidecar/
+for d in animas/*/; do (cd "$d" && docker compose --profile ssh-sidecar up -d ssh-sidecar); done
 ```
 
 ## Security considerations
@@ -128,6 +128,6 @@ for d in animas/*/; do (cd "$d" && docker compose restart); done
 - The `exec` tool has a `dangerousPatterns` blocklist in `tools.js` — extend it if you add new risky commands
 - Sub-agents get a restricted tool set (no `env_manage`, `remote_exec`, or `remote_write_file`)
 - Containers run as unprivileged user (UID 2000) with `no-new-privileges`
-- SSH keys are encrypted at rest and isolated in a network-less sidecar
+- SSH keys are encrypted at rest; the optional `ssh-sidecar` plugin isolates saved-host and interactive SSH flows in a separate process
 
 See [docs/security.md](docs/security.md) for the full threat model.

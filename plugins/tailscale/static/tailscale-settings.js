@@ -23,24 +23,33 @@
   let _mountEl = null;
 
   const HTML = `
-    <div class="settings-note" style="margin-top:4px">Mesh-VPN access via tailscaled. Log in once via SSO; state persists at <code>/data/tailscale</code> across container restarts.</div>
-    <div id="ts-status" style="margin-top:8px;padding:8px 10px;background:var(--bg-2,var(--surface));border:1px solid var(--border);border-radius:4px;font-size:.72rem;display:flex;align-items:center;justify-content:space-between;gap:8px">
-      <span id="ts-line">loading…</span>
-      <span style="display:flex;gap:4px">
-        <button class="settings-btn-secondary" id="ts-login"  type="button" style="font-size:.66rem;padding:3px 8px">Log in to Tailscale</button>
-        <button class="settings-btn-secondary" id="ts-logout" type="button" style="font-size:.66rem;padding:3px 8px;display:none">Logout</button>
+    <div class="settings-note settings-muted">Mesh-VPN access via tailscaled. Log in once via SSO; state persists at <code>/data/tailscale</code> across container restarts.</div>
+    <div id="ts-status" class="settings-plugin-card settings-plugin-card-row">
+      <span id="ts-line" class="settings-status-muted">loading…</span>
+      <span class="settings-plugin-actions tight">
+        <button class="settings-btn-secondary settings-compact-btn" id="ts-login" type="button">Log in to Tailscale</button>
+        <button class="settings-btn-secondary settings-compact-btn" id="ts-logout" type="button" hidden>Logout</button>
       </span>
     </div>
-    <div id="ts-authurl" style="display:none;margin-top:8px;padding:10px;background:var(--bg-2,var(--surface));border:1px dashed var(--accent2,var(--accent));border-radius:4px;font-size:.7rem">
-      <div style="margin-bottom:6px;font-weight:600;color:var(--accent2,var(--accent))">Open this URL in your browser and complete SSO:</div>
-      <a id="ts-authurl-link" href="#" target="_blank" rel="noopener noreferrer" style="word-break:break-all;color:var(--accent);text-decoration:underline"></a>
-      <div style="margin-top:6px;color:var(--text-dim)">Polling status until connected…</div>
+    <div id="ts-authurl" class="settings-plugin-auth-box" hidden>
+      <div class="settings-plugin-accent-title">Open this URL in your browser and complete SSO:</div>
+      <a id="ts-authurl-link" href="#" target="_blank" rel="noopener noreferrer" class="settings-plugin-link"></a>
+      <div class="settings-note settings-muted">Polling status until connected…</div>
     </div>
-    <label style="display:block;font-size:.7rem;margin-top:14px">Hostname for this container on the tailnet
-      <input id="ts-hostname" type="text" autocomplete="off" placeholder="spore-<agent>" style="display:block;margin-top:3px;width:100%;max-width:520px;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-      <div class="settings-note" style="margin-top:3px">Sent as <code>tailscale up --hostname &lt;value&gt;</code>. Defaults to <code>spore-&lt;agentId&gt;</code>. Saved separately from the central Save button — use <button class="settings-btn-secondary" type="button" id="ts-hostname-save" style="font-size:.62rem;padding:1px 6px">save</button> to apply.</div>
+    <label class="settings-subsection">Hostname for this container on the tailnet
+      <input id="ts-hostname" type="text" autocomplete="off" placeholder="spore-<agent>">
+      <div class="settings-note settings-muted-soft">Sent as <code>tailscale up --hostname &lt;value&gt;</code>. Defaults to <code>spore-&lt;agentId&gt;</code>. Saved separately from the central Save button.</div>
     </label>
+    <div class="settings-row wrap">
+      <button class="settings-btn-secondary settings-compact-btn" type="button" id="ts-hostname-save">Save hostname</button>
+    </div>
   `;
+
+  function setLine(line, text, kind = '') {
+    if (!line) return;
+    line.textContent = text;
+    line.dataset.kind = kind;
+  }
 
   async function refreshStatus() {
     if (!_mountEl) return;
@@ -58,34 +67,30 @@
         const ip = d.tailnetIp || '?';
         const online = d.onlineCount != null ? d.onlineCount : 0;
         const total = d.peerCount != null ? d.peerCount : 0;
-        line.textContent = `connected · ${ip} · ${online}/${total} peers online`;
-        line.style.color = 'var(--text)';
-        loginBtn.style.display = 'none';
-        logoutBtn.style.display = '';
-        urlBox.style.display = 'none';
+        setLine(line, `connected · ${ip} · ${online}/${total} peers online`, 'ok');
+        loginBtn.hidden = true;
+        logoutBtn.hidden = false;
+        urlBox.hidden = true;
         if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
       } else if (state === 'NeedsLogin' || state === 'Starting') {
-        line.textContent = state === 'Starting' ? 'daemon starting…' : 'not logged in';
-        line.style.color = 'var(--text-dim)';
-        loginBtn.style.display = '';
-        logoutBtn.style.display = 'none';
+        setLine(line, state === 'Starting' ? 'daemon starting…' : 'not logged in');
+        loginBtn.hidden = false;
+        logoutBtn.hidden = true;
         if (d.authUrl) {
-          urlBox.style.display = '';
+          urlBox.hidden = false;
           urlLink.href = d.authUrl;
           urlLink.textContent = d.authUrl;
         } else {
-          urlBox.style.display = 'none';
+          urlBox.hidden = true;
         }
       } else {
-        line.textContent = d.error ? `tailscaled not running · ${String(d.error).slice(0, 80)}` : `state: ${state}`;
-        line.style.color = 'var(--danger)';
-        loginBtn.style.display = '';
-        logoutBtn.style.display = 'none';
-        urlBox.style.display = 'none';
+        setLine(line, d.error ? `tailscaled not running · ${String(d.error).slice(0, 80)}` : `state: ${state}`, 'err');
+        loginBtn.hidden = false;
+        logoutBtn.hidden = true;
+        urlBox.hidden = true;
       }
     } catch (e) {
-      line.textContent = 'status unavailable: ' + e.message;
-      line.style.color = 'var(--danger)';
+      setLine(line, 'status unavailable: ' + e.message, 'err');
     }
   }
 
@@ -95,30 +100,30 @@
     const urlLink = _mountEl?.querySelector('#ts-authurl-link');
     const line = _mountEl?.querySelector('#ts-line');
     if (btn) btn.disabled = true;
-    if (line) { line.textContent = 'requesting login URL…'; line.style.color = 'var(--accent2,var(--accent))'; }
+    setLine(line, 'requesting login URL…', 'accent');
     try {
       const r = await fetch(apiBase() + '/api/tailscale/login', { method: 'POST', headers: authHeaders(), credentials: 'include' });
       if (!r.ok) {
         const txt = await r.text().catch(() => '');
         let msg = `HTTP ${r.status}`;
         try { const j = JSON.parse(txt); if (j.error) msg = j.error; } catch {}
-        if (line) { line.textContent = 'login failed: ' + msg; line.style.color = 'var(--danger)'; }
+        setLine(line, 'login failed: ' + msg, 'err');
         alert('Tailscale login failed: ' + msg);
         return;
       }
       const d = await r.json();
       if (d.status === 'already-connected') { refreshStatus(); return; }
       if (d.authUrl && urlBox && urlLink) {
-        urlBox.style.display = '';
+        urlBox.hidden = false;
         urlLink.href = d.authUrl;
         urlLink.textContent = d.authUrl;
-        if (line) { line.textContent = 'open the link above to complete SSO'; line.style.color = 'var(--accent2,var(--accent))'; }
+        setLine(line, 'open the link above to complete SSO', 'accent');
       }
       // Poll status until Running.
       if (_pollTimer) clearInterval(_pollTimer);
       _pollTimer = setInterval(refreshStatus, 4000);
     } catch (e) {
-      if (line) { line.textContent = 'login error: ' + e.message; line.style.color = 'var(--danger)'; }
+      setLine(line, 'login error: ' + e.message, 'err');
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -163,7 +168,7 @@
         return;
       }
       if (btn) btn.textContent = 'saved ✓';
-      setTimeout(() => { if (btn) btn.textContent = 'save'; }, 1500);
+      setTimeout(() => { if (btn) btn.textContent = 'Save hostname'; }, 1500);
     } catch (e) {
       alert('Save error: ' + e.message);
     } finally {

@@ -66,6 +66,37 @@
     --font-serif: 'Fraunces', 'Newsreader', Georgia, serif;
   }
   html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font-body) !important; font-weight: 400; font-variation-settings: 'wght' 450; }
+  [data-theme="light"] :is(
+    #chat-panel,
+    #right-panel,
+    #util-bar,
+    #mobile-nav,
+    #desktop-dock,
+    #dock-logs-menu,
+    #dock-graphs-menu,
+    #tools-menu,
+    #graph-picker,
+    .picker-dropdown,
+    #graph-drop-menu,
+    #event-log,
+    #node-pane,
+    #files-pane,
+    #logs-pane,
+    #skills-pane,
+    #terminal-pane,
+    #tm-window,
+    #settings-pane,
+    #graph-modal,
+    #browser-preview,
+    #code-viewer,
+    #m-tab-bar,
+    #m-drawer,
+    .floating-pane-head,
+    .floating-pane-body
+  ) {
+    --accent: var(--accent3);
+    --accent2: var(--accent3);
+  }
   /* Force the body font onto common UI chrome with !important so any
      browser-extension stylesheet (FontAwesome injectors, "Stylus" user
      styles, accessibility overrides, etc.) that adds rules like
@@ -114,4 +145,3 @@
   }
 
   /* Login lives at its own /login page now (static/login.html). */
-

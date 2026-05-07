@@ -18,6 +18,7 @@ const ACTIVE_FILE = '_active';
 const GENERAL_KB_SLUG = 'spore-knowledge-base';
 const PROJECT_REF_SOURCE = 'project-graph-seed';
 const CHANNEL_REF_SOURCE = 'channel-graph-seed';
+const USER_REF_SOURCE = 'user-graph-seed';
 
 const PROJECT_REF_NODES = [
   {
@@ -26,7 +27,7 @@ const PROJECT_REF_NODES = [
     description: 'Rules for working inside this Spore Code project graph.',
     aspects: {
       scope: [
-        'This graph is scoped to one user project identity. Treat it as local project memory, not the user/global graph.',
+        'This graph is scoped to one project workspace identity and can be shared by collaborators on the same project. Treat it as local project memory, not the user/global graph.',
         'Stay inside the projectContext.cwd unless the user explicitly expands scope.',
         'Use client-side project paths from tool results and projectContext, not server/container paths.',
         'Container paths such as /app, /data, /workspace, and /mnt are Spore Core paths, not the user project. Do not use them for project file work.',
@@ -256,12 +257,106 @@ const CHANNEL_REF_NODES = [
   },
 ];
 
+const USER_REF_NODES = [
+  {
+    id: 'ref-user-scope',
+    label: 'Web User Scope',
+    description: 'Rules for working inside this authenticated web user graph.',
+    aspects: {
+      scope: [
+        'This graph is scoped to one authenticated web user account.',
+        'Treat this graph as the primary memory for this web user, not as the operator/global graph.',
+        'Store this user\'s preferences, app workflows, recurring requests, personal facts, and conversation commitments here.',
+        'Do not leak another web user\'s private facts, tasks, or preferences into this graph.',
+      ],
+      recall: [
+        'Default/main graph memory may provide global agent settings and shared baseline context.',
+        'General Knowledge Base memory may provide reusable guidance and patterns; check it for technical, tool, workflow, and app-behavior questions before relying only on this user graph.',
+        'This user graph should remain the local truth for this web user unless the user explicitly asks to make something global.',
+      ],
+    },
+  },
+  {
+    id: 'ref-user-memory',
+    label: 'Web User Memory Workflow',
+    description: 'How durable web user discoveries are recorded and promoted.',
+    aspects: {
+      memory: [
+        'Use this graph for web-user-specific durable memory: saved preferences, report formats, schedules, task context, and working style.',
+        'Keep short-lived chatter out of permanent memory unless it changes future behavior for this user.',
+        'Reusable lessons may be sanitized into the protected general knowledge base; user-specific details stay here.',
+        'Do not leave reusable tool, plugin, provider, or workflow lessons only in this user graph when they would help other users, channels, or projects.',
+      ],
+      privacy: [
+        'Do not write secrets, credentials, invite keys, or private channel pairing codes into this graph.',
+        'Facts about other people should be stored only when they are necessary context for this web user.',
+      ],
+    },
+  },
+  {
+    id: 'ref-user-recall',
+    label: 'Scoped Web User Recall',
+    description: 'How recall combines user, reusable, and global memory.',
+    aspects: {
+      recall: [
+        'User memory is the primary truth for this authenticated web user.',
+        'General Knowledge Base memory is the shared reusable layer. Query it for tool behavior, provider/plugin setup, model-routing behavior, UI workflows, integration gotchas, and technical recommendations.',
+        'Main/default graph memory is for agent identity, global operator preferences, and system settings; avoid treating it as this user\'s private history.',
+        'If this user mentions a reusable tool or workflow lesson, preserve the user-specific context here and let the distiller promote a sanitized version to the General Knowledge Base.',
+      ],
+    },
+  },
+];
+
 function _hashKey(value) {
   return require('crypto').createHash('sha256').update(String(value || '')).digest('hex').slice(0, 12);
 }
 
+function _normalizeProjectRemote(remote) {
+  if (!remote || typeof remote !== 'string') return null;
+  let s = remote.trim();
+  if (!s) return null;
+  s = s.replace(/^git@([^:]+):/, 'https://$1/');
+  s = s.replace(/^ssh:\/\/git@([^/]+)\//, 'https://$1/');
+  s = s.replace(/\.git$/i, '');
+  s = s.replace(/\/+$/, '');
+  return s.toLowerCase();
+}
+
+function _normalizeProjectRoot(root) {
+  const raw = String(root || '').trim();
+  if (!raw) return '';
+  let s = raw.replace(/\\/g, '/').replace(/\/+$/, '');
+  s = s.replace(/^([A-Z]):/, (_, drive) => `${drive.toLowerCase()}:`);
+  return s;
+}
+
+function _projectRemoteFromIdentityKey(identityKey) {
+  const s = String(identityKey || '');
+  return s.startsWith('git:') ? s.slice(4) : null;
+}
+
+function _projectRootFromIdentityKey(identityKey) {
+  const s = String(identityKey || '');
+  if (!s.startsWith('cwd:')) return null;
+  const parts = s.slice(4).split(':');
+  if (parts.length < 2) return null;
+  const looksLikeNewWindowsKey = parts.length >= 3 && /^[a-z]$/i.test(parts[1]) && /^[\\/]/.test(parts[2] || '');
+  if (looksLikeNewWindowsKey) return parts.slice(1).join(':');
+  return parts.length >= 3 ? parts.slice(2).join(':') : parts.slice(1).join(':');
+}
+
 function _projectUserFromIdentityKey(identityKey) {
-  const match = String(identityKey || '').match(/^cwd:([^:]+):/i);
+  const s = String(identityKey || '');
+  if (!s.startsWith('cwd:')) return null;
+  const parts = s.slice(4).split(':');
+  if (parts.length < 3) return null;
+  const looksLikeNewWindowsKey = /^[a-z]$/i.test(parts[1]) && /^[\\/]/.test(parts[2] || '');
+  return looksLikeNewWindowsKey ? null : parts[0];
+}
+
+function _webUserFromIdentityKey(identityKey) {
+  const match = String(identityKey || '').match(/^web-user:(.+)$/i);
   return match ? match[1] : null;
 }
 
@@ -386,6 +481,19 @@ class GraphRegistry {
           this.log?.warn?.(`[multi-graph] channel seed normalize failed for ${slug}: ${e.message}`);
         }
       }
+      if (graph.role === 'user') {
+        if (graph.managed !== true) { graph.managed = true; changed = true; }
+        if (graph.activationLocked !== true) { graph.activationLocked = true; changed = true; }
+        if (graph.seedProfile !== 'user') { graph.seedProfile = 'user'; changed = true; }
+        if (this._applyUserAccessMeta(graph, {})) changed = true;
+        try {
+          const dbPath = this.getDbPath(slug);
+          if (dbPath && fs.existsSync(dbPath) && this._applyUserSeedProfile(slug)) changed = true;
+          this.refreshStats(slug);
+        } catch (e) {
+          this.log?.warn?.(`[multi-graph] user seed normalize failed for ${slug}: ${e.message}`);
+        }
+      }
       if (graph.role === 'general_kb') {
         if (graph.managed !== true) { graph.managed = true; changed = true; }
         if (graph.activationLocked !== true) { graph.activationLocked = true; changed = true; }
@@ -500,7 +608,7 @@ class GraphRegistry {
   isActivationLocked(graphOrSlug) {
     const graph = typeof graphOrSlug === 'string' ? this._registry[graphOrSlug] : graphOrSlug;
     if (!graph) return false;
-    return graph.activationLocked === true || graph.role === 'project' || graph.role === 'channel' || (graph.protected === true && graph.role !== 'main');
+    return graph.activationLocked === true || graph.role === 'project' || graph.role === 'channel' || graph.role === 'user' || (graph.protected === true && graph.role !== 'main');
   }
 
   /**
@@ -526,6 +634,8 @@ class GraphRegistry {
         this._applyProjectSeedProfile(slug, db);
       } else if (opts.seedProfile === 'channel' || opts.role === 'channel') {
         this._applyChannelSeedProfile(slug, db);
+      } else if (opts.seedProfile === 'user' || opts.role === 'user') {
+        this._applyUserSeedProfile(slug, db);
       }
       db.close();
     } else {
@@ -545,15 +655,21 @@ class GraphRegistry {
       description: description || '',
       role: opts.role || 'custom',
       protected: opts.protected === true,
-      managed: opts.managed === true || opts.role === 'project' || opts.role === 'channel',
-      activationLocked: opts.activationLocked === true || opts.role === 'project' || opts.role === 'channel',
-      seedProfile: opts.seedProfile || (opts.role === 'project' ? 'project' : (opts.role === 'channel' ? 'channel' : 'standard')),
+      managed: opts.managed === true || opts.role === 'project' || opts.role === 'channel' || opts.role === 'user',
+      activationLocked: opts.activationLocked === true || opts.role === 'project' || opts.role === 'channel' || opts.role === 'user',
+      seedProfile: opts.seedProfile || (opts.role === 'project' ? 'project' : (opts.role === 'channel' ? 'channel' : (opts.role === 'user' ? 'user' : 'standard'))),
       identityKey: opts.identityKey || null,
       platform: opts.platform || null,
       externalUserId: opts.externalUserId || null,
       externalChannelId: opts.externalChannelId || null,
       source: opts.source || 'user',
       createdBy: opts.createdBy || null,
+      owner: opts.owner || null,
+      createdFor: opts.createdFor || null,
+      webappUser: opts.webappUser || null,
+      username: opts.username || null,
+      userId: opts.userId || null,
+      collaborators: opts.collaborators || undefined,
       created: new Date().toISOString(),
       nodeCount,
     };
@@ -598,6 +714,27 @@ class GraphRegistry {
     return Object.values(this._registry).find(g =>
       g.identityKey === identityKey && (!role || g.role === role)
     ) || null;
+  }
+
+  findProjectByLocation(identityKey, meta = {}) {
+    const wantedRemote = _normalizeProjectRemote(
+      meta.projectRemote || meta.remote || _projectRemoteFromIdentityKey(identityKey)
+    );
+    const wantedRoot = _normalizeProjectRoot(
+      meta.projectRoot || meta.root || _projectRootFromIdentityKey(identityKey)
+    );
+    if (!wantedRemote && !wantedRoot) return null;
+    return Object.values(this._registry).find(g => {
+      if (!g || g.role !== 'project') return false;
+      const graphRemote = _normalizeProjectRemote(
+        g.projectRemote || g.remote || _projectRemoteFromIdentityKey(g.identityKey)
+      );
+      if (wantedRemote && graphRemote && wantedRemote === graphRemote) return true;
+      const graphRoot = _normalizeProjectRoot(
+        g.projectRoot || g.root || _projectRootFromIdentityKey(g.identityKey)
+      );
+      return !!(wantedRoot && graphRoot && wantedRoot === graphRoot);
+    }) || null;
   }
 
   _applyProjectAccessMeta(graph, meta = {}) {
@@ -646,11 +783,12 @@ class GraphRegistry {
 
   ensureProjectGraph(identityKey, meta = {}) {
     if (!identityKey) throw new Error('identityKey is required');
-    const existing = this.findByIdentityKey(identityKey, 'project');
+    const existing = this.findByIdentityKey(identityKey, 'project') || this.findProjectByLocation(identityKey, meta);
     if (existing) {
       existing.managed = true;
       existing.activationLocked = true;
       existing.seedProfile = 'project';
+      if (existing.identityKey !== identityKey) existing.identityKey = identityKey;
       if (meta.name && existing.name !== meta.name) existing.name = meta.name;
       if (meta.description && existing.description !== meta.description) existing.description = meta.description;
       this._applyProjectAccessMeta(existing, meta);
@@ -676,6 +814,91 @@ class GraphRegistry {
       identityKey,
     });
     if (this._applyProjectAccessMeta(this._registry[createdSlug], meta)) this._save();
+    return createdSlug;
+  }
+
+  _applyUserAccessMeta(graph, meta = {}) {
+    if (!graph || graph.role !== 'user') return false;
+    let changed = false;
+    const identityUser = _webUserFromIdentityKey(graph.identityKey);
+    const username = meta.username || meta.userId || meta.webappUser || identityUser || null;
+    const owner = meta.owner || username || null;
+    for (const [key, value] of Object.entries({
+      owner,
+      createdFor: meta.createdFor || username || owner,
+      webappUser: meta.webappUser || username || owner,
+      username: username || owner,
+      userId: meta.userId || username || owner,
+    })) {
+      if (value && graph[key] !== value) {
+        graph[key] = value;
+        changed = true;
+      }
+    }
+    const collaborators = _accessList(
+      graph.collaborators,
+      graph.allowedUsers,
+      graph.allowedWebUsers,
+      owner,
+      username,
+      identityUser,
+      meta.collaborators,
+      meta.members,
+      meta.allowedUsers,
+      meta.allowedWebUsers,
+    );
+    if (collaborators.length) {
+      const current = JSON.stringify(graph.collaborators || []);
+      const next = JSON.stringify(collaborators);
+      if (current !== next) {
+        graph.collaborators = collaborators;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  ensureUserGraph(identityKey, meta = {}) {
+    if (!identityKey) throw new Error('identityKey is required');
+    const existing = this.findByIdentityKey(identityKey, 'user');
+    if (existing) {
+      existing.managed = true;
+      existing.activationLocked = true;
+      existing.seedProfile = 'user';
+      if (meta.name && existing.name !== meta.name) existing.name = meta.name;
+      if (meta.description && existing.description !== meta.description) existing.description = meta.description;
+      if (meta.source && existing.source !== meta.source) existing.source = meta.source;
+      if (meta.createdBy && existing.createdBy !== meta.createdBy) existing.createdBy = meta.createdBy;
+      this._applyUserAccessMeta(existing, meta);
+      this._applyUserSeedProfile(existing.slug);
+      this.refreshStats(existing.slug);
+      this._save();
+      return existing.slug;
+    }
+    const slug = `user-${_hashKey(identityKey)}`;
+    if (this._registry[slug]) {
+      if (this._applyUserAccessMeta(this._registry[slug], meta)) this._save();
+      return slug;
+    }
+    const username = meta.username || meta.userId || meta.webappUser || _webUserFromIdentityKey(identityKey) || null;
+    const createdSlug = this.create(meta.name || `${username || 'User'} Memory`, meta.description || identityKey, {
+      slug,
+      role: 'user',
+      protected: false,
+      managed: true,
+      activationLocked: true,
+      seedProfile: 'user',
+      source: meta.source || 'webapp',
+      createdBy: meta.createdBy || 'webapp',
+      identityKey,
+      owner: meta.owner || username || null,
+      createdFor: meta.createdFor || username || null,
+      webappUser: meta.webappUser || username || null,
+      username,
+      userId: meta.userId || username || null,
+      collaborators: _accessList(meta.collaborators, meta.members, meta.allowedUsers, meta.allowedWebUsers, username),
+    });
+    if (this._applyUserAccessMeta(this._registry[createdSlug], meta)) this._save();
     return createdSlug;
   }
 
@@ -729,9 +952,39 @@ class GraphRegistry {
     return true;
   }
 
-  recordChannelGraphDistill(slug, meta = {}) {
+  markProjectGraphActivity(slug, meta = {}) {
     const graph = this._registry[slug];
-    if (!graph || graph.role !== 'channel') return false;
+    if (!graph || graph.role !== 'project') return false;
+    const now = meta.at || new Date().toISOString();
+    graph.lastActivityAt = now;
+    if (!graph.distillDirty) graph.distillDirtySince = now;
+    graph.distillDirty = true;
+    if (meta.reason) graph.distillReason = meta.reason;
+    if (meta.userId) graph.lastUserId = meta.userId;
+    if (meta.username) graph.lastUsername = meta.username;
+    if (meta.projectRoot) graph.projectRoot = meta.projectRoot;
+    if (meta.projectRemote) graph.projectRemote = meta.projectRemote;
+    this._save();
+    return true;
+  }
+
+  markUserGraphActivity(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph || graph.role !== 'user') return false;
+    const now = meta.at || new Date().toISOString();
+    graph.lastActivityAt = now;
+    if (!graph.distillDirty) graph.distillDirtySince = now;
+    graph.distillDirty = true;
+    if (meta.reason) graph.distillReason = meta.reason;
+    if (meta.username) graph.username = meta.username;
+    if (meta.userId) graph.userId = meta.userId;
+    this._save();
+    return true;
+  }
+
+  recordScopedGraphDistill(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph || (graph.role !== 'project' && graph.role !== 'channel' && graph.role !== 'user')) return false;
     const now = meta.at || new Date().toISOString();
     graph.lastDistillAttemptAt = now;
     graph.lastDistillStatus = meta.success === false ? 'error' : 'ok';
@@ -753,6 +1006,24 @@ class GraphRegistry {
     this.refreshStats(slug);
     this._save();
     return true;
+  }
+
+  recordChannelGraphDistill(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph || graph.role !== 'channel') return false;
+    return this.recordScopedGraphDistill(slug, meta);
+  }
+
+  recordUserGraphDistill(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph || graph.role !== 'user') return false;
+    return this.recordScopedGraphDistill(slug, meta);
+  }
+
+  recordProjectGraphDistill(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph || graph.role !== 'project') return false;
+    return this.recordScopedGraphDistill(slug, meta);
   }
 
   /**
@@ -787,11 +1058,11 @@ class GraphRegistry {
     return newSlug;
   }
 
-  /** Delete a graph. Cannot delete the active graph. */
-  delete(slug) {
+  /** Delete a graph. Cannot delete the active graph unless the caller switches first. */
+  delete(slug, opts = {}) {
     if (!this._registry[slug]) throw new Error(`Graph "${slug}" not found`);
     if (slug === this.getActiveSlug()) throw new Error('Cannot delete the active graph. Switch to another graph first.');
-    if (this._registry[slug].protected) throw new Error(`Cannot delete protected graph "${slug}"`);
+    if (this._registry[slug].protected && opts.allowProtected !== true) throw new Error(`Cannot delete protected graph "${slug}"`);
 
     const dbPath = path.join(this.graphsDir, `${slug}.db`);
     try { fs.unlinkSync(dbPath); } catch { /* silent: best-effort cleanup */ }
@@ -826,6 +1097,7 @@ class GraphRegistry {
       'name', 'description', 'role', 'protected', 'managed', 'activationLocked',
       'seedProfile', 'identityKey', 'platform', 'externalUserId', 'externalChannelId',
       'source', 'createdBy', 'owner', 'collaborators', 'allowedUsers', 'allowedWebUsers',
+      'createdFor', 'webappUser', 'username', 'userId',
       'projectKey', 'projectRoot', 'projectRemote',
     ];
     let changed = false;
@@ -841,6 +1113,9 @@ class GraphRegistry {
     }
     if (graph.role === 'project') {
       if (this._applyProjectAccessMeta(graph, meta)) changed = true;
+    }
+    if (graph.role === 'user') {
+      if (this._applyUserAccessMeta(graph, meta)) changed = true;
     }
     if (changed) {
       this.refreshStats(slug);
@@ -1013,6 +1288,60 @@ class GraphRegistry {
         if (!edge) {
           try {
             db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', ?, 'documents', 0.8, ?)").run(ref.id, CHANNEL_REF_SOURCE);
+            changed = true;
+          } catch {}
+        }
+      }
+    } finally {
+      if (!existingDb) {
+        try { db.close(); } catch {}
+      }
+    }
+    return changed;
+  }
+
+  _applyUserSeedProfile(slug, existingDb = null) {
+    const dbPath = this.getDbPath(slug) || path.join(this.graphsDir, `${slug}.db`);
+    const db = existingDb || new DatabaseSync(dbPath);
+    let changed = false;
+    try {
+      db.exec('PRAGMA foreign_keys=ON');
+      const genericRefs = db.prepare("SELECT id FROM nodes WHERE type = 'reference' AND id LIKE 'ref-%' AND extracted_with != ?").all(USER_REF_SOURCE);
+      if (genericRefs.length) {
+        const ids = genericRefs.map(r => r.id);
+        const q = ids.map(() => '?').join(',');
+        db.prepare(`DELETE FROM edges WHERE source IN (${q}) OR target IN (${q})`).run(...ids, ...ids);
+        try { db.prepare(`DELETE FROM aliases WHERE node_id IN (${q})`).run(...ids); } catch {}
+        db.prepare(`DELETE FROM nodes WHERE id IN (${q})`).run(...ids);
+        changed = true;
+      }
+
+      for (const ref of USER_REF_NODES) {
+        const existed = db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(ref.id);
+        db.prepare(
+          'INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with) VALUES (?, ?, ?, ?, 8, ?)'
+        ).run(ref.id, ref.label, 'reference', ref.description, USER_REF_SOURCE);
+        if (!existed) changed = true;
+        for (const [aspectName, attrs] of Object.entries(ref.aspects || {})) {
+          let asp = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(ref.id, aspectName);
+          if (!asp) {
+            db.prepare('INSERT INTO aspects (node_id, name, weight, extracted_with) VALUES (?, ?, 8, ?)').run(ref.id, aspectName, USER_REF_SOURCE);
+            asp = { id: db.prepare('SELECT last_insert_rowid() AS id').get().id };
+            changed = true;
+          }
+          for (const content of attrs || []) {
+            const dup = db.prepare('SELECT 1 FROM attributes WHERE aspect_id = ? AND content = ?').get(asp.id, content);
+            if (!dup) {
+              db.prepare('INSERT INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES (?, ?, 8, ?, ?)')
+                .run(asp.id, content, USER_REF_SOURCE, USER_REF_SOURCE);
+              changed = true;
+            }
+          }
+        }
+        const edge = db.prepare("SELECT 1 FROM edges WHERE source = 'spore' AND target = ? AND type = 'documents'").get(ref.id);
+        if (!edge) {
+          try {
+            db.prepare("INSERT INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', ?, 'documents', 0.8, ?)").run(ref.id, USER_REF_SOURCE);
             changed = true;
           } catch {}
         }

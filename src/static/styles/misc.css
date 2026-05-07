@@ -174,6 +174,142 @@
   @keyframes toast-slide-in { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes toast-fade-out { from { opacity: 1; } to { opacity: 0; transform: translateY(-10px); } }
 
+  /* ── First-run App Tour ── */
+  .app-tour-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 40000;
+    pointer-events: auto;
+  }
+  .app-tour-highlight {
+    position: fixed;
+    border-radius: 12px;
+    pointer-events: none;
+    box-shadow:
+      0 0 0 9999px rgba(0,0,0,.62),
+      0 0 0 2px var(--accent),
+      0 14px 42px rgba(0,0,0,.38);
+    background: rgba(var(--hl-rgb), .035);
+    transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease;
+  }
+  .app-tour-highlight.centered {
+    border-radius: 999px;
+  }
+  .app-tour-card {
+    position: fixed;
+    width: min(360px, calc(100vw - 28px));
+    padding: 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--surface) 96%, transparent);
+    color: var(--text);
+    box-shadow: 0 18px 54px rgba(0,0,0,.48);
+    backdrop-filter: blur(14px);
+  }
+  .app-tour-kicker {
+    margin-bottom: 6px;
+    color: var(--accent);
+    font-size: .58rem;
+    font-weight: 700;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+  }
+  .app-tour-title {
+    margin: 0 0 8px;
+    color: var(--text-bright);
+    font-size: .96rem;
+    line-height: 1.2;
+  }
+  .app-tour-body {
+    margin: 0;
+    color: var(--text);
+    font-size: .78rem;
+    line-height: 1.48;
+  }
+  .app-tour-foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .app-tour-count {
+    flex: 1;
+    color: var(--text-dim);
+    font-size: .68rem;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .app-tour-btn {
+    min-width: 60px;
+    min-height: 30px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--element);
+    color: var(--text);
+    font-size: .72rem;
+    cursor: pointer;
+  }
+  .app-tour-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text-bright);
+  }
+  .app-tour-btn:disabled {
+    opacity: .42;
+    cursor: default;
+  }
+  .app-tour-btn.primary {
+    background: var(--text-bright);
+    color: var(--bg);
+    border-color: var(--text-bright);
+    font-weight: 700;
+  }
+  .app-tour-btn.ghost {
+    min-width: 76px;
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .graph-node.app-tour-node-target .node-focus-halo {
+    opacity: 1 !important;
+    stroke: var(--accent) !important;
+    stroke-width: 1.8;
+    stroke-dasharray: 4 3;
+  }
+  .graph-node.app-tour-node-target .glow-ring {
+    opacity: .58 !important;
+  }
+  .graph-node.app-tour-node-target .node-circle {
+    stroke: var(--accent) !important;
+    stroke-width: 2.2;
+  }
+  @keyframes appTourNodePulse {
+    0%, 100% { opacity: .34; transform: scale(1); }
+    50% { opacity: .7; transform: scale(1.06); }
+  }
+  .graph-node.app-tour-node-target .glow-ring {
+    animation: appTourNodePulse 1.4s ease-in-out infinite;
+  }
+  @media (max-width: 520px) {
+    .app-tour-card {
+      left: 14px !important;
+      right: 14px;
+      bottom: 14px;
+      top: auto !important;
+      width: auto;
+    }
+    .app-tour-foot {
+      flex-wrap: wrap;
+    }
+    .app-tour-count {
+      order: -1;
+      flex-basis: 100%;
+      text-align: left;
+    }
+    .app-tour-btn {
+      flex: 1;
+    }
+  }
+
   /* ── Code Viewer Panel (docked + floating) ── */
   #code-viewer {
     display: none; position: fixed; z-index: 68;

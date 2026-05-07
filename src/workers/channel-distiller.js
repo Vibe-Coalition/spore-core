@@ -1,12 +1,18 @@
 /**
  * channel-distiller.js
  *
- * Periodically promotes reusable, non-private lessons from per-person
- * channel graphs into the protected general knowledge base. Channel graphs
- * are long lived, so they cannot rely on a session-end distillation hook.
+ * Periodically promotes reusable, non-private lessons from long-lived
+ * channel/user graphs into the protected general knowledge base. These
+ * scopes do not have a reliable session-end distillation hook.
  */
 
 const graphEvents = require('../graph/events');
+const {
+  linkPromotedGeneralKbNode,
+  sanitizeAspectName,
+} = require('../graph/general-kb-promotion');
+const { syncPersonToGeneralKb } = require('../graph/general-kb-people');
+const { syncSkillToGeneralKb } = require('../graph/general-kb-skills');
 const { modelForTier } = require('../settings');
 
 const SOURCE = 'channel-distill';
@@ -15,6 +21,7 @@ const DEFAULT_IDLE_MINUTES = 45;
 const DEFAULT_BATCH_SIZE = 3;
 
 const ALLOWED_TYPES = new Set(['tool', 'library', 'framework', 'service', 'concept', 'system']);
+const DIGEST_TYPES = new Set([...ALLOWED_TYPES, 'person', 'skill']);
 
 function _minutes(configValue, fallback) {
   const n = Number(configValue);
@@ -48,6 +55,19 @@ function _sanitizeLesson(text) {
     .slice(0, 600);
 }
 
+function _sanitizePersonFact(text) {
+  const raw = String(text || '').trim();
+  if (!raw || raw.length < 8) return null;
+  if (/(sk-[a-z0-9]|ghp_[a-z0-9]|password\s*=|api[_-]?key\s*=|secret\s*=)/i.test(raw)) return null;
+  if (_looksChannelPrivate(raw)) return null;
+  return raw
+    .replace(/\s*\(source:\s*[^)]+\)\s*$/i, '')
+    .replace(/\/(?:home|Users|mnt|app|workspace|data)\/[^\s`'")]+/g, '<path>')
+    .replace(/[A-Za-z]:\\[^\s`'")]+/g, '<path>')
+    .replace(/\b-?\d{6,}\b/g, '<id>')
+    .slice(0, 500);
+}
+
 function _looksChannelPrivate(text) {
   const raw = String(text || '');
   const s = raw.toLowerCase();
@@ -68,6 +88,23 @@ function _nodeId(value) {
     .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80);
+}
+
+function _isGenericPersonLabel(value) {
+  const label = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return !label || ['person', 'user', 'unknown', 'anonymous', 'someone', 'operator', 'this-user', 'that-user'].includes(label);
+}
+
+function _personNodeId(nodeIdRaw, labelRaw) {
+  const id = _nodeId(nodeIdRaw || labelRaw);
+  if (!id) return null;
+  if (/^(?:channel|chat|telegram|slack|discord)-/.test(id)) return null;
+  if (/^(?:user|web-user)-/.test(id)) {
+    const labelId = _nodeId(labelRaw || '');
+    if (labelId && !/^(?:user|web-user|channel|chat|telegram|slack|discord)-/.test(labelId)) return labelId;
+    return null;
+  }
+  return id;
 }
 
 function _aspectWithAttr(db, nodeId, aspectName, content, source = SOURCE) {
@@ -129,7 +166,7 @@ class ChannelDistiller {
 
     try {
       const graphs = (this.registry.list?.() || [])
-        .filter(g => g.role === 'channel' && g.distillDirty)
+        .filter(g => (g.role === 'project' || g.role === 'channel' || g.role === 'user') && g.distillDirty)
         .filter(g => {
           if (force) return true;
           const lastActivity = Date.parse(g.lastActivityAt || g.distillDirtySince || 0);
@@ -158,29 +195,36 @@ class ChannelDistiller {
     if (!slug) return { skipped: 'missing-slug' };
     const db = this.learner.getGraphDb?.(slug);
     if (!db) return { skipped: 'missing-db' };
+    const role = graph.role === 'project' ? 'project' : (graph.role === 'user' ? 'user' : 'channel');
+    const recordDistill = (meta) => {
+      if (this.registry.recordScopedGraphDistill?.(slug, meta)) return true;
+      if (role === 'user') return this.registry.recordUserGraphDistill?.(slug, meta);
+      if (role === 'project') return this.registry.recordProjectGraphDistill?.(slug, meta);
+      return this.registry.recordChannelGraphDistill?.(slug, meta);
+    };
 
-    graphEvents.emit('change', { op: 'channel:distill-start', graph: slug, source: SOURCE });
+    graphEvents.emit('change', { op: `${role}:distill-start`, graph: slug, source: SOURCE });
     try {
       const digest = this._collectDigest(db, graph);
       if (digest.length === 0) {
-        this.registry.recordChannelGraphDistill?.(slug, { success: true, promoted: 0, candidates: 0 });
-        graphEvents.emit('change', { op: 'channel:distill-done', graph: slug, promoted: 0, empty: true, source: SOURCE });
+        recordDistill({ success: true, promoted: 0, candidates: 0 });
+        graphEvents.emit('change', { op: `${role}:distill-done`, graph: slug, promoted: 0, empty: true, source: SOURCE });
         return { distilled: true, promoted: 0, candidates: 0 };
       }
 
       const parsed = await this._askLlm(graph, digest);
       const promoted = this._promoteReusable(parsed, slug);
-      this.registry.recordChannelGraphDistill?.(slug, {
+      recordDistill({
         success: true,
         promoted,
         candidates: digest.length,
       });
-      graphEvents.emit('change', { op: 'channel:distill-done', graph: slug, promoted, candidates: digest.length, source: SOURCE });
+      graphEvents.emit('change', { op: `${role}:distill-done`, graph: slug, promoted, candidates: digest.length, source: SOURCE });
       return { distilled: true, promoted, candidates: digest.length };
     } catch (e) {
       this.stats.errors++;
-      this.registry.recordChannelGraphDistill?.(slug, { success: false, error: e.message });
-      graphEvents.emit('change', { op: 'channel:distill-done', graph: slug, error: e.message, source: SOURCE });
+      recordDistill({ success: false, error: e.message });
+      graphEvents.emit('change', { op: `${role}:distill-done`, graph: slug, error: e.message, source: SOURCE });
       this.log.warn?.(`[channel-distill] ${slug} failed: ${e.message}`);
       return { error: e.message };
     }
@@ -194,11 +238,11 @@ class ChannelDistiller {
     const whereRecent = since ? 'AND (a.created >= ? OR a.updated_at >= ?)' : '';
     const nodes = db.prepare(`
       SELECT n.id, n.label, n.type, n.description, n.importance, MAX(a.created) AS last_attr
-        FROM nodes n
+       FROM nodes n
         JOIN aspects asp ON asp.node_id = n.id
         JOIN attributes a ON a.aspect_id = asp.id
        WHERE n.id NOT LIKE 'ref-%'
-         AND n.type NOT IN ('person', 'channel', 'project', 'session', 'event', 'place', 'organization')
+         AND n.type NOT IN ('channel', 'project', 'session', 'event', 'place', 'organization')
          ${whereRecent}
        GROUP BY n.id
        ORDER BY datetime(last_attr) DESC, n.importance DESC
@@ -215,21 +259,27 @@ class ChannelDistiller {
     `);
 
     return nodes
-      .filter(n => ALLOWED_TYPES.has(String(n.type || '').toLowerCase()))
+      .filter(n => DIGEST_TYPES.has(String(n.type || '').toLowerCase()))
       .map(n => {
+        const type = String(n.type || '').toLowerCase();
         const aspects = {};
         for (const row of attrStmt.all(n.id, attrLimit)) {
           const text = String(row.content || '').trim();
-          if (!text || _looksChannelPrivate(text)) continue;
+          const clean = type === 'person'
+            ? _sanitizePersonFact(text)
+            : (!_looksChannelPrivate(text) ? text.slice(0, 500) : null);
+          if (!clean) continue;
           const name = String(row.aspect || 'notes').slice(0, 40);
           if (!aspects[name]) aspects[name] = [];
-          aspects[name].push(text.slice(0, 500));
+          aspects[name].push(clean);
         }
         return {
           id: n.id,
           label: n.label,
           type: n.type,
-          description: String(n.description || '').slice(0, 300),
+          description: type === 'person'
+            ? (_sanitizePersonFact(n.description) || '')
+            : String(n.description || '').slice(0, 300),
           aspects,
         };
       })
@@ -237,22 +287,35 @@ class ChannelDistiller {
   }
 
   async _askLlm(graph, digest) {
+    const scopeLabel = graph.role === 'project' ? 'project' : (graph.role === 'user' ? 'web user' : 'chat channel');
     const prompt = [
-      'You are distilling a long-lived chat channel memory graph into reusable general knowledge.',
+      `You are distilling a long-lived ${scopeLabel} memory graph into reusable general knowledge.`,
       '',
-      'The channel graph is private and scoped to one external person or chat. Your job is to copy out ONLY lessons that are reusable across users, projects, or channels.',
+      'The source graph is scoped to one project, person, or chat. Your job is to copy out ONLY lessons that are reusable across users, projects, or channels, plus safe public/team person context.',
       '',
       'Hard privacy rules:',
-      '- Do not include person names, usernames, chat IDs, user IDs, channel IDs, schedules, reminders, report formats, notification preferences, recurring jobs, private plans, or commitments.',
-      '- Do not include facts that are only true for this one channel user.',
+      '- Do not include usernames, chat IDs, user IDs, channel IDs, schedules, reminders, report formats, notification preferences, recurring jobs, private plans, or commitments.',
+      '- You may include or update people only when the fact is durable shared context and safe for the protected General Knowledge Base; omit private preferences, contact handles, access details, or anything only useful inside this one source graph.',
+      '- Do not include facts that are only true for this one source graph.',
       '- Do not include pairing codes, access tokens, credentials, or operational authorization details.',
       '- If a lesson needs a person or channel identity to be useful, leave it in the channel graph and omit it.',
       '',
       'Good candidates:',
       '- Technical fixes, library/tool gotchas, protocol behavior, durable UI/backend patterns, or general integration lessons discovered while helping through the channel.',
       '- Channel-independent agent workflow lessons, if sanitized.',
+      '- Reusable replayable workflows learned through repeated support or coding work; include commands, code/tool replay snippets, validation, and gotchas.',
+      '- Safe people context such as public/team role, authorship, maintainership, project responsibility, or collaboration facts that should be available across project/user/channel scopes.',
       '',
-      `Channel graph: ${graph.slug}`,
+      'Skill rules:',
+      '- A skill is not a task title or feature request. Do not emit thin skills like "Add CLI Typo Suggestions"; use createNodes/appendNotes for those.',
+      '- Emit a skill only when another agent could replay the workflow later from the stored commands/code/steps.',
+      '- Required shape for useful skills: applicability, prerequisites if any, commands or replay code, ordered steps, validation checks, and gotchas.',
+      '',
+      'People rules:',
+      '- Emit people[] when a candidate person has safe public/team context such as maintainer, author, contributor, reviewer, project owner, or team member working on a shared project/tool.',
+      '- Omit private preferences, contact details, handles, schedules, account IDs, and person facts that only matter inside this one graph.',
+      '',
+      `Source graph: ${graph.slug} (role=${graph.role || 'channel'})`,
       'Candidate digest:',
       JSON.stringify(digest, null, 2),
       '',
@@ -260,6 +323,12 @@ class ChannelDistiller {
       '{',
       '  "createNodes": [',
       '    { "nodeId": "telegram-bot-api", "label": "Telegram Bot API", "type": "service", "description": "Bot integration API", "aspects": [{ "name": "gotchas", "attributes": ["Reusable sanitized lesson"] }] }',
+      '  ],',
+      '  "skills": [',
+      '    { "slug": "debug-webhook-delivery", "title": "Debug Webhook Delivery", "tags": ["webhooks"], "summary": "Diagnose webhook delivery failures without preserving private endpoint details.", "applicability": "Use when an integration reports webhook callbacks are missing or failing.", "commands": ["curl -i <callback-url-health-endpoint>"], "steps": ["Verify the provider accepted the callback URL.", "Check recent delivery attempts and HTTP status codes.", "Replay one sanitized test event if the provider supports it."], "replay": ["Use the provider delivery log to resend a sanitized failed event, then compare request arrival logs."], "validation": ["Confirm a 2xx delivery in provider logs and a matching server-side request log."], "gotchas": ["Do not save tokens, private callback URLs, chat IDs, or user IDs."] }',
+      '  ],',
+      '  "people": [',
+      '    { "nodeId": "ada-lovelace", "label": "Ada Lovelace", "description": "Mathematician and computing pioneer", "aspects": [{ "name": "public_context", "attributes": ["Known for early computing work"] }] }',
       '  ],',
       '  "appendNotes": [',
       '    { "targetNodeId": "existing-or-new-node-id", "aspect": "gotchas", "content": "Reusable sanitized lesson" }',
@@ -307,8 +376,21 @@ class ChannelDistiller {
     const kbSlug = registry?.getGeneralKnowledgeSlug?.();
     const kb = kbSlug ? this.learner.getGraphDb?.(kbSlug) : null;
     if (!kb) return 0;
+    const sourceGraph = registry?.get?.(sourceSlug);
+    const sourceRole = sourceGraph?.role === 'user' ? 'user' : 'channel';
 
     let promoted = 0;
+    const upsertPerson = (personRaw) => {
+      const result = syncPersonToGeneralKb({
+        getGraphDb: this.learner.getGraphDb?.bind(this.learner),
+        _graphRegistry: registry,
+      }, personRaw, { source: SOURCE, sourceGraph: sourceSlug, sourceRole });
+      if (result.synced && result.changed) {
+        graphEvents.emit('change', { op: 'node:upsert', nodeId: result.nodeId, type: 'person', source: SOURCE });
+      }
+      return result.synced && result.changed;
+    };
+
     const upsert = (nodeIdRaw, labelRaw, typeRaw, descriptionRaw, lessonRaw, aspectRaw) => {
       const clean = _sanitizeLesson(lessonRaw);
       if (!clean) return false;
@@ -325,28 +407,55 @@ class ChannelDistiller {
         kb.prepare(
           'INSERT INTO nodes (id, label, type, description, importance, mentions, provenance, extracted_with, extracted_at, extra) VALUES (?, ?, ?, ?, 6, 1, ?, ?, ?, ?)'
         ).run(id, label, type, description, 'general-kb', SOURCE, new Date().toISOString(), JSON.stringify({
-          sourceChannelGraph: sourceSlug,
+          sourceScopedGraph: sourceSlug,
+          sourceRole,
+          sourceChannelGraph: sourceRole === 'channel' ? sourceSlug : undefined,
+          sourceUserGraph: sourceRole === 'user' ? sourceSlug : undefined,
           confidence: 'conservative-auto',
         }));
       } else {
         kb.prepare('UPDATE nodes SET mentions = mentions + 1, updated = CURRENT_TIMESTAMP WHERE id = ?').run(id);
       }
 
-      const source = `source: channel/${sourceSlug}`;
+      const source = `source: ${sourceRole}/${sourceSlug}`;
       const attr = `${clean} (${source})`;
       if (_aspectWithAttr(kb, id, 'reusable_lessons', attr, SOURCE)) {
         _aspectWithAttr(kb, id, 'summary', clean, SOURCE);
         if (aspectRaw && aspectRaw !== 'reusable_lessons') {
-          _aspectWithAttr(kb, id, String(aspectRaw).replace(/[^a-z0-9_]/gi, '_').slice(0, 40) || 'notes', clean, SOURCE);
+          _aspectWithAttr(kb, id, sanitizeAspectName(aspectRaw, 'notes'), clean, SOURCE);
         }
+        linkPromotedGeneralKbNode(kb, id, type, SOURCE);
         graphEvents.emit('change', { op: 'attribute:create', nodeId: id, aspect: 'reusable_lessons', content: attr, source: SOURCE });
         return true;
       }
+      linkPromotedGeneralKbNode(kb, id, type, SOURCE);
       return false;
     };
 
+    for (const skill of [
+      ...(Array.isArray(parsed?.skills) ? parsed.skills : []),
+      ...(Array.isArray(parsed?.createSkills) ? parsed.createSkills : []),
+    ]) {
+      const result = syncSkillToGeneralKb({ getGraphDb: this.learner.getGraphDb?.bind(this.learner), _graphRegistry: registry }, { ...skill, sharedSkill: false }, { source: SOURCE });
+      if (result.synced && result.changed) promoted++;
+    }
     for (const c of Array.isArray(parsed?.createNodes) ? parsed.createNodes : []) {
       const type = String(c?.type || 'concept').toLowerCase();
+      if (type === 'skill') {
+        const result = syncSkillToGeneralKb({ getGraphDb: this.learner.getGraphDb?.bind(this.learner), _graphRegistry: registry }, {
+          slug: c.nodeId,
+          title: c.label,
+          summary: c.description,
+          lessons: (Array.isArray(c?.aspects) ? c.aspects : []).flatMap(asp => Array.isArray(asp?.attributes) ? asp.attributes : []),
+          sharedSkill: false,
+        }, { source: SOURCE });
+        if (result.synced && result.changed) promoted++;
+        continue;
+      }
+      if (type === 'person') {
+        if (upsertPerson(c)) promoted++;
+        continue;
+      }
       if (!ALLOWED_TYPES.has(type)) continue;
       for (const asp of Array.isArray(c?.aspects) ? c.aspects : []) {
         for (const attr of Array.isArray(asp?.attributes) ? asp.attributes : []) {
@@ -354,7 +463,23 @@ class ChannelDistiller {
         }
       }
     }
+    for (const p of [
+      ...(Array.isArray(parsed?.people) ? parsed.people : []),
+      ...(Array.isArray(parsed?.updatePeople) ? parsed.updatePeople : []),
+    ]) {
+      if (upsertPerson(p)) promoted++;
+    }
     for (const a of Array.isArray(parsed?.appendNotes) ? parsed.appendNotes : []) {
+      const noteType = String(a?.type || a?.targetType || '').toLowerCase();
+      if (noteType === 'person') {
+        if (upsertPerson({
+          nodeId: a.targetNodeId,
+          label: a.label || a.targetLabel || a.targetNodeId,
+          aspect: a.aspect,
+          content: a.content,
+        })) promoted++;
+        continue;
+      }
       if (upsert(a.targetNodeId, a.targetNodeId, 'concept', 'Reusable channel lesson', a.content, a.aspect)) promoted++;
     }
 

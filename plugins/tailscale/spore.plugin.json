@@ -5,5 +5,5 @@
   "kind": "tool",
   "entry": "./index.js",
   "depends": [],
-  "description": "Tailscale mesh-VPN integration. Adds /api/tailscale/{status,login,logout} endpoints (settings UI uses these to drive the SSO login flow) and the ref-tailscale reference node so the agent has authoritative docs about the Tailscale CLI. Requires the tailscaled daemon to be running inside the container — that's a system-level concern handled by entrypoint.sh / Dockerfile (gated by SPORE_TAILSCALE_ENABLED=true), not the plugin. Compute-cluster routing (SSH over tailscale MagicDNS) stays in core."
+  "description": "Tailscale mesh-VPN integration. Adds /api/tailscale/{status,login,logout,settings} endpoints and the ref-tailscale reference node so the agent has authoritative docs about the Tailscale CLI. Requires the tailscaled daemon to be running inside the container — that's a system-level concern handled by entrypoint.sh / Dockerfile (gated by SPORE_TAILSCALE_ENABLED=true), not this plugin. Cluster and SSH key workflows belong to the compute-cluster and ssh-sidecar plugins."
 }

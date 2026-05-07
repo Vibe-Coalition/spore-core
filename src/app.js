@@ -167,6 +167,8 @@ function updateWebCapabilityNode(config, db, log) {
 }
 
 function migrateReferenceNodes(db, log) {
+  cleanupRetiredReferenceNodes(db, log, 'active');
+
   try {
     const staleMarker = db.prepare(
       "SELECT a.id FROM aspects a JOIN attributes at ON at.aspect_id = a.id WHERE a.node_id = 'ref-api-keys' AND a.name = 'access_patterns' AND at.content LIKE '%/data/.env%' LIMIT 1"
@@ -326,6 +328,120 @@ function migrateReferenceNodes(db, log) {
   }
 }
 
+function cleanupRetiredReferenceNodes(db, log, graphLabel = 'graph') {
+  try {
+    const retiredIds = ['ref-code-viewer', 'ref-cross-agent-messaging', 'ref-token-efficiency'];
+    const before = db.prepare(
+      `SELECT COUNT(*) AS c FROM nodes WHERE id IN (${retiredIds.map(() => '?').join(',')})`
+    ).get(...retiredIds)?.c || 0;
+
+    db.exec(`
+      DELETE FROM edges
+       WHERE source IN ('ref-code-viewer', 'ref-cross-agent-messaging', 'ref-token-efficiency')
+          OR target IN ('ref-code-viewer', 'ref-cross-agent-messaging', 'ref-token-efficiency');
+
+      DELETE FROM attributes
+       WHERE aspect_id IN (
+         SELECT id FROM aspects
+          WHERE node_id IN ('ref-code-viewer', 'ref-cross-agent-messaging')
+             OR node_id = 'ref-token-efficiency'
+       );
+
+      DELETE FROM aspects
+       WHERE node_id IN ('ref-code-viewer', 'ref-cross-agent-messaging', 'ref-token-efficiency');
+
+      DELETE FROM aliases
+       WHERE node_id IN ('ref-code-viewer', 'ref-cross-agent-messaging', 'ref-token-efficiency');
+
+      DELETE FROM nodes
+       WHERE id IN ('ref-code-viewer', 'ref-cross-agent-messaging', 'ref-token-efficiency');
+
+      DELETE FROM attributes
+       WHERE aspect_id IN (
+         SELECT id FROM aspects
+          WHERE node_id = 'ref-tool-workflows'
+            AND name = 'tool_selection'
+       )
+         AND (
+           content LIKE 'The user controls code-viewer mode%'
+           OR content LIKE 'The code viewer is automatic:%'
+         );
+
+      UPDATE attributes
+         SET content = 'Use delegate_task for sub-agent work, spore_message for a configured multi-spore mesh, and message_send for real channel delivery; do not create graph-inbox nodes as a messaging protocol.'
+       WHERE content = 'Use delegate_task for sub-agent work and message_send for real channel delivery; do not create graph-inbox nodes as a messaging protocol.';
+    `);
+
+    db.prepare(`
+      INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+      SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'tool_selection' ORDER BY id LIMIT 1),
+             'In the web panel, read_file/write_file/edit_file automatically create code-viewer tabs; use file tools normally and do not build a custom viewer.',
+             8, 'seed', 'seed'
+       WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'tool_selection')
+         AND NOT EXISTS (
+           SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+            WHERE asp.node_id = 'ref-tool-workflows'
+              AND asp.name = 'tool_selection'
+              AND a.content LIKE 'In the web panel, read_file/write_file/edit_file automatically create code-viewer tabs%'
+         )
+    `).run();
+
+    db.prepare(`
+      INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+      SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'asking_waiting_tracking' ORDER BY id LIMIT 1),
+             'Use delegate_task for sub-agent work, spore_message for a configured multi-spore mesh, and message_send for real channel delivery; do not create graph-inbox nodes as a messaging protocol.',
+             8, 'seed', 'seed'
+       WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'asking_waiting_tracking')
+         AND NOT EXISTS (
+           SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+            WHERE asp.node_id = 'ref-tool-workflows'
+              AND asp.name = 'asking_waiting_tracking'
+              AND a.content LIKE 'Use delegate_task for sub-agent work%do not create graph-inbox nodes%'
+         )
+    `).run();
+
+    db.prepare(`
+      INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+      SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'efficiency' ORDER BY id LIMIT 1),
+             'Keep tool use lean: do not re-read files or docs you just used, do not refetch stable facts, and delegate genuinely heavy independent work.',
+             8, 'seed', 'seed'
+       WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'efficiency')
+         AND NOT EXISTS (
+           SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+            WHERE asp.node_id = 'ref-tool-workflows'
+              AND asp.name = 'efficiency'
+              AND a.content LIKE 'Keep tool use lean:%'
+         )
+    `).run();
+
+    if (before > 0) {
+      log.info(`[boot] Retired ${before} stale ref node(s) from ${graphLabel}`);
+    }
+  } catch (e) {
+    log.warn(`[boot] Retired ref-node cleanup failed for ${graphLabel}: ${e.message}`);
+  }
+}
+
+function cleanupRetiredReferenceNodesAcrossGraphs(graphRegistry, activeDb, log) {
+  if (!graphRegistry?.list) return;
+  const { DatabaseSync } = require('node:sqlite');
+  const activePath = path.resolve(graphRegistry.getActiveDbPath?.() || '');
+
+  for (const graph of graphRegistry.list()) {
+    const dbPath = graph?.dbPath;
+    if (!dbPath || !fs.existsSync(dbPath)) continue;
+    const resolved = path.resolve(dbPath);
+    const db = resolved === activePath ? activeDb : new DatabaseSync(resolved);
+    try {
+      cleanupRetiredReferenceNodes(db, log, graph.slug || resolved);
+    } finally {
+      if (resolved !== activePath) {
+        try { db.close(); } catch {}
+      }
+    }
+  }
+}
+
 async function boot() {
   const config = loadConfig();
   const log = createLogger(config.logLevel);
@@ -358,6 +474,7 @@ async function boot() {
   // Inject web-serving capability into graph so agent knows its own public URLs
   updateWebCapabilityNode(config, graph.db, log);
   migrateReferenceNodes(graph.db, log);
+  cleanupRetiredReferenceNodesAcrossGraphs(graphRegistry, graph.db, log);
 
   const { MultiProvider } = require('./providers');
 
@@ -401,6 +518,7 @@ async function boot() {
   const graphMaintenance = new GraphMaintenanceCoordinator(config, log, llmClient, learner, graphRegistry, {
     maintainer,
     janitor,
+    channelDistiller,
     backup,
   });
   log.info(`Graph maintenance coordinator initialized (interval=${config.graphMaintenanceIntervalMinutes || 120}m)`);

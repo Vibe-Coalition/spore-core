@@ -208,6 +208,58 @@ function _hasForcedToolChoice(params) {
   return false;
 }
 
+function _stripUsageMeta(params) {
+  if (!params || typeof params !== 'object' || !Object.prototype.hasOwnProperty.call(params, '_usageMeta')) {
+    return { clean: params, meta: null };
+  }
+  const { _usageMeta, ...clean } = params;
+  return { clean, meta: _usageMeta && typeof _usageMeta === 'object' ? _usageMeta : null };
+}
+
+function _inferUsageSource(meta) {
+  if (meta?.source) return String(meta.source);
+  const stack = String(meta?._stack || '');
+  if (stack.includes('/workers/learner')) return 'learner';
+  if (stack.includes('/workers/maintainer')) return 'maintainer';
+  if (stack.includes('/workers/janitor')) return 'janitor';
+  if (stack.includes('/workers/channel-distiller')) return 'channel-distiller';
+  if (stack.includes('/graph/retrieval')) return 'recall';
+  if (stack.includes('/tools/tools.js')) return 'subagent';
+  if (stack.includes('/plugins/longmemeval')) return 'longmemeval';
+  if (stack.includes('/plugins/session-graph')) return 'session-graph';
+  if (stack.includes('/gateways/web.js')) return 'web';
+  if (stack.includes('/agent/loop.js')) return 'agent';
+  return 'llm';
+}
+
+function _usageMetaWithCallsite(meta) {
+  return { ...(meta || {}), _stack: new Error().stack || '' };
+}
+
+function _recordUsage(params, response, meta) {
+  const usage = response?.usage;
+  if (!usage) return;
+  try {
+    const feed = require('../graph/feed');
+    const source = _inferUsageSource(meta);
+    feed.logTokens({
+      model: params?.model || meta?.model || 'unknown',
+      channelName: meta?.channelName || meta?.channelId || source,
+      trigger: meta?.trigger || meta?.route || source,
+      usage,
+      iterations: meta?.iterations || 1,
+      source,
+      route: meta?.route || null,
+      platform: meta?.platform || null,
+      sessionKey: meta?.sessionKey || null,
+    });
+  } catch (e) {
+    if (process.env.SPORE_DEBUG_USAGE_LOG === '1') {
+      console.warn('[providers] usage accounting failed:', e.message);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Capability inference & cache
 // ---------------------------------------------------------------------------
@@ -418,19 +470,49 @@ class MultiProvider {
 
   get messages() {
     return {
-      create: (params, opts) => {
-        const effective = this.resolveRequest(params);
+      create: async (params, opts) => {
+        const { clean, meta } = _stripUsageMeta(params);
+        const usageMeta = _usageMetaWithCallsite(meta);
+        const effective = this.resolveRequest(clean);
         const client = this._clientFor(effective.model);
-        return client.messages.create(effective, opts);
+        const response = await client.messages.create(effective, opts);
+        _recordUsage(effective, response, usageMeta);
+        return response;
       },
       stream: (params, opts) => {
-        const effective = this.resolveRequest(params);
+        const { clean, meta } = _stripUsageMeta(params);
+        const usageMeta = _usageMetaWithCallsite(meta);
+        const effective = this.resolveRequest(clean);
         const client = this._clientFor(effective.model);
         if (typeof client.messages.stream === 'function') {
-          return client.messages.stream(effective, opts);
+          const stream = client.messages.stream(effective, opts);
+          if (stream && typeof stream.finalMessage === 'function') {
+            const originalFinalMessage = stream.finalMessage.bind(stream);
+            let recorded = false;
+            stream.finalMessage = async (...args) => {
+              const response = await originalFinalMessage(...args);
+              if (!recorded) {
+                recorded = true;
+                _recordUsage(effective, response, usageMeta);
+              }
+              return response;
+            };
+          }
+          return stream;
         }
         const result = client.messages.create(effective, opts);
-        return { finalMessage: () => result, on: () => {} };
+        let recorded = false;
+        return {
+          finalMessage: async () => {
+            const response = await result;
+            if (!recorded) {
+              recorded = true;
+              _recordUsage(effective, response, usageMeta);
+            }
+            return response;
+          },
+          on: () => {},
+        };
       },
     };
   }

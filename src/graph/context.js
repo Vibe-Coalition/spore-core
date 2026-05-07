@@ -476,13 +476,13 @@ class GraphContext {
     const inc = (key) => !allowed || allowed.includes(key);
     const parts = [
       inc('channel') ? this._truncateToTokenBudget(this._buildChannelSection(opts.channelId, opts.channelName), B.channel) : null,
-      inc('person') && opts.userName ? this._truncateToTokenBudget(this._buildPersonSection(opts.userId, opts.userName), B.person) : null,
+      inc('person') && opts.userName ? this._truncateToTokenBudget(this._buildPersonSection(opts.userId, opts.userName, opts), B.person) : null,
       inc('relevant') && opts.messageContent ? this._truncateToTokenBudget(this._buildRelevantContext(opts.messageContent, { _precomputedResults: opts._precomputedResults, _referenceDate: opts._referenceDate, userId: opts.userId, projectContext: opts.projectContext }), B.relevant) : null,
       inc('episodes') && opts.messageContent ? this._truncateToTokenBudget(this._buildEpisodesSection(opts.messageContent, undefined, { userId: opts.userId, projectContext: opts.projectContext }), B.episodes) : null,
       inc('feed') ? this._truncateToTokenBudget(this._buildCrossSessionSection(opts), B.feed) : null,
       inc('behavior') ? this._truncateToTokenBudget(this._buildConversationBehavior(opts), B.behavior) : null,
       inc('runtime') ? this._truncateToTokenBudget(this._buildRuntimeSection(opts), B.runtime) : null,
-      inc('runtime') ? this._buildClusterAccessSection() : null,
+      inc('cluster') ? this._buildClusterAccessSection(opts) : null,
     ].filter(Boolean);
     return parts.join('\n\n');
   }
@@ -501,7 +501,13 @@ class GraphContext {
             heading: `### Channel Operating References (${scope.slug})`,
             note: '_Stable channel-mode rules loaded from the channel graph seed nodes._',
           }
-        : null);
+        : (scope?.role === 'user'
+          ? {
+              like: 'ref-user-%',
+              heading: `### Web User Operating References (${scope.slug})`,
+              note: '_Stable web-user rules loaded from the user graph seed nodes._',
+            }
+          : null));
     if (!refConfig) return null;
     try {
       const rows = graph.db.prepare(`
@@ -573,8 +579,9 @@ class GraphContext {
       general_kb: 'Reusable Engineering Memory',
       main: 'User/System Preferences',
       channel: 'Channel/Thread Memory',
+      user: 'Web User Memory',
     };
-    const sections = ['## Scoped Recall Bundle', '_Memory is separated by origin. Treat project or channel memory as local truth for this session; reusable engineering memory as patterns that may apply; user/system preferences as operator preference/config._'];
+    const sections = ['## Scoped Recall Bundle', '_Memory is separated by origin. Treat project, channel, or web user memory as local truth for this session; reusable engineering memory as patterns that may apply; user/system preferences as operator preference/config._'];
     const accessed = [];
 
     for (const scope of scopes) {
@@ -668,6 +675,7 @@ class GraphContext {
           try { skip = !!h({ opts, queryType, log: this.log }); } catch (e) { this.log.warn('[graph] shouldSkipRecall hook failed: ' + e.message); }
           if (skip) {
             this.log.info(`[graph] Recall skipped by plugin: "${(opts.messageContent || '').slice(0, 80)}..."`);
+            if (opts.memoryEnvelope?.readScopes?.length) opts._skipDefaultRecallSections = true;
             return this.buildSystemPrompt(opts);
           }
         }
@@ -971,7 +979,7 @@ class GraphContext {
       channel: allowedKeys.has('channel') ? this._truncateToTokenBudget(
         this._buildChannelSection(opts.channelId, opts.channelName), B.channel) : null,
       person: allowedKeys.has('person') && opts.userName ? this._truncateToTokenBudget(
-        this._buildPersonSection(opts.userId, opts.userName), B.person) : null,
+        this._buildPersonSection(opts.userId, opts.userName, opts), B.person) : null,
       relevant: allowedKeys.has('relevant') && opts.messageContent ? this._truncateToTokenBudget(
         this._buildRelevantContext(opts.messageContent, { _precomputedResults: opts._precomputedResults, _referenceDate: opts._referenceDate, _queryType: opts._queryType, _queryParams: opts._queryParams, userId: opts.userId, projectContext: opts.projectContext }), B.relevant) : null,
       anti: allowedKeys.has('anti') ? this._truncateToTokenBudget(
@@ -984,7 +992,7 @@ class GraphContext {
         this._buildConversationBehavior(opts), B.behavior) : null,
       runtime: allowedKeys.has('runtime') ? this._truncateToTokenBudget(
         this._buildRuntimeSection(opts), B.runtime) : null,
-      cluster: allowedKeys.has('runtime') ? this._buildClusterAccessSection() : null,
+      cluster: allowedKeys.has('cluster') ? this._buildClusterAccessSection(opts) : null,
       overview: allowedKeys.has('overview') ? this._truncateToTokenBudget(
         this._buildOverviewSection({ userId: opts.userId, projectContext: opts.projectContext }), B.overview) : null,
       hyperedges: allowedKeys.has('hyperedges') ? this._truncateToTokenBudget(
@@ -1008,6 +1016,11 @@ class GraphContext {
       sectionMap.reflections = null;
       sectionMap.overview = null;
       sectionMap.hyperedges = null;
+      sectionMap.gaps = null;
+      if (opts.memoryEnvelope?.mode === 'codebase-session' || (opts.platform === 'cli' && opts.projectContext?.cwd)) {
+        sectionMap.selfknowledge = null;
+        sectionMap.feed = null;
+      }
     }
 
     const orderedKeys = GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full;

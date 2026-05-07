@@ -314,9 +314,24 @@
   .ssh-host-list { margin: 10px 0; }
   .ssh-host-item {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; margin: 4px 0;
+    padding: 5px 7px; border: 1px solid var(--border); border-radius: 4px; margin: 4px 0;
+    gap: 8px;
   }
-  .ssh-host-item .host-info { color: var(--text); font-size: 0.7rem; }
+  .ssh-host-item .host-info {
+    display: flex; align-items: center; gap: 6px;
+    color: var(--text); font-size: 0.65rem; min-width: 0; overflow: hidden;
+  }
+  .ssh-host-item .host-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ssh-host-item .host-meta {
+    color: var(--text-dim); font-size: 0.55rem; min-width: 0; max-width: 260px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ssh-host-item .host-auth {
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px solid color-mix(in srgb, var(--accent2) 35%, transparent);
+    border-radius: 999px; color: var(--accent2); padding: 0 5px; font-size: 0.5rem;
+    white-space: nowrap;
+  }
   .ssh-host-item .host-actions { display: flex; gap: 4px; }
   .ssh-host-item .host-actions button {
     background: none; border: 1px solid var(--border); color: var(--text-dim);
@@ -324,6 +339,20 @@
   }
   .ssh-host-item .host-actions button:hover { border-color: var(--accent2); color: var(--accent2); }
   .ssh-host-item .host-actions button.delete:hover { border-color: #e74c3c; color: #e74c3c; }
+  .ssh-keystore-sidecar {
+    display: inline-flex; align-items: center; gap: 7px; max-width: 100%;
+    border: 1px solid color-mix(in srgb, var(--accent2) 35%, var(--border));
+    border-radius: 999px; padding: 5px 8px;
+    background: color-mix(in srgb, var(--accent2) 10%, transparent);
+  }
+  .ssh-keystore-sidecar-title { color: var(--accent2); font-size: 0.62rem; line-height: 1; white-space: nowrap; }
+  .ssh-keystore-sidecar-copy {
+    color: var(--text-dim); font-size: 0.52rem; line-height: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ssh-keystore-mode-note {
+    margin-top: 7px; color: var(--text-dim); font-size: 0.6rem; line-height: 1.4;
+  }
   .sa-line.error { color: var(--danger); }
   .sa-line.done { color: var(--accent); }
   @keyframes sa-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
@@ -951,6 +980,7 @@
   #search {
     display: inline-flex; align-items: center;
     font-family: var(--font-body);
+    position: relative;
   }
   #search input {
     background: var(--surface); border: 1px solid var(--border); color: var(--text);
@@ -960,3 +990,67 @@
   }
   #search input:focus { border-color: var(--border-active); }
   #search input::placeholder { color: var(--text-muted); }
+  #graph-search-results {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    width: min(420px, calc(100vw - 32px));
+    max-height: 360px;
+    overflow: auto;
+    display: none;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 18px 42px rgba(0,0,0,.32);
+    z-index: 1200;
+  }
+  #graph-search-results.open { display: flex; }
+  .gsr-head {
+    padding: 5px 7px 6px;
+    font-size: .66rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0;
+  }
+  .gsr-empty {
+    padding: 10px 8px;
+    color: var(--text-muted);
+    font-size: .78rem;
+  }
+  .gsr-item {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    border-radius: 6px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+  .gsr-item:hover,
+  .gsr-item:focus {
+    outline: none;
+    background: rgba(var(--hl-rgb), .08);
+  }
+  .gsr-title {
+    font-size: .82rem;
+    font-weight: 600;
+    line-height: 1.25;
+  }
+  .gsr-meta {
+    color: var(--accent);
+    font-size: .68rem;
+    line-height: 1.25;
+  }
+  .gsr-snippet {
+    color: var(--text-muted);
+    font-size: .72rem;
+    line-height: 1.35;
+  }

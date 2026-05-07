@@ -38,6 +38,19 @@ const { coreRequire, modelForTier } = require('../../core-require');
 // distillation work live. Without this, summarize/distill runs silently
 // from the viewer's POV; a fresh node appears only after manual refresh.
 const graphEvents = coreRequire('graph/events');
+const {
+  linkPromotedGeneralKbNode,
+  sanitizeAspectName,
+  sanitizeNodeId,
+} = coreRequire('graph/general-kb-promotion');
+const {
+  promoteScopedPeopleToGeneralKb,
+  syncPersonToGeneralKb,
+} = coreRequire('graph/general-kb-people');
+const {
+  normalizeGraphSkill,
+  syncSkillToGeneralKb,
+} = coreRequire('graph/general-kb-skills');
 
 function emitChange(learner, payload) {
   try {
@@ -73,6 +86,80 @@ async function _callLlmStreaming(llmClient, params, log, label) {
     text = (response?.content || []).find(b => b.type === 'text')?.text || '';
   }
   return text;
+}
+
+function _parseLlmJsonObject(text) {
+  if (!text || !String(text).trim()) return null;
+  let cleaned = String(text).replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  if (cleaned[0] !== '{') {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) cleaned = match[0];
+  }
+  try {
+    const parsed = JSON.parse(cleaned);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function _distillReplayableSkills(llmClient, config, sessionId, sessionSummary, recentRounds, parsed, log) {
+  const existing = [
+    ...(Array.isArray(parsed?.skills) ? parsed.skills : []),
+    ...(Array.isArray(parsed?.createSkills) ? parsed.createSkills : []),
+  ];
+  if (existing.length > 0) return [];
+  const sourceText = `${sessionSummary || ''}\n${recentRounds || ''}`;
+  if (!/\b(?:npm|pnpm|yarn|bun|pytest|go test|cargo test|docker|curl|npx|node|python|run_tests|exec|write_file|edit_file|read_file)\b/i.test(sourceText)) return [];
+
+  const promptText = [
+    'You are doing a focused second pass over a completed coding session to extract reusable, replayable workflow skills.',
+    '',
+    'A skill is a procedure another agent can replay later. It is NOT a task title, feature request, or isolated lesson.',
+    'Emit zero skills unless the session contains enough concrete commands, tool usage, code/config shape, validation, and gotchas to replay the workflow.',
+    '',
+    'Rules:',
+    '- Prefer 0 or 1 skill. Use 2 only if the session clearly contains two separate replayable workflows.',
+    '- The skill must include applicability, concrete commands or replay code, ordered steps, validation checks, and gotchas.',
+    '- Keep it reusable across projects. Strip private paths, IDs, usernames, hostnames, tokens, and account details.',
+    '- Do not emit skills like "Add CLI Typo Suggestions" unless you can include the command/code replay and validation flow needed to repeat it.',
+    '- If the session only contains small facts/gotchas, return {"skills":[]}.',
+    '',
+    `Session: ${sessionId}`,
+    'Session summary:',
+    sessionSummary || '(none)',
+    '',
+    `Recent rounds:\n${recentRounds || '  (none)'}`,
+    '',
+    'Main graph distill JSON:',
+    JSON.stringify({
+      createNodes: Array.isArray(parsed?.createNodes) ? parsed.createNodes : [],
+      appendNotes: Array.isArray(parsed?.appendNotes) ? parsed.appendNotes : [],
+    }, null, 2).slice(0, 4000),
+    '',
+    'Output valid JSON only:',
+    '{',
+    '  "skills": [',
+    '    { "slug": "start-expo-dev-server", "title": "Start Expo Dev Server", "tags": ["expo", "dev-server"], "summary": "Start and verify an Expo dev server in a reusable way.", "applicability": "Use when an Expo project needs a local dev server reachable from a browser or device.", "prerequisites": ["Run from the project root after dependencies are installed."], "commands": ["npx expo start --port 8081"], "steps": ["Check package scripts and config before choosing the command.", "Start Expo on an explicit port.", "Watch CLI output for local/LAN URLs.", "Verify the server responds before reporting readiness."], "replay": ["spawn(\\"npx\\", [\\"expo\\", \\"start\\", \\"--port\\", \\"8081\\"], { stdio: \\"inherit\\" })"], "validation": ["curl -I http://localhost:8081"], "gotchas": ["Do not store private LAN IPs or project paths."] }',
+    '  ]',
+    '}',
+  ].join('\n');
+
+  try {
+    const model = modelForTier('casual', config);
+    const respText = (await _callLlmStreaming(llmClient, {
+      model,
+      max_tokens: 3000,
+      messages: [{ role: 'user', content: promptText }],
+    }, log, 'graphcorn-skill-distill')).trim();
+    const skillJson = _parseLlmJsonObject(respText);
+    const skills = Array.isArray(skillJson?.skills) ? skillJson.skills : [];
+    if (skills.length && log) log.info(`[distill] ${sessionId} focused skill pass emitted ${skills.length} skill candidate(s)`);
+    return skills;
+  } catch (e) {
+    if (log) log.warn(`[distill] ${sessionId} focused skill pass failed: ${e.message}`);
+    return [];
+  }
 }
 
 function sessionNodeId(sessionId) {
@@ -418,6 +505,79 @@ function _descriptionFromLesson(desc, cleanLesson) {
   return (sentence || cleanLesson || 'Reusable engineering lesson').slice(0, 500);
 }
 
+function _parseJsonObject(raw) {
+  if (!raw || typeof raw !== 'string') return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function _deleteGeneralKbNode(db, node, reason) {
+  const nodeId = node?.id;
+  if (!nodeId) return false;
+  try {
+    const hasRecycle = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recycle_bin'").get();
+    if (hasRecycle) {
+      const payload = JSON.stringify({
+        node,
+        aspects: db.prepare('SELECT * FROM aspects WHERE node_id = ?').all(nodeId),
+        edges: db.prepare('SELECT * FROM edges WHERE source = ? OR target = ?').all(nodeId, nodeId),
+      });
+      db.prepare(`
+        INSERT INTO recycle_bin (item_type, item_id, label, payload, deleted_by, reason, confidence, expires_at)
+        VALUES ('node', ?, ?, ?, 'general-kb-repair', ?, 1.0, datetime('now', '+7 days'))
+      `).run(nodeId, node.label || nodeId, payload, reason);
+    }
+    db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(nodeId, nodeId);
+    db.prepare('DELETE FROM attributes WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = ?)').run(nodeId);
+    db.prepare('DELETE FROM aspects WHERE node_id = ?').run(nodeId);
+    db.prepare('DELETE FROM aliases WHERE node_id = ?').run(nodeId);
+    db.prepare('DELETE FROM nodes WHERE id = ?').run(nodeId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function _sanitizeGeneralPersonFact(text) {
+  const raw = String(text || '').trim();
+  if (!raw || raw.length < 8) return null;
+  if (/(sk-[a-z0-9]|ghp_[a-z0-9]|password\s*=|api[_-]?key\s*=|secret\s*=)/i.test(raw)) return null;
+  if (/@[a-z0-9_]{3,}/i.test(raw)) return null;
+  if (/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/i.test(raw)) return null;
+  if (/\b(?:user|chat|channel|telegram|slack|discord)[ _-]?id\b/i.test(raw)) return null;
+  if (/\b(?:pairing code|approved user|dm policy|private dm)\b/i.test(raw)) return null;
+  if (/\b(?:remind|reminder|schedule|cron job|daily report|weekly report|notification preference|timezone|wake me|send me|send him|send her)\b/i.test(raw)) return null;
+  if (/(^|[\\/])\.spore-code[\\/]|scratch helper|scratch_helpers|local workspace|repository path|source code located|untracked files/i.test(raw)) return null;
+  if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(raw)) return null;
+  return raw
+    .replace(/\s*\(source:\s*[^)]+\)\s*$/i, '')
+    .replace(/\/(?:home|Users|mnt|app|workspace|data)\/[^\s`'")]+/g, '<project-path>')
+    .replace(/[A-Za-z]:\\[^\s`'")]+/g, '<project-path>')
+    .replace(/\b-?\d{6,}\b/g, '<id>')
+    .slice(0, 500);
+}
+
+function _isGenericPersonLabel(value) {
+  const label = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return !label || ['person', 'user', 'unknown', 'anonymous', 'someone', 'operator', 'this-user', 'that-user'].includes(label);
+}
+
+function _personNodeId(nodeIdRaw, labelRaw) {
+  const id = sanitizeNodeId(nodeIdRaw || labelRaw);
+  if (!id) return null;
+  if (/^(?:channel|chat|telegram|slack|discord)-/.test(id)) return null;
+  if (/^(?:user|web-user)-/.test(id)) {
+    const labelId = sanitizeNodeId(labelRaw || '');
+    if (labelId && !/^(?:user|web-user|channel|chat|telegram|slack|discord)-/.test(labelId)) return labelId;
+    return null;
+  }
+  return id;
+}
+
 function _aspectWithAttr(db, nodeId, aspectName, content, { weight = 7, importance = 7, source = 'session-distill' } = {}) {
   if (!content) return false;
   let asp = db.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(nodeId, aspectName);
@@ -441,6 +601,24 @@ function promoteReusableKnowledge(learner, sessionId, parsed, opts = {}) {
   const sessionNodeId_ = sessionNodeId(sessionId);
   const projectId = opts.projectId || null;
   const source = `source: ${projectId || 'project'} / ${sessionNodeId_}`;
+  const upsertPerson = (personRaw) => {
+    const result = syncPersonToGeneralKb(learner, personRaw, {
+      source: 'session-distill',
+      sourceGraph: projectId || sessionNodeId_,
+      sourceRole: projectId ? 'project' : 'session',
+    });
+    if (result.synced && result.changed) {
+      graphEvents.emit('change', {
+        op: 'node:upsert',
+        nodeId: result.nodeId,
+        type: 'person',
+        source: 'general-kb',
+        graph: slug,
+      });
+    }
+    return result.synced && result.changed;
+  };
+
   const upsert = (nodeId, label, type, description, lesson, aspectName = null) => {
     if (_looksProjectSpecificReusableLesson({ nodeId, label, type, aspect: aspectName, lesson })) return false;
     const clean = _sanitizeReusableLesson(lesson);
@@ -477,15 +655,39 @@ function promoteReusableKnowledge(learner, sessionId, parsed, opts = {}) {
       ).run(asp.id, content);
       _aspectWithAttr(kb, id, 'summary', clean, { weight: 9, importance: 8, source: 'session-distill' });
       _aspectWithAttr(kb, id, 'applicability', 'Reusable across projects when the same tool, framework, protocol, or UI constraint appears.', { weight: 6, importance: 6, source: 'session-distill' });
+      linkPromotedGeneralKbNode(kb, id, type || 'concept', 'session-distill');
       graphEvents.emit('change', { op: 'attribute:create', nodeId: id, aspect: 'reusable_lessons', content, source: 'general-kb', graph: slug });
       return true;
     }
+    linkPromotedGeneralKbNode(kb, id, type || 'concept', 'session-distill');
     return false;
   };
 
   let promoted = 0;
+  for (const skill of [
+    ...(Array.isArray(parsed?.skills) ? parsed.skills : []),
+    ...(Array.isArray(parsed?.createSkills) ? parsed.createSkills : []),
+  ]) {
+    const result = syncSkillToGeneralKb(learner, { ...skill, sharedSkill: false }, { source: 'session-distill' });
+    if (result.synced && result.changed) promoted++;
+  }
   for (const c of parsed?.createNodes || []) {
     const type = String(c?.type || 'concept').toLowerCase();
+    if (type === 'skill') {
+      const result = syncSkillToGeneralKb(learner, {
+        slug: c.nodeId,
+        title: c.label,
+        summary: c.description,
+        lessons: (c.aspects || []).flatMap(asp => Array.isArray(asp?.attributes) ? asp.attributes : []),
+        sharedSkill: false,
+      }, { source: 'session-distill' });
+      if (result.synced && result.changed) promoted++;
+      continue;
+    }
+    if (type === 'person') {
+      if (upsertPerson(c)) promoted++;
+      continue;
+    }
     if (!['tool', 'library', 'framework', 'service', 'concept'].includes(type)) continue;
     for (const asp of c.aspects || []) {
       for (const attr of asp.attributes || []) {
@@ -493,7 +695,23 @@ function promoteReusableKnowledge(learner, sessionId, parsed, opts = {}) {
       }
     }
   }
+  for (const p of [
+    ...(Array.isArray(parsed?.people) ? parsed.people : []),
+    ...(Array.isArray(parsed?.updatePeople) ? parsed.updatePeople : []),
+  ]) {
+    if (upsertPerson(p)) promoted++;
+  }
   for (const a of parsed?.appendNotes || []) {
+    const noteType = String(a?.type || a?.targetType || '').toLowerCase();
+    if (noteType === 'person') {
+      if (upsertPerson({
+        nodeId: a.targetNodeId,
+        label: a.label || a.targetLabel || a.targetNodeId,
+        aspect: a.aspect,
+        content: a.content,
+      })) promoted++;
+      continue;
+    }
     if (upsert(a.targetNodeId, a.targetNodeId, 'concept', 'Reusable project lesson', a.content, a.aspect)) promoted++;
   }
   return { promoted, slug };
@@ -507,40 +725,82 @@ function repairGeneralKnowledgeBase(learner, log) {
   if (!kb) return { repaired: 0, removed: 0 };
   let repaired = 0;
   let removed = 0;
+  try {
+    const peopleYield = promoteScopedPeopleToGeneralKb(learner, registry, { source: 'general-kb-repair' });
+    repaired += peopleYield.promoted || 0;
+  } catch (e) {
+    log?.warn?.(`[general-kb] scoped people yield failed: ${e.message}`);
+  }
   const nodes = kb.prepare(`
-    SELECT n.id, n.label, n.type, n.description,
+    SELECT n.id, n.label, n.type, n.description, n.extra,
            (SELECT a.content FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
              WHERE asp.node_id = n.id AND asp.name = 'reusable_lessons'
              ORDER BY a.id LIMIT 1) AS lesson
-      FROM nodes n
-     WHERE n.extracted_with IN ('session-distill', 'general-kb') OR n.provenance = 'general-kb'
+     FROM nodes n
+     WHERE n.extracted_with IN ('session-distill', 'channel-distill', 'general-kb', 'general-kb-repair')
+        OR n.provenance = 'general-kb'
   `).all();
   for (const n of nodes) {
     const clean = _sanitizeReusableLesson(n.lesson);
     if (_looksProjectSpecificReusableLesson({ nodeId: n.id, label: n.label, type: n.type, aspect: 'reusable_lessons', lesson: n.lesson })) {
       try {
-        const payload = JSON.stringify({
-          node: n,
-          aspects: kb.prepare('SELECT * FROM aspects WHERE node_id = ?').all(n.id),
-          edges: kb.prepare('SELECT * FROM edges WHERE source = ? OR target = ?').all(n.id, n.id),
-        });
-        kb.prepare(`
-          INSERT INTO recycle_bin (item_type, item_id, label, payload, deleted_by, reason, confidence, expires_at)
-          VALUES ('node', ?, ?, ?, 'general-kb-repair', 'project-specific reusable lesson stayed in project graph', 1.0, datetime('now', '+7 days'))
-        `).run(n.id, n.label, payload);
-        kb.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(n.id, n.id);
-        kb.prepare('DELETE FROM nodes WHERE id = ?').run(n.id);
-        removed++;
+        if (_deleteGeneralKbNode(kb, n, 'project-specific reusable lesson stayed in project graph')) removed++;
       } catch (e) {
         log?.warn?.(`[general-kb] repair remove ${n.id} failed: ${e.message}`);
       }
       continue;
+    }
+    if (String(n.type || '').toLowerCase() === 'skill') {
+      const skillSlug = String(n.id || '').replace(/^skill-/, '');
+      const extra = _parseJsonObject(n.extra);
+      const rows = kb.prepare(`
+        SELECT asp.name AS aspect, a.content
+          FROM aspects asp
+          JOIN attributes a ON a.aspect_id = asp.id
+         WHERE asp.node_id = ?
+      `).all(n.id);
+      const skillRecord = {
+        slug: skillSlug,
+        title: n.label,
+        summary: n.description,
+        sharedSkill: false,
+      };
+      let hasSkillLookup = false;
+      for (const row of rows) {
+        const aspect = String(row.aspect || '').toLowerCase();
+        if (aspect === 'tags') skillRecord.tags = String(row.content || '').split(',').map(s => s.trim()).filter(Boolean);
+        else if (aspect === 'skill_lookup') hasSkillLookup = true;
+        else if (aspect === 'applicability') skillRecord.applicability = row.content;
+        else if (aspect === 'prerequisites') (skillRecord.prerequisites ||= []).push(row.content);
+        else if (aspect === 'commands') (skillRecord.commands ||= []).push(row.content);
+        else if (aspect === 'steps') (skillRecord.steps ||= []).push(row.content);
+        else if (aspect === 'replay') (skillRecord.replay ||= []).push(row.content);
+        else if (aspect === 'examples') (skillRecord.examples ||= []).push(row.content);
+        else if (aspect === 'validation') (skillRecord.validation ||= []).push(row.content);
+        else if (aspect === 'gotchas') (skillRecord.gotchas ||= []).push(row.content);
+        else if (aspect === 'lessons') (skillRecord.lessons ||= []).push(row.content);
+      }
+      const normalized = normalizeGraphSkill(skillRecord);
+      const realMirroredSkill = extra.sharedSkill === true && hasSkillLookup;
+      if (!realMirroredSkill && !normalized.replayable) {
+        if (_deleteGeneralKbNode(kb, n, 'distilled skill lacked replayable commands/code/steps')) removed++;
+        continue;
+      }
+      const skill = syncSkillToGeneralKb(learner, {
+        slug: skillSlug,
+        title: n.label,
+        summary: n.description,
+        sharedSkill: realMirroredSkill,
+      }, { source: 'general-kb-repair' });
+      if (skill.changed) repaired++;
     }
     if (clean && _genericKbDescription(n.description)) {
       kb.prepare('UPDATE nodes SET description = ?, updated = CURRENT_TIMESTAMP WHERE id = ?').run(_descriptionFromLesson(n.description, clean), n.id);
       _aspectWithAttr(kb, n.id, 'summary', clean, { weight: 9, importance: 8, source: 'general-kb-repair' });
       repaired++;
     }
+    const link = linkPromotedGeneralKbNode(kb, n.id, n.type, 'general-kb-repair');
+    if (link.edgesCreated) repaired++;
   }
   if ((repaired || removed) && log) log.info(`[general-kb] repair complete: repaired=${repaired} removed=${removed}`);
   try { registry.refreshStats(slug); } catch {}
@@ -680,10 +940,12 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '',
       `Recent rounds (last 10):\n${recentRounds || '  (no rounds recorded)'}`,
       '',
-      `${tempRows.length === 0 ? 'NO temporary nodes were created during this session — but the rounds above show real tool activity. Your job here is entirely `createNodes` / `appendNotes`: look at the tools used and files touched, and mint permanent nodes for the frameworks/libraries/services the agent successfully used. This is ESPECIALLY important when nothing else will capture the success — without createNodes, next session starts from zero on whatever worked here.' : `${tempRows.length} temporary nodes were created during this session.`} You have THREE operations — use all of them:`,
+      `${tempRows.length === 0 ? 'NO temporary nodes were created during this session — but the rounds above show real tool activity. Your job here is mostly `createNodes` / `appendNotes`: look at the tools used and files touched, and mint permanent nodes for the frameworks/libraries/services the agent successfully used. This is ESPECIALLY important when nothing else will capture the success — without createNodes, next session starts from zero on whatever worked here.' : `${tempRows.length} temporary nodes were created during this session.`} You have FIVE operations — use the ones that apply:`,
       '  • PROMOTE — keep an existing temp node as permanent (the user/future sessions will benefit)',
       '  • CREATE_NODES — mint FRESH permanent nodes for tools/frameworks/libraries/services the agent USED this session that are not already in the graph. Look at the rounds (tools: ..., files: ...) and the summary. Every non-trivial tool, framework, library, package, CLI, service the agent touched deserves its own node, even if it was "just used" without being deeply discussed. node types: "tool" (CLI binaries, commands), "library" (npm packages, imports), "framework" (expo, next, react-native), "service" (apis, databases), "concept" (design patterns, approaches).',
       '  • APPEND_NOTES — attach session-specific lessons onto existing permanent nodes (e.g. add "Learned in session: expo router 4.x changed the typed-routes default to true" onto the existing `expo-router` node\'s gotchas aspect). Works on both pre-existing nodes and nodes you just created via `createNodes`.',
+      '  • SKILLS — emit only reusable replayable workflows learned during this session. A skill is NOT a one-off feature/task like "Add CLI Typo Suggestions"; that belongs in createNodes/appendNotes. A skill must include when to use it, prerequisites if any, concrete commands or replay code, ordered steps, validation checks, and gotchas. Do not include credentials, account IDs, private paths, or one-project-only instructions. The General KB yield will reject thin/non-replayable skill records.',
+      '  • PEOPLE — emit safe public/team person context for the protected General Knowledge Base whenever the session reveals it. Include maintainership, authorship, collaboration roles, project/team responsibility, or durable work context. Do not include private preferences, contact handles, account IDs, schedules, credentials, or anything only useful in this one project/session.',
       '  • DROP (implicit) — anything not in `promote` will be soft-deleted',
       '',
       'Heuristics:',
@@ -691,6 +953,8 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '  CREATE_NODES: external tools/libraries/frameworks/services the project uses. Think `npm`, `expo`, `qrcode-terminal`, `react-native`, `docker`, `postgres`, `vite`, `tailwind`, `pnpm`, `pytest`. Keep descriptions factual and small; put session-specific quirks on a `gotchas` aspect.',
       '  DO NOT create nodes for the agent\'s own built-in tools — those are always available, so nodes for them are graph noise. Skip: exec, sleep, read_file, write_file, edit_file, glob, grep, graph_query, graph_update, graph_delete, note_discovery, web_search, web_fetch, ask_user, message_send, delegate_task, schedule_wakeup, save_tool, browser_*, terminal_*, ssh_*, email_*, voice_*, notify_user. These are Spore Core tools the agent already has, not things learned during the session.',
       '  APPEND_NOTES: version-specific gotchas, "X is deprecated, use Y", configuration tips discovered by trial-and-error.',
+      '  SKILLS: only workflows another agent could replay later. Include real shell commands, tool calls, script snippets, or code/config examples. If there is no replay artifact, do not emit a skill.',
+      '  PEOPLE: if a person node or session text says someone maintains, authored, owns, reviews, or works on a shared project/tool, emit a people[] item with public_context/team_context facts.',
       '  SCRATCH HELPERS: If the agent wrote any files under `.spore-code/scratch/` during the session (check the `files` field on each round), emit an `appendNotes` onto the PROJECT node\'s `scratch_helpers` aspect with one entry per file: `<path> — <one-line purpose>`. Example: `.spore-code/scratch/get-lan-ip.js — prints LAN IP, skipping VPN adapters`. This is how future sessions find existing helpers without `glob`-ing the directory every turn.',
       '  DROP: error log dumps, intermediate debug captures, half-formed thoughts, generic concepts already well-covered in the graph.',
       '',
@@ -704,6 +968,12 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       '  ],',
       '  "createNodes": [',
       '    { "nodeId": "expo", "label": "Expo", "type": "framework", "description": "React Native toolchain for mobile apps", "aspects": [{ "name": "overview", "attributes": ["Used for dev server + QR code bundling"] }, { "name": "gotchas", "attributes": ["Dev server defaults to port 8081; use --port to override"] }] }',
+      '  ],',
+      '  "skills": [',
+      '    { "slug": "start-expo-dev-server", "title": "Start Expo Dev Server", "tags": ["expo", "react-native", "dev-server"], "summary": "Start and verify an Expo dev server in a reusable way.", "applicability": "Use when a React Native/Expo project needs a local dev server reachable from a browser or device.", "prerequisites": ["Run from the project root after dependencies are installed."], "commands": ["npx expo start --port 8081"], "steps": ["Check package scripts and Expo config before choosing the command.", "Start Expo on an explicit port.", "Watch the CLI output for the local/LAN URLs and QR code.", "Verify the server responds before telling the user it is ready."], "replay": ["const { spawn } = require(\\"node:child_process\\");\\nspawn(\\"npx\\", [\\"expo\\", \\"start\\", \\"--port\\", \\"8081\\"], { stdio: \\"inherit\\" });"], "validation": ["curl -I http://localhost:8081"], "gotchas": ["Do not store private LAN IPs or project paths in the shared skill.", "If the command echoes instead of running on Windows, switch to a script file or native process tool."] }',
+      '  ],',
+      '  "people": [',
+      '    { "nodeId": "ada-lovelace", "label": "Ada Lovelace", "description": "Mathematician and computing pioneer", "aspects": [{ "name": "public_context", "attributes": ["Known for early computing work"] }] }',
       '  ],',
       '  "appendNotes": [',
       '    { "targetNodeId": "<existing permanent or just-created node id>", "aspect": "gotchas", "content": "Learned in session: <specific lesson>" }',
@@ -746,6 +1016,14 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
         if (log) log.warn(`[distill] ${id} non-JSON response — proceeding with no promotions. raw: ${respText.slice(0, 200)}`);
         parsed = { promote: [], createNodes: [], appendNotes: [] };
       }
+    }
+
+    const focusedSkills = await _distillReplayableSkills(llmClient, config, sessionId, sessionSummary, recentRounds, parsed, log);
+    if (focusedSkills.length) {
+      parsed.skills = [
+        ...(Array.isArray(parsed.skills) ? parsed.skills : []),
+        ...focusedSkills,
+      ];
     }
 
     const promoteList = Array.isArray(parsed.promote) ? parsed.promote : [];

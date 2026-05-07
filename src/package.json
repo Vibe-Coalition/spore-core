@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node app.js",
     "test": "node test.js",
+    "graph:seed-benchmark": "node tools/seed-benchmark-graph.js",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker logs -f ${AGENT_ID:-spore}"

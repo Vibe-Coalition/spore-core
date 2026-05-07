@@ -41,7 +41,7 @@ INSERT INTO aspects (node_id, name, weight, extracted_with)
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='connection_flow'),
-         'Login is interactive SSO via Settings → Compute Cluster → "Log in to Tailscale". The button spawns `tailscale up` on the server, captures the login URL, and surfaces it to the operator. They open it, complete SSO, done.',
+         'Login is interactive SSO via Settings → Plugins → Tailscale → "Log in to Tailscale". The button spawns `tailscale up` on the server, captures the login URL, and surfaces it to the operator. They open it, complete SSO, done.',
          9, 'seed', 'seed'
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-tailscale' AND name='connection_flow')
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='connection_flow') AND content LIKE 'Login is interactive SSO%');
@@ -53,7 +53,7 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='connection_flow') AND content LIKE 'Once logged in%');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='connection_flow'),
-         'If the agent sees "not logged in" / "NeedsLogin", tell the operator to visit Settings → Compute Cluster and click Log in. Do NOT try to start login yourself — the URL has to land in the UI.',
+         'If the agent sees "not logged in" / "NeedsLogin", tell the operator to visit Settings → Plugins → Tailscale and click Log in. Do NOT try to start login yourself — the URL has to land in the UI.',
          9, 'seed', 'seed'
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-tailscale' AND name='connection_flow')
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='connection_flow') AND content LIKE 'If the agent sees "not logged in"%');
@@ -76,15 +76,13 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage') AND content LIKE '%status --json%');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage'),
-         '`tailscale ssh user@peer` shells into a tailnet peer without managing host keys (Tailscale SSH handles auth). Prefer this over raw ssh when the target is tailnet-only.',
+         'For configured SSH hosts, do NOT use `tailscale ssh`. Use the sidecar-backed `remote_exec`, `remote_read_file`, and `remote_write_file` tools with the saved host ID. `tailscale ssh` is a separate Tailscale SSH ACL/control-plane auth flow and can fail with host-key/control-plane errors even when sidecar OpenSSH works.',
          9, 'seed', 'seed'
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage')
-    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage') AND content LIKE '%tailscale ssh user@peer%');
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage') AND content LIKE 'For configured SSH hosts, do NOT use `tailscale ssh`%');
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
   SELECT (SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage'),
          '`tailscale ip -4 <peer>` → tailnet IPv4 of a peer; `tailscale ping <peer>` verifies reachability and whether traffic is direct vs DERP-relayed.',
          8, 'seed', 'seed'
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage')
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-tailscale' AND name='cli_usage') AND content LIKE '%tailscale ip -4%');
-
-

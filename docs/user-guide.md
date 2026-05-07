@@ -112,7 +112,8 @@ To connect to external servers:
 **Key security:**
 - SSH keys are encrypted with AES-256-GCM before storage
 - Keys are never sent back to the browser after saving
-- When the SSH sidecar is deployed, keys are isolated in a separate process with no network access
+- When the `ssh-sidecar` plugin and sidecar service are deployed, saved-host keys, interactive SSH sessions, remote exec, and SFTP are isolated in a separate process with no inbound ports
+- Compute Cluster uses a sidecar credential profile named `cluster-default`; generated cluster keys are created inside the sidecar and only the public key/fingerprint are shown in Settings.
 
 ### Terminal Controls
 

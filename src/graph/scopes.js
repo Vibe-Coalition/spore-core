@@ -28,12 +28,21 @@ function _hash(value, len = 12) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex').slice(0, len);
 }
 
+function normalizeProjectRoot(root) {
+  const raw = String(root || '').trim();
+  if (!raw) return '';
+  let s = raw.replace(/\\/g, '/').replace(/\/+$/, '');
+  s = s.replace(/^([A-Z]):/, (_, drive) => `${drive.toLowerCase()}:`);
+  return s;
+}
+
 function projectIdentityFromContext(userId, pc = {}) {
   if (!pc || typeof pc !== 'object') return null;
   const remote = normalizeGitRemote(
     pc.gitRemote || pc.remoteUrl || pc.originUrl || pc.origin || pc.git?.remote || pc.git?.origin
   );
   const root = pc.gitRoot || pc.repoRoot || pc.root || pc.workspaceRoot || pc.cwd || '';
+  const normalizedRoot = normalizeProjectRoot(root);
   if (remote) {
     return {
       key: `git:${remote}`,
@@ -46,9 +55,8 @@ function projectIdentityFromContext(userId, pc = {}) {
   const machine = pc.machineId || pc.hostname || pc.host || 'unknown-machine';
   const cwd = pc.cwd || root;
   if (!cwd) return null;
-  const u = _safePart(userId || pc.userId || 'anon', 'anon');
   return {
-    key: `cwd:${u}:${machine}:${cwd}`,
+    key: `cwd:${_safePart(machine, 'unknown-machine')}:${normalizedRoot || normalizeProjectRoot(cwd)}`,
     label: pc.project || path.basename(cwd) || 'Project',
     basis: 'cwd',
     remote: null,
@@ -90,6 +98,23 @@ function channelIdentityFromContext(opts = {}) {
   }
 
   return null;
+}
+
+function webUserIdentityFromContext(opts = {}) {
+  const platform = String(opts.platform || '').trim().toLowerCase();
+  const role = String(opts.userRole || opts.role || '').trim().toLowerCase();
+  if (platform !== 'web' || role !== 'webapp') return null;
+  const rawUser = opts.userId != null ? String(opts.userId).trim() : String(opts.userName || '').trim();
+  if (!rawUser || /^operator$/i.test(rawUser) || /^guest$/i.test(rawUser)) return null;
+  const userPart = _safePart(rawUser, 'user');
+  const label = String(opts.userName || rawUser).trim() || rawUser;
+  return {
+    key: `web-user:${userPart}`,
+    label,
+    basis: 'web-user',
+    username: rawUser,
+    description: `Private web memory for ${label}`,
+  };
 }
 
 function looksReusableTechnicalQuery(text) {
@@ -150,10 +175,13 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
       projectKey: base.projectKey || null,
       channelSlug: base.channelSlug || null,
       channelKey: base.channelKey || null,
+      userSlug: base.userSlug || null,
+      userKey: base.userKey || null,
       readScopes,
       writeScopes: {
         defaultSlug: primarySlug || mainSlug,
         personalSlug: mainSlug,
+        userSlug: base.userSlug || base.writeScopes?.userSlug || null,
         generalKbSlug: generalSlug,
         ...(base.writeScopes || {}),
       },
@@ -167,6 +195,12 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
   const generalSlug = registry.getGeneralKnowledgeSlug();
   const mainScope = _scope(registry, mainSlug, 'main', 'User/System Preferences', 8);
   const generalScope = _scope(registry, generalSlug, 'general_kb', 'Reusable Engineering Memory', 8);
+  const platform = String(opts.platform || '').trim().toLowerCase();
+  const role = String(opts.userRole || opts.role || '').trim().toLowerCase();
+  const isCliProjectSession = !!(
+    opts.projectContext?.cwd
+    && (platform === 'cli' || role === 'cli' || opts.projectContext?.source === 'spore-code')
+  );
 
   let mode = 'normal-chat';
   let primarySlug = active?.protected ? mainSlug : activeSlug;
@@ -174,9 +208,11 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
   let projectKey = null;
   let channelSlug = null;
   let channelKey = null;
+  let userSlug = null;
+  let userKey = null;
   const readScopes = [];
 
-  if (opts.platform === 'cli' && opts.projectContext?.cwd) {
+  if (isCliProjectSession) {
     const identity = projectIdentityFromContext(opts.userId || opts.userName, opts.projectContext);
     if (identity) {
       projectKey = identity.key;
@@ -190,6 +226,13 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
         projectRoot: identity.root,
         projectRemote: identity.remote,
       });
+      registry.markProjectGraphActivity?.(projectSlug, {
+        reason: 'codebase-turn',
+        userId: opts.userId || opts.userName || 'anon',
+        username: opts.userName || opts.userId || 'anon',
+        projectRoot: identity.root,
+        projectRemote: identity.remote,
+      });
       mode = 'codebase-session';
       primarySlug = projectSlug;
       readScopes.push(_scope(registry, projectSlug, 'project', 'Project Memory', 18));
@@ -199,6 +242,33 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
       // graph for code sessions: it contains global activity logs and older
       // project snippets that can make a fresh project graph sound like it
       // has already read the codebase.
+    }
+  }
+
+  if (readScopes.length === 0) {
+    const identity = webUserIdentityFromContext(opts);
+    if (identity) {
+      userKey = identity.key;
+      userSlug = registry.ensureUserGraph(identity.key, {
+        name: `${identity.label} Memory`,
+        description: identity.description,
+        source: 'webapp',
+        createdBy: 'webapp',
+        username: identity.username,
+        userId: identity.username,
+        webappUser: identity.username,
+        owner: identity.username,
+      });
+      registry.markUserGraphActivity?.(userSlug, {
+        reason: 'web-user-turn',
+        username: identity.username,
+        userId: identity.username,
+      });
+      mode = 'web-user-session';
+      primarySlug = userSlug;
+      readScopes.push(_scope(registry, userSlug, 'user', 'User Memory', 18));
+      readScopes.push(_scope(registry, mainSlug, 'main', 'Default Knowledge', 6));
+      readScopes.push(generalScope);
     }
   }
 
@@ -224,14 +294,14 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
       mode = identity.basis === 'person' ? 'channel-person-session' : 'channel-thread-session';
       primarySlug = channelSlug;
       readScopes.push(_scope(registry, channelSlug, 'channel', 'Channel Memory', 18));
-      if (looksReusableTechnicalQuery(opts.content || opts.messageContent)) readScopes.push(generalScope);
+      readScopes.push(_scope(registry, generalSlug, 'general_kb', 'Reusable Engineering Memory', looksReusableTechnicalQuery(opts.content || opts.messageContent) ? 8 : 4));
     }
   }
 
   if (readScopes.length === 0) {
     readScopes.push(_scope(registry, primarySlug || mainSlug, active?.role || 'custom', 'Active Graph', 14));
     if (mainSlug !== primarySlug) readScopes.push(mainScope);
-    if (looksReusableTechnicalQuery(opts.content || opts.messageContent)) readScopes.push(generalScope);
+    readScopes.push(_scope(registry, generalSlug, 'general_kb', 'Reusable Engineering Memory', looksReusableTechnicalQuery(opts.content || opts.messageContent) ? 8 : 4));
   }
 
   const envelope = {
@@ -244,12 +314,15 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
     projectKey,
     channelSlug,
     channelKey,
+    userSlug,
+    userKey,
     readScopes: _dedupeScopes(readScopes),
     writeScopes: {
       defaultSlug: primarySlug || mainSlug,
       personalSlug: mainSlug,
       projectSlug,
       channelSlug,
+      userSlug,
       generalKbSlug: generalSlug,
     },
   };
@@ -270,8 +343,10 @@ function mergeMemoryEnvelope(base, patch) {
 
 module.exports = {
   normalizeGitRemote,
+  normalizeProjectRoot,
   projectIdentityFromContext,
   channelIdentityFromContext,
+  webUserIdentityFromContext,
   looksReusableTechnicalQuery,
   resolveDefaultMemoryEnvelope,
   mergeMemoryEnvelope,

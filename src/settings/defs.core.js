@@ -100,6 +100,9 @@ R({ key: 'models.videoFallback',  type: 'string', default: null, envVar: 'SPORE_
     scope: ['server', 'runtime'], group: 'models' });
 R({ key: 'modelLimits',      type: 'json',   default: null, envVar: 'SPORE_MODEL_LIMITS',
     scope: ['server', 'settings', 'runtime'], group: 'models', label: 'Per-model context limits' });
+R({ key: 'tokenPricing',     type: 'json',   default: {}, envVar: 'SPORE_TOKEN_PRICING',
+    scope: ['server', 'settings', 'runtime'], group: 'models',
+    label: 'Per-model token pricing' });
 
 // ──────────────────────────────────────────────────────────────────────
 // Providers (host-level keys; voice/embedder/email keys live in plugins)
@@ -513,5 +516,7 @@ R({ key: 'appearance.theme', type: 'enum', default: 'dark',
     // Anything not explicitly 'light' lands on 'dark'. Cleans up stale
     // values from earlier multi-theme builds without rejecting saves.
     coerce: v => String(v || '').toLowerCase() === 'light' ? 'light' : 'dark' });
+R({ key: 'nodePerformanceMetricViz', type: 'boolean', default: false,
+    scope: ['settings', 'runtime'], group: 'appearance', label: 'Node performance metric viz' });
 
 module.exports = {};

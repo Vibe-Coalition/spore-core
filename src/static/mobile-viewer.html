@@ -5,13 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Spore Core</title>
 <script src="brand.js"></script>
-<link rel="stylesheet" href="styles/base.css?v=20260429c">
+<link rel="stylesheet" href="styles/base.css?v=260506-light-ui-accent">
 <link rel="stylesheet" href="styles/onboarding.css?v=20260429c">
 <link rel="stylesheet" href="styles/layout.css?v=260504-chatfloat">
-<link rel="stylesheet" href="styles/panes.css?v=260505-dockchips">
-<link rel="stylesheet" href="styles/settings.css?v=260505-docklayer">
+<link rel="stylesheet" href="styles/panes.css?v=260506-sshcompact">
+<link rel="stylesheet" href="styles/settings.css?v=260506-settings-light-accent">
 <link rel="stylesheet" href="styles/chat.css?v=260504-chatstatus">
-<link rel="stylesheet" href="styles/graph.css?v=260505-dockchips">
+<link rel="stylesheet" href="styles/graph.css?v=260506-edgecollapse1">
 <link rel="stylesheet" href="styles/misc.css?v=260505-docklayer">
 <link rel="stylesheet" href="styles/mobile.css?v=20260429c">
 <!-- mobile-shell.css overrides everything above when body.mobile-shell.
@@ -435,6 +435,7 @@
       <span class="vm-divider" aria-hidden="true"></span>
       <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">☀</button>
     </div>
+    <canvas id="graph-webgl" aria-label="WebGL graph renderer"></canvas>
     <svg id="graph-svg"></svg>
 
 
@@ -601,6 +602,11 @@
               <button id="btn-keystore-lock" style="font-size:0.6rem;padding:2px 8px;background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer">Lock</button>
             </div>
           </div>
+          <div id="ssh-keystore-sidecar" class="ssh-keystore-sidecar" style="display:none">
+            <span class="ssh-keystore-sidecar-title">SSH Sidecar active <span id="ssh-keystore-sidecar-count"></span></span>
+            <span class="ssh-keystore-sidecar-copy">no unlock / keys isolated</span>
+          </div>
+          <div id="ssh-keystore-mode-note" class="ssh-keystore-mode-note" style="display:none"></div>
         </div>
         <div id="ssh-host-list" class="ssh-host-list"></div>
         <div id="ssh-host-form">
@@ -828,8 +834,8 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <!-- Foundation (loaded first) -->
 <script defer src="scripts/bootstrap.js?v=20260429c"></script>
-<script defer src="scripts/core.js?v=20260429c"></script>
-<script defer src="scripts/auth.js?v=20260429c"></script>
+<script defer src="scripts/core.js?v=260506-light-orange-accent"></script>
+<script defer src="scripts/auth.js?v=260506-user-graph-default"></script>
 <script defer src="scripts/tools-menu.js?v=20260429c"></script>
 
 <!-- Model library helper — must load before settings.js so the
@@ -838,25 +844,25 @@
 
 <!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
      can find the original at top-level evaluation time. -->
-<script defer src="scripts/settings.js?v=260505-graphacl"></script>
+<script defer src="scripts/settings.js?v=260506-settings-search2"></script>
 
 <!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
-<script defer src="scripts/effects.js?v=20260429c"></script>
+<script defer src="scripts/effects.js?v=260506-selfstatic1"></script>
 
 <!-- Alternate views: list + type map -->
-<script defer src="scripts/extras.js?v=20260429c"></script>
+<script defer src="scripts/extras.js?v=260506-webgledges"></script>
 
 <!-- Feature modules — wire DOM events, no top-level cross-script deps -->
-<script defer src="scripts/terminal.js?v=20260429c"></script>
+<script defer src="scripts/terminal.js?v=260506-sshcompact"></script>
 <script defer src="scripts/shared-skills.js?v=20260429c"></script>
-<script defer src="scripts/graph-picker.js?v=260505-graphacl"></script>
+<script defer src="scripts/graph-picker.js?v=260506-auto-renderer1"></script>
 <script defer src="scripts/files.js?v=20260429c"></script>
 <script defer src="scripts/right-panel.js?v=260504-logmenu"></script>
-<script defer src="scripts/voice.js?v=20260429c"></script>
-<script defer src="scripts/onboarding.js?v=260504-recallob"></script>
-<script defer src="scripts/graph.js?v=260505-viewgraphfix"></script>
-<script defer src="scripts/chat.js?v=260505-viewgraphfix"></script>
-<script defer src="scripts/panels.js?v=260505-multibackup"></script>
+<script defer src="scripts/voice.js?v=260506-busy-followup"></script>
+<script defer src="scripts/onboarding.js?v=260506-sidecar-extra"></script>
+<script defer src="scripts/graph.js?v=260506-eventcoalesce1"></script>
+<script defer src="scripts/chat.js?v=260506-empty-assistant-row"></script>
+<script defer src="scripts/panels.js?v=260506-webglresize"></script>
 
 <!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
 <script defer src="scripts/boot.js?v=20260429c"></script>
@@ -924,6 +930,11 @@ build/
   </div>
   <div class="floating-pane-body">
     <div class="settings-body">
+      <div class="settings-searchbar">
+        <input id="settings-search" type="search" placeholder="Search settings" autocomplete="off" aria-label="Search settings">
+        <button id="settings-search-clear" type="button" hidden>clear</button>
+        <span id="settings-search-count" aria-live="polite"></span>
+      </div>
       <div class="settings-tabs" id="settings-tabs"></div>
       <div class="settings-panes" id="settings-panes">
         <div class="settings-tab-pane" data-tab="profile"></div>
@@ -1125,7 +1136,7 @@ build/
         <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session graph retrieval. This adds one extra LLM round before the main answer.</div>
       </div>
 
-      <div class="settings-section" data-target-tab="agent">
+      <div class="settings-section" data-target-tab="advanced">
         <h4>Context budgets</h4>
         <div class="settings-note">Override the agent's memory budgets. Leave blank to use the auto-scaled default (which grows with the active model's context window).</div>
         <div class="settings-inline">
@@ -1218,14 +1229,25 @@ build/
       </div>
 
       <div class="settings-section wide" data-target-tab="advanced">
-        <h4>Runtime</h4>
+        <h4>Spore Runtime</h4>
         <label for="settings-runtime-public-url-input">Public URL</label>
         <input id="settings-runtime-public-url-input" type="text" placeholder="https://spore.example.com (or https://host.tld/path)">
-        <div class="settings-note">Set this so the agent knows its own external address for generating links (web_serve, graph viewer, etc.). No trailing slash.</div>
+        <div class="settings-note">Set this so the agent knows its own external address for generated links, graph viewer links, channel callbacks, and setup guidance. No trailing slash.</div>
+        <div class="settings-check">
+          <input id="settings-node-performance-metric-viz" type="checkbox">
+          <label for="settings-node-performance-metric-viz">Node performance metric viz</label>
+        </div>
+        <div class="settings-note">Shows the graph renderer/status line below the node, edge, and type totals.</div>
         <div class="settings-kv" style="margin-top:10px"><span>Agent ID</span><code id="settings-runtime-agent-id"></code></div>
         <div class="settings-kv"><span>Web Port</span><code id="settings-runtime-web-port"></code></div>
         <div class="settings-kv"><span>Workspace</span><code id="settings-runtime-workspace"></code></div>
         <div class="settings-kv"><span>Data Dir</span><code id="settings-runtime-data-dir"></code></div>
+      </div>
+
+      <div class="settings-section wide" id="settings-runtime-queue-section" data-target-tab="advanced">
+        <h4>Runtime job queue</h4>
+        <div class="settings-note">Central scheduler for web, CLI, channels, learner, wakeups, backups, and maintenance work. Lane limits and enable/disable changes apply after server restart.</div>
+        <div id="settings-core-runtime-controls"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="providers">
@@ -1436,15 +1458,15 @@ build/
         </details>
       </div>
 
-      <div class="settings-section wide" data-target-tab="advanced">
+      <div class="settings-section wide" data-target-tab="graph-memory">
         <h4 style="color:var(--danger,#ff5566)">Reset Graph</h4>
         <div class="settings-note">
-          <strong>Destructive.</strong> Wipes <em>everything</em> in this agent's graph DB — every node, aspect, attribute, edge, episode, gap, reflection — and re-applies the seeded reference nodes from <code>/app/reference-nodes.sql</code> + every <code>migrate-ref-*.sql</code>. Use this when you want to start the agent's memory from scratch (dev testing, changed your mind about training, suspected corruption, etc.). The DB file is backed up to <code>&lt;path&gt;.pre-reset.&lt;ts&gt;</code> before the wipe so the action is recoverable.
+          <strong>Destructive.</strong> Resets the core memory set: the Default graph and General Knowledge graph are wiped back to seed nodes, and every other graph is removed, including project, channel, user, and custom graphs. Each reset database is backed up before the wipe so the action is recoverable from disk.
         </div>
-        <div class="settings-note" style="margin-top:8px">Type <code>RESET</code> in the box below to enable the button. Effect is immediate, no restart needed — the live graph handle is mutated in place.</div>
+        <div class="settings-note" style="margin-top:8px">Type <code>RESET</code> in the box below to enable the button. Effect is immediate, no restart needed — the app switches back to Default when needed and refreshes the graph list.</div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
           <input id="settings-reset-confirm" type="text" placeholder="type RESET to confirm" style="flex:1" autocomplete="off">
-          <button type="button" id="settings-reset-btn" disabled style="background:var(--danger,#ff5566);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:not-allowed;opacity:0.5">Reset graph</button>
+          <button type="button" id="settings-reset-btn" disabled style="background:var(--danger,#ff5566);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:not-allowed;opacity:0.5">Reset core graphs</button>
         </div>
         <div class="settings-note" id="settings-reset-result" style="margin-top:8px;display:none"></div>
       </div>

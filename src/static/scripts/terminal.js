@@ -325,21 +325,71 @@
     if (window._ws?.readyState === 1) window._ws.send(JSON.stringify({ type: 'terminal:keystore:lock' }));
   });
 
-  function updateKeystoreUI(unlocked, source) {
+  function escapeHTML(value) {
+    return String(value ?? '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[c]));
+  }
+
+  function clearKeystoreErrors() {
+    document.querySelectorAll('.keystore-error').forEach(el => el.remove());
+    const passEl = document.getElementById('ssh-keystore-pass');
+    if (passEl) {
+      passEl.style.borderColor = '';
+      passEl.setCustomValidity('');
+    }
+  }
+
+  function updateKeystoreUI(unlocked, source, status = {}) {
     const lockedEl = document.getElementById('ssh-keystore-locked');
     const unlockedEl = document.getElementById('ssh-keystore-unlocked');
+    const sidecarEl = document.getElementById('ssh-keystore-sidecar');
+    const noteEl = document.getElementById('ssh-keystore-mode-note');
     const formEl = document.getElementById('ssh-host-form');
+    if (!lockedEl || !unlockedEl || !formEl) return;
+
+    lockedEl.style.display = 'none';
+    unlockedEl.style.display = 'none';
+    if (sidecarEl) sidecarEl.style.display = 'none';
+    if (noteEl) noteEl.style.display = 'none';
+    clearKeystoreErrors();
+
+    const sidecarReady = status.mode === 'sidecar' || (status.sidecarReady && !status.localMode);
+    if (sidecarReady) {
+      if (sidecarEl) sidecarEl.style.display = '';
+      const countEl = document.getElementById('ssh-keystore-sidecar-count');
+      if (countEl) {
+        const count = Number(status.hostCount || 0);
+        countEl.textContent = count ? `(${count} host${count === 1 ? '' : 's'})` : '';
+      }
+      formEl.style.display = '';
+      const passEl = document.getElementById('ssh-keystore-pass');
+      if (passEl) passEl.value = '';
+      return;
+    }
+
+    if (status.sidecarEnabled && !status.sidecarReady && noteEl) {
+      noteEl.textContent = status.socketPresent
+        ? 'SSH Sidecar is configured but not ready yet; local keystore fallback is active.'
+        : 'SSH Sidecar is configured but its socket is unavailable; local keystore fallback is active.';
+      noteEl.style.display = '';
+    }
+
     if (unlocked) {
-      lockedEl.style.display = 'none';
       unlockedEl.style.display = '';
       formEl.style.display = '';
       const srcEl = document.getElementById('ssh-keystore-source');
-      srcEl.textContent = source === 'webAuthPass' ? '(via login password)' : '(via session passphrase)';
-      document.getElementById('btn-keystore-lock').style.display = source === 'webAuthPass' ? 'none' : '';
-      document.getElementById('ssh-keystore-pass').value = '';
+      if (srcEl) srcEl.textContent = source === 'webAuthPass' ? '(via login password)' : '(via session passphrase)';
+      const lockBtn = document.getElementById('btn-keystore-lock');
+      if (lockBtn) lockBtn.style.display = source === 'webAuthPass' ? 'none' : '';
+      const passEl = document.getElementById('ssh-keystore-pass');
+      if (passEl) passEl.value = '';
     } else {
       lockedEl.style.display = '';
-      unlockedEl.style.display = 'none';
       formEl.style.display = 'none';
     }
   }
@@ -384,15 +434,27 @@
       container.innerHTML = '<div style="color:var(--text-dim);font-size:0.65rem">No SSH hosts configured</div>';
       return;
     }
-    container.innerHTML = hosts.map(h => `
-      <div class="ssh-host-item" data-id="${h.id}">
-        <span class="host-info">${h.name} <span style="color:var(--text-dim)">(${h.username}@${h.hostname}:${h.port})</span></span>
-        <span class="host-actions">
-          <button onclick="editSSHHost('${h.id}')">edit</button>
-          <button class="delete" onclick="deleteSSHHost('${h.id}')">del</button>
-        </span>
-      </div>
-    `).join('');
+    container.innerHTML = hosts.map(h => {
+      const auth = h.credentialId
+        ? `profile:${h.credentialId}`
+        : h.hasKey && h.hasPassword ? 'key+password'
+          : h.hasKey ? 'key'
+            : h.hasPassword ? 'password' : 'no auth';
+      const source = h.metadata?.source ? ` / ${h.metadata.source}` : '';
+      return `
+        <div class="ssh-host-item" data-id="${escapeHTML(h.id)}">
+          <span class="host-info">
+            <span class="host-name">${escapeHTML(h.name || h.id)}</span>
+            <span class="host-meta">${escapeHTML(h.username)}@${escapeHTML(h.hostname)}:${escapeHTML(h.port || 22)}${escapeHTML(source)}</span>
+            <span class="host-auth">${escapeHTML(auth)}</span>
+          </span>
+          <span class="host-actions">
+            <button onclick="editSSHHost(${escapeHTML(JSON.stringify(h.id))})">edit</button>
+            <button class="delete" onclick="deleteSSHHost(${escapeHTML(JSON.stringify(h.id))})">del</button>
+          </span>
+        </div>
+      `;
+    }).join('');
     hosts.forEach(h => {
       const opt = document.createElement('option');
       opt.value = h.id; opt.textContent = h.name;
@@ -453,6 +515,8 @@
           document.getElementById('ssh-hostname').value = h.hostname || '';
           document.getElementById('ssh-port').value = h.port || 22;
           document.getElementById('ssh-username').value = h.username || '';
+          document.getElementById('ssh-key').value = '';
+          document.getElementById('ssh-password').value = '';
         }
       }
       return true;
@@ -477,12 +541,12 @@
       return true;
     }
     if (msg.type === 'terminal:keystore:status') {
-      updateKeystoreUI(msg.unlocked, msg.source);
+      updateKeystoreUI(msg.unlocked, msg.source, msg);
       return true;
     }
     if (msg.type === 'terminal:keystore:unlocked') {
       if (msg.success) {
-        updateKeystoreUI(true, 'ui-passphrase');
+        updateKeystoreUI(true, msg.source || (msg.mode === 'sidecar' ? 'ssh-sidecar' : 'ui-passphrase'), msg);
         refreshHostList();
       } else {
         const passEl = document.getElementById('ssh-keystore-pass');

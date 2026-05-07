@@ -1,17 +1,17 @@
 // HTTP route handlers for the compute-cluster plugin.
-// Extracted verbatim from src/gateways/web.js — same endpoint
-// behavior, same response shapes, same /data/.ssh/id_cluster path.
-// Operates on host config (clusterUsername / clusterLoginHost /
-// clusterTmuxPrefix / clusterHosts / tailscaleHostname) so existing
-// .env / spore.json contents keep working out of the box.
+//
+// Cluster credentials are owned by SSHManager/ssh-sidecar, not by this
+// plugin. Generated keys are created inside the sidecar; the app process
+// receives only public key metadata. Pasted keys transit this route once
+// so the operator can import an existing key, but no route can read a
+// private key back out.
 
 const fs = require('fs');
-const path = require('path');
-const { spawn, execFileSync } = require('child_process');
 
-const SSH_DIR = '/data/.ssh';
-const KEY_PATH = path.join(SSH_DIR, 'id_cluster');
-const PUB_PATH = KEY_PATH + '.pub';
+const CLUSTER_CREDENTIAL_ID = 'cluster-default';
+const PRIMARY_CLUSTER_HOST_ID = 'cluster-login';
+const LEGACY_KEY_PATH = '/data/.ssh/id_cluster';
+const LEGACY_PUB_PATH = `${LEGACY_KEY_PATH}.pub`;
 
 async function readJson(req) {
   let body = '';
@@ -23,15 +23,158 @@ async function readJson(req) {
   return JSON.parse(body);
 }
 
+function sendJson(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+function getSshManager(api) {
+  const tools = api._appContext?.tools || null;
+  if (tools?._ensureSSHManager) return tools._ensureSSHManager();
+  if (tools?._sshManager) return tools._sshManager;
+  const gateway = tools?.gateway || api._appContext?.gateways?.getGateway?.('web') || null;
+  if (gateway?._ensureSSHManager) return gateway._ensureSSHManager();
+  return gateway?._sshManager || null;
+}
+
+function managerSidecarReady(mgr) {
+  if (!mgr) return false;
+  if (typeof mgr.isSidecarReady === 'function') return mgr.isSidecarReady();
+  const status = mgr.getStatus?.();
+  return !!(status?.sidecarReady && !status?.localMode);
+}
+
+async function ensureSidecarReady(mgr) {
+  if (!mgr) return false;
+  if (managerSidecarReady(mgr)) return true;
+  if (typeof mgr.waitForSidecarReady === 'function') return await mgr.waitForSidecarReady(1200);
+  return managerSidecarReady(mgr);
+}
+
+function sidecarRequiredMessage() {
+  return 'Compute Cluster SSH keys now require the SSH Sidecar service. Install/enable ssh-sidecar and start the sidecar service; no manual keystore unlock is needed.';
+}
+
+function slug(value, fallback = 'cluster') {
+  const s = String(value || fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return s || fallback;
+}
+
+function clusterProxy() {
+  if (String(process.env.SPORE_CLUSTER_SSH_PROXY || '').toLowerCase() === 'none') return null;
+  const host = process.env.SPORE_CLUSTER_SOCKS_HOST || '127.0.0.1';
+  const port = Number(process.env.SPORE_CLUSTER_SOCKS_PORT || 1055);
+  return { type: 'socks5', host, port };
+}
+
+function computeHostEntries(cfg, credentialReady) {
+  if (!credentialReady) return [];
+  const proxy = clusterProxy();
+  const entries = [];
+  const username = String(cfg.clusterUsername || '').trim();
+  const loginHost = String(cfg.clusterLoginHost || '').trim();
+  if (username && loginHost) {
+    entries.push({
+      id: PRIMARY_CLUSTER_HOST_ID,
+      name: 'Cluster login',
+      hostname: loginHost,
+      port: 22,
+      username,
+      credentialId: CLUSTER_CREDENTIAL_ID,
+      proxy,
+      metadata: { source: 'compute-cluster', role: 'primary' },
+    });
+  }
+
+  const extra = Array.isArray(cfg.clusterHosts) ? cfg.clusterHosts : [];
+  extra.forEach((h, idx) => {
+    if (!h || typeof h !== 'object') return;
+    const hostname = String(h.host || '').trim();
+    if (!hostname) return;
+    const name = String(h.name || hostname).trim();
+    entries.push({
+      id: `cluster-${slug(name || hostname || idx, `host-${idx + 1}`)}`,
+      name,
+      hostname,
+      port: 22,
+      username: String(h.username || username || '').trim(),
+      credentialId: CLUSTER_CREDENTIAL_ID,
+      proxy,
+      metadata: { source: 'compute-cluster', role: 'additional' },
+    });
+  });
+
+  return entries.filter(h => h.username && h.hostname);
+}
+
+async function getClusterCredential(mgr) {
+  if (!mgr?.getCredentialPublic || !(await ensureSidecarReady(mgr))) {
+    return { id: CLUSTER_CREDENTIAL_ID, hasPrivate: false, publicKey: null, fingerprint: null, error: sidecarRequiredMessage() };
+  }
+  return await mgr.getCredentialPublic(CLUSTER_CREDENTIAL_ID);
+}
+
+async function migrateLegacyCredential(api, mgr, credential) {
+  if (!(await ensureSidecarReady(mgr)) || credential?.hasPrivate || !fs.existsSync(LEGACY_KEY_PATH)) return { credential, migrated: false };
+  try {
+    const privateKey = fs.readFileSync(LEGACY_KEY_PATH, 'utf8');
+    const imported = await mgr.saveCredentialPrivateKey({
+      id: CLUSTER_CREDENTIAL_ID,
+      name: 'Compute Cluster',
+      privateKey,
+      metadata: { source: 'compute-cluster', migratedFrom: LEGACY_KEY_PATH },
+    });
+    try { fs.unlinkSync(LEGACY_KEY_PATH); } catch {}
+    try { fs.unlinkSync(LEGACY_PUB_PATH); } catch {}
+    api.getLogger().info('Migrated legacy cluster SSH key into ssh-sidecar credential profile and removed /data/.ssh/id_cluster');
+    return { credential: imported, migrated: true };
+  } catch (e) {
+    api.getLogger().warn(`Legacy cluster key migration failed: ${e.message}`);
+    return { credential: { ...credential, error: e.message }, migrated: false };
+  }
+}
+
+async function syncClusterHosts(api, opts = {}) {
+  const cfg = api._appContext?.config || {};
+  const mgr = getSshManager(api);
+  if (!mgr) throw new Error('SSH manager not available');
+  if (opts.requireSidecar && !(await ensureSidecarReady(mgr))) throw new Error(sidecarRequiredMessage());
+
+  let credential = await getClusterCredential(mgr);
+  const migration = await migrateLegacyCredential(api, mgr, credential);
+  credential = migration.credential;
+
+  const desired = computeHostEntries(cfg, !!credential?.hasPrivate);
+  const desiredIds = new Set(desired.map(h => h.id));
+  for (const host of desired) {
+    await mgr.saveHost(host);
+  }
+
+  try {
+    const existing = await mgr.listHosts();
+    for (const host of existing || []) {
+      if (host?.metadata?.source !== 'compute-cluster') continue;
+      if (!desiredIds.has(host.id)) await mgr.deleteHost(host.id);
+    }
+  } catch (e) {
+    api.getLogger().warn(`cluster host cleanup failed: ${e.message}`);
+  }
+
+  return { mgr, credential, hosts: desired, migrated: migration.migrated };
+}
+
 function getSettings(api, req, res) {
   const cfg = api._appContext?.config || {};
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    clusterUsername:   cfg.clusterUsername || '',
-    clusterLoginHost:  cfg.clusterLoginHost || '',
+  sendJson(res, 200, {
+    clusterUsername: cfg.clusterUsername || '',
+    clusterLoginHost: cfg.clusterLoginHost || '',
     clusterTmuxPrefix: cfg.clusterTmuxPrefix || 'spore',
     clusterHosts: Array.isArray(cfg.clusterHosts) ? cfg.clusterHosts : [],
-  }));
+  });
 }
 
 async function postSettings(api, req, res) {
@@ -41,15 +184,13 @@ async function postSettings(api, req, res) {
     const cfg = api._appContext?.config || {};
     const envUpd = {};
     const updates = {};
-    if ('clusterUsername'  in body) { updates.clusterUsername  = clean(body.clusterUsername)  || null; envUpd.SPORE_CLUSTER_USERNAME    = clean(body.clusterUsername); }
-    if ('clusterLoginHost' in body) { updates.clusterLoginHost = clean(body.clusterLoginHost) || null; envUpd.SPORE_CLUSTER_LOGIN_HOST  = clean(body.clusterLoginHost); }
+    if ('clusterUsername' in body) { updates.clusterUsername = clean(body.clusterUsername) || null; envUpd.SPORE_CLUSTER_USERNAME = clean(body.clusterUsername); }
+    if ('clusterLoginHost' in body) { updates.clusterLoginHost = clean(body.clusterLoginHost) || null; envUpd.SPORE_CLUSTER_LOGIN_HOST = clean(body.clusterLoginHost); }
     if ('clusterTmuxPrefix' in body) {
       const p = clean(body.clusterTmuxPrefix).replace(/[^a-zA-Z0-9_-]/g, '') || 'spore';
       updates.clusterTmuxPrefix = p;
       envUpd.SPORE_CLUSTER_TMUX_PREFIX = p;
     }
-    // tailscaleHostname now owned by the tailscale plugin (POST
-    // /api/tailscale/settings). Cleanly separated.
     Object.assign(cfg, updates);
     try {
       const gw = api._appContext?.tools?.gateway;
@@ -57,11 +198,18 @@ async function postSettings(api, req, res) {
         gw._applyEnvUpdates(envUpd);
       }
     } catch (e) { api.getLogger().warn('cluster-settings persist failed: ' + e.message); }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, saved: updates }));
+
+    let ssh = null;
+    try {
+      const synced = await syncClusterHosts(api);
+      ssh = { credentialReady: !!synced.credential?.hasPrivate, hosts: synced.hosts.map(h => h.id), migrated: synced.migrated };
+    } catch (e) {
+      ssh = { error: e.message };
+    }
+
+    sendJson(res, 200, { ok: true, saved: updates, ssh });
   } catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    sendJson(res, 500, { error: e.message });
   }
 }
 
@@ -74,8 +222,8 @@ async function postHosts(api, req, res) {
     for (const h of hosts) {
       if (!h || typeof h !== 'object') continue;
       const entry = {
-        name:     String(h.name || '').trim().slice(0, 64),
-        host:     String(h.host || '').trim().slice(0, 128),
+        name: String(h.name || '').trim().slice(0, 64),
+        host: String(h.host || '').trim().slice(0, 128),
         username: String(h.username || '').trim().slice(0, 64),
       };
       if (!entry.host && !entry.name) continue;
@@ -89,11 +237,18 @@ async function postHosts(api, req, res) {
         gw._applyEnvUpdates({ SPORE_CLUSTER_HOSTS: JSON.stringify(cleanList) });
       }
     } catch (e) { api.getLogger().warn('cluster-hosts persist failed: ' + e.message); }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, hosts: cleanList }));
+
+    let ssh = null;
+    try {
+      const synced = await syncClusterHosts(api);
+      ssh = { credentialReady: !!synced.credential?.hasPrivate, hosts: synced.hosts.map(h => h.id), migrated: synced.migrated };
+    } catch (e) {
+      ssh = { error: e.message };
+    }
+
+    sendJson(res, 200, { ok: true, hosts: cleanList, ssh });
   } catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    sendJson(res, 500, { error: e.message });
   }
 }
 
@@ -101,97 +256,89 @@ async function postTestSsh(api, req, res) {
   try {
     const body = await readJson(req).catch(() => ({}));
     const cfg = api._appContext?.config || {};
-    const user = String(body.user || cfg.clusterUsername || '').trim();
-    const host = String(body.host || cfg.clusterLoginHost || '').trim();
-    if (!user || !host) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'username and host required (set Cluster settings first)' }));
+    if (body.user) cfg.clusterUsername = String(body.user || '').trim();
+    if (body.host) cfg.clusterLoginHost = String(body.host || '').trim();
+
+    if (!cfg.clusterUsername || !cfg.clusterLoginHost) {
+      sendJson(res, 400, { ok: false, error: 'username and host required (set Cluster settings first)' });
       return;
     }
-    const hasKey = fs.existsSync(KEY_PATH);
-    // Route through tailscale's local SOCKS5 proxy so MagicDNS names
-    // resolve against the tailnet and the outbound connection rides
-    // the userspace-networking tailscale stack.
-    const sshArgs = [
-      '-o', 'BatchMode=yes',
-      '-o', 'ConnectTimeout=12',
-      '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'UserKnownHostsFile=/data/.ssh/known_hosts',
-      '-o', 'ProxyCommand=nc -X 5 -x 127.0.0.1:1055 %h %p',
-    ];
-    if (hasKey) sshArgs.push('-i', KEY_PATH, '-o', 'IdentitiesOnly=yes');
-    sshArgs.push(`${user}@${host}`, 'hostname; which sbatch || echo no-slurm; sinfo --version 2>/dev/null || echo no-sinfo');
-    const proc = spawn('ssh', sshArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    proc.stdout.on('data', c => { out += c.toString(); });
-    proc.stderr.on('data', c => { err += c.toString(); });
-    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 20000);
-    const code = await new Promise((r) => { proc.on('close', (c) => { clearTimeout(timer); r(c); }); });
-    const output = (out || '').trim();
-    const stderr = (err || '').trim();
-    let hint = null;
-    if (code !== 0) {
-      if (/could not resolve hostname|getaddrinfo/i.test(stderr)) {
-        hint = 'Hostname did not resolve via MagicDNS. Verify the tailscale plugin is installed + connected (Settings → Tailscale).';
-      } else if (/Permission denied|publickey/i.test(stderr)) {
-        hint = hasKey
-          ? 'SSH auth rejected. Make sure the public key (settings → Copy SSH public key) is in ~/.ssh/authorized_keys on the cluster login node.'
-          : 'No SSH key installed. Click "Generate SSH key" below, copy the public key, and install it on the cluster (~/.ssh/authorized_keys).';
-      } else {
-        hint = 'SSH failed. If the hostname is unreachable, verify tailscale is connected. Otherwise check the cluster username and that your public key is authorised.';
-      }
+
+    const synced = await syncClusterHosts(api, { requireSidecar: true });
+    if (!synced.credential?.hasPrivate) {
+      sendJson(res, 400, {
+        ok: false,
+        error: 'No cluster SSH credential installed',
+        hint: 'Generate a key, copy the public key to ~/.ssh/authorized_keys on the cluster login node, then test again.',
+      });
+      return;
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ok: code === 0,
-      code,
+
+    const hostId = body.hostId || PRIMARY_CLUSTER_HOST_ID;
+    const result = await synced.mgr.remoteExec(hostId, 'hostname; which sbatch || echo no-slurm; sinfo --version 2>/dev/null || echo no-sinfo', { timeout: 20000 });
+    const output = [result.stdout, result.stderr ? `--- stderr ---\n${result.stderr}` : ''].filter(Boolean).join('\n').trim();
+    sendJson(res, 200, {
+      ok: (result.exitCode ?? 0) === 0,
+      code: result.exitCode ?? 0,
       output: output.slice(0, 800),
-      stderr: stderr.slice(0, 800),
-      usedKey: hasKey ? KEY_PATH : null,
-      hint,
-    }));
+      stderr: String(result.stderr || '').trim().slice(0, 800),
+      usedKey: CLUSTER_CREDENTIAL_ID,
+      hostId,
+      migrated: synced.migrated,
+    });
   } catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    const msg = e.message || String(e);
+    let hint = 'SSH failed. Verify Tailscale is connected, the cluster username/login host are correct, and the public key is authorized on the login node.';
+    if (/sidecar/i.test(msg)) hint = sidecarRequiredMessage();
+    else if (/could not resolve|getaddrinfo|ENOTFOUND/i.test(msg)) hint = 'Hostname did not resolve. Verify the Tailscale plugin is installed, connected, and MagicDNS is enabled.';
+    else if (/Permission denied|publickey|All configured authentication methods failed/i.test(msg)) hint = 'SSH auth rejected. Copy the public key from settings into ~/.ssh/authorized_keys on the cluster login node.';
+    sendJson(res, 200, { ok: false, code: 1, stderr: msg.slice(0, 800), hint, usedKey: CLUSTER_CREDENTIAL_ID });
   }
 }
 
-function getSshKey(api, req, res) {
+async function getSshKey(api, req, res) {
   try {
-    const hasPrivate = fs.existsSync(KEY_PATH);
-    let publicKey = null, fingerprint = null;
-    if (fs.existsSync(PUB_PATH)) {
-      try { publicKey = fs.readFileSync(PUB_PATH, 'utf8').trim(); } catch {}
+    const mgr = getSshManager(api);
+    if (!mgr) {
+      sendJson(res, 200, { hasPrivate: false, publicKey: null, fingerprint: null, credentialId: CLUSTER_CREDENTIAL_ID, sidecarReady: false, error: 'SSH manager not available' });
+      return;
     }
-    if (hasPrivate) {
-      try { fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim(); } catch {}
+    let credential = await getClusterCredential(mgr);
+    const migration = await migrateLegacyCredential(api, mgr, credential);
+    credential = migration.credential;
+    if (migration.migrated) {
+      try { await syncClusterHosts(api); } catch (e) { api.getLogger().warn(`cluster host sync after migration failed: ${e.message}`); }
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ hasPrivate, publicKey, fingerprint }));
+    sendJson(res, 200, {
+      hasPrivate: !!credential?.hasPrivate,
+      publicKey: credential?.publicKey || null,
+      fingerprint: credential?.fingerprint || null,
+      credentialId: CLUSTER_CREDENTIAL_ID,
+      backend: 'ssh-sidecar',
+      sidecarReady: await ensureSidecarReady(mgr),
+      migrated: migration.migrated,
+      error: credential?.error || null,
+    });
   } catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    sendJson(res, 500, { error: e.message });
   }
 }
 
-function postSshKeyGenerate(api, req, res) {
+async function postSshKeyGenerate(api, req, res) {
   try {
     const cfg = api._appContext?.config || {};
-    fs.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(SSH_DIR, 0o700); } catch {}
-    try { fs.unlinkSync(KEY_PATH); } catch {}
-    try { fs.unlinkSync(PUB_PATH); } catch {}
-    const comment = `spore-cluster-${cfg.agentId || 'agent'}`;
-    execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', comment, '-f', KEY_PATH], { stdio: ['ignore', 'pipe', 'pipe'] });
-    try { fs.chmodSync(KEY_PATH, 0o600); } catch {}
-    try { fs.chmodSync(PUB_PATH, 0o644); } catch {}
-    const publicKey = fs.readFileSync(PUB_PATH, 'utf8').trim();
-    const fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, publicKey, fingerprint }));
+    const mgr = getSshManager(api);
+    if (!mgr || !(await ensureSidecarReady(mgr))) throw new Error(sidecarRequiredMessage());
+    const credential = await mgr.generateCredential({
+      id: CLUSTER_CREDENTIAL_ID,
+      name: 'Compute Cluster',
+      comment: `spore-cluster-${cfg.agentId || 'agent'}`,
+      metadata: { source: 'compute-cluster' },
+    });
+    const synced = await syncClusterHosts(api, { requireSidecar: true });
+    sendJson(res, 200, { ok: true, publicKey: credential.publicKey, fingerprint: credential.fingerprint, hosts: synced.hosts.map(h => h.id) });
   } catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    sendJson(res, 500, { error: e.message });
   }
 }
 
@@ -199,43 +346,30 @@ async function postSshKey(api, req, res) {
   try {
     const body = await readJson(req);
     const privateKey = String(body.privateKey || '').trim();
-    if (!privateKey.startsWith('-----BEGIN') || !privateKey.includes('PRIVATE KEY-----')) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'input does not look like an SSH private key (expected PEM with BEGIN/END PRIVATE KEY markers)' }));
-      return;
-    }
-    fs.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(SSH_DIR, 0o700); } catch {}
-    fs.writeFileSync(KEY_PATH, privateKey.endsWith('\n') ? privateKey : privateKey + '\n', { mode: 0o600 });
-    try { fs.chmodSync(KEY_PATH, 0o600); } catch {}
-    let publicKey = null, fingerprint = null;
-    try {
-      publicKey = execFileSync('ssh-keygen', ['-y', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
-      fs.writeFileSync(PUB_PATH, publicKey + '\n', { mode: 0o644 });
-      fingerprint = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { encoding: 'utf8' }).trim();
-    } catch (e) {
-      try { fs.unlinkSync(KEY_PATH); } catch {}
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Could not derive public key — is this an encrypted / passphrase-protected key? Decrypt it first (`ssh-keygen -p -f key`) or paste an unencrypted version.' }));
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, publicKey, fingerprint }));
+    const mgr = getSshManager(api);
+    if (!mgr || !(await ensureSidecarReady(mgr))) throw new Error(sidecarRequiredMessage());
+    const credential = await mgr.saveCredentialPrivateKey({
+      id: CLUSTER_CREDENTIAL_ID,
+      name: 'Compute Cluster',
+      privateKey,
+      metadata: { source: 'compute-cluster', imported: true },
+    });
+    const synced = await syncClusterHosts(api, { requireSidecar: true });
+    sendJson(res, 200, { ok: true, publicKey: credential.publicKey, fingerprint: credential.fingerprint, hosts: synced.hosts.map(h => h.id) });
   } catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    sendJson(res, 500, { error: e.message });
   }
 }
 
-function deleteSshKey(api, req, res) {
+async function deleteSshKey(api, req, res) {
   try {
-    try { fs.unlinkSync(KEY_PATH); } catch {}
-    try { fs.unlinkSync(PUB_PATH); } catch {}
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
+    const mgr = getSshManager(api);
+    if (!mgr || !(await ensureSidecarReady(mgr))) throw new Error(sidecarRequiredMessage());
+    await mgr.deleteCredential(CLUSTER_CREDENTIAL_ID);
+    await syncClusterHosts(api, { requireSidecar: true });
+    sendJson(res, 200, { ok: true });
   } catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    sendJson(res, 500, { error: e.message });
   }
 }
 

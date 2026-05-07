@@ -1,6 +1,14 @@
 -- Idempotently add web-chat media and built-in panel behavior docs to
 -- reference nodes. Re-running is a no-op.
 
+-- The old ref-code-viewer node was too much graph surface for a built-in UI
+-- behavior. Keep the behavior as one line on ref-tool-workflows instead.
+DELETE FROM edges WHERE source = 'ref-code-viewer' OR target = 'ref-code-viewer';
+DELETE FROM attributes WHERE aspect_id IN (SELECT id FROM aspects WHERE node_id = 'ref-code-viewer');
+DELETE FROM aspects WHERE node_id = 'ref-code-viewer';
+DELETE FROM aliases WHERE node_id = 'ref-code-viewer';
+DELETE FROM nodes WHERE id = 'ref-code-viewer';
+
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
 VALUES ('ref-image-display', 'Displaying Images in Chat', 'reference',
   'How to render images and media inline in the web control panel.', 8, 'seed');
@@ -42,27 +50,35 @@ WHERE NOT EXISTS (
   WHERE asp.node_id = 'ref-image-display' AND a.content LIKE 'User uploads are saved under `/workspace/uploads`%'
 );
 
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-code-viewer', 'Code Viewer Panel', 'reference',
-  'A built-in floating panel in the web control panel that automatically displays code when read_file, write_file, or edit_file are used.', 9, 'seed');
+DELETE FROM attributes
+WHERE aspect_id IN (
+  SELECT id FROM aspects
+  WHERE node_id = 'ref-tool-workflows'
+    AND name = 'tool_selection'
+)
+  AND content LIKE 'The user controls code-viewer mode%';
 
-INSERT INTO aspects (node_id, name, weight, extracted_with)
-SELECT 'ref-code-viewer', 'how_it_works', 9, 'seed'
-WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-code-viewer' AND name = 'how_it_works');
+DELETE FROM attributes
+WHERE aspect_id IN (
+  SELECT id FROM aspects
+  WHERE node_id = 'ref-tool-workflows'
+    AND name = 'tool_selection'
+)
+  AND content LIKE 'The code viewer is automatic:%';
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
-SELECT (SELECT id FROM aspects WHERE node_id = 'ref-code-viewer' AND name = 'how_it_works' ORDER BY id LIMIT 1),
-       'The user controls code-viewer mode in the web panel: Auto, On request, or Off. The agent should use file tools normally and not build a custom code viewer.', 9, 'seed', 'seed'
-WHERE NOT EXISTS (
+SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'tool_selection' ORDER BY id LIMIT 1),
+       'In the web panel, read_file/write_file/edit_file automatically create code-viewer tabs; use file tools normally and do not build a custom viewer.', 8, 'seed', 'seed'
+WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'tool_selection')
+  AND NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
-  WHERE asp.node_id = 'ref-code-viewer' AND a.content LIKE 'The user controls code-viewer mode%'
+  WHERE asp.node_id = 'ref-tool-workflows'
+    AND asp.name = 'tool_selection'
+    AND a.content LIKE 'In the web panel, read_file/write_file/edit_file automatically create code-viewer tabs%'
 );
 
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
 VALUES ('spore', 'ref-image-display', 'documents', 0.8, 'seed');
-
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with)
-VALUES ('spore', 'ref-code-viewer', 'documents', 0.8, 'seed');
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-browser-automation' AND name = 'usage' ORDER BY id LIMIT 1),

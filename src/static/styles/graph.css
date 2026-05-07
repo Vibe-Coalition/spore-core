@@ -21,6 +21,100 @@
   #canvas #graph-svg {
     transition: opacity 160ms ease, filter 160ms ease;
   }
+  #canvas #graph-webgl {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: none;
+    z-index: 1;
+    cursor: grab;
+    touch-action: none;
+    transition: opacity 160ms ease, filter 160ms ease;
+  }
+  #canvas #graph-webgl:active { cursor: grabbing; }
+  #canvas.webgl-active #graph-webgl { display: block; }
+  #canvas.webgl-active #graph-svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2;
+    opacity: 1;
+    pointer-events: none;
+  }
+  #canvas.webgl-active #graph-svg .webgl-overlay-ring {
+    stroke-width: 2;
+    stroke-dasharray: 5 4;
+    filter: drop-shadow(0 0 5px rgba(var(--hl-rgb), .28));
+  }
+  #canvas.webgl-active #graph-svg .webgl-overlay-label {
+    fill: var(--text);
+    stroke: var(--graph-bg);
+    stroke-width: 4px;
+    paint-order: stroke fill;
+    font-family: var(--font-body);
+    font-size: 12px;
+    font-weight: 650;
+    pointer-events: none;
+    user-select: none;
+  }
+  #canvas.webgl-active #graph-svg .webgl-overlay-item[data-kind="search"] .webgl-overlay-label {
+    fill: var(--accent2);
+    font-size: 11px;
+  }
+  #canvas.webgl-active #graph-svg .webgl-overlay-item[data-kind="auto"] .webgl-overlay-ring {
+    opacity: 0;
+  }
+  #canvas.webgl-active #graph-svg .webgl-overlay-item[data-kind="auto"] .webgl-overlay-label {
+    fill: var(--text-dim);
+    font-size: 10.5px;
+    font-weight: 600;
+    opacity: .86;
+  }
+  #canvas.webgl-active #graph-svg .webgl-type-label {
+    fill: var(--text);
+    stroke: var(--graph-bg);
+    stroke-width: 5px;
+    paint-order: stroke fill;
+    font-family: var(--font-body);
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 0;
+    opacity: .62;
+    text-anchor: middle;
+    dominant-baseline: central;
+    pointer-events: none;
+    user-select: none;
+  }
+  #canvas .graph-renderer-snapshot {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 6;
+    pointer-events: none;
+    opacity: 1;
+    filter: none;
+    transform: scale(1);
+    transform-origin: center;
+    transition: opacity 260ms ease, filter 260ms ease, transform 260ms ease;
+  }
+  #canvas.graph-renderer-entering.view-graph #graph-svg,
+  #canvas.graph-renderer-entering.view-graph #graph-webgl {
+    opacity: 0;
+    filter: blur(5px);
+  }
+  #canvas.graph-renderer-revealing.view-graph #graph-svg,
+  #canvas.graph-renderer-revealing.view-graph #graph-webgl {
+    opacity: 1;
+    filter: none;
+  }
+  #canvas.graph-renderer-fading .graph-renderer-snapshot {
+    opacity: 0;
+    filter: blur(6px);
+    transform: scale(1.006);
+  }
   #canvas.graph-transitioning.view-graph #graph-svg,
   #canvas.graph-transitioning.view-list #view-list,
   #canvas.graph-transitioning.view-typemap #view-typemap,
@@ -28,10 +122,23 @@
     opacity: 0;
     filter: blur(6px);
   }
+  #canvas.graph-structure-transitioning.view-graph #graph-svg,
+  #canvas.graph-structure-transitioning.view-graph #graph-webgl {
+    opacity: 0;
+    filter: blur(8px);
+  }
+  #canvas.graph-structure-revealing.view-graph #graph-svg,
+  #canvas.graph-structure-revealing.view-graph #graph-webgl {
+    opacity: 1;
+    filter: none;
+  }
   @media (prefers-reduced-motion: reduce) {
-    #canvas #graph-svg {
+    #canvas #graph-svg,
+    #canvas #graph-webgl,
+    #canvas .graph-renderer-snapshot {
       transition: none;
       filter: none !important;
+      transform: none !important;
     }
   }
   #graph-svg.is-marquee-selecting { cursor: crosshair; }
@@ -210,6 +317,7 @@
     transition: opacity .24s ease;
   }
   #canvas:not(.view-graph) #graph-svg,
+  #canvas:not(.view-graph) #graph-webgl,
   #canvas:not(.view-graph) #search,
   #canvas:not(.view-graph) #event-feed,
   #canvas:not(.view-graph) #stats {
@@ -221,6 +329,7 @@
 
   /* In non-graph modes, hide graph-only controls (filter/center/+node/separator). */
   #canvas:not(.view-graph) #filter-type,
+  #canvas:not(.view-graph) #timeline-filter,
   #canvas:not(.view-graph) #btn-center,
   #canvas:not(.view-graph) #btn-new-node,
   #canvas:not(.view-graph) #controls > span { display: none !important; }
@@ -230,6 +339,7 @@
      content inside each view applies its own padding-top to clear it. */
   #view-list, #view-typemap, #view-work {
     position: absolute; inset: 0; box-sizing: border-box;
+    z-index: 1;
     opacity: 0; pointer-events: none; transform: translateY(6px);
     transition: opacity .24s ease, transform .28s cubic-bezier(.4,.05,.2,1), filter 160ms ease;
   }
@@ -570,6 +680,14 @@
     font-size: 10px; opacity: .8;
   }
   .tm-bubble-dot { pointer-events: none; }
+  .tm-sample-note {
+    font-family: var(--font-body);
+    font-size: 11px;
+    fill: var(--text-dim);
+    opacity: .72;
+    pointer-events: none;
+    user-select: none;
+  }
   .tm-edge { fill: none; pointer-events: none; transition: stroke-opacity .15s; stroke-linecap: round; }
   .tm-edge.tm-edge-hi { stroke-opacity: .9 !important; }
   .tm-edge.tm-edge-dim { stroke-opacity: .03 !important; }
@@ -652,6 +770,40 @@
     user-select: none;
   }
   .stats-line:hover { color: var(--text); }
+  .graph-mode-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    padding: 3px 6px;
+    border: 1px solid var(--border-subtle, var(--border));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--surface) 82%, transparent);
+    color: var(--text-dim);
+    font-family: var(--font-body);
+  }
+  .graph-mode-line[data-truncated="true"] {
+    color: var(--text);
+  }
+  .graph-mode-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .graph-mode-actions button {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 0.66rem;
+    padding: 1px 6px;
+    cursor: pointer;
+  }
+  .graph-mode-actions button:hover {
+    border-color: var(--accent);
+    color: var(--text);
+  }
   .stats-chevron {
     display: inline-block; width: 10px; font-size: 9px; opacity: .55;
     transition: transform .15s;
@@ -1133,6 +1285,13 @@
   .edge-new {
     animation: graphEdgeAppear .42s ease-out both;
   }
+  #graph-svg g.links line.edge-connect-pending {
+    opacity: 0;
+  }
+  #graph-svg g.links line.edge-connecting {
+    opacity: 1;
+    will-change: stroke-dashoffset, stroke-width;
+  }
 
   /* ── Self-node = F01 "Six-petal" Spore mark.
      Spec lives in the spore logo + node design spec.
@@ -1219,23 +1378,44 @@
      truth. EDGE_KIND opacity (0.45/0.6/0.85) lives on the line element. */
   #graph-svg g.links line {
     stroke: var(--text);
-    stroke-width: 0.6;
+    stroke-width: 0.05;
+  }
+  #graph-svg g.links line.hybrid-context-edge {
+    stroke-opacity: 0.18;
+  }
+  #graph-svg .graph-node.hybrid-context-node {
+    opacity: 0.42;
+  }
+  #graph-svg .graph-node.hybrid-context-node .node-label,
+  #graph-svg .graph-node.hybrid-context-node .node-sub-label {
+    display: none;
+  }
+  #graph-svg .graph-node[data-culled="true"],
+  #graph-svg g.links line[data-culled="true"] {
+    display: none;
   }
   #graph-svg defs #arrowhead path { fill: var(--text); fill-opacity: 0.55; }
 
   /* Selected node edge highlighting */
-  .edge-highlighted { stroke: var(--accent) !important; stroke-width: 1.4 !important; stroke-opacity: 0.85 !important; }
+  .edge-highlighted { stroke: var(--text) !important; stroke-opacity: 0.68 !important; }
   /* Petri focus: dim non-neighbor nodes/edges when something's selected so
      attention follows the picked node and its one-hop context. */
   .node-faded { opacity: 0.22; transition: opacity 180ms ease; }
   .edge-faded { stroke-opacity: 0.10 !important; transition: stroke-opacity 180ms ease; }
-  .focus-edge-label {
-    font-family: var(--font-body); font-size: 9.5px; letter-spacing: 0.04em;
-    fill: var(--text-dim, #8a8aa0); pointer-events: none; user-select: none;
-    /* Halo stroke matches the active canvas surface so labels remain
-       readable in both themes (was hardcoded near-black for dark only). */
-    paint-order: stroke fill; stroke: var(--graph-bg); stroke-opacity: 0.85;
-    stroke-width: 3px; stroke-linejoin: round;
+  .focus-edge-label { pointer-events: none; user-select: none; }
+  .focus-edge-label-bg {
+    display: none;
+  }
+  .focus-edge-label-text {
+    font-family: var(--font-body);
+    font-size: 11.75px;
+    font-weight: 560;
+    letter-spacing: 0;
+    fill: color-mix(in srgb, var(--text-dim) 90%, transparent);
+    stroke: color-mix(in srgb, var(--graph-bg) 88%, transparent);
+    stroke-width: 2px;
+    paint-order: stroke fill;
+    opacity: 0.82;
   }
   .node-selected-multi .node-circle {
     stroke: var(--accent2) !important;

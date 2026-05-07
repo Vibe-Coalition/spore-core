@@ -193,7 +193,7 @@ function flattenWizardPayload(body) {
   const out = {};
 
   // Pass-through scalars (registry keys match wizard keys 1:1).
-  for (const k of ['displayName', 'enhancedRecall', 'modelLimits', 'embedder', 'agentEffort', 'agentBornDate', 'publicUrl']) {
+  for (const k of ['displayName', 'enhancedRecall', 'modelLimits', 'tokenPricing', 'embedder', 'agentEffort', 'agentBornDate', 'publicUrl']) {
     if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
   }
   if (Object.prototype.hasOwnProperty.call(body, 'inviteKey')) out.inviteKey = body.inviteKey;

@@ -380,6 +380,9 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'Nodes = entities. Aspects = facets of a node. Attributes = facts within an aspect.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Edges connect nodes with typed relationships.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Gaps are open questions stored on nodes — things to explore.', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'A separate protected General Knowledge Base graph exists at slug spore-knowledge-base. Query it with graph_query({ graph: "spore-knowledge-base", mode: "overview", limit: 20, offset: 0 }) for reusable tool, workflow, provider, plugin, UI, and app-behavior knowledge.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'When the user asks about shared graph knowledge, reusable lessons, or graph-distilled skills, inspect the General Knowledge Base directly. Use graph_query({ graph: "spore-knowledge-base", type: "skill" }) for stored skill nodes, or graph_query({ graph: "spore-knowledge-base", query: "skill" }) for broader skill-related matches. Do not describe the General Knowledge Base as empty if overview/type results returned nodes.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use graph_query({ mode: "graphs" }) to list available graph scopes. Do not inspect /data/graphs or _registry.json with shell commands for normal graph discovery.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use graph_update tool to persist new knowledge. Tag with extracted_with.', 8, 'seed', 'seed');
 
 
@@ -514,48 +517,6 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'Use cron for scheduled triggers; use startup_tasks for persistent daemons. They solve different problems.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'startup_tasks stores its registry in /data/.startup-tasks.json and replays it after boot.', 8, 'seed', 'seed');
 
--- NODE: Cross-Agent Messaging
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-cross-agent-messaging', 'Cross-Agent Messaging', 'reference',
-  'Reliable messaging between agent instances using graph inbox nodes instead of ephemeral spore_message.', 7, 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-cross-agent-messaging', 'pattern', 8, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'spore_message is sync and ephemeral — if target is busy/offline, message vanishes', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Better: use a {name}-inbox node in each agent''s graph as a persistent message queue', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Message format: sender|ISO-timestamp|content|ack:bool|relayed:bool', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Send: graph_update target-inbox with new message attribute', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Receive: check your own inbox node at conversation start, mark ack:true when read', 7, 'seed', 'seed');
-
--- NODE: Code Viewer Panel
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-code-viewer', 'Code Viewer Panel', 'reference',
-  'A built-in floating panel in the web control panel that automatically displays code when you use read_file, write_file, or edit_file.', 9, 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-code-viewer', 'how_it_works', 9, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'The code viewer is AUTOMATIC — it activates whenever you call read_file, write_file, or edit_file. You do NOT need to build it.', 10, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'read_file: shows the file content with syntax highlighting and line numbers in a floating panel (badge: READ)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'write_file: shows the new file content in the panel (badge: NEW)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'edit_file: shows a unified diff with green (added) and red (removed) lines (badge: EDIT)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'The panel supports tabs — multiple files appear as tabs the user can switch between', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'It is draggable, resizable, and remembers position across sessions', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Files over 50KB or binary files are silently skipped — no panel for those', 7, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'If a user asks to "see the code" or "show me the diff", just use read_file or edit_file — the panel does the rest', 9, 'seed', 'seed');
-
--- NODE: Token Efficiency
-INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
-VALUES ('ref-token-efficiency', 'Token Efficiency', 'reference',
-  'Rules for keeping token usage low and being cost-effective.', 8, 'seed');
-
-INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-token-efficiency', 'rules', 9, 'seed');
-INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
-  ((SELECT MAX(id) FROM aspects), 'Read a skill ONCE, cache the key facts in your graph, never re-fetch', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Don''t re-read files you just wrote', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Keep responses concise — long explanations burn output tokens for you and input tokens next turn', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Use delegate_task for heavy work — runs in separate context', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Cache operational knowledge in your graph — don''t rely on re-fetching the same info every session', 9, 'seed', 'seed');
-
 -- NODE: Tool Workflows
 INSERT OR IGNORE INTO nodes (id, label, type, description, importance, extracted_with)
 VALUES ('ref-tool-workflows', 'Tool Workflows', 'reference',
@@ -566,6 +527,7 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'Use edit_file for modifications to existing files; use write_file only for brand-new files. Rewriting whole files wastes time and risks losing unrelated edits.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use exec only for scripts, package commands, git, or shell commands with no dedicated tool. Prefer native read_file/grep/glob/web_fetch/graph tools when they exist.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use startup_tasks for long-running processes that must survive restarts; use cron for scheduled triggers. Do not use raw nohup for persistent services.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'In the web panel, read_file/write_file/edit_file automatically create code-viewer tabs; use file tools normally and do not build a custom viewer.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use graph_update for deliberate corrections or explicit knowledge persistence. Learning already happens automatically, so do not duplicate every ordinary conversation turn.', 8, 'seed', 'seed');
 
 INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tool-workflows', 'efficiency', 8, 'seed');
@@ -573,7 +535,8 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'Plan → execute → verify. Pick the most likely path, try it, and fall back only on failure.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Sequential by default. Parallelize only when results are truly independent and all branches are needed; do not shotgun tool calls.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Check before installing: `which <cmd>` or `pip list | grep <pkg>`. Never install the same package multiple ways in parallel.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Each tool call costs tokens and time. Fewer targeted calls beat many speculative calls.', 7, 'seed', 'seed');
+  ((SELECT MAX(id) FROM aspects), 'Each tool call costs tokens and time. Fewer targeted calls beat many speculative calls.', 7, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Keep tool use lean: do not re-read files or docs you just used, do not refetch stable facts, and delegate genuinely heavy independent work.', 8, 'seed', 'seed');
 
 INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-tool-workflows', 'asking_waiting_tracking', 9, 'seed');
 INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
@@ -581,6 +544,7 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'CLI QUESTIONS protocol is for plan-mode prose interviews, not the ask_user tool: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use schedule_wakeup for known waits such as deploy settling, job start delays, or rate-limit cooldowns. It releases the session and re-enters later instead of sleeping in a loop.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Never poll delegated tasks with task_status + sleep. If delegated tasks are running and no other work remains, end the turn; task_complete re-enters automatically.', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Use delegate_task for sub-agent work, spore_message for a configured multi-spore mesh, and message_send for real channel delivery; do not create graph-inbox nodes as a messaging protocol.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use task_create/task_progress/task_list for jobs spanning more than one back-and-forth. Tasks survive restarts and blockers hide dependent tasks until resolved.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Use log_watch for continuous local log visibility while a process runs; use tight regex because every match becomes an interjection.', 7, 'seed', 'seed');
 
@@ -593,10 +557,7 @@ INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUE
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-web-architecture', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-image-display', 'documents', 0.8, 'seed');
 -- spore→ref-browser-automation moved to plugins/browser-core/sql/install.sql.
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-cross-agent-messaging', 'documents', 0.8, 'seed');
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-token-efficiency', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-tool-workflows', 'documents', 0.8, 'seed');
-INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-code-viewer', 'documents', 0.8, 'seed');
 INSERT OR IGNORE INTO edges (source, target, type, weight, extracted_with) VALUES ('spore', 'ref-cron-runtime', 'documents', 0.8, 'seed');
 
 

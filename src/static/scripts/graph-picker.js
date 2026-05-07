@@ -10,7 +10,8 @@ let _viewedGraphMeta = null;
 let _dockGraphMenuOpen = false;
 
 function _isInspectOnlyGraph(g) {
-  return !!(g?.readOnly || g?.canManage === false || g?.inspectOnly || g?.activationLocked || g?.managed || g?.protected || g?.role === 'project' || g?.role === 'general_kb');
+  if (g?.currentScope || g?.scopedActive || (g?.active && g?.access === 'scoped')) return false;
+  return !!(g?.readOnly || g?.canManage === false || g?.inspectOnly || g?.activationLocked || g?.managed || g?.protected || g?.role === 'project' || g?.role === 'user' || g?.role === 'general_kb');
 }
 
 function _canManageGraphsFromPicker() {
@@ -77,8 +78,13 @@ function _graphDockBadge(g) {
   if (g.role === 'general_kb') return 'kb';
   if (g.role === 'project') return 'project';
   if (g.role === 'channel') return 'channel';
+  if (g.role === 'user') return 'user';
   if (_isInspectOnlyGraph(g)) return 'inspect';
   return 'use';
+}
+
+function _isGeneralKnowledgeGraph(g) {
+  return !!(g && (g.role === 'general_kb' || g.slug === 'spore-knowledge-base'));
 }
 
 function _syncDockGraphButton() {
@@ -91,6 +97,9 @@ function _syncDockGraphButton() {
 
 function _sortDockGraphs(graphs) {
   return [...(graphs || [])].sort((a, b) => {
+    const ak = _isGeneralKnowledgeGraph(a) ? 0 : 1;
+    const bk = _isGeneralKnowledgeGraph(b) ? 0 : 1;
+    if (ak !== bk) return ak - bk;
     const ar = a.active ? 0 : (_viewedGraphSlug === a.slug ? 1 : 2);
     const br = b.active ? 0 : (_viewedGraphSlug === b.slug ? 1 : 2);
     if (ar !== br) return ar - br;
@@ -157,9 +166,12 @@ async function quickSwitchToGraph(slug) {
     const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/activate`, { method: 'POST' });
     const data = await res.json();
     if (data.error) { toast(data.error, true); return; }
-    const graphData_ = await fetchGraph({ slug: data.slug || slug, preserveViewed: false });
+    const graphData_ = await fetchGraph({ slug: data.slug || slug, mode: 'auto', preserveViewed: false });
     _setViewedGraph({ graph: { slug: data.slug || slug, name: data.name || slug, active: true } }, data.slug || slug);
-    await _swapGraphWithFade(() => initGraph(graphData_));
+    await _swapGraphWithFade(() => {
+      if (typeof renderGraphPayload === 'function') renderGraphPayload(graphData_);
+      else initGraph(graphData_);
+    });
     toast(`Switched to "${data.name || slug}"`);
     await loadGraphsList();
     if (typeof renderSettingsGraphsList === 'function') renderSettingsGraphsList();
@@ -240,7 +252,8 @@ function renderGraphPicker(filter) {
     } else if (viewing) {
       html += `<span class="gp-active-badge">VIEWING</span>`;
     } else if (inspectOnly) {
-      html += `<span class="gp-active-badge">${g.role === 'project' ? 'PROJECT' : 'SYSTEM'}</span>`;
+      const badge = g.role === 'project' ? 'PROJECT' : (g.role === 'user' ? 'USER' : (g.role === 'channel' ? 'CHANNEL' : 'SYSTEM'));
+      html += `<span class="gp-active-badge">${badge}</span>`;
       html += `<div class="gp-actions">`;
       if (canManage) html += `<button onclick="event.stopPropagation();maintainGraph('${esc(g.slug)}')" title="Run safe graph maintenance">maintain</button>`;
       html += `<button onclick="event.stopPropagation();inspectGraph('${esc(g.slug)}')" title="Inspect managed graph">inspect</button>`;
@@ -299,11 +312,10 @@ async function maintainGraph(slug) {
 
 async function inspectGraph(slug) {
   try {
-    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/data`);
-    const data = await res.json();
+    const data = await fetchGraph({ slug, mode: 'auto' });
     if (data.error) { toast(data.error, true); return; }
     _setViewedGraph(data, slug);
-    await _swapGraphWithFade(() => { if (typeof initGraph === 'function') initGraph(data); });
+    await _swapGraphWithFade(() => { if (typeof renderGraphPayload === 'function') renderGraphPayload(data); });
     toast(`Inspecting "${data.graph?.name || slug}"`);
     _graphPickerOpen = false;
     graphPickerEl.classList.remove('open');
@@ -316,7 +328,7 @@ async function inspectGraph(slug) {
 
 async function viewActiveGraph(slug = null) {
   try {
-    const data = await fetchGraph({ preserveViewed: false });
+    const data = await fetchGraph({ mode: 'auto', preserveViewed: false });
     const active = _graphsList.find(g => g.active) || null;
     _setViewedGraph({
       graph: active || {
@@ -325,7 +337,7 @@ async function viewActiveGraph(slug = null) {
         active: true,
       },
     }, active?.slug || slug || 'default');
-    await _swapGraphWithFade(() => { if (typeof initGraph === 'function') initGraph(data); });
+    await _swapGraphWithFade(() => { if (typeof renderGraphPayload === 'function') renderGraphPayload(data); });
     if (slug || active?.name) toast(`Viewing "${active?.name || slug}"`);
     renderGraphPicker();
     if (typeof renderSettingsGraphsList === 'function') renderSettingsGraphsList();
@@ -344,9 +356,12 @@ async function switchToGraph(slug) {
     _graphPickerOpen = false;
     graphPickerEl.classList.remove('open');
     // Reload the graph visualization
-    const graphData_ = await fetchGraph({ slug: data.slug || slug, preserveViewed: false });
+    const graphData_ = await fetchGraph({ slug: data.slug || slug, mode: 'auto', preserveViewed: false });
     _setViewedGraph({ graph: { slug: data.slug || slug, name: data.name || slug, active: true } }, data.slug || slug);
-    await _swapGraphWithFade(() => initGraph(graphData_));
+    await _swapGraphWithFade(() => {
+      if (typeof renderGraphPayload === 'function') renderGraphPayload(graphData_);
+      else initGraph(graphData_);
+    });
     await loadGraphsList();
     if (typeof renderSettingsGraphsList === 'function') {
       renderSettingsGraphsList();

@@ -29,6 +29,20 @@ function loadWizardHarness() {
       wizardEntries: () => JSON.parse(JSON.stringify(_obWizardEntries())),
       autoFillEmptyTiers: (tier) => _obAutoFillEmptyTiers(tier),
       tierValues: () => JSON.parse(JSON.stringify(_obTierValues)),
+      renderChannelCard: (plugin) => _obRenderChannelCard(plugin),
+      setChannels({ plugins = [], saved = {}, checked = {} } = {}) {
+        _obPluginsCache = plugins;
+        _obData.plugins = JSON.parse(JSON.stringify(saved));
+        document.getElementById = (id) => {
+          const prefix = 'ob-channel-on-';
+          if (!String(id || '').startsWith(prefix)) return null;
+          return { checked: !!checked[String(id).slice(prefix.length)] };
+        };
+      },
+      snapshotChannels() {
+        _obSnapshotChannelsStep();
+        return JSON.parse(JSON.stringify(_obData.plugins || {}));
+      },
     };
   `;
   const ctx = {
@@ -42,7 +56,7 @@ function loadWizardHarness() {
     localStorage: { getItem() {}, setItem() {}, removeItem() {} },
     sessionStorage: { setItem() {} },
     window: { location: { reload() {} }, matchMedia: () => ({ matches: false }) },
-    document: { querySelectorAll: () => [] },
+    document: { querySelectorAll: () => [], getElementById: () => null },
   };
   vm.createContext(ctx);
   vm.runInContext(code, ctx, { filename: file });
@@ -133,4 +147,38 @@ test('wizard only auto-fills empty tiers when exactly one model is configured', 
   });
   h.autoFillEmptyTiers('planner');
   assert.deepEqual(plain(h.tierValues().normal), { provider: 'openai', modelId: 'gpt-5' });
+});
+
+test('wizard channels step only records install toggles, not channel settings', () => {
+  const h = loadWizardHarness();
+  const slack = {
+    id: 'slack',
+    name: 'Slack',
+    channel: true,
+    pane: {
+      description: 'Connect Slack through Socket Mode.',
+      schema: [
+        { key: 'enabled', label: 'Enable Slack channel', type: 'toggle', default: false },
+        { key: 'botToken', label: 'Bot token', type: 'password', secret: true },
+        { key: 'sessionMode', label: 'Session mode', type: 'select', default: 'thread', options: ['channel', 'thread'] },
+      ],
+      values: { botToken: 'xoxb-secret', sessionMode: 'thread' },
+    },
+  };
+
+  const html = h.renderChannelCard(slack);
+  assert.match(html, /ob-channel-on-slack/);
+  assert.match(html, /Settings -&gt; Channels/);
+  assert.doesNotMatch(html, /data-channel-key/);
+  assert.doesNotMatch(html, /Bot token|Session mode|xoxb-secret/);
+
+  h.setChannels({
+    plugins: [slack, { id: 'telegram', name: 'Telegram', channel: true }],
+    checked: { slack: true, telegram: false },
+  });
+
+  assert.deepEqual(plain(h.snapshotChannels()), {
+    slack: { enabled: true, config: {} },
+    telegram: { enabled: false, config: {} },
+  });
 });

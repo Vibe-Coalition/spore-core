@@ -220,8 +220,8 @@ class Janitor {
     try {
       const newModel = this.config.learnerModel || this.config.casualModel || this.config.model;
       if (newModel && newModel !== this.model) this.model = newModel;
-      const { createClientForModel } = require('../providers');
-      const fresh = createClientForModel(this.model, this.config);
+      const { MultiProvider } = require('../providers');
+      const fresh = new MultiProvider(this.config);
       if (fresh) this.client = fresh;
     } catch (e) {
       this.log.warn(`[janitor] client refresh failed: ${e.message}`);

@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "kind": "tool",
   "entry": "./index.js",
-  "depends": [],
-  "description": "SLURM compute-cluster integration over a tailnet (or any reachable network). Owns /api/cluster/{settings,hosts,test-ssh,ssh-key} HTTP routes, cluster SSH key management at /data/.ssh/id_cluster, and the ref-compute-cluster knowledge node. Tailscale plugin is optional but recommended — without it, clusters reachable only via MagicDNS won't resolve. Reads cluster config from the host slot (clusterUsername/LoginHost/TmuxPrefix/Hosts) populated by SPORE_CLUSTER_* env vars."
+  "depends": ["tailscale", "ssh-sidecar"],
+  "description": "SLURM compute-cluster integration over a tailnet. Owns /api/cluster/{settings,hosts,test-ssh,ssh-key} HTTP routes, cluster settings UI, and the ref-compute-cluster knowledge node. Depends on Tailscale for private network reachability and ssh-sidecar for sidecar-owned cluster SSH credentials. Reads cluster config from the host slot (clusterUsername/LoginHost/TmuxPrefix/Hosts) populated by SPORE_CLUSTER_* env vars."
 }

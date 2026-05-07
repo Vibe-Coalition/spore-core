@@ -157,6 +157,51 @@ function _writeGeom(sel, g) {
   sel.select('.self-center').attr('r', g.center.r).attr('opacity', g.center.opacity);
 }
 
+function _writeGeomFast(entry, g) {
+  if (!entry?.group?.isConnected) return;
+  for (let i = 0; i < 6; i++) {
+    const sp = g.spokes[i], pt = g.petals[i], ha = g.halos[i];
+    const spoke = entry.spokes[i];
+    if (spoke) {
+      spoke.setAttribute('x1', '0');
+      spoke.setAttribute('y1', '0');
+      spoke.setAttribute('x2', sp.x2);
+      spoke.setAttribute('y2', sp.y2);
+      spoke.setAttribute('stroke-width', sp.sw);
+      spoke.setAttribute('opacity', sp.opacity);
+    }
+    const petal = entry.petals[i];
+    if (petal) {
+      petal.setAttribute('cx', pt.cx);
+      petal.setAttribute('cy', pt.cy);
+      petal.setAttribute('r', pt.r);
+      petal.setAttribute('opacity', pt.opacity);
+    }
+    const halo = entry.halos[i];
+    if (halo) {
+      if (entry.haloModes[i] !== ha.mode) {
+        entry.haloModes[i] = ha.mode;
+        if (ha.mode === 'fill') {
+          halo.setAttribute('fill', 'var(--spore-amber)');
+          halo.setAttribute('stroke', 'none');
+        } else {
+          halo.setAttribute('fill', 'none');
+          halo.setAttribute('stroke', 'var(--spore-amber)');
+        }
+      }
+      if (ha.mode !== 'fill') halo.setAttribute('stroke-width', ha.sw);
+      halo.setAttribute('cx', ha.cx);
+      halo.setAttribute('cy', ha.cy);
+      halo.setAttribute('r', ha.r);
+      halo.setAttribute('opacity', ha.opacity);
+    }
+  }
+  if (entry.center) {
+    entry.center.setAttribute('r', g.center.r);
+    entry.center.setAttribute('opacity', g.center.opacity);
+  }
+}
+
 const _FLOWER_ANIMS = {
   // ── Idle pool ──────────────────────────────────────────────────────
   wobble: { kind: 'idle', fn: (R, t) => {
@@ -349,16 +394,58 @@ const _ACTIVE_KEYS = Object.keys(_FLOWER_ANIMS).filter(k => _FLOWER_ANIMS[k].kin
 const _selfAnim = {
   current: null, startMs: 0,
   prev: null, prevStartMs: 0, fadeStartMs: 0,
-  raf: null,
+  raf: null, timer: null,
+  lastFrameMs: 0,
+  cache: [], cacheAt: 0,
 };
-function _flowerEachSelf(fn) {
-  const groups = document.querySelectorAll('.graph-node[data-node-type="self"]');
-  groups.forEach(g => {
-    const sel = d3.select(g);
-    const datum = sel.datum();
+function _selfAnimSchedule(delay = 0, force = false) {
+  if (force) {
+    if (_selfAnim.timer) { clearTimeout(_selfAnim.timer); _selfAnim.timer = null; }
+    if (_selfAnim.raf) { cancelAnimationFrame(_selfAnim.raf); _selfAnim.raf = null; }
+  }
+  if (_selfAnim.raf || _selfAnim.timer) return;
+  const wait = Math.max(0, Number(delay) || 0);
+  if (wait > 8) {
+    _selfAnim.timer = setTimeout(() => {
+      _selfAnim.timer = null;
+      _selfAnim.raf = requestAnimationFrame(_selfAnimTick);
+    }, wait);
+  } else {
+    _selfAnim.raf = requestAnimationFrame(_selfAnimTick);
+  }
+}
+function _flowerSelfEntries(now = performance.now()) {
+  const cached = _selfAnim.cache || [];
+  if (cached.length && now - (_selfAnim.cacheAt || 0) < 1000 && cached.every(entry => entry.group?.isConnected)) {
+    return cached;
+  }
+  const entries = [];
+  document.querySelectorAll('.graph-node[data-node-type="self"]').forEach(group => {
+    const datum = d3.select(group).datum();
     const R = (datum && datum.radius) || 14;
-    fn(sel, R);
+    const entry = {
+      group,
+      sel: d3.select(group),
+      R,
+      spokes: [],
+      petals: [],
+      halos: [],
+      haloModes: [],
+      center: group.querySelector('.self-center'),
+    };
+    for (let i = 0; i < 6; i++) {
+      entry.spokes[i] = group.querySelector(`.self-spoke[data-i="${i}"]`);
+      entry.petals[i] = group.querySelector(`.self-petal[data-i="${i}"]`);
+      entry.halos[i] = group.querySelector(`.self-halo[data-i="${i}"]`);
+    }
+    entries.push(entry);
   });
+  _selfAnim.cache = entries;
+  _selfAnim.cacheAt = now;
+  return entries;
+}
+function _flowerEachSelf(fn) {
+  _flowerSelfEntries().forEach(entry => fn(entry.sel, entry.R, entry));
 }
 function _pickAnim(kind) {
   // Idle is fixed to wobble — keeps the resting state visually consistent
@@ -374,10 +461,23 @@ function _pickAnim(kind) {
   return pick;
 }
 function _selfAnimTick(now) {
+  _selfAnim.raf = null;
+  if (document.hidden) {
+    _selfAnimSchedule(1000);
+    return;
+  }
   if (!_selfAnim.startMs) _selfAnim.startMs = now;
   const t = (now - _selfAnim.startMs) / 1000;
   const def = _FLOWER_ANIMS[_selfAnim.current];
-  if (def) {
+  const entries = _flowerSelfEntries(now);
+  const activeFrame = !!(_sporeActiveLast || _selfAnim.prev || def?.kind === 'active');
+  const frameInterval = activeFrame ? 34 : 90;
+  if (entries.length && _selfAnim.lastFrameMs && now - _selfAnim.lastFrameMs < frameInterval) {
+    _selfAnimSchedule(frameInterval - (now - _selfAnim.lastFrameMs));
+    return;
+  }
+  _selfAnim.lastFrameMs = now;
+  if (def && entries.length) {
     let fading = false;
     let fadeP = 0;
     if (_selfAnim.prev && _selfAnim.fadeStartMs) {
@@ -390,7 +490,8 @@ function _selfAnimTick(now) {
         fading = true;
       }
     }
-    _flowerEachSelf((sel, R) => {
+    entries.forEach((entry) => {
+      const R = entry.R || 14;
       const newG = def.fn(R, t);
       let g = newG;
       if (fading) {
@@ -401,10 +502,10 @@ function _selfAnimTick(now) {
           g = _lerpGeom(prevG, newG, _easeInOut(fadeP));
         }
       }
-      _writeGeom(sel, g);
+      _writeGeomFast(entry, g);
     });
   }
-  _selfAnim.raf = requestAnimationFrame(_selfAnimTick);
+  if (activeFrame) _selfAnimSchedule(entries.length ? frameInterval : 1000);
 }
 function _selfAnimSetActive(active) {
   const next = _pickAnim(active ? 'active' : 'idle');
@@ -419,7 +520,7 @@ function _selfAnimSetActive(active) {
   }
   _selfAnim.current = next;
   _selfAnim.startMs = 0;
-  if (!_selfAnim.raf) _selfAnim.raf = requestAnimationFrame(_selfAnimTick);
+  _selfAnimSchedule(0, true);
 }
 // Kick off the idle loop early. _flowerEachSelf is a no-op until the
 // first self-node lands in the DOM, so this is safe pre-initGraph.
@@ -492,7 +593,7 @@ function getColor(type) {
 // Edge weight classification (design_handoff_node_graph).
 //   strong  — direct, primary edges. width 2.0, opacity 0.85, no dash.
 //   normal  — ordinary edges.        width 1.4, opacity 0.6,  no dash.
-//   soft    — inferred / weak.       width 1.0, opacity 0.45, dash 4 4.
+//   soft    — inferred / weak.       width 1.0, opacity 0.45, no dash.
 // Heuristic: any edge directly connecting the self-node is "strong"; an
 // edge whose source.weight (an aggregate from extraction) is >= 3 is
 // "normal"; otherwise "soft". Falls back to "normal" when nothing is
@@ -513,7 +614,7 @@ function getEdgeKind(d) {
 const EDGE_KIND = {
   strong: { width: 2.0, opacity: 0.55, dash: null },
   normal: { width: 1.4, opacity: 0.38, dash: null },
-  soft:   { width: 1.0, opacity: 0.25, dash: '4 4' },
+  soft:   { width: 1.0, opacity: 0.25, dash: null },
 };
 function getFillColor(type) {
   // The soft, harmonised fill paired with the family stroke. Used as the
@@ -1269,7 +1370,8 @@ function _autoLabelBudget(scale, nodeCount) {
   const visibleArea = 630000 * Math.min(4, scale * scale);
   let budget = Math.floor(visibleArea / (labelArea * 4.5));
   // Hard floor so even at low zoom you see the most-important handful.
-  budget = Math.max(scale > 0.28 ? 12 : 0, Math.min(nodeCount, budget));
+  const zoomCap = scale > 2.6 ? 96 : (scale > 1.4 ? 72 : 48);
+  budget = Math.max(scale > 0.28 ? 12 : 0, Math.min(nodeCount, budget, zoomCap));
   return budget;
 }
 
@@ -1285,10 +1387,12 @@ function _setLabelPlacement(labelEl, placement) {
 }
 
 function _setLabelHidden(labelEl) {
+  labelEl.style.display = 'none';
   labelEl.style.opacity = '0';
 }
 
 function _setLabelVisible(labelEl, opacity = 1) {
+  labelEl.style.removeProperty('display');
   labelEl.style.opacity = String(Math.max(0, Math.min(1, opacity)));
 }
 
@@ -1304,7 +1408,8 @@ function _scheduleLabelLayout(immediate = false) {
   }
   if (_labelLayoutTimer) return;
   const alpha = typeof simulation?.alpha === 'function' ? simulation.alpha() : 0;
-  const delay = alpha > 0.18 ? 120 : (alpha > 0.08 ? 64 : 18);
+  const zooming = window._graphZoomInteracting === true;
+  const delay = zooming ? 110 : (alpha > 0.18 ? 120 : (alpha > 0.08 ? 64 : 28));
   _labelLayoutTimer = setTimeout(() => {
     _labelLayoutTimer = null;
     _updateNodeLabelVisibility(_currentZoomScale);
@@ -1556,6 +1661,8 @@ function _applyGraphSelectionStyles() {
       });
   }
 
+  if (typeof window._webglApplyFilters === 'function') window._webglApplyFilters();
+  else if (typeof window._webglRefreshOverlay === 'function') window._webglRefreshOverlay();
   _scheduleLabelLayout(true);
 }
 
@@ -1618,6 +1725,7 @@ function showGraphContextMenu(clientX, clientY) {
 function clearGraphSelection() {
   hideGraphContextMenu();
   _setGraphSelection([]);
+  if (typeof updateStats === 'function') updateStats();
 }
 
 function _clientToSvgPoint(clientX, clientY) {

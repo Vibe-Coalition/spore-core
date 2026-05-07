@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Spore Core</title>
 <script src="brand.js"></script>
-<link rel="stylesheet" href="styles/base.css?v=260503-141408">
+<link rel="stylesheet" href="styles/base.css?v=260506-light-ui-accent">
 <link rel="stylesheet" href="styles/onboarding.css?v=260503-141408">
 <link rel="stylesheet" href="styles/layout.css?v=260504-chatfloat">
-<link rel="stylesheet" href="styles/panes.css?v=260505-dockchips">
-<link rel="stylesheet" href="styles/settings.css?v=260505-docklayer">
+<link rel="stylesheet" href="styles/panes.css?v=260506-sshcompact">
+<link rel="stylesheet" href="styles/settings.css?v=260506-settings-light-accent">
 <link rel="stylesheet" href="styles/chat.css?v=260504-chatstatus">
-<link rel="stylesheet" href="styles/graph.css?v=260505-dockchips">
-<link rel="stylesheet" href="styles/misc.css?v=260505-docklayer">
+<link rel="stylesheet" href="styles/graph.css?v=260507-edge-width-anim">
+<link rel="stylesheet" href="styles/misc.css?v=260506-first-tour2">
 <link rel="stylesheet" href="styles/mobile.css?v=260503-141408">
 </head>
 <body>
@@ -281,9 +281,9 @@
 
       <section class="ob-step" data-step="ch">
         <h3>Channels</h3>
-        <div class="ob-desc">Web chat is always enabled, and CLI access is handled by Spore Code. Optional public chat integrations are plugins; each one owns its credentials, delivery style, and session policy.</div>
+        <div class="ob-desc">Web chat is always enabled, and CLI access is handled by Spore Code. Pick the optional channel plugins to install now; credentials, delivery style, and session policy stay in Settings after setup.</div>
         <div id="ob-channel-list" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
-        <div class="ob-note" style="margin-top:8px">You can install or remove channel plugins later from Settings → Channels.</div>
+        <div class="ob-note" style="margin-top:8px">You can install, remove, or configure channel plugins later from Settings → Channels.</div>
       </section>
     </div>
     <div id="onboarding-foot">
@@ -422,6 +422,7 @@
       <span class="vm-divider" aria-hidden="true"></span>
       <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">☀</button>
     </div>
+    <canvas id="graph-webgl" aria-label="WebGL graph renderer"></canvas>
     <svg id="graph-svg"></svg>
 
 
@@ -512,12 +513,13 @@
         <span class="tlf-readout" id="tlf-readout"></span>
       </div>
       <button id="btn-new-node" class="btn-new" title="Create new node">+ node</button>
-      <div id="search"><input type="text" placeholder="search nodes..." id="search-input"></div>
+      <div id="search"><input type="text" placeholder="search nodes across graphs..." id="search-input"></div>
       <div style="position:relative;display:inline-block" id="tools-menu-wrap">
         <button id="btn-tools-menu" title="Tools &amp; settings">menu</button>
         <div id="tools-menu" style="display:none;position:absolute;right:0;top:110%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px;z-index:999;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
           <div class="tools-menu-item" id="tmi-settings" title="Configure this agent">Settings</div>
           <div class="tools-menu-item" id="tmi-graphs" title="Switch knowledge graph">Graphs</div>
+          <div class="tools-menu-item" id="tmi-tour" title="Show the guided tour">Tour</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           <div class="tools-menu-item" id="tmi-enhanced-recall" title="LLM-powered query decomposition for better memory retrieval" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer">
             <span>Enhanced Recall</span>
@@ -597,6 +599,11 @@
               <button id="btn-keystore-lock" style="font-size:0.6rem;padding:2px 8px;background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer">Lock</button>
             </div>
           </div>
+          <div id="ssh-keystore-sidecar" class="ssh-keystore-sidecar" style="display:none">
+            <span class="ssh-keystore-sidecar-title">SSH Sidecar active <span id="ssh-keystore-sidecar-count"></span></span>
+            <span class="ssh-keystore-sidecar-copy">no unlock / keys isolated</span>
+          </div>
+          <div id="ssh-keystore-mode-note" class="ssh-keystore-mode-note" style="display:none"></div>
         </div>
         <div id="ssh-host-list" class="ssh-host-list"></div>
         <div id="ssh-host-form">
@@ -824,8 +831,8 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <!-- Foundation (loaded first) -->
 <script defer src="scripts/bootstrap.js?v=260503-141408"></script>
-<script defer src="scripts/core.js?v=260503-141408"></script>
-<script defer src="scripts/auth.js?v=260503-141408"></script>
+<script defer src="scripts/core.js?v=260506-light-orange-accent"></script>
+<script defer src="scripts/auth.js?v=260506-user-graph-default"></script>
 <script defer src="scripts/tools-menu.js?v=260503-141408"></script>
 
 <!-- Model library helper — must load before settings.js so the
@@ -834,25 +841,26 @@
 
 <!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
      can find the original at top-level evaluation time. -->
-<script defer src="scripts/settings.js?v=260505-graphacl"></script>
+<script defer src="scripts/settings.js?v=260506-settings-search2"></script>
+<script defer src="scripts/tutorial.js?v=260506-first-tour3"></script>
 
 <!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
-<script defer src="scripts/effects.js?v=260503-141408"></script>
+<script defer src="scripts/effects.js?v=260507-label-perf"></script>
 
 <!-- Alternate views: list + type map -->
-<script defer src="scripts/extras.js?v=260503-141408"></script>
+<script defer src="scripts/extras.js?v=260507-lean-graph"></script>
 
 <!-- Feature modules — wire DOM events, no top-level cross-script deps -->
-<script defer src="scripts/terminal.js?v=260503-141408"></script>
+<script defer src="scripts/terminal.js?v=260506-sshcompact"></script>
 <script defer src="scripts/shared-skills.js?v=260503-141408"></script>
-<script defer src="scripts/graph-picker.js?v=260505-graphacl"></script>
+<script defer src="scripts/graph-picker.js?v=260506-auto-renderer1"></script>
 <script defer src="scripts/files.js?v=260503-141408"></script>
 <script defer src="scripts/right-panel.js?v=260504-logmenu"></script>
-<script defer src="scripts/voice.js?v=260503-141408"></script>
-<script defer src="scripts/onboarding.js?v=260504-recallob"></script>
-<script defer src="scripts/graph.js?v=260505-viewgraphfix"></script>
-<script defer src="scripts/chat.js?v=260505-viewgraphfix"></script>
-<script defer src="scripts/panels.js?v=260505-multibackup"></script>
+<script defer src="scripts/voice.js?v=260506-busy-followup"></script>
+<script defer src="scripts/onboarding.js?v=260506-sidecar-extra"></script>
+<script defer src="scripts/graph.js?v=260507-small-radial"></script>
+<script defer src="scripts/chat.js?v=260507-lean-graph"></script>
+<script defer src="scripts/panels.js?v=260506-webglresize"></script>
 
 <!-- Boot IIFE — MUST load LAST so every dependency is in scope -->
 <script defer src="scripts/boot.js?v=260503-141408"></script>
@@ -916,6 +924,11 @@ build/
   </div>
   <div class="floating-pane-body">
     <div class="settings-body">
+      <div class="settings-searchbar">
+        <input id="settings-search" type="search" placeholder="Search settings" autocomplete="off" aria-label="Search settings">
+        <button id="settings-search-clear" type="button" hidden>clear</button>
+        <span id="settings-search-count" aria-live="polite"></span>
+      </div>
       <div class="settings-tabs" id="settings-tabs"></div>
       <div class="settings-panes" id="settings-panes">
         <div class="settings-tab-pane" data-tab="profile"></div>
@@ -923,7 +936,6 @@ build/
         <div class="settings-tab-pane" data-tab="agent"></div>
         <div class="settings-tab-pane" data-tab="graph-memory"></div>
         <div class="settings-tab-pane" data-tab="backups"></div>
-        <div class="settings-tab-pane" data-tab="cluster"></div>
         <div class="settings-tab-pane" data-tab="tools"></div>
         <div class="settings-tab-pane" data-tab="channels"></div>
         <div class="settings-tab-pane" data-tab="plugins"></div>
@@ -945,17 +957,17 @@ build/
 
       <div class="settings-section wide" data-target-tab="plugins">
         <h4>Plugins</h4>
-        <div id="settings-plugins-state" class="settings-note" style="opacity:.85"></div>
-        <div id="settings-plugins-dirs" class="settings-note" style="opacity:.55;margin-top:4px"></div>
-        <div id="settings-plugins-manager" style="margin-top:10px"></div>
-        <div id="settings-plugins-clone-row" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
-          <h5 style="margin:0 0 6px 0">Add plugin from Git</h5>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <input type="text" id="settings-plugins-clone-repo" placeholder="https://github.com/owner/spore-plugin-foo.git" style="flex:1;min-width:280px;font-family:var(--font-body)" />
-            <input type="text" id="settings-plugins-clone-name" placeholder="dir name (optional)" style="width:160px;font-family:var(--font-body)" />
+        <div id="settings-plugins-state" class="settings-note settings-muted"></div>
+        <div id="settings-plugins-dirs" class="settings-note settings-muted-soft"></div>
+        <div id="settings-plugins-manager" class="settings-subsection"></div>
+        <div id="settings-plugins-clone-row" class="settings-subsection" hidden>
+          <div class="settings-subtitle">Add plugin from Git</div>
+          <div class="settings-row wrap">
+            <input type="text" id="settings-plugins-clone-repo" class="settings-inline-input" placeholder="https://github.com/owner/spore-plugin-foo.git" />
+            <input type="text" id="settings-plugins-clone-name" class="settings-inline-input" placeholder="dir name (optional)" />
             <button class="settings-btn-secondary" id="settings-plugins-clone-btn" type="button">Clone</button>
           </div>
-          <div class="settings-note" style="opacity:.6;margin-top:4px">
+          <div class="settings-note settings-muted-soft">
             Shallow-clones into the user plugins dir. After clone, the plugin appears in the list above as "available" — click Install to load it.
           </div>
         </div>
@@ -979,19 +991,19 @@ build/
 
       <div class="settings-section wide" data-target-tab="graph-memory">
         <h4>Maintenance &amp; Janitor</h4>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div class="settings-row wrap">
           <button class="settings-btn-secondary" id="settings-maintainer-run">Run maintenance cycle</button>
-          <span id="settings-maintainer-status" style="font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);opacity:.75"></span>
+          <span id="settings-maintainer-status" class="settings-status-muted"></span>
         </div>
         <div class="settings-note">Forces an immediate maintainer cycle (bypasses the 15-min interval gate). Triggers gap detection/filling, reflections, stale check, sparse-node connection, dedup, reasoning, and embedding passes.</div>
 
-        <div style="margin-top:18px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div class="settings-row wrap settings-subsection">
           <button class="settings-btn-secondary" id="settings-janitor-run">Run janitor now</button>
-          <span id="settings-janitor-status" style="font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);opacity:.75"></span>
+          <span id="settings-janitor-status" class="settings-status-muted"></span>
         </div>
-        <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
-          <label for="settings-janitor-mode" style="font-size:.72rem">Aggressiveness</label>
-          <select id="settings-janitor-mode" style="background:var(--bg-2);color:var(--text);border:1px solid var(--border);padding:4px 6px;border-radius:4px;font-size:.72rem">
+        <div class="settings-row wrap">
+          <label for="settings-janitor-mode">Aggressiveness</label>
+          <select id="settings-janitor-mode">
             <option value="conservative">conservative</option>
             <option value="moderate" selected>moderate</option>
             <option value="aggressive">aggressive</option>
@@ -999,13 +1011,13 @@ build/
         </div>
         <div class="settings-note">The LLM janitor evaluates temp nodes before they expire, prunes stale/low-signal attributes, and (outside conservative mode) can remove one-off permanent nodes. Everything goes to the recycling bin first.</div>
 
-        <div style="margin-top:12px">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div style="font-size:.78rem;font-weight:600">Recycling bin <span id="settings-janitor-bin-count" style="color:var(--text-dim);font-weight:400"></span></div>
-            <button class="settings-btn-secondary" id="settings-janitor-empty-bin" style="font-size:.68rem;padding:3px 8px">Empty bin</button>
+        <div class="settings-subsection">
+          <div class="settings-row spaced">
+            <div class="settings-subtitle">Recycling bin <span id="settings-janitor-bin-count" class="settings-muted-soft"></span></div>
+            <button class="settings-btn-secondary settings-compact-btn" id="settings-janitor-empty-bin">Empty bin</button>
           </div>
-          <div id="settings-janitor-bin-list" style="margin-top:8px;max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg-2)">
-            <div style="padding:12px;color:var(--text-dim);font-size:.68rem">(not loaded yet — open this panel or press Run janitor)</div>
+          <div id="settings-janitor-bin-list" class="settings-scroll-box">
+            <div class="settings-scroll-empty">(not loaded yet — open this panel or press Run janitor)</div>
           </div>
         </div>
 
@@ -1021,19 +1033,19 @@ build/
           <div class="settings-portability-tag">portable snapshot</div>
         </div>
         <div class="settings-portability-callout">Reference nodes and the agent self node are excluded from graph exports; imported edges are re-wired to the target graph.</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin:10px 0">
-          <label style="font-size:.68rem">Export graph scope
-            <select id="settings-export-graph-scope" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+        <div class="settings-field-grid">
+          <label>Export graph scope
+            <select id="settings-export-graph-scope">
               <option value="current">current view</option>
               <option value="selected">selected graph</option>
               <option value="all">all graphs</option>
             </select>
           </label>
-          <label id="settings-export-graph-select-wrap" style="font-size:.68rem">Graph
-            <select id="settings-export-graph-slug" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px"></select>
+          <label id="settings-export-graph-select-wrap">Graph
+            <select id="settings-export-graph-slug"></select>
           </label>
-          <label style="font-size:.68rem">Single-graph import target
-            <select id="settings-import-graph-slug" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px"></select>
+          <label>Single-graph import target
+            <select id="settings-import-graph-slug"></select>
           </label>
         </div>
         <div class="settings-hint">Include in export</div>
@@ -1046,38 +1058,38 @@ build/
         <div class="settings-export-actions">
           <button class="settings-btn-secondary settings-export-primary" id="settings-graph-export">Export bundle</button>
           <button class="settings-btn-secondary" id="settings-graph-import">Import bundle...</button>
-          <input type="file" id="settings-graph-import-file" accept=".json,application/json" style="display:none">
+          <input type="file" id="settings-graph-import-file" accept=".json,application/json" hidden>
         </div>
         <div id="settings-graph-port-status" class="settings-port-status"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="backups">
         <h4>Graph backups</h4>
-          <div class="settings-note" style="margin-top:4px">Periodic snapshots of every graph DB via <code>VACUUM INTO</code>. Rolling retention is applied per graph; restores are matched to the graph slug before anything is copied back.</div>
-          <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:380px">
-            <label style="font-size:.7rem">Interval (minutes)
-              <input id="settings-backup-interval" type="number" min="1" step="1" value="60" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-            </label>
-            <label style="font-size:.7rem">Retention
-              <input id="settings-backup-retention" type="number" min="1" step="1" value="20" style="display:block;margin-top:3px;width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
-            </label>
+        <div class="settings-note">Periodic snapshots of every graph DB via <code>VACUUM INTO</code>. Rolling retention is applied per graph; restores are matched to the graph slug before anything is copied back.</div>
+        <div class="settings-field-grid compact">
+          <label>Interval (minutes)
+            <input id="settings-backup-interval" type="number" min="1" step="1" value="60">
+          </label>
+          <label>Retention
+            <input id="settings-backup-retention" type="number" min="1" step="1" value="20">
+          </label>
+        </div>
+        <div class="settings-row wrap">
+          <label class="settings-check">
+            <input id="settings-backup-enabled" type="checkbox" checked> Enabled
+          </label>
+          <label class="settings-check">
+            <input id="settings-backup-on-change-only" type="checkbox" checked> Skip unchanged
+          </label>
+          <button class="settings-btn-secondary settings-compact-btn" id="settings-backup-run">Snapshot now</button>
+        </div>
+        <div id="settings-backup-status" class="settings-status-muted"></div>
+        <div class="settings-subsection">
+          <div class="settings-subtitle settings-muted">Available snapshots</div>
+          <div id="settings-backup-list" class="settings-scroll-box">
+            <div class="settings-scroll-empty">(open this panel to load list)</div>
           </div>
-          <div style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap">
-            <label style="font-size:.68rem;display:flex;align-items:center;gap:4px">
-              <input id="settings-backup-enabled" type="checkbox" checked> Enabled
-            </label>
-            <label style="font-size:.68rem;display:flex;align-items:center;gap:4px">
-              <input id="settings-backup-on-change-only" type="checkbox" checked> Skip unchanged
-            </label>
-            <button class="settings-btn-secondary" id="settings-backup-run" style="font-size:.68rem;padding:3px 8px">Snapshot now</button>
-          </div>
-          <div id="settings-backup-status" style="margin-top:6px;font-family:var(--font-body);font-size:.62rem;color:var(--text-dim)"></div>
-          <div style="margin-top:10px">
-            <div style="font-size:.7rem;color:var(--text-dim)">Available snapshots</div>
-            <div id="settings-backup-list" style="margin-top:4px;max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg-2)">
-              <div style="padding:10px;color:var(--text-dim);font-size:.66rem">(open this panel to load list)</div>
-            </div>
-          </div>
+        </div>
       </div>
 
       <div class="settings-section" data-target-tab="agent">
@@ -1091,7 +1103,7 @@ build/
 
       <!-- Email settings extracted to plugins/email/ — see Plugins tab. -->
 
-<div class="settings-section wide" id="settings-users-section" data-target-tab="users">
+      <div class="settings-section wide" id="settings-users-section" data-target-tab="users">
         <h4>Users</h4>
         <div class="settings-note">Manage who can access this instance. Changes take effect immediately and active sessions are dropped.</div>
         <div id="settings-users-list" class="settings-users-list"></div>
@@ -1103,7 +1115,7 @@ build/
         <label for="settings-profile-displayname">What should the agent call you?</label>
         <input id="settings-profile-displayname" type="text" placeholder="">
         <div class="settings-note" id="settings-profile-username-note"></div>
-        <h4 style="margin-top:18px">Change password</h4>
+        <h4 class="settings-section-break-title">Change password</h4>
         <label for="settings-profile-pw-current">Current password</label>
         <input id="settings-profile-pw-current" type="password" autocomplete="current-password">
         <label for="settings-profile-pw-new">New password (min 8 chars)</label>
@@ -1112,7 +1124,7 @@ build/
           <button type="button" class="settings-test-btn" id="settings-profile-pw-save">change password</button>
           <span class="settings-test-result" id="settings-profile-pw-result"></span>
         </div>
-        <h4 style="margin-top:18px">Sign out</h4>
+        <h4 class="settings-section-break-title">Sign out</h4>
         <div class="settings-note">Ends your session on this device. You'll be sent back to the login screen.</div>
         <div class="settings-test-row">
           <button type="button" class="settings-test-btn" id="settings-profile-logout">log out</button>
@@ -1124,7 +1136,7 @@ build/
         <h4>Memory</h4>
         <div class="settings-check">
           <input id="settings-enhanced-recall" type="checkbox">
-          <label for="settings-enhanced-recall" style="margin:0">Enable Enhanced Recall</label>
+          <label for="settings-enhanced-recall">Enable Enhanced Recall</label>
         </div>
         <div class="settings-note">Uses LLM-assisted query decomposition for better temporal and cross-session graph retrieval. This adds one extra LLM round before the main answer.</div>
       </div>
@@ -1132,50 +1144,50 @@ build/
       <div class="settings-section" data-target-tab="agent">
         <h4>Agent Effort</h4>
         <div class="settings-note">One dial that bundles message budgets, iteration caps, tool-result truncation, and sub-agent fan-out. Quick = cheap and chatty. Balanced = current defaults. Deep = long research/coding sessions; raises sub-agent count, iteration ceiling, and budgets — costs more per turn.</div>
-        <div id="settings-effort-buttons" style="display:flex;gap:8px;margin-top:8px">
+        <div id="settings-effort-buttons" class="settings-row">
           <button class="settings-effort-btn" type="button" data-effort="quick">Quick</button>
           <button class="settings-effort-btn" type="button" data-effort="balanced">Balanced</button>
           <button class="settings-effort-btn" type="button" data-effort="deep">Deep</button>
         </div>
-        <div class="settings-note" id="settings-effort-summary" style="margin-top:8px;opacity:0.7"></div>
+        <div class="settings-note settings-muted" id="settings-effort-summary"></div>
       </div>
 
-      <div class="settings-section" data-target-tab="agent">
+      <div class="settings-section" data-target-tab="advanced">
         <h4>Context budgets</h4>
         <div class="settings-note">Override the agent's memory budgets. Leave blank to use the auto-scaled default (which grows with the active model's context window).</div>
         <div class="settings-inline">
           <div>
             <label for="settings-budget-casual">Casual chat budget (tokens)</label>
             <input id="settings-budget-casual" type="number" min="1000" step="1000" placeholder="auto">
-            <div class="settings-note" id="settings-budget-casual-default" style="opacity:0.65"></div>
+            <div class="settings-note settings-muted" id="settings-budget-casual-default"></div>
           </div>
           <div>
             <label for="settings-budget-complex">Coding/research budget (tokens)</label>
             <input id="settings-budget-complex" type="number" min="1000" step="1000" placeholder="auto">
-            <div class="settings-note" id="settings-budget-complex-default" style="opacity:0.65"></div>
+            <div class="settings-note settings-muted" id="settings-budget-complex-default"></div>
           </div>
         </div>
-        <div class="settings-note" style="margin-top:6px">When the conversation crosses these limits the agent compacts older turns into a summary. Higher = more memory but more API spend; lower = more aggressive forgetting.</div>
-        <div class="settings-inline" style="margin-top:10px">
+        <div class="settings-note">When the conversation crosses these limits the agent compacts older turns into a summary. Higher = more memory but more API spend; lower = more aggressive forgetting.</div>
+        <div class="settings-inline">
           <div>
             <label for="settings-budget-compact-threshold">Compaction ceiling (tokens)</label>
             <input id="settings-budget-compact-threshold" type="number" min="1000" step="1000" placeholder="auto">
-            <div class="settings-note" id="settings-budget-compact-threshold-default" style="opacity:0.65"></div>
+            <div class="settings-note settings-muted" id="settings-budget-compact-threshold-default"></div>
           </div>
           <div>
             <label for="settings-budget-tool-result-cap">Tool result cap (characters)</label>
             <input id="settings-budget-tool-result-cap" type="number" min="1000" step="1000" placeholder="auto">
-            <div class="settings-note" id="settings-budget-tool-result-cap-default" style="opacity:0.65"></div>
+            <div class="settings-note settings-muted" id="settings-budget-tool-result-cap-default"></div>
           </div>
         </div>
-        <div class="settings-note" style="margin-top:6px">Compaction ceiling caps the absolute total size at which the agent must compact, regardless of model context window. The tool-result cap is the default truncation; per-tool overrides (e.g. read_file 120k, exec 30k) still apply.</div>
+        <div class="settings-note">Compaction ceiling caps the absolute total size at which the agent must compact, regardless of model context window. The tool-result cap is the default truncation; per-tool overrides (e.g. read_file 120k, exec 30k) still apply.</div>
       </div>
 
       <div class="settings-section" data-target-tab="agent">
         <h4>Proactive</h4>
         <div class="settings-check">
           <input id="settings-proactive-enabled" type="checkbox">
-          <label for="settings-proactive-enabled" style="margin:0">Allow proactive messages</label>
+          <label for="settings-proactive-enabled">Allow proactive messages</label>
         </div>
         <div class="settings-inline">
           <div>
@@ -1196,7 +1208,7 @@ build/
         <h4>Voice</h4>
         <div class="settings-check">
           <input id="settings-voice-enabled" type="checkbox">
-          <label for="settings-voice-enabled" style="margin:0">Enable voice pipeline</label>
+          <label for="settings-voice-enabled">Enable voice pipeline</label>
         </div>
         <div class="settings-inline">
           <div>
@@ -1233,14 +1245,25 @@ build/
       </div>
 
       <div class="settings-section wide" data-target-tab="advanced">
-        <h4>Runtime</h4>
+        <h4>Spore Runtime</h4>
         <label for="settings-runtime-public-url-input">Public URL</label>
         <input id="settings-runtime-public-url-input" type="text" placeholder="https://spore.example.com (or https://host.tld/path)">
-        <div class="settings-note">Set this so the agent knows its own external address for generating links (web_serve, graph viewer, etc.). No trailing slash.</div>
-        <div class="settings-kv" style="margin-top:10px"><span>Agent ID</span><code id="settings-runtime-agent-id"></code></div>
+        <div class="settings-note">Set this so the agent knows its own external address for generated links, graph viewer links, channel callbacks, and setup guidance. No trailing slash.</div>
+        <div class="settings-check">
+          <input id="settings-node-performance-metric-viz" type="checkbox">
+          <label for="settings-node-performance-metric-viz">Node performance metric viz</label>
+        </div>
+        <div class="settings-note">Shows the graph renderer/status line below the node, edge, and type totals.</div>
+        <div class="settings-kv"><span>Agent ID</span><code id="settings-runtime-agent-id"></code></div>
         <div class="settings-kv"><span>Web Port</span><code id="settings-runtime-web-port"></code></div>
         <div class="settings-kv"><span>Workspace</span><code id="settings-runtime-workspace"></code></div>
         <div class="settings-kv"><span>Data Dir</span><code id="settings-runtime-data-dir"></code></div>
+      </div>
+
+      <div class="settings-section wide" id="settings-runtime-queue-section" data-target-tab="advanced">
+        <h4>Runtime job queue</h4>
+        <div class="settings-note">Central scheduler for web, CLI, channels, learner, wakeups, backups, and maintenance work. Lane limits and enable/disable changes apply after server restart.</div>
+        <div id="settings-core-runtime-controls"></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="providers">
@@ -1375,11 +1398,11 @@ build/
            named prefix (for example local/qwen or groq/llama) with the
            same baseUrl + apiKey + auth-header shape. -->
       <div class="settings-section wide" data-target-tab="providers">
-        <div class="settings-provider-head" style="margin-bottom:8px">
-          <h4 style="margin:0">OAI-compatible endpoints</h4>
+        <div class="settings-section-head">
+          <h4>OAI-compatible endpoints</h4>
           <button type="button" class="settings-ghost-btn" onclick="addSettingsCustomProvider()">+ Add endpoint</button>
         </div>
-        <div class="settings-note" style="margin-bottom:12px">Connect any OpenAI-compatible chat-completion endpoint — vLLM, LM Studio, Ollama, llama.cpp, self-hosted. Each endpoint gets a prefix you choose, and model routes use <code>prefix/model-id</code>.</div>
+        <div class="settings-note">Connect any OpenAI-compatible chat-completion endpoint — vLLM, LM Studio, Ollama, llama.cpp, self-hosted. Each endpoint gets a prefix you choose, and model routes use <code>prefix/model-id</code>.</div>
         <div id="settings-providers-oai-local"></div>
         <div id="settings-custom-providers"></div>
       </div>
@@ -1388,8 +1411,8 @@ build/
         <h4>Invite Key</h4>
         <div class="settings-note">Single host-level secret. Anyone with this key can self-register a webapp account (login screen → Create) and connect via Spore Code. Installing Spore Code during onboarding generates one automatically if none exists. Empty disables both flows. Persists to <code>SPORE_INVITE_KEY</code> in the instance .env.</div>
         <label for="settings-invite-key">Invite key</label>
-        <div style="display:flex; gap:6px; align-items:stretch; margin-top:4px">
-          <input id="settings-invite-key" type="password" placeholder="empty = self-register + Spore Code disabled" autocomplete="off" style="flex:1; min-width:0">
+        <div class="settings-row stretch">
+          <input id="settings-invite-key" class="settings-inline-input" type="password" placeholder="empty = self-register + Spore Code disabled" autocomplete="off">
           <button type="button" class="settings-test-btn" id="settings-invite-key-show" title="Show / hide">show</button>
           <button type="button" class="settings-test-btn" id="settings-invite-key-copy" title="Copy to clipboard">copy</button>
           <button type="button" class="settings-test-btn" id="settings-invite-key-regen" title="Generate a new key (existing webapp guests + Spore Code users will need the new one)">regen</button>
@@ -1402,32 +1425,32 @@ build/
         <h4>System Prompt Budgets</h4>
         <div class="settings-note">Token caps applied when assembling the agent's system prompt. Sections that exceed their cap are silently truncated from the END — leave defaults unless the plan-mode verification logs report missing markers (<code>docker logs ... | grep '[plan-mode]'</code>). Changes apply on the next turn — no restart needed.</div>
 
-        <label for="settings-budget-runtime">Runtime section <span class="settings-budget-default" id="settings-budget-runtime-default" style="opacity:0.6;font-weight:normal"></span></label>
+        <label for="settings-budget-runtime">Runtime section <span class="settings-budget-default" id="settings-budget-runtime-default"></span></label>
         <input id="settings-budget-runtime" type="number" min="100" step="100" placeholder="leave blank to use default">
         <div class="settings-note">Carries project context, sandbox rules, plan-mode block (PHASE 1-5 + QUESTIONS protocol + tooling-question list + RULES). Bump this when you've added prompt content and the agent stops following late-block instructions.</div>
 
-        <label for="settings-budget-total" style="margin-top:14px">Total prompt budget <span class="settings-budget-default" id="settings-budget-total-default" style="opacity:0.6;font-weight:normal"></span></label>
+        <label for="settings-budget-total">Total prompt budget <span class="settings-budget-default" id="settings-budget-total-default"></span></label>
         <input id="settings-budget-total" type="number" min="1000" step="1000" placeholder="leave blank to use default">
         <div class="settings-note">Hard cap on total system prompt size in tokens. The DROP_ORDER list (gaps → anti → selfknowledge → plugin → feed → tooling → runtime → reflections → derived → episodes) trims sections from least-important first when the total exceeds this.</div>
 
-        <details style="margin-top:14px">
-          <summary style="cursor:pointer;font-weight:500">Per-section budgets (advanced — 18 sections)</summary>
-          <div id="settings-budget-sections-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px"></div>
+        <details class="settings-details">
+          <summary>Per-section budgets (advanced — 18 sections)</summary>
+          <div id="settings-budget-sections-grid" class="settings-budget-grid"></div>
           <div class="settings-note">Override individual sections — leave any field blank to use the default. Unknown keys and non-positive values are silently ignored at boot.</div>
         </details>
       </div>
 
-      <div class="settings-section wide" data-target-tab="advanced">
-        <h4 style="color:var(--danger,#ff5566)">Reset Graph</h4>
+      <div class="settings-section wide" data-target-tab="graph-memory">
+        <h4 class="settings-danger-title">Reset Graph</h4>
         <div class="settings-note">
-          <strong>Destructive.</strong> Wipes <em>everything</em> in this agent's graph DB — every node, aspect, attribute, edge, episode, gap, reflection — and re-applies the seeded reference nodes from <code>/app/reference-nodes.sql</code> + every <code>migrate-ref-*.sql</code>. Use this when you want to start the agent's memory from scratch (dev testing, changed your mind about training, suspected corruption, etc.). The DB file is backed up to <code>&lt;path&gt;.pre-reset.&lt;ts&gt;</code> before the wipe so the action is recoverable.
+          <strong>Destructive.</strong> Resets the core memory set: the Default graph and General Knowledge graph are wiped back to seed nodes, and every other graph is removed, including project, channel, user, and custom graphs. Each reset database is backed up before the wipe so the action is recoverable from disk.
         </div>
-        <div class="settings-note" style="margin-top:8px">Type <code>RESET</code> in the box below to enable the button. Effect is immediate, no restart needed — the live graph handle is mutated in place.</div>
-        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-          <input id="settings-reset-confirm" type="text" placeholder="type RESET to confirm" style="flex:1" autocomplete="off">
-          <button type="button" id="settings-reset-btn" disabled style="background:var(--danger,#ff5566);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:not-allowed;opacity:0.5">Reset graph</button>
+        <div class="settings-note">Type <code>RESET</code> in the box below to enable the button. Effect is immediate, no restart needed — the app switches back to Default when needed and refreshes the graph list.</div>
+        <div class="settings-row stretch">
+          <input id="settings-reset-confirm" class="settings-inline-input" type="text" placeholder="type RESET to confirm" autocomplete="off">
+          <button type="button" id="settings-reset-btn" class="settings-btn-secondary settings-danger-primary" disabled>Reset core graphs</button>
         </div>
-        <div class="settings-note" id="settings-reset-result" style="margin-top:8px;display:none"></div>
+        <div class="settings-note" id="settings-reset-result" hidden></div>
       </div>
 
       <div class="settings-section wide" data-target-tab="tools">
@@ -1447,15 +1470,15 @@ build/
             <div class="settings-provider-head"><strong>SearXNG (primary)</strong></div>
             <label for="settings-websearch-searxng-url">Base URL</label>
             <input id="settings-websearch-searxng-url" type="text" placeholder="http://searxng:8080">
-            <label for="settings-websearch-searxng-key" style="margin-top:8px">API Key (optional)</label>
+            <label for="settings-websearch-searxng-key">API Key (optional)</label>
             <input id="settings-websearch-searxng-key" type="password" placeholder="optional Bearer token">
-            <div class="settings-note" style="margin-top:6px">Self-hosted metasearch. Tried first; leave empty to disable.</div>
+            <div class="settings-note">Self-hosted metasearch. Tried first; leave empty to disable.</div>
           </div>
           <div class="settings-provider-group">
             <div class="settings-provider-head"><strong>Brave (fallback)</strong></div>
             <label for="settings-websearch-brave-key">API Key</label>
             <input id="settings-websearch-brave-key" type="password" placeholder="BSAa...">
-            <div class="settings-note" style="margin-top:6px">Used when SearXNG is unset or returns no results.</div>
+            <div class="settings-note">Used when SearXNG is unset or returns no results.</div>
           </div>
         </div>
         <div class="settings-test-row">

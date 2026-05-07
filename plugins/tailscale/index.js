@@ -10,7 +10,7 @@
 // one plugin lifetime. Cleared on uninstall via shutdown handler.
 
 const { spawn } = require('child_process');
-const { tsRun, TS_SOCKET } = require('./lib/tailscale-cli');
+const { ensureTailscaled, tsRun, TS_SOCKET } = require('./lib/tailscale-cli');
 
 module.exports = function register(api) {
   // In-memory state — closure over the plugin's lifetime.
@@ -21,7 +21,7 @@ module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
     uninstall: './sql/uninstall.sql',
-    schemaVersion: 1,
+    schemaVersion: 3,
   });
 
   // Path alias so existing UI + scripts that hit /api/tailscale/* keep
@@ -32,14 +32,18 @@ module.exports = function register(api) {
   async function statusHandler(req, res) {
     try {
       const r = await tsRun(['status', '--json'], 8000);
-      if (r.code !== 0) {
+      let j = null;
+      if ((r.stdout || '').trim()) {
+        try { j = JSON.parse(r.stdout); } catch (e) {
+          if (r.code === 0) {
+            res.writeHead(500); res.end(JSON.stringify({ error: 'tailscale status parse: ' + e.message })); return;
+          }
+        }
+      }
+      if (!j && r.code !== 0) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ backend: 'Stopped', error: (r.stderr || '').trim().slice(0, 300), authUrl: _tsAuthUrl || null }));
         return;
-      }
-      let j;
-      try { j = JSON.parse(r.stdout); } catch (e) {
-        res.writeHead(500); res.end(JSON.stringify({ error: 'tailscale status parse: ' + e.message })); return;
       }
       const peers = [];
       for (const key of Object.keys(j.Peer || {})) {
@@ -56,7 +60,7 @@ module.exports = function register(api) {
         peers,
         peerCount: peers.length,
         onlineCount: peers.filter(p => p.online).length,
-        authUrl: (j.BackendState === 'NeedsLogin' ? (_tsAuthUrl || null) : null),
+        authUrl: (j.BackendState === 'NeedsLogin' ? (_tsAuthUrl || j.AuthURL || null) : null),
       }));
     } catch (e) {
       res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
@@ -201,6 +205,10 @@ module.exports = function register(api) {
     html: '<div data-plugin-mount="tailscale">Loading…</div>',
   });
   api.registerFrontendAsset('tailscale-settings.js');
+
+  ensureTailscaled().catch(e => {
+    api.getLogger().warn('tailscaled auto-start failed: ' + (e?.message || e));
+  });
 
   // Shutdown: kill any active login process so plugin uninstall doesn't
   // leave a child SUDO process running in the container.

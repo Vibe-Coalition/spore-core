@@ -279,6 +279,7 @@ class WebSettingsService {
       inviteKey: '',
       inviteKeySet: !!this.config.inviteKey,
       modelLimits: this.config.modelLimits || {},
+      tokenPricing: this.config.tokenPricing || {},
       agent: this._agentSettingsBlock(),
       budgets: this._budgetSettingsBlock(),
       browser: {
@@ -635,6 +636,7 @@ class WebSettingsService {
     if (models.videoFallback !== undefined) this.config.videoFallbackModel = models.videoFallback;
     this.config.model = this.config.plannerModel || this.config.normalModel || this.config.casualModel || null;
     if (snap.modelLimits !== undefined) this.config.modelLimits = snap.modelLimits;
+    if (snap.tokenPricing !== undefined) this.config.tokenPricing = snap.tokenPricing;
 
     const providers = snap.providers || {};
     if (providers.anthropic?.apiKey !== undefined) this.config.anthropicApiKey = providers.anthropic.apiKey;
@@ -698,6 +700,7 @@ class WebSettingsService {
       'openaiReasoningEffort', 'learningMode', 'maintainerIdleOnly',
       'tempNodeTtlHours', 'janitorMode', 'janitorIntervalMinutes',
       'janitorRecycleBinTtlDays', 'janitorPruneBatchSize', 'janitorEnabled',
+      'nodePerformanceMetricViz',
       'graphBackupEnabled', 'graphBackupIntervalMinutes', 'graphBackupRetention',
       'graphBackupDir', 'graphBackupOnChangeOnly',
       'heartbeatIntervalMinutes',

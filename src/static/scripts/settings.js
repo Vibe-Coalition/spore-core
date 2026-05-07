@@ -32,13 +32,13 @@ function _populatePluginsTab(plugins) {
     const user = plugins.dirs?.user || '(unset — set SPORE_PLUGINS_USER_DIR to enable git clone)';
     dirsEl.innerHTML = `Discovery dirs: <code>${_escapeHtml(bundled)}</code> (bundled) · <code>${_escapeHtml(user)}</code> (user)`;
   }
-  if (cloneRow) cloneRow.style.display = (enabled && hot && plugins.dirs?.user) ? 'block' : 'none';
+  if (cloneRow) cloneRow.hidden = !(enabled && hot && plugins.dirs?.user);
 
   // Unified list: everything on disk, with install/uninstall toggle per row.
   const availableAll = Array.isArray(plugins.available) ? plugins.available : [];
   const available = availableAll.filter(p => !_isChannelPlugin(p));
   if (available.length === 0) {
-    mgrEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugins found in either discovery dir.</div>';
+    mgrEl.innerHTML = '<div class="settings-note settings-muted-soft">No plugins found in either discovery dir.</div>';
   } else {
     mgrEl.innerHTML = available.map(_renderPluginRow.bind(null, hot)).join('');
   }
@@ -48,7 +48,7 @@ function _populatePluginsTab(plugins) {
   //  follow in a later pass; the API supports it but the host needs more wiring.)
   const panes = Array.isArray(plugins.panes) ? plugins.panes.filter(p => (!p.tab || p.tab === 'plugins') && !_isChannelPane(p, availableAll)) : [];
   if (panes.length === 0) {
-    panesEl.innerHTML = '<div class="settings-note" style="opacity:.6">No plugin settings to configure.</div>';
+    panesEl.innerHTML = '<div class="settings-note settings-muted-soft">No plugin settings to configure.</div>';
   } else {
     panesEl.innerHTML = panes.map(_renderPluginPane).join('');
   }
@@ -62,18 +62,19 @@ function _populatePluginsTab(plugins) {
 }
 
 function _renderPluginRow(hotReload, p) {
-  const sourceTag = `<span class="settings-note" style="opacity:.55">${_escapeHtml(p.source || 'unknown')}</span>`;
+  const sourceTag = `<span class="settings-note settings-muted-soft">${_escapeHtml(p.source || 'unknown')}</span>`;
+  const description = (p.description || '').trim() || 'No description provided by this plugin.';
   const stateTag = p.isInstalled
-    ? '<span class="settings-note" style="color:var(--accent);opacity:.85">installed</span>'
+    ? '<span class="settings-note settings-status-ok">installed</span>'
     : (p.isDisabled
-      ? '<span class="settings-note" style="color:#c66;opacity:.85">uninstalled</span>'
-      : '<span class="settings-note" style="opacity:.55">available</span>');
+      ? '<span class="settings-note settings-status-danger">uninstalled</span>'
+      : '<span class="settings-note settings-muted-soft">available</span>');
 
   const bits = [];
-  if (p.hasReferenceNodes) bits.push('<span class="settings-note" style="opacity:.7">ref nodes</span>');
-  if (p.toolCount) bits.push(`<span class="settings-note" style="opacity:.7">${p.toolCount} tool${p.toolCount > 1 ? 's' : ''}</span>`);
-  if (p.gatewayCount) bits.push(`<span class="settings-note" style="opacity:.7">${p.gatewayCount} gateway${p.gatewayCount > 1 ? 's' : ''}</span>`);
-  if ((p.depends || []).length) bits.push(`<span class="settings-note" style="opacity:.55">depends: ${p.depends.map(_escapeHtml).join(', ')}</span>`);
+  if (p.hasReferenceNodes) bits.push('<span class="settings-note settings-muted">ref nodes</span>');
+  if (p.toolCount) bits.push(`<span class="settings-note settings-muted">${p.toolCount} tool${p.toolCount > 1 ? 's' : ''}</span>`);
+  if (p.gatewayCount) bits.push(`<span class="settings-note settings-muted">${p.gatewayCount} gateway${p.gatewayCount > 1 ? 's' : ''}</span>`);
+  if ((p.depends || []).length) bits.push(`<span class="settings-note settings-muted-soft">depends: ${p.depends.map(_escapeHtml).join(', ')}</span>`);
 
   let actionBtn = '';
   if (hotReload) {
@@ -82,16 +83,17 @@ function _renderPluginRow(hotReload, p) {
       : `<button type="button" class="settings-btn-secondary" data-plugin-install="${_escapeAttr(p.id)}">Install</button>`;
   }
 
-  return `<div class="settings-plugin-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--border)">
-    <div style="display:flex;flex-direction:column;gap:3px;min-width:0;flex:1">
-      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+  return `<div class="settings-plugin-row">
+    <div class="settings-plugin-row-main">
+      <div class="settings-plugin-row-head">
         <strong>${_escapeHtml(p.name || p.id)}</strong>
-        <span class="settings-note" style="opacity:.5">${_escapeHtml(p.id)}@${_escapeHtml(p.version || '0.0.0')}</span>
-        <span class="settings-note" style="opacity:.7">${_escapeHtml(p.kind)}</span>
+        <span class="settings-note settings-muted-soft">${_escapeHtml(p.id)}@${_escapeHtml(p.version || '0.0.0')}</span>
+        <span class="settings-note settings-muted">${_escapeHtml(p.kind)}</span>
         ${sourceTag}
         ${stateTag}
       </div>
-      ${bits.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap">${bits.join('')}</div>` : ''}
+      <div class="settings-plugin-description">${_escapeHtml(description)}</div>
+      ${bits.length ? `<div class="settings-plugin-row-tags">${bits.join('')}</div>` : ''}
     </div>
     ${actionBtn}
   </div>`;
@@ -99,11 +101,11 @@ function _renderPluginRow(hotReload, p) {
 
 function _renderPluginPane(pane) {
   const fields = (pane.schema || []).map(field => _renderPluginField(pane.pluginId, field, pane.values?.[field.key], pane.meta?.[field.key])).join('');
-  const desc = pane.description ? `<div class="settings-note" style="margin-bottom:8px">${_escapeHtml(pane.description)}</div>` : '';
+  const desc = pane.description ? `<div class="settings-note">${_escapeHtml(pane.description)}</div>` : '';
   const customHtml = pane.html ? `<div data-plugin-custom="${pane.pluginId}">${pane.html}</div>` : '';
   const channelHtml = pane.pluginId === 'telegram' ? _renderTelegramPairingPanel() : '';
-  return `<div class="settings-plugin-pane" data-plugin-pane="${pane.pluginId}" style="margin-bottom:18px;padding:10px 0;border-top:1px solid var(--border)">
-    <h5 style="margin:0 0 6px 0">${_escapeHtml(pane.title)}</h5>
+  return `<div class="settings-plugin-pane" data-plugin-pane="${pane.pluginId}">
+    <h5>${_escapeHtml(pane.title)}</h5>
     ${desc}
     ${fields}
     ${customHtml}
@@ -124,13 +126,13 @@ function _renderTelegramPairingPanel() {
     <div class="settings-channel-pairing-group">
       <div class="settings-channel-pairing-label">Pending requests</div>
       <div class="settings-channel-pairing-list" data-telegram-pairing-pending>
-        <div class="settings-note" style="opacity:.6">Loading...</div>
+        <div class="settings-note settings-muted-soft">Loading...</div>
       </div>
     </div>
     <div class="settings-channel-pairing-group">
       <div class="settings-channel-pairing-label">Approved users</div>
       <div class="settings-channel-pairing-list" data-telegram-pairing-approved>
-        <div class="settings-note" style="opacity:.6">Loading...</div>
+        <div class="settings-note settings-muted-soft">Loading...</div>
       </div>
     </div>
   </div>`;
@@ -138,8 +140,8 @@ function _renderTelegramPairingPanel() {
 
 function _renderPluginField(pluginId, field, value, meta) {
   const id = `settings-plugin-${pluginId}-${field.key}`;
-  const labelEl = `<label for="${id}" style="display:block;font-size:.78rem;margin-bottom:2px">${_escapeHtml(field.label || field.key)}</label>`;
-  const help = field.help ? `<div class="settings-note" style="opacity:.6;margin-top:2px">${_escapeHtml(field.help)}</div>` : '';
+  const labelEl = `<label for="${id}">${_escapeHtml(field.label || field.key)}</label>`;
+  const help = field.help ? `<div class="settings-note settings-muted-soft">${_escapeHtml(field.help)}</div>` : '';
   // Compute the rendered value (saved slot value > schema default > '').
   // Stash it on the wrapper as `data-plugin-original` so the collector
   // can diff against it on save and only emit fields the operator
@@ -148,26 +150,26 @@ function _renderPluginField(pluginId, field, value, meta) {
   // authHeader:'bearer' when the wizard had already persisted x-key.
   const v = (value === undefined || value === null) ? (field.default !== undefined ? field.default : '') : value;
   const originalAttr = `data-plugin-original="${_escapeAttr(String(v))}"`;
-  const wrap = (inner) => `<div style="margin-bottom:10px" data-plugin-field="${pluginId}.${field.key}" data-plugin-secret="${field.secret ? '1' : '0'}" ${originalAttr}>${labelEl}${inner}${help}</div>`;
+  const wrap = (inner, extraClass = '') => `<div class="settings-plugin-field${extraClass ? ` ${extraClass}` : ''}" data-plugin-field="${pluginId}.${field.key}" data-plugin-secret="${field.secret ? '1' : '0'}" ${originalAttr}>${labelEl}${inner}${help}</div>`;
   switch (field.type) {
     case 'toggle': {
       const checked = !!v ? 'checked' : '';
       return wrap(`<input type="checkbox" id="${id}" ${checked} />`);
     }
     case 'number':
-      return wrap(`<input type="number" id="${id}" value="${_escapeAttr(String(v))}" style="width:120px" />`);
+      return wrap(`<input type="number" id="${id}" value="${_escapeAttr(String(v))}" />`, 'compact');
     case 'select': {
       const opts = (field.options || []).map(o => `<option value="${_escapeAttr(o.value)}"${o.value === v ? ' selected' : ''}>${_escapeHtml(o.label || o.value)}</option>`).join('');
       return wrap(`<select id="${id}">${opts}</select>`);
     }
     case 'textarea':
-      return wrap(`<textarea id="${id}" rows="3" style="width:100%;font-family:var(--font-body)">${_escapeHtml(String(v))}</textarea>`);
+      return wrap(`<textarea id="${id}" rows="3">${_escapeHtml(String(v))}</textarea>`);
     case 'password': {
       const placeholder = meta?.isSet ? '••• stored — leave blank to keep' : '';
-      return wrap(`<input type="password" id="${id}" placeholder="${placeholder}" style="width:100%;font-family:var(--font-body)" />`);
+      return wrap(`<input type="password" id="${id}" placeholder="${placeholder}" />`);
     }
     default:
-      return wrap(`<input type="text" id="${id}" value="${_escapeAttr(String(v))}" style="width:100%;font-family:var(--font-body)" />`);
+      return wrap(`<input type="text" id="${id}" value="${_escapeAttr(String(v))}" />`);
   }
 }
 
@@ -223,7 +225,7 @@ function _populateChannelsTab(plugins) {
     : [];
   panesEl.innerHTML = panes.length
     ? panes.map(_renderPluginPane).join('')
-    : '<div class="settings-note" style="opacity:.6">No channel plugin settings available.</div>';
+    : '<div class="settings-note settings-muted-soft">No channel plugin settings available.</div>';
   try {
     document.dispatchEvent(new CustomEvent('spore-channel-panes-rendered', { detail: { panes } }));
   } catch {}
@@ -240,7 +242,7 @@ function _renderChannelRow(hotReload, p) {
         : `<button type="button" class="settings-btn-secondary" data-plugin-install="${_escapeAttr(p.id)}">Install</button>`)
       : '');
   const deps = (p.depends || []).length
-    ? `<span class="settings-note" style="opacity:.55">depends: ${p.depends.map(_escapeHtml).join(', ')}</span>`
+    ? `<span class="settings-note settings-muted-soft">depends: ${p.depends.map(_escapeHtml).join(', ')}</span>`
     : '';
   return `<div class="settings-channel-row">
     <div class="settings-channel-main">
@@ -249,7 +251,7 @@ function _renderChannelRow(hotReload, p) {
         <span class="settings-channel-id">${_escapeHtml(p.id)}</span>
         <span class="settings-channel-status ${statusClass}">${_escapeHtml(status)}</span>
       </div>
-      <div class="settings-note" style="opacity:.72">${_escapeHtml(p.description || 'Channel integration plugin.')}</div>
+      <div class="settings-note settings-muted">${_escapeHtml(p.description || 'Channel integration plugin.')}</div>
       ${deps}
     </div>
     ${action}
@@ -280,7 +282,7 @@ function _settingsPairingTime(iso) {
 }
 
 function _settingsRenderTelegramPending(reqs) {
-  if (!reqs.length) return '<div class="settings-note" style="opacity:.6">No pending Telegram pairing requests.</div>';
+  if (!reqs.length) return '<div class="settings-note settings-muted-soft">No pending Telegram pairing requests.</div>';
   return reqs.map(req => {
     const lastSeen = _settingsPairingTime(req.lastSeenAt || req.createdAt);
     const details = [
@@ -299,7 +301,7 @@ function _settingsRenderTelegramPending(reqs) {
 }
 
 function _settingsRenderTelegramApproved(ids) {
-  if (!ids.length) return '<div class="settings-note" style="opacity:.6">No approved Telegram users.</div>';
+  if (!ids.length) return '<div class="settings-note settings-muted-soft">No approved Telegram users.</div>';
   return ids.map(id => `<div class="settings-channel-pairing-row">
     <div class="settings-channel-pairing-main">
       <div class="settings-channel-pairing-title">Telegram user</div>
@@ -325,8 +327,8 @@ async function _settingsRefreshTelegramPairing() {
   const pendingEl = panel.querySelector('[data-telegram-pairing-pending]');
   const approvedEl = panel.querySelector('[data-telegram-pairing-approved]');
   if (!pendingEl || !approvedEl) return;
-  pendingEl.innerHTML = '<div class="settings-note" style="opacity:.6">Loading...</div>';
-  approvedEl.innerHTML = '<div class="settings-note" style="opacity:.6">Loading...</div>';
+  pendingEl.innerHTML = '<div class="settings-note settings-muted-soft">Loading...</div>';
+  approvedEl.innerHTML = '<div class="settings-note settings-muted-soft">Loading...</div>';
   _settingsTelegramPairingStatus('', '');
   try {
     const [pendingData, approvedData] = await Promise.all([
@@ -338,8 +340,8 @@ async function _settingsRefreshTelegramPairing() {
     pendingEl.innerHTML = _settingsRenderTelegramPending(pending);
     approvedEl.innerHTML = _settingsRenderTelegramApproved(approved);
   } catch (err) {
-    pendingEl.innerHTML = '<div class="settings-note" style="opacity:.6">Unable to load pairing requests.</div>';
-    approvedEl.innerHTML = '<div class="settings-note" style="opacity:.6">Unable to load approved users.</div>';
+    pendingEl.innerHTML = '<div class="settings-note settings-muted-soft">Unable to load pairing requests.</div>';
+    approvedEl.innerHTML = '<div class="settings-note settings-muted-soft">Unable to load approved users.</div>';
     _settingsTelegramPairingStatus(err?.message || 'Pairing API unavailable', 'err');
   }
 }
@@ -521,19 +523,19 @@ async function _populateUsersSection() {
   if (!_isCreatorRole()) { section.style.display = 'none'; return; }
   section.style.display = '';
   const list = document.getElementById('settings-users-list');
-  list.innerHTML = '<div class="settings-note" style="opacity:.6">Loading…</div>';
+  list.innerHTML = '<div class="settings-note settings-muted-soft">Loading…</div>';
   try {
     const r = await fetch(API + '/api/webapp/users', { headers: authHeaders() });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     const users = (d.users || []).slice().sort((a, b) => (a.username || '').localeCompare(b.username || ''));
-    if (!users.length) { list.innerHTML = '<div class="settings-note" style="opacity:.6">No users yet.</div>'; return; }
+    if (!users.length) { list.innerHTML = '<div class="settings-note settings-muted-soft">No users yet.</div>'; return; }
     const me = _currentUserName;
     list.innerHTML = users.map(u => {
       const isSelf = u.username === me;
       const tag = u.selfRegistered ? '<span class="su-tag">self-registered</span>' : '';
       const roleSel = isSelf
-        ? `<span style="color:var(--text-dim);font-size:.74rem">${u.role}</span>`
+        ? `<span class="su-role">${u.role}</span>`
         : `<select data-user-role="${u.username}">
              <option value="webapp"${u.role === 'webapp' ? ' selected' : ''}>webapp</option>
              <option value="creator"${u.role === 'creator' ? ' selected' : ''}>creator</option>
@@ -568,7 +570,7 @@ async function _populateUsersSection() {
       });
     });
   } catch (e) {
-    list.innerHTML = `<div class="settings-note" style="color:var(--danger)">${esc(e.message || e)}</div>`;
+    list.innerHTML = `<div class="settings-note settings-status-danger">${esc(e.message || e)}</div>`;
   }
 }
 async function _settingsPatchUser(username, patch) {
@@ -986,90 +988,8 @@ function _settingsRuntimeLaneLimitsPayload() {
 }
 
 function _settingsEnsureGraphRuntimeStyles() {
-  if (document.getElementById('settings-graph-runtime-styles')) return;
-  const style = document.createElement('style');
-  style.id = 'settings-graph-runtime-styles';
-  style.textContent = `
-    #settings-graph-runtime-controls {
-      margin-top: 14px;
-      margin-bottom: 16px;
-      display: grid;
-      gap: 10px;
-    }
-    .settings-runtime-card {
-      border: 1px solid color-mix(in srgb, var(--accent2) 22%, var(--border));
-      border-radius: 11px;
-      padding: 11px;
-      background: linear-gradient(135deg,
-        color-mix(in srgb, var(--accent2) 7%, var(--panel)),
-        color-mix(in srgb, var(--surface) 72%, transparent));
-    }
-    .settings-runtime-card-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 8px;
-    }
-    .settings-runtime-card-title {
-      font-size: .76rem;
-      font-weight: 700;
-      color: var(--text);
-      letter-spacing: .03em;
-      text-transform: uppercase;
-    }
-    .settings-runtime-card .settings-check {
-      margin: 0;
-      white-space: nowrap;
-      color: var(--text-dim);
-      font-size: .68rem;
-    }
-    .settings-runtime-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 8px;
-    }
-    .settings-runtime-grid label {
-      margin-top: 0;
-      font-size: .62rem;
-    }
-    .settings-runtime-grid input {
-      padding: 6px 8px;
-      font-size: .76rem;
-    }
-    .settings-runtime-lane-control {
-      display: grid;
-      gap: 4px;
-      align-content: start;
-    }
-    .settings-runtime-lane-hint {
-      color: var(--text-dim);
-      font-size: .62rem;
-      line-height: 1.35;
-      opacity: .82;
-    }
-    .settings-runtime-note {
-      margin-top: 8px;
-      color: var(--text-dim);
-      font-size: .66rem;
-      line-height: 1.45;
-    }
-    .settings-runtime-status {
-      display: inline-flex;
-      align-items: center;
-      min-height: 1.3em;
-      color: var(--text-dim);
-      font-family: var(--font-body);
-      font-size: .64rem;
-      opacity: .82;
-    }
-    @media (max-width: 760px) {
-      .settings-runtime-card-head { align-items: flex-start; flex-direction: column; }
-      .settings-runtime-grid { grid-template-columns: 1fr; }
-      .settings-runtime-card .settings-check { white-space: normal; }
-    }
-  `;
-  document.head.appendChild(style);
+  // Runtime settings styles live in settings.css; kept as a compatibility
+  // shim for older call sites that still ensure before mounting controls.
 }
 
 function _settingsEnsureGraphRuntimeControls() {
@@ -1120,10 +1040,37 @@ function _settingsEnsureGraphRuntimeControls() {
       </div>
       <div class="settings-runtime-note">Only targets the General Knowledge Base graph. It enriches under-researched nodes with usage guidance and supporting detail.</div>
     </div>
+  `;
+  const janitorRow = document.getElementById('settings-janitor-run')?.closest('div');
+  if (janitorRow && janitorRow.parentElement === section) section.insertBefore(wrap, janitorRow);
+  else section.appendChild(wrap);
+}
+
+function _settingsEnsureCoreRuntimeControls() {
+  _settingsEnsureGraphRuntimeStyles();
+  let wrap = document.getElementById('settings-core-runtime-controls');
+  if (!wrap) {
+    const runtimeSection = document.getElementById('settings-runtime-public-url-input')?.closest('.settings-section');
+    if (!runtimeSection) return;
+    const section = document.createElement('div');
+    section.className = 'settings-section wide';
+    section.id = 'settings-runtime-queue-section';
+    section.setAttribute('data-target-tab', 'advanced');
+    section.innerHTML = `
+      <h4>Runtime job queue</h4>
+      <div class="settings-note">Central scheduler for web, CLI, channels, learner, wakeups, backups, and maintenance work. Lane limits and enable/disable changes apply after server restart.</div>
+      <div id="settings-core-runtime-controls"></div>
+    `;
+    runtimeSection.insertAdjacentElement('afterend', section);
+    wrap = section.querySelector('#settings-core-runtime-controls');
+  }
+  if (!wrap || wrap.dataset.mounted === '1') return;
+  wrap.dataset.mounted = '1';
+  wrap.innerHTML = `
     <div class="settings-runtime-card">
       <div class="settings-runtime-card-head">
         <div>
-          <div class="settings-runtime-card-title">Runtime job queue</div>
+          <div class="settings-runtime-card-title">Lane limits</div>
           <span id="settings-runtime-queue-status" class="settings-runtime-status">status not loaded</span>
         </div>
         <label class="settings-check" for="settings-runtime-queue-enabled">
@@ -1143,9 +1090,6 @@ function _settingsEnsureGraphRuntimeControls() {
       <div class="settings-runtime-note">Coordinates web, CLI, channel, learner, wakeup, and maintenance work. Enable/disable, lane limits, and timer cadence apply after server restart.</div>
     </div>
   `;
-  const janitorRow = document.getElementById('settings-janitor-run')?.closest('div');
-  if (janitorRow && janitorRow.parentElement === section) section.insertBefore(wrap, janitorRow);
-  else section.appendChild(wrap);
 }
 
 function _settingsCanonicalValue(data, key, fallback) {
@@ -1181,6 +1125,7 @@ function _settingsSetRuntimeChecked(id, value) {
 
 function _populateGraphRuntimeSettings(data) {
   _settingsEnsureGraphRuntimeControls();
+  _settingsEnsureCoreRuntimeControls();
   _settingsSetRuntimeChecked('settings-graph-maintenance-enabled',
     _settingsCanonicalValue(data, 'graphMaintenanceEnabled', true));
   _settingsSetRuntimeInput('settings-graph-maintenance-interval',
@@ -1280,6 +1225,8 @@ function _buildSettingsPatchPayload(modelLimits, models) {
     _settingsCheckboxIfPresent('settings-runtime-queue-enabled'));
   _settingsPatchIfPresent(patch, 'runtimeQueueLaneLimits',
     _settingsRuntimeLaneLimitsPayload());
+  _settingsPatchIfPresent(patch, 'nodePerformanceMetricViz',
+    _settingsCheckboxIfPresent('settings-node-performance-metric-viz'));
 
   for (const [tier, value] of Object.entries(models || {})) {
     patch[`models.${tier}`] = _settingsComposeModelRef(value.provider, value.model);
@@ -1483,22 +1430,26 @@ async function _hidePluginUiIfMissing() {
 // janitor bin, tailscale status, etc.) stays fresh without blocking open.
 const SETTINGS_TABS = [
   { id: 'profile',      label: 'Profile',       forAll: true  },
-  { id: 'providers',    label: 'Providers',     forAll: false },
+  { id: 'providers',    label: 'Models',        forAll: false },
   { id: 'agent',        label: 'Agent',         forAll: false },
   { id: 'graph-memory', label: 'Graph & Memory', forAll: false },
-  { id: 'backups',      label: 'Backups',       forAll: false },
-  { id: 'tools',        label: 'Tools',         forAll: false },
+  { id: 'backups',      label: 'Backups & Portability', forAll: false },
+  { id: 'tools',        label: 'Tools & Search', forAll: false },
   { id: 'channels',     label: 'Channels',      forAll: false },
   { id: 'plugins',      label: 'Plugins',       forAll: false },
   { id: 'users',        label: 'Users',         forAll: false },
-  { id: 'advanced',     label: 'Advanced',      forAll: false },
+  // Keep the stable tab id for saved preferences, but show the product-facing
+  // name now that this pane owns host/runtime controls.
+  { id: 'advanced',     label: 'Spore Core',    forAll: false },
 ];
 const _SETTINGS_TAB_REFRESHERS = {
   'graph-memory': () => {
-    try { if (typeof _runtimeQueueRefreshStatus === 'function') _runtimeQueueRefreshStatus(); } catch {}
     try { if (typeof _maintRefreshStatus === 'function') _maintRefreshStatus(); } catch {}
     try { if (typeof _janRefreshStatus === 'function') _janRefreshStatus(); } catch {}
     try { if (typeof _janLoadBin === 'function') _janLoadBin(); } catch {}
+  },
+  'advanced': () => {
+    try { if (typeof _runtimeQueueRefreshStatus === 'function') _runtimeQueueRefreshStatus(); } catch {}
   },
   'backups': () => {
     try { if (typeof _bkLoadStatus === 'function') _bkLoadStatus(); } catch {}
@@ -1510,6 +1461,189 @@ const _SETTINGS_TAB_REFRESHERS = {
   // Tailscale + compute-cluster live in their plugins now (Plugins
   // tab). No 'cluster' refresher needed.
 };
+
+let _settingsSearchBound = false;
+let _settingsSearchObserver = null;
+let _settingsSearchRaf = null;
+
+function _settingsSearchNormalize(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function _settingsSearchExpandText(value) {
+  const raw = String(value || '');
+  const camelSplit = raw
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  const dePunctuated = raw.replace(/[^a-zA-Z0-9]+/g, ' ');
+  return _settingsSearchNormalize(`${raw} ${camelSplit} ${dePunctuated}`);
+}
+
+function _settingsSearchCompact(value) {
+  return _settingsSearchNormalize(value).replace(/[^a-z0-9]+/g, '');
+}
+
+function _settingsSearchTokenMatches(text, token) {
+  if (!token) return true;
+  if (text.includes(token)) return true;
+  const compactToken = _settingsSearchCompact(token);
+  if (!compactToken) return true;
+  const compactText = _settingsSearchCompact(text);
+  if (compactText.includes(compactToken)) return true;
+  const words = text.split(/[^a-z0-9]+/).filter(Boolean);
+  if (words.some(word => word.startsWith(compactToken) || word.includes(compactToken))) return true;
+  return false;
+}
+
+function _settingsSearchTabLabel(tabId) {
+  return SETTINGS_TABS.find(t => t.id === tabId)?.label || tabId || '';
+}
+
+function _settingsSearchSectionText(section) {
+  const pane = section.closest('.settings-tab-pane');
+  const tabId = pane?.getAttribute('data-tab') || section.getAttribute('data-target-tab') || '';
+  const pieces = [
+    _settingsSearchTabLabel(tabId),
+    section.id,
+    section.getAttribute('data-target-tab'),
+    section.getAttribute('data-search-terms'),
+    section.textContent,
+  ];
+  section.querySelectorAll('label, input, select, textarea, button, [title], [aria-label], [placeholder]').forEach(el => {
+    pieces.push(
+      el.id,
+      el.name,
+      el.getAttribute('for'),
+      el.getAttribute('title'),
+      el.getAttribute('aria-label'),
+      el.getAttribute('placeholder')
+    );
+    if (el.tagName === 'SELECT') {
+      Array.from(el.options || []).forEach(opt => pieces.push(opt.textContent, opt.value));
+    }
+  });
+  return _settingsSearchExpandText(pieces.filter(Boolean).join(' '));
+}
+
+function _settingsSearchBaseHidden(section, allowedTabs) {
+  const pane = section.closest('.settings-tab-pane');
+  const tabId = pane?.getAttribute('data-tab') || section.getAttribute('data-target-tab') || '';
+  if (!allowedTabs.has(tabId)) return true;
+  if (section.hidden) return true;
+  if (section.style.display === 'none' && !section.classList.contains('settings-search-hidden')) return true;
+  let el = section.parentElement;
+  while (el && el.id !== 'settings-panes') {
+    if (el.hidden || el.style.display === 'none') return true;
+    el = el.parentElement;
+  }
+  return false;
+}
+
+function _settingsSearchEmptyEl() {
+  const panes = document.getElementById('settings-panes');
+  if (!panes) return null;
+  let el = document.getElementById('settings-search-empty');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'settings-search-empty';
+    el.className = 'settings-search-empty';
+    el.textContent = 'No settings match that search.';
+    panes.appendChild(el);
+  }
+  return el;
+}
+
+function _settingsApplySearchFilter() {
+  const input = document.getElementById('settings-search');
+  const clearBtn = document.getElementById('settings-search-clear');
+  const countEl = document.getElementById('settings-search-count');
+  const panesWrap = document.getElementById('settings-panes');
+  if (!input || !panesWrap) return;
+
+  const tokens = _settingsSearchNormalize(input.value).split(' ').filter(Boolean);
+  const active = tokens.length > 0;
+  const emptyEl = _settingsSearchEmptyEl();
+  const panes = Array.from(panesWrap.querySelectorAll('.settings-tab-pane'));
+  const sections = Array.from(panesWrap.querySelectorAll('.settings-section'));
+  const allowedTabs = new Set(Array.from(document.querySelectorAll('#settings-tabs .settings-tab'))
+    .map(btn => btn.getAttribute('data-tab'))
+    .filter(Boolean));
+
+  panesWrap.classList.toggle('settings-search-active', active);
+  if (clearBtn) clearBtn.hidden = !active;
+
+  if (!active) {
+    panes.forEach(pane => pane.removeAttribute('data-search-visible'));
+    sections.forEach(section => section.classList.remove('settings-search-hidden', 'settings-search-match'));
+    if (emptyEl) emptyEl.removeAttribute('data-visible');
+    if (countEl) countEl.textContent = '';
+    return;
+  }
+
+  let matches = 0;
+  const visiblePanes = new Set();
+  for (const section of sections) {
+    const pane = section.closest('.settings-tab-pane');
+    const tabId = pane?.getAttribute('data-tab') || section.getAttribute('data-target-tab') || '';
+    const hidden = _settingsSearchBaseHidden(section, allowedTabs);
+    const text = hidden ? '' : _settingsSearchSectionText(section);
+    const matched = !hidden && tokens.every(token => _settingsSearchTokenMatches(text, token));
+    section.classList.toggle('settings-search-hidden', !matched);
+    section.classList.toggle('settings-search-match', matched);
+    if (matched) {
+      matches++;
+      if (tabId) visiblePanes.add(tabId);
+    }
+  }
+
+  panes.forEach(pane => {
+    const tabId = pane.getAttribute('data-tab');
+    if (visiblePanes.has(tabId)) pane.setAttribute('data-search-visible', 'true');
+    else pane.removeAttribute('data-search-visible');
+  });
+  if (emptyEl) {
+    if (matches) emptyEl.removeAttribute('data-visible');
+    else emptyEl.setAttribute('data-visible', 'true');
+  }
+  if (countEl) countEl.textContent = matches ? `${matches} match${matches === 1 ? '' : 'es'}` : 'No matches';
+}
+
+function _settingsClearSearch(opts = {}) {
+  const input = document.getElementById('settings-search');
+  if (!input) return;
+  input.value = '';
+  _settingsApplySearchFilter();
+  if (opts.focus) input.focus();
+}
+
+function _bindSettingsSearch() {
+  if (_settingsSearchBound) return;
+  _settingsSearchBound = true;
+  const input = document.getElementById('settings-search');
+  const clearBtn = document.getElementById('settings-search-clear');
+  const panes = document.getElementById('settings-panes');
+  if (!input || !panes) return;
+
+  input.addEventListener('input', _settingsApplySearchFilter);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && input.value) {
+      e.stopPropagation();
+      _settingsClearSearch({ focus: true });
+    }
+  });
+  clearBtn?.addEventListener('click', () => _settingsClearSearch({ focus: true }));
+  if (typeof MutationObserver === 'function' && !_settingsSearchObserver) {
+    _settingsSearchObserver = new MutationObserver(() => {
+      if (!input.value.trim()) return;
+      if (_settingsSearchRaf) cancelAnimationFrame(_settingsSearchRaf);
+      _settingsSearchRaf = requestAnimationFrame(() => {
+        _settingsSearchRaf = null;
+        _settingsApplySearchFilter();
+      });
+    });
+    _settingsSearchObserver.observe(panes, { childList: true, subtree: true, characterData: true });
+  }
+}
 
 function _reparentSettingsSections() {
   // Move every [data-target-tab] section into its matching pane. Idempotent.
@@ -1535,6 +1669,8 @@ function _renderSettingsTabs() {
   tabBar.innerHTML = allowed.map(t =>
     `<button class="settings-tab" type="button" data-tab="${t.id}">${t.label}</button>`
   ).join('');
+  _bindSettingsSearch();
+  _settingsApplySearchFilter();
 }
 
 function _settingsSwitchTab(tabId) {
@@ -1554,6 +1690,7 @@ function _settingsSwitchTab(tabId) {
 document.addEventListener('click', (e) => {
   const t = e.target;
   if (t && t.classList?.contains('settings-tab') && t.hasAttribute('data-tab')) {
+    if (document.getElementById('settings-search')?.value) _settingsClearSearch();
     _settingsSwitchTab(t.getAttribute('data-tab'));
   }
 });
@@ -1573,6 +1710,7 @@ async function openSettingsPanel() {
   _initSettingsFloatingPane();
   _bindResetGraphButton();
   _bindInviteKeyButtons();
+  _bindSettingsSearch();
   _hidePluginUiIfMissing();
   if (typeof _focusFloatingWindow === 'function') _focusFloatingWindow('settings-pane');
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
@@ -1659,6 +1797,7 @@ function _initSettingsFloatingPane() {
 
 function closeSettingsPanel() {
   const { overlay } = getSettingsEls();
+  _settingsClearSearch();
   overlay?.classList.remove('settings-pane-open', 'window-maximized');
   setSettingsBusy(false, '');
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
@@ -1667,13 +1806,13 @@ function closeSettingsPanel() {
 async function renderSettingsGraphsList() {
   const container = document.getElementById('settings-graphs-list');
   if (!container) return;
-  container.innerHTML = '<div style="opacity:.5;font-size:.66rem;padding:6px">loading…</div>';
+  container.innerHTML = '<div class="settings-scroll-empty">loading…</div>';
   try {
     const res = await fetch(API + '/api/graphs');
     const data = await res.json();
     const graphs = data.graphs || [];
     if (!graphs.length) {
-      container.innerHTML = '<div style="opacity:.5;font-size:.66rem;padding:6px">No graphs yet</div>';
+      container.innerHTML = '<div class="settings-scroll-empty">No graphs yet</div>';
       return;
     }
     container.innerHTML = graphs.map(g => {
@@ -1737,7 +1876,7 @@ async function renderSettingsGraphsList() {
       btn.addEventListener('click', () => _maintainSettingsGraph(btn.dataset.graphMaintain, graphs.find(g => g.slug === btn.dataset.graphMaintain)));
     });
   } catch (e) {
-    container.innerHTML = `<div style="opacity:.5;font-size:.66rem;padding:6px;color:var(--danger)">Failed: ${esc(e.message)}</div>`;
+    container.innerHTML = `<div class="settings-scroll-empty settings-status-danger">Failed: ${esc(e.message)}</div>`;
   }
 }
 
@@ -1810,36 +1949,73 @@ async function _resetSettingsGraph(slug, graph) {
 }
 
 // Reset Graph button — gates on the user typing the literal RESET into
-// the confirm input, then POSTs /api/admin/reset-graph. On success
-// shows the before/after counts + backup path inline. The endpoint
-// itself also requires {confirm: "RESET"} as a second guard. Idempotent
-// rebind — refreshes button state if the settings pane is opened/closed
-// multiple times in one session.
+// the confirm input, then POSTs /api/admin/reset-graph. In multi-graph
+// mode this resets default + General Knowledge and prunes every other
+// graph. The endpoint itself also requires {confirm: "RESET"} as a
+// second guard. Idempotent rebind — refreshes button state if the
+// settings pane is opened/closed multiple times in one session.
 // Invite-key card buttons — show/hide toggle, copy-to-clipboard, regen.
 // Regen sets a `_pendingInviteRegenerate` flag so the next saveSettingsPanel
 // call posts `inviteKeyRegenerate: true` instead of the typed value.
 let _inviteKeyBound = false;
 let _pendingInviteRegenerate = false;
 let _pendingInviteClear = false;
+async function _revealInviteKey(input) {
+  const r = await fetch(API + '/api/settings/invite-key/reveal', {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || !data?.ok) throw new Error(data?.error || 'Invite key reveal failed');
+  if (!data.inviteKey) throw new Error('No invite key is set');
+  if (input) {
+    input.value = data.inviteKey;
+    input.type = 'text';
+    input.dataset.secretSet = '1';
+    input.dataset.revealed = '1';
+  }
+  const note = document.getElementById('settings-invite-key-note');
+  if (note) note.textContent = 'Current invite key revealed. Copy it now or hide it again.';
+  const showBtn = document.getElementById('settings-invite-key-show');
+  if (showBtn) showBtn.textContent = 'hide';
+  return data.inviteKey;
+}
 function _bindInviteKeyButtons() {
   if (_inviteKeyBound) return;
   _inviteKeyBound = true;
   const input = document.getElementById('settings-invite-key');
-  document.getElementById('settings-invite-key-show')?.addEventListener('click', () => {
+  document.getElementById('settings-invite-key-show')?.addEventListener('click', async () => {
     if (!input) return;
-    if (input.type === 'password') { input.type = 'text'; document.getElementById('settings-invite-key-show').textContent = 'hide'; }
-    else { input.type = 'password'; document.getElementById('settings-invite-key-show').textContent = 'show'; }
+    const showBtn = document.getElementById('settings-invite-key-show');
+    if (input.type === 'password') {
+      try {
+        if (!input.value && input.dataset.secretSet === '1') await _revealInviteKey(input);
+        else input.type = 'text';
+        if (showBtn) showBtn.textContent = 'hide';
+      } catch (e) {
+        toast(e?.message || 'Invite key reveal failed', true);
+      }
+    } else {
+      input.type = 'password';
+      if (showBtn) showBtn.textContent = 'show';
+    }
   });
   document.getElementById('settings-invite-key-copy')?.addEventListener('click', async () => {
-    if (!input?.value) return;
-    const ok = await _copyToClipboard(input.value);
-    toast(ok ? 'Invite key copied' : 'Copy failed — select manually', !ok);
+    try {
+      const value = input?.value || (input?.dataset.secretSet === '1' ? await _revealInviteKey(input) : '');
+      if (!value) throw new Error('No invite key is set');
+      const ok = await _copyToClipboard(value);
+      toast(ok ? 'Invite key copied' : 'Copy failed — select manually', !ok);
+    } catch (e) {
+      toast(e?.message || 'Invite key copy failed', true);
+    }
   });
   document.getElementById('settings-invite-key-regen')?.addEventListener('click', async () => {
     if (!confirm('Regenerate the Spore Core invite key? Existing webapp guests + Spore Code users will lose access until they get the new key.')) return;
     _pendingInviteRegenerate = true;
     _pendingInviteClear = false;
-    if (input) input.value = '';
+    if (input) { input.value = ''; input.dataset.revealed = '0'; }
     const note = document.getElementById('settings-invite-key-note');
     if (note) note.textContent = 'Will mint a fresh UUID on Save.';
     toast('Click Save to mint the new key');
@@ -1848,7 +2024,7 @@ function _bindInviteKeyButtons() {
     if (!confirm('Disable the invite key? Self-registration and Spore Code invite auth will stop working until a new key is set.')) return;
     _pendingInviteClear = true;
     _pendingInviteRegenerate = false;
-    if (input) input.value = '';
+    if (input) { input.value = ''; input.dataset.secretSet = '0'; input.dataset.revealed = '0'; }
     const note = document.getElementById('settings-invite-key-note');
     if (note) note.textContent = 'Will disable invite auth on Save.';
     toast('Click Save to disable the invite key');
@@ -1864,22 +2040,20 @@ function _bindResetGraphButton() {
   if (!input || !btn) return;
   _resetGraphBound = true;
 
-  const updateBtn = () => {
-    const ok = input.value === 'RESET';
-    btn.disabled = !ok;
-    btn.style.cursor = ok ? 'pointer' : 'not-allowed';
-    btn.style.opacity = ok ? '1' : '0.5';
-  };
+	  const updateBtn = () => {
+	    const ok = input.value === 'RESET';
+	    btn.disabled = !ok;
+	  };
   input.addEventListener('input', updateBtn);
 
   btn.addEventListener('click', async () => {
     if (input.value !== 'RESET') return;
     btn.disabled = true;
     btn.textContent = 'Resetting…';
-    if (result) {
-      result.style.display = 'block';
-      result.textContent = 'Wiping graph + reseeding refs…';
-    }
+	    if (result) {
+	      result.hidden = false;
+	      result.textContent = 'Resetting default + General Knowledge and pruning extra graphs…';
+	    }
     try {
       const r = await fetch(API + '/api/admin/reset-graph', {
         method: 'POST',
@@ -1888,18 +2062,32 @@ function _bindResetGraphButton() {
       });
       const data = await r.json();
       if (!r.ok || !data.ok) throw new Error(data?.error || 'reset failed');
-      const b = data.before || {};
-      const a = data.after || {};
-      const summary = `Graph reset OK. before: nodes=${b.nodes} aspects=${b.aspects} attrs=${b.attrs} edges=${b.edges} episodes=${b.episodes}. after: nodes=${a.nodes} aspects=${a.aspects} attrs=${a.attrs} edges=${a.edges} episodes=${a.episodes}. backup at ${data.backup}.`;
+      const d = data.defaultGraph || {};
+      const g = data.generalGraph || {};
+      const db = d.before || {};
+      const da = d.after || {};
+      const gb = g.before || {};
+      const ga = g.after || {};
+      const pruned = Array.isArray(data.prunedGraphs) ? data.prunedGraphs : [];
+      const graphSummary = data.mode === 'legacy'
+        ? `Graph reset OK. before: nodes=${db.nodes} aspects=${db.aspects} attrs=${db.attrs} edges=${db.edges} episodes=${db.episodes}. after: nodes=${da.nodes} aspects=${da.aspects} attrs=${da.attrs} edges=${da.edges} episodes=${da.episodes}. backup at ${d.backup || data.backup}.`
+        : `Core graph reset OK. default: ${db.nodes ?? '?'} → ${da.nodes ?? '?'} nodes. General Knowledge: ${gb.nodes ?? '?'} → ${ga.nodes ?? '?'} nodes. Pruned ${pruned.length} extra graph${pruned.length === 1 ? '' : 's'}. Backups: ${[d.backup, g.backup].filter(Boolean).join(' · ') || 'created'}.`;
+      const summary = graphSummary;
       if (result) result.textContent = summary;
-      if (typeof toast === 'function') toast('Graph reset to seeds');
+      if (typeof toast === 'function') toast(data.mode === 'legacy' ? 'Graph reset to seeds' : `Reset core graphs; pruned ${pruned.length}`);
+      if (typeof loadGraphsList === 'function') loadGraphsList();
+      if (typeof renderSettingsGraphsList === 'function') renderSettingsGraphsList();
+      if (typeof viewActiveGraph === 'function') {
+        const active = (typeof _graphsList !== 'undefined' ? _graphsList : []).find(g => g.active);
+        if (active) viewActiveGraph(active.slug);
+      }
     } catch (e) {
       if (result) result.textContent = 'Failed: ' + (e?.message || e);
       if (typeof toast === 'function') toast('Reset failed: ' + (e?.message || e), true);
     } finally {
       input.value = '';
       updateBtn();
-      btn.textContent = 'Reset graph';
+      btn.textContent = 'Reset core graphs';
     }
   });
   updateBtn();
@@ -2077,8 +2265,8 @@ function _populateBudgetInputs(budgets) {
     const curVal = sections[k];
     const overridden = (curVal != null && curVal !== defVal);
     return `
-      <div class="settings-budget-row" style="display:flex;flex-direction:column;gap:2px">
-        <label for="settings-budget-section-${k}" style="font-size:0.85em">${k} <span style="opacity:0.55;font-weight:normal">(default ${defVal})</span></label>
+      <div class="settings-budget-row">
+        <label for="settings-budget-section-${k}">${k} <span class="settings-budget-default">(default ${defVal})</span></label>
         <input id="settings-budget-section-${k}" data-budget-section="${k}" type="number" min="100" step="100" placeholder="${defVal}" value="${overridden ? curVal : ''}">
       </div>
     `;

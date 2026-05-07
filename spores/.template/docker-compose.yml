@@ -40,10 +40,6 @@ services:
       - default
       - anima-web
 
-    depends_on:
-      ssh-sidecar:
-        condition: service_started
-
     deploy:
       resources:
         limits:
@@ -58,19 +54,30 @@ services:
     stop_grace_period: 10s
 
   ssh-sidecar:
-    image: anima-ssh-sidecar:latest
-    container_name: ${AGENT_ID:-anima}-ssh-sidecar
+    image: spore-ssh-sidecar:latest
+    container_name: ${AGENT_ID:-spore}-ssh-sidecar
     restart: unless-stopped
-    network_mode: "none"
+    profiles:
+      - ssh-sidecar
+    depends_on:
+      - anima
+    network_mode: "service:anima"
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
-      - SIDECAR_PASSPHRASE=${ANIMA_WEB_AUTH_PASS:?Set ANIMA_WEB_AUTH_PASS in .env before starting}
+      - SIDECAR_PASSPHRASE=${SPORE_SSH_SIDECAR_PASSPHRASE:-}
       - SIDECAR_SOCKET=/run/ssh-sidecar/sidecar.sock
       - SIDECAR_STORE=/data/ssh-hosts.json
+      - SIDECAR_AUDIT_LOG=/data/terminal-audit.log
+      - SIDECAR_ALLOWED_HOSTS=${SPORE_SSH_SIDECAR_ALLOWED_HOSTS:-*}
     volumes:
       - ssh-sidecar-sock:/run/ssh-sidecar
-      - ./data:/data
+      - ssh-sidecar-data:/data
     deploy:
       resources:
         limits:
@@ -78,6 +85,7 @@ services:
 
 volumes:
   ssh-sidecar-sock:
+  ssh-sidecar-data:
 
 networks:
   anima-web:

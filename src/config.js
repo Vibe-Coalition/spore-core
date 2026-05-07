@@ -85,6 +85,7 @@ const DEFAULTS = {
   nicknames: [],          // e.g. ["harry", "h"] — group chat trigger words
   maxTokens: 16384,
   contextWindow: 200000,
+  tokenPricing: {}, // SPORE_TOKEN_PRICING — JSON map of model → USD per million tokens
 
   // Learner
   learningMode: 'always', // 'always' | 'flush_only' | 'disabled'
@@ -132,6 +133,7 @@ const DEFAULTS = {
     maintenance: 1,
     background: 1,
   },
+  nodePerformanceMetricViz: false,    // Show graph renderer/node performance status line in the web UI
   graphBackupEnabled: true,          // SPORE_BACKUP_ENABLED=false to disable
   graphBackupIntervalMinutes: 60,    // SPORE_BACKUP_INTERVAL_MINUTES
   graphBackupRetention: 20,          // SPORE_BACKUP_RETENTION — rolling count kept
@@ -364,6 +366,11 @@ function loadConfigFresh() {
   // Per-model context overrides — JSON map of `<modelRef>: {contextWindow, compactAt}`
   if (process.env.SPORE_MODEL_LIMITS) {
     try { config.modelLimits = JSON.parse(process.env.SPORE_MODEL_LIMITS); } catch {
+      // silent: malformed JSON → fallback
+    }
+  }
+  if (process.env.SPORE_TOKEN_PRICING) {
+    try { config.tokenPricing = JSON.parse(process.env.SPORE_TOKEN_PRICING); } catch {
       // silent: malformed JSON → fallback
     }
   }
@@ -841,6 +848,7 @@ function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
   if (models.videoFallback !== undefined)  cfg.videoFallbackModel = models.videoFallback;
   cfg.model = cfg.plannerModel || cfg.normalModel || cfg.casualModel || null;
   if (snap.modelLimits !== undefined)      cfg.modelLimits = snap.modelLimits;
+  if (snap.tokenPricing !== undefined)     cfg.tokenPricing = snap.tokenPricing;
 
   const providers = snap.providers || {};
   if (providers.anthropic?.apiKey !== undefined)   cfg.anthropicApiKey = providers.anthropic.apiKey;
@@ -918,6 +926,7 @@ function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
     'generalKbResearchEnabled', 'generalKbResearchIntervalHours',
     'generalKbResearchBatchSize',
     'runtimeQueueEnabled', 'runtimeQueueLaneLimits',
+    'nodePerformanceMetricViz',
     'graphBackupEnabled', 'graphBackupIntervalMinutes', 'graphBackupRetention',
     'graphBackupDir', 'graphBackupOnChangeOnly',
     'heartbeatIntervalMinutes',

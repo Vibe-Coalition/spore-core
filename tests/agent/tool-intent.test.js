@@ -131,6 +131,90 @@ test('end-turn handler does not replay stale intermediate text as final answer',
   assert.deepEqual(stored, []);
 });
 
+test('empty direct coding replies are repaired only after tool use', () => {
+  const agent = makeAgent(['read_file']);
+  const base = {
+    opts: { trigger: 'mention', projectContext: { mode: 'execute', cwd: '/repo' } },
+    toolLog: [{ tool: 'read_file' }],
+  };
+
+  assert.equal(agent._shouldRepairEmptyDirectToolReply({ ...base, finalText: '', isDirect: true }), true);
+  assert.equal(agent._shouldRepairEmptyDirectToolReply({ ...base, finalText: 'NO_REPLY', isDirect: true }), true);
+  assert.equal(agent._shouldRepairEmptyDirectToolReply({ ...base, finalText: 'done', isDirect: true }), false);
+  assert.equal(agent._shouldRepairEmptyDirectToolReply({ ...base, finalText: '', isDirect: false }), false);
+  assert.equal(agent._shouldRepairEmptyDirectToolReply({ ...base, finalText: '', isDirect: true, wasUserAbort: true }), false);
+  assert.equal(agent._shouldRepairEmptyDirectToolReply({ ...base, finalText: '', isDirect: true, toolLog: [] }), false);
+  assert.equal(agent._shouldRepairEmptyDirectToolReply({ ...base, finalText: '', isDirect: true, opts: { trigger: 'mention' } }), false);
+});
+
+test('empty direct coding reply repair uses a no-tool status turn and reports metadata', async () => {
+  const agent = makeAgent(['read_file', 'exec']);
+  const statuses = [];
+  const messages = [
+    { role: 'user', content: 'fix the tests' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'exec', input: { command: 'npm test' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '{"ok":true}' }] },
+  ];
+  let request;
+  agent._callLLM = async (systemPrompt, repairMessages, opts) => {
+    request = { systemPrompt, repairMessages, opts };
+    return {
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 3,
+      },
+      content: [{ type: 'text', text: 'I made the change and the focused npm test command passed.' }],
+    };
+  };
+  const totalUsage = {
+    input_tokens: 1,
+    output_tokens: 1,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  };
+
+  const repair = await agent._repairEmptyDirectToolReply({
+    systemPrompt: 'sys',
+    staticPrompt: 'static',
+    dynamicContext: 'dynamic',
+    messages,
+    opts: {
+      platform: 'cli',
+      trigger: 'mention',
+      projectContext: { mode: 'execute', cwd: '/repo' },
+      onStatus(status) { statuses.push(status); },
+    },
+    sessionKey: 'session-1',
+    totalUsage,
+    toolLog: [{
+      tool: 'exec',
+      input: '{"command":"npm test -- --grep request-id"}',
+      resultPreview: '{"ok":true,"stdout":"15 passing"}',
+      succeeded: true,
+      exitCode: 0,
+    }],
+  });
+
+  assert.equal(repair.repaired, true);
+  assert.match(repair.text, /focused npm test/);
+  assert.deepEqual(request.opts.tools, []);
+  assert.equal(request.opts.route, 'response-repair');
+  assert.equal(request.opts.projectContext.cwd, '/repo');
+  assert.match(request.repairMessages.at(-1).content, /Do not call tools/);
+  assert.match(request.repairMessages.at(-1).content, /Latest tool evidence/);
+  assert.match(request.repairMessages.at(-1).content, /npm test -- --grep request-id/);
+  assert.notEqual(request.repairMessages, messages);
+  assert.deepEqual(statuses, [{ type: 'response_repair', reason: 'empty_tool_reply' }]);
+  assert.deepEqual(totalUsage, {
+    input_tokens: 11,
+    output_tokens: 6,
+    cache_read_input_tokens: 2,
+    cache_creation_input_tokens: 3,
+  });
+});
+
 test('runtime contract adds a non-droppable cli plan-mode guard', () => {
   const agent = makeAgent(['read_file', 'glob', 'graph_query']);
   const contract = agent._buildRuntimeToolContract({
@@ -143,6 +227,20 @@ test('runtime contract adds a non-droppable cli plan-mode guard', () => {
   assert.match(contract, /QUESTIONS:/);
   assert.match(contract, /PLAN_READY/);
   assert.match(contract, /Do NOT call `exec`/);
+  assert.match(contract, /final verification claims must be command-derived/);
+  assert.match(contract, /focused tests/);
+});
+
+test('runtime contract explains graph discovery and General Knowledge Base access', () => {
+  const agent = makeAgent(['graph_query']);
+  const contract = agent._buildRuntimeToolContract({ platform: 'web' });
+
+  assert.match(contract, /graph_query\(\{ mode: "graphs" \}\)/);
+  assert.match(contract, /graph: "spore-knowledge-base"/);
+  assert.match(contract, /type: "skill"/);
+  assert.match(contract, /shared\/stored graph knowledge/);
+  assert.match(contract, /Do not call it empty or "fresh"/);
+  assert.match(contract, /do not inspect `\/data\/graphs`/i);
 });
 
 test('cli plan marker text does not force hidden execution tools', () => {
@@ -156,6 +254,36 @@ test('cli plan marker text does not force hidden execution tools', () => {
     }),
     null,
   );
+});
+
+test('graph discovery loop guard catches varied no-progress graph probes', () => {
+  const agent = makeAgent(['graph_query']);
+  const tracker = {};
+  const result = JSON.stringify({ mode: 'overview', nodes: [], total: 0, done: true });
+  const calls = [
+    { query: 'shared graph' },
+    { query: 'shared graph knowledge skills' },
+    { query: 'stored skills' },
+    { query: 'distilled skills' },
+    { query: '*' },
+    { mode: 'overview' },
+    { graph: 'spore-knowledge-base', type: 'concept' },
+    { project: 'spore-knowledge-base', type: 'technology' },
+    { graph: 'spore-knowledge-base', query: 'general knowledge' },
+    { query: 'current graph' },
+    { mode: 'graphs' },
+  ];
+
+  const checks = calls.map(input => agent._recordGraphDiscoveryProgress(
+    tracker,
+    'graph_query',
+    input,
+    result,
+  ));
+
+  assert.equal(checks.some(c => c.warning), true);
+  assert.equal(checks.at(-1).blocked, true);
+  assert.match(checks.at(-1).message, /Repeated graph-discovery queries/);
 });
 
 test('aborted tool batches keep tool_use/tool_result pairing intact', async () => {
@@ -181,6 +309,123 @@ test('aborted tool batches keep tool_use/tool_result pairing intact', async () =
     assert.equal(parsed.interrupted, true);
     assert.match(parsed.note, /context/);
   }
+});
+
+test('duplicate tool batches execute one identical call and preserve pairing', async () => {
+  const agent = makeAgent(['read_file']);
+  const executed = [];
+  const statuses = [];
+
+  const result = await agent._executeToolBatch([
+    { id: 'toolu_1', name: 'read_file', input: { path: 'tests/test_options.py' } },
+    { id: 'toolu_2', name: 'read_file', input: { path: 'tests/test_options.py' } },
+    { id: 'toolu_3', name: 'read_file', input: { path: 'tests/test_options.py', offset: 10, limit: 5 } },
+  ], {
+    abortSignal: null,
+    sessionKey: 'session-1',
+    loopTracker: { history: [], maxHistory: 20 },
+    toolLog: [],
+    opts: {
+      onStatus(status) { statuses.push(status); },
+      async onToolExecute(name, input, id) {
+        executed.push({ name, input, id });
+        return { ok: true, id, input };
+      },
+    },
+  });
+
+  assert.deepEqual(executed.map(e => e.id), ['toolu_1', 'toolu_3']);
+  assert.equal(result.criticalBlock, false);
+  assert.deepEqual(result.toolResults.map(r => r.tool_use_id), ['toolu_1', 'toolu_2', 'toolu_3']);
+  assert.match(JSON.parse(result.toolResults[1].content).error, /Duplicate read_file call skipped/);
+  assert.equal(JSON.parse(result.toolResults[1].content).duplicateOf, 'toolu_1');
+  assert.equal(statuses.some(s => s.type === 'duplicate_tool_batch' && s.skipped === 1), true);
+});
+
+test('large duplicate tool batches trip the loop breaker before context bloat', async () => {
+  const agent = makeAgent(['read_file']);
+  let executed = 0;
+  const blocks = Array.from({ length: 12 }, (_, i) => ({
+    id: `toolu_${i}`,
+    name: 'read_file',
+    input: { path: 'tests/test_options.py' },
+  }));
+
+  const result = await agent._executeToolBatch(blocks, {
+    abortSignal: null,
+    sessionKey: 'session-1',
+    loopTracker: { history: [], maxHistory: 20 },
+    toolLog: [],
+    opts: {
+      async onToolExecute() {
+        executed += 1;
+        return { ok: true, content: 'file contents' };
+      },
+    },
+  });
+
+  assert.equal(executed, 1);
+  assert.equal(result.criticalBlock, true);
+  assert.equal(result.toolResults.length, 12);
+  assert.equal(result.toolResults.filter(r => /Duplicate read_file call skipped/.test(r.content)).length, 11);
+});
+
+test('context overflow errors compact once and retry', async () => {
+  const agent = makeAgent(['read_file']);
+  const statuses = [];
+  let compactArgs = null;
+  agent._compactHistory = async (sessionKey, messages, targetTokens, onStatus) => {
+    compactArgs = { sessionKey, messages, targetTokens, onStatus };
+    return [
+      messages[0],
+      { role: 'user', content: '[compacted test history]' },
+    ];
+  };
+
+  const err = new Error('OAI provider HTTP 400: {"error":{"message":"This model maximum context length is 262144 tokens. However, you requested 8192 output tokens and your prompt contains at least 253953 input tokens"}}');
+  err.status = 400;
+  const state = {
+    sessionRecoveredThisCall: false,
+    contextOverflowRecoveredThisCall: false,
+    apiRetries: 0,
+  };
+
+  const first = await agent._handleIterationError(err, {
+    abortSignal: null,
+    sessionKey: 'session-1',
+    iterations: 3,
+    opts: { onStatus(status) { statuses.push(status); } },
+    messages: [
+      { role: 'user', content: 'fix it' },
+      { role: 'assistant', content: 'working' },
+      { role: 'user', content: 'x'.repeat(10000) },
+    ],
+    state,
+    systemPrompt: 'system',
+    hardCeiling: 12000,
+  });
+
+  assert.equal(first.action, 'continue');
+  assert.equal(state.contextOverflowRecoveredThisCall, true);
+  assert.equal(compactArgs.sessionKey, 'session-1');
+  assert.ok(compactArgs.targetTokens < 12000);
+  assert.deepEqual(first.messages, [
+    { role: 'user', content: 'fix it\n[compacted test history]' },
+  ]);
+  assert.equal(statuses.some(s => s.type === 'context_overflow_recover'), true);
+  assert.equal(statuses.some(s => s.type === 'context_overflow_retry'), true);
+
+  const second = await agent._handleIterationError(err, {
+    abortSignal: null,
+    sessionKey: 'session-1',
+    iterations: 4,
+    opts: {},
+    messages: first.messages,
+    state,
+    systemPrompt: 'system',
+    hardCeiling: 12000,
+  });
+  assert.equal(second.action, 'rethrow');
 });
 
 test('abort preserves queued interjections instead of discarding user text', () => {

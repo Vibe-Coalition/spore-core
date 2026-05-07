@@ -1,7 +1,7 @@
 {
-  "name": "anima-ssh-sidecar",
+  "name": "spore-ssh-sidecar",
   "version": "1.0.0",
-  "description": "Credential isolation sidecar for SSH key management",
+  "description": "Spore SSH credential isolation sidecar",
   "main": "ssh-sidecar.js",
   "scripts": {
     "start": "node ssh-sidecar.js"

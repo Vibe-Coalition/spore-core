@@ -123,45 +123,50 @@ The web panel includes an interactive terminal with local PTY and remote SSH sup
 
 ### Encryption at Rest
 
-SSH keys and passwords are encrypted with AES-256-GCM before being written to `/data/ssh-hosts.json`. The encryption key is derived from `ANIMA_WEB_AUTH_PASS` using PBKDF2 (100,000 iterations, SHA-256). Without the passphrase, the stored file is cryptographically opaque.
+SSH keys and passwords are encrypted with AES-256-GCM before being written to disk. Local fallback mode stores them in `/data/ssh-hosts.json` and derives the key from `SPORE_WEB_AUTH_PASS` when available, or from an operator-entered keystore passphrase. Sidecar mode stores them in the sidecar data mount and derives the key from `SPORE_SSH_SIDECAR_PASSPHRASE`. Without the relevant passphrase, the stored file is cryptographically opaque.
+
+Sidecar mode also supports credential profiles. A plugin can generate a key inside the sidecar, attach that profile to multiple hosts, and expose only public key metadata to the main app. The compute-cluster plugin uses this for its `cluster-default` profile so the agent never needs an explicit keystore unlock and cannot retrieve the private key through any supported RPC.
 
 ### Credential Isolation Sidecar
 
-To prevent key exposure even if the main Anima process is compromised, SSH operations run in a **separate sidecar container**:
+To reduce key exposure if the main Spore process is compromised, the optional `ssh-sidecar` plugin can run saved-host operations, interactive SSH sessions, remote exec, and SFTP operations in a **separate sidecar container**:
 
 ```
 ┌──────────────────────────┐          ┌────────────────────────┐
-│   Anima Container        │          │   SSH Sidecar          │
+│   Spore Core Container   │          │   SSH Sidecar          │
 │                          │          │                        │
 │   ssh-manager.js         │  Unix    │   ssh-sidecar.js       │
 │   (thin RPC client)     ◄──Socket──►   (key store + ssh2)   │
 │                          │          │                        │
 │   Sees: terminal I/O     │          │   Sees: decrypted keys │
-│   Never: raw keys        │          │   Network: NONE        │
+│   Never: raw keys        │          │   Network: outbound SSH│
 └──────────────────────────┘          └────────────────────────┘
 ```
 
 **Sidecar properties:**
-- `network_mode: none` — zero network access; cannot exfiltrate keys over HTTP, DNS, or any other protocol
+- No inbound ports; communicates only through the shared Unix socket
+- Outbound network is required to open SSH connections. Restrict it with `SPORE_SSH_SIDECAR_ALLOWED_HOSTS` and host firewall/container-network policy where possible
 - Communicates only via a Unix domain socket at `/run/ssh-sidecar/sidecar.sock`
 - The socket is mounted read-only into the main container
-- Runs as unprivileged `anima` user (UID 2000)
+- The supported RPC API does not return private key material. A compromised main process can still ask the sidecar to use or mutate credentials while the socket is mounted, so treat socket access as privileged.
+- Runs as unprivileged `spore` user (UID 2000)
+- Runs with `no-new-privileges`, `cap_drop: ALL`, read-only root filesystem, and a dedicated sidecar data mount in the compose template
 - Memory-limited to 64MB
-- The sidecar passphrase is derived from `ANIMA_WEB_AUTH_PASS` — the same password that gates web panel access
+- The sidecar passphrase is separate from web login: set `SPORE_SSH_SIDECAR_PASSPHRASE`
 
 **Threat model for SSH keys:**
 
 | Threat | Mitigation |
 |---|---|
-| Attacker reads `/data/ssh-hosts.json` from disk | Keys are AES-256-GCM encrypted; useless without `ANIMA_WEB_AUTH_PASS` |
-| Attacker gets RCE in the main Anima process | Cannot read keys — they live only in the sidecar process. Attacker can issue `session.open` RPCs but cannot extract the key material |
-| Attacker gets RCE in the sidecar | Sidecar has `network_mode: none` — cannot exfiltrate keys to an external server. Could theoretically open SSH connections to hosts the sidecar knows about |
-| Attacker intercepts the Unix socket | Socket has `0660` permissions owned by `anima:anima`. Requires container-level access which implies RCE already |
-| `ANIMA_WEB_AUTH_PASS` is weak | All bets off — use a strong password. This gates both web panel access and key encryption |
+| Attacker reads the SSH host store from disk | Keys are AES-256-GCM encrypted; useless without the local keystore passphrase or `SPORE_SSH_SIDECAR_PASSPHRASE` |
+| Attacker gets RCE in the main Spore process | In sidecar mode they cannot read raw saved-host keys through supported APIs, but they can issue allowed RPCs over the Unix socket while it is mounted |
+| Attacker gets RCE in the sidecar | They can access decrypted keys in memory and use the sidecar's outbound network path. Mitigate with host allowlists, no inbound ports, no app-source mount, and firewall egress controls |
+| Attacker intercepts the Unix socket | Socket has `0660` permissions owned by `spore:spore`. Requires container-level access which implies RCE already |
+| Sidecar passphrase is weak | Sidecar-encrypted host data is only as strong as `SPORE_SSH_SIDECAR_PASSPHRASE`; use a long random secret |
 
 ### Fallback Mode
 
-If the sidecar is not running (e.g., older deployments), `ssh-manager.js` falls back to in-process mode where keys are encrypted/decrypted locally. This provides encryption at rest but not process isolation. The sidecar is strongly recommended for any deployment where SSH keys grant access to production systems.
+If the sidecar plugin is uninstalled or `/run/ssh-sidecar/sidecar.sock` is unavailable, `ssh-manager.js` falls back to in-process mode where keys are encrypted/decrypted locally. This provides encryption at rest but not process isolation. The sidecar is strongly recommended for deployments where saved SSH keys grant access to production systems.
 
 ### Audit Logging
 
@@ -258,7 +263,7 @@ Package installation is supported via a restricted `sudoers` policy: the `anima`
 4. **Do not enable `ANIMA_SRC_EDITABLE`** unless you fully trust the agent and its users.
 5. **Rotate API keys regularly**, especially if you share them across many animas.
 6. **Keep the manager on a non-default port** and behind Traefik — do not bind `18900` to `0.0.0.0` on a public server.
-7. **Always deploy the SSH sidecar** when storing SSH keys. Do not rely on fallback mode for production SSH credentials.
+7. **Deploy the `ssh-sidecar` plugin profile** when storing production SSH keys. Do not rely on fallback mode for production SSH credentials.
 8. **Use SSH key authentication** over passwords when possible. Keys can be rotated and revoked independently.
 9. **Review the audit log** (`/data/terminal-audit.log`) periodically for unexpected SSH connections.
 10. **Do not bypass package vetting.** If a package is blocked, investigate the findings before overriding. Typosquat and supply-chain attacks are the most common vector for agent-driven compromise.

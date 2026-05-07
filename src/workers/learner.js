@@ -261,23 +261,41 @@ class Learner {
     this._drainQueue();
   }
 
-  async _callWithRetry(fn, label = 'learner') {
+  _queueYieldError(label = 'learner') {
+    const err = new Error(`${label} yielded to user-facing work`);
+    err.name = 'QueueYieldError';
+    err.yielded = true;
+    return err;
+  }
+
+  _queueJobShouldYield(queueJob) {
+    if (!queueJob) return false;
+    if (queueJob.signal?.aborted) return true;
+    try { return !!queueJob.shouldYield?.(); } catch { return false; }
+  }
+
+  async _callWithRetry(fn, label = 'learner', opts = {}) {
+    const queueJob = opts.queueJob || null;
+    const signal = opts.signal || queueJob?.signal || null;
     const delays = [5000, 15000, 30000];
     for (let attempt = 0; attempt <= delays.length; attempt++) {
+      if (signal?.aborted || this._queueJobShouldYield(queueJob)) throw this._queueYieldError(label);
       if (this._llmBusy) {
         this.log.info(`[${label}] LLM busy, deferring (attempt ${attempt + 1})`);
         return null;
       }
       if (attempt > 0) {
         await new Promise(r => setTimeout(r, delays[attempt - 1]));
+        if (signal?.aborted || this._queueJobShouldYield(queueJob)) throw this._queueYieldError(label);
         if (this._llmBusy) {
           this.log.info(`[${label}] LLM became busy during backoff, deferring`);
           return null;
         }
       }
       try {
-        return await fn();
+        return await fn(signal ? { signal } : undefined);
       } catch (e) {
+        if (signal?.aborted || this._queueJobShouldYield(queueJob)) throw this._queueYieldError(label);
         const isRetryable = e.message?.includes('aborted') || e.message?.includes('ECONNRESET')
           || e.message?.includes('ETIMEDOUT') || e.message?.includes('socket hang up')
           || e.status === 429 || e.status === 503;
@@ -407,7 +425,8 @@ class Learner {
   async extractAndLearn(userMessage, assistantResponse, opts = {}) {
     this._refreshSharedGraphWriters();
     const observedAt = opts.observedAt || new Date().toISOString();
-    const exchange = this._buildExchange(userMessage, assistantResponse, opts, observedAt);
+    const scopedOpts = { ...opts, observedAt };
+    const exchange = this._buildExchange(userMessage, assistantResponse, scopedOpts, observedAt);
     if (exchange.length < 20) return;
 
     let episodeId = null;
@@ -440,10 +459,16 @@ class Learner {
       }
     } catch (e) { this.log.warn('[learner] dedup lookup failed: ' + e.message); }
 
-    const entry = { userMessage, assistantResponse, opts, exchange, observedAt, episodeId, contentHash };
+    const entry = { userMessage, assistantResponse, opts: scopedOpts, exchange, observedAt, episodeId, contentHash };
+
+    if (this._queueJobShouldYield(scopedOpts.queueJob)) return { yielded: true };
 
     if (this._running || this._llmBusy) {
       const reason = this._running ? 'already-running' : 'llm-busy';
+      if (scopedOpts.queueJob) {
+        this.log.info(`[learner] Runtime queue yield — ${reason}`);
+        return { yielded: true };
+      }
       if (this._queue.length >= this._maxQueue) {
         this.stats.skipped++;
         this.log.info(`[learner] Extraction dropped — ${reason}, queue full (${this._queue.length}/${this._maxQueue})`);
@@ -457,7 +482,7 @@ class Learner {
       return;
     }
 
-    await this._processBatchExtraction([entry]);
+    return await this._processBatchExtraction([entry]);
   }
 
 
@@ -524,6 +549,8 @@ class Learner {
       const prompt = basePrompt;
 
       const _model = this.config.learnerModel || this.config.casualModel || this.config.model;
+      const queueJob = mergedOpts.queueJob || null;
+      if (this._queueJobShouldYield(queueJob)) return { yielded: true };
       const { wrapSystemPromptForModel } = require('../providers');
       const system = wrapSystemPromptForModel(
         [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }],
@@ -531,7 +558,7 @@ class Learner {
         this.config,
       );
 
-      const response = await this._callWithRetry(() => this.client.messages.create({
+      const response = await this._callWithRetry((callOpts) => this.client.messages.create({
         model: _model,
         // Bumped 4096 → 8192 (2026-04-23). Extraction can return many
         // entities + aspects + attributes from a single rich turn; 4k
@@ -539,7 +566,7 @@ class Learner {
         max_tokens: 8192,
         system,
         messages: [{ role: 'user', content: combinedExchange }],
-      }), 'learner-extract');
+      }, callOpts), 'learner-extract', { queueJob });
       if (!response) {
         this.log.warn(`[learner] Extraction aborted — LLM returned no response (${Date.now() - startedAt}ms)`);
         graphEvents.emit('change', { op: 'learner:done', sessionKey: sessionId, error: 'no-response', elapsedMs: Date.now() - startedAt, source: 'learner' });
@@ -606,6 +633,7 @@ class Learner {
 
       // Verification pass
       try {
+        if (this._queueJobShouldYield(queueJob)) return { yielded: true };
         this._currentEpisodeId = lastEpisodeId;
         const verifyResult = await this._verifyExtraction(combinedExchange, extraction, lastObservedAt, mergedOpts);
         this._currentEpisodeId = null;
@@ -619,11 +647,25 @@ class Learner {
 
       // Automatic skill extraction
       try {
+        if (this._queueJobShouldYield(queueJob)) return { yielded: true };
         await this._maybeExtractSkill(batch, combinedExchange);
       } catch (se) {
         this.log.debug?.(`[learner] Skill extraction skipped: ${se.message}`);
       }
     } catch (e) {
+      if (e?.yielded || e?.name === 'QueueYieldError') {
+        this.log.info(`[learner] Extraction yielded to user-facing work (${Date.now() - startedAt}ms)`);
+        try {
+          graphEvents.emit('change', {
+            op: 'learner:done',
+            sessionKey: sessionId,
+            yielded: true,
+            elapsedMs: Date.now() - startedAt,
+            source: 'learner',
+          });
+        } catch (emitErr) { this.log.warn('[learner] graphEvents.emit failed: ' + emitErr.message); }
+        return { yielded: true };
+      }
       this.stats.errors++;
       this.log.error('[learner] Batch extraction failed:', e.message);
       // Always close the learner:start we emitted at line 373 — otherwise
@@ -723,6 +765,8 @@ Return ONLY valid JSON (same schema as extraction):
 }`;
 
     const _model = this.config.learnerModel || this.config.casualModel || this.config.model;
+    const queueJob = opts?.queueJob || null;
+    if (this._queueJobShouldYield(queueJob)) return null;
     const { wrapSystemPromptForModel } = require('../providers');
     const system = wrapSystemPromptForModel(
       [{ type: 'text', text: verifyPrompt, cache_control: { type: 'ephemeral' } }],
@@ -730,14 +774,14 @@ Return ONLY valid JSON (same schema as extraction):
       this.config,
     );
 
-    const response = await this._callWithRetry(() => this.client.messages.create({
+    const response = await this._callWithRetry((callOpts) => this.client.messages.create({
       model: _model,
       // Bumped 2048 → 4096 (2026-04-23). Verification pass shouldn't be
       // tighter than half of extraction; was producing truncated retries.
       max_tokens: 4096,
       system,
       messages: [{ role: 'user', content: exchange }],
-    }), 'learner-verify');
+    }, callOpts), 'learner-verify', { queueJob });
     if (!response) return null;
 
     const text = response.content.find(b => b.type === 'text')?.text || '';
@@ -865,8 +909,12 @@ The JSON schema for updates becomes:
     const scopes = envelope?.writeScopes || {};
     const lines = [];
     lines.push('## Memory write routing');
-    lines.push('For EACH entity, aspect, update, edge, and gap, add a "target" field when it is not personal/user memory.');
-    lines.push(`- "local" — main/user graph for agent identity, global system config, and facts/preferences explicitly meant to apply across all channels.`);
+    lines.push('For EACH entity, aspect, update, edge, and gap, add a "target" field when it should go outside the default session memory.');
+    lines.push(`- "local" — main/global graph for agent identity, global system config, and facts/preferences explicitly meant to apply across all users and channels.`);
+    if (scopes.userSlug) {
+      lines.push(`- "graph:${scopes.userSlug}" — current authenticated web user's graph. Use for this user's preferences, personal facts, app workflows, recurring requests, task context, and private commitments.`);
+      lines.push('- Never write another web user\'s private preferences, tasks, schedules, or conversation facts into this graph.');
+    }
     if (scopes.projectSlug) {
       lines.push(`- "graph:${scopes.projectSlug}" — current project/codebase graph. Use for repo facts, codebase decisions, scripts, fixes, tool/config discoveries, session summaries, and project-specific technical details.`);
     }
@@ -1223,6 +1271,33 @@ The JSON schema for updates becomes:
           for (const k of ['entities', 'aspects', 'updates', 'edges', 'gaps', 'total']) total[k] += wrote[k] || 0;
           total.newNodeIds.push(...(wrote.newNodeIds || []));
           total.writeTargets.push({ target, slug: targetDb.slug || null, total: wrote.total || 0 });
+          if (targetDb.slug && (wrote.total || 0) > 0) {
+            const registry = this._graphRegistry || this._appContext?.tools?._graphRegistry || null;
+            const graph = registry?.get?.(targetDb.slug);
+            if (graph?.role === 'channel') {
+              registry.markChannelGraphActivity?.(targetDb.slug, {
+                reason: 'learner-write',
+                at: opts.observedAt,
+                platform: opts.platform,
+                externalUserId: opts.userId,
+                externalChannelId: opts.channelId,
+              });
+            } else if (graph?.role === 'project') {
+              registry.markProjectGraphActivity?.(targetDb.slug, {
+                reason: 'learner-write',
+                at: opts.observedAt,
+                username: opts.userName || opts.userId,
+                userId: opts.userId,
+              });
+            } else if (graph?.role === 'user') {
+              registry.markUserGraphActivity?.(targetDb.slug, {
+                reason: 'learner-write',
+                at: opts.observedAt,
+                username: opts.userName || opts.userId,
+                userId: opts.userId,
+              });
+            }
+          }
         } finally {
           this.db = originalDb;
           this._defaultWriteDb = null;
@@ -2135,6 +2210,8 @@ ${structuredTemplate}`;
    */
   async _maybeExtractSkill(batch, combinedExchange) {
     if (!this._skills.available) return;
+    const queueJob = batch?.[batch.length - 1]?.opts?.queueJob || null;
+    if (this._queueJobShouldYield(queueJob)) return;
 
     // Cooldown: don't run skill extraction more than once per 5 minutes
     if (Date.now() - this._lastSkillExtractAt < this._skillCooldownMs) return;
@@ -2171,14 +2248,14 @@ ${structuredTemplate}`;
 
     const userContent = `## Conversation exchange\n${combinedExchange.substring(0, 4000)}\n\n## Tool calls (${allToolCalls.length} total)\n${toolSummary}\n\n## Existing skills\n${existingSummary}`;
 
-    const response = await this._callWithRetry(() => this.client.messages.create({
+    const response = await this._callWithRetry((callOpts) => this.client.messages.create({
       model: _model,
       // Bumped 2048 → 4096 (2026-04-23) — skill JSON now also includes
       // longer step summaries and 4k headroom matches extraction tier.
       max_tokens: 4096,
       system,
       messages: [{ role: 'user', content: userContent }],
-    }), 'learner-skill');
+    }, callOpts), 'learner-skill', { queueJob });
     if (!response) return;
 
     const text = response.content.find(b => b.type === 'text')?.text || '';

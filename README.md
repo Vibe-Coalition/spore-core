@@ -20,8 +20,8 @@ The three connect to the same server and share the same graph; sessions stay sco
 - **Hybrid retrieval** — embedding similarity (Gemma / Gemini) + FTS5 full-text + temporal proximity + multi-hop graph walks + raw conversation excerpts. Whatever the question shape, the recall pipeline picks an appropriate tier.
 - **Tool use + delegation** — `read_file`, `write_file`, `edit_file`, `exec`, `grep`, `glob`, `web_search`, `web_fetch`, `analyze_image/video/audio`, `delegate_task` (sub-agents), graph CRUD, cross-platform `message_send`, `schedule_wakeup`, and a managed browser session for click/type/scroll automation.
 - **Voice pipeline** — Deepgram or local Whisper STT, ElevenLabs / OpenAI / Edge TTS, live voice calls with interrupt detection.
-- **SSH terminal** — embedded xterm.js with a local PTY and remote-host SSH. Keys encrypted at rest (AES-256-GCM, PBKDF2) and isolated in a network-less sidecar container.
-- **Plugin system** — providers, embedders, tools, prompt sections, lifecycle hooks, settings panes — all extensible. 17 plugins ship in the image (see below).
+- **SSH terminal** — embedded xterm.js with a local PTY and remote-host SSH. Keys are encrypted at rest (AES-256-GCM, PBKDF2); the optional `ssh-sidecar` plugin can isolate saved-host operations, interactive SSH sessions, remote exec, and SFTP in a separate process.
+- **Plugin system** — providers, embedders, tools, prompt sections, lifecycle hooks, settings panes — all extensible. Bundled plugins ship in the image (see below).
 
 ## Quick start
 
@@ -73,9 +73,10 @@ Every plugin below ships in the image. Operators toggle them in **Settings → P
 | `flux` | FLUX image generation via `api.bfl.ai`. |
 | `email` | SMTP/IMAP via Nodemailer + ImapFlow. |
 | `tailscale` | Tailscale userspace networking. Mesh routing to other Spore Core agents and operator workstations. |
-| `compute-cluster` | SLURM cluster access (sbatch / squeue / live tail). |
+| `compute-cluster` | SLURM cluster access over Tailscale; depends on `tailscale` + `ssh-sidecar` and stores cluster SSH credentials as sidecar profiles. |
 | `session-graph` | Generic session/project node primitives. Foundation for code-session plugins. |
 | `spore-code` | Pairs CLI sessions (`spore` Go binary) into project-scoped agent contexts; powers `/api/spore-code/auth` + `/sessions`. |
+| `ssh-sidecar` | SSH credential-isolation sidecar packaging, credential profiles, settings status UI, and reference docs. |
 
 Plugins declare config schemas with `envFallback`, so wizard-saved values survive container rebuilds — keys persist in `.env` (bind-mounted) and the Settings UI surfaces them on every boot.
 
@@ -113,12 +114,12 @@ GraphContext ←→ graph.db (SQLite + WAL)
   │
 SessionManager ←→ sessions.db
   │
-ToolSystem ←→ SSH Sidecar (Unix socket, no network)
+ToolSystem ←→ SSH Sidecar plugin (optional Unix socket)
   │
 Learner + Maintainer + Janitor + Backup + Proactive (workers)
 ```
 
-Each instance runs as a single Docker container with its own bind-mounted `data/` (graph + session DBs + backups) and `workspace/` (writable scratch). Provider keys live in `.env` (also bind-mounted). Spore Core itself is unsandboxed inside the container; the SSH credential store is the one piece pushed out to a sidecar with no network access at all.
+Each instance runs as a single Docker container with its own bind-mounted `data/` (graph + session DBs + backups) and `workspace/` (writable scratch). Provider keys live in `.env` (also bind-mounted). Spore Core itself is unsandboxed inside the container; the optional SSH sidecar plugin can push SSH credential storage, interactive SSH sessions, remote exec, and SFTP into a separate process with no inbound ports and constrained outbound SSH egress.
 
 Platform gateways auto-enable when their tokens are set:
 
@@ -144,8 +145,8 @@ src/                  Core application
   plugins/            Plugin manager core (api.js, manager.js, openclaw-adapter.js)
   static/             graph-viewer.html + mobile-viewer.html + login.html + scripts/
 
-plugins/              17 bundled plugin packages (provider, tool, embedder, …)
-sidecar/              SSH credential isolation (separate container, no network)
+plugins/              Bundled plugin packages (provider, tool, embedder, system, …)
+  ssh-sidecar/        SSH credential isolation plugin + sidecar Docker runtime
 docs/                 Extended documentation
 animas/               Per-instance config + data (gitignored)
 ```
@@ -166,7 +167,7 @@ animas/               Per-instance config + data (gitignored)
 
 - Containers run as unprivileged user (UID 2000), `no-new-privileges` enforced
 - Web panel uses session cookies (HttpOnly + SameSite=Lax); webapp self-register gated behind a host-level `SPORE_INVITE_KEY`
-- SSH keys encrypted at rest (AES-256-GCM, PBKDF2) and isolated in a sidecar with zero network access
+- SSH keys encrypted at rest (AES-256-GCM, PBKDF2); optional sidecar process isolation for saved-host, interactive SSH, remote exec, and SFTP flows
 - `exec` tool blocks dangerous patterns; source editing disabled by default
 - All host ports bind to `127.0.0.1` by convention; reverse-proxy publicly with whatever you already run
 

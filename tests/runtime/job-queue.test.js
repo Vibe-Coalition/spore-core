@@ -375,3 +375,55 @@ test('wakeup jobs preserve cli route and project memory context', async () => {
     fixture.cleanup();
   }
 });
+
+test('wakeup session callbacks stop after first delivered route', async () => {
+  const fixture = makeDb();
+  const events = [];
+  const tools = {
+    _getSessionBroadcaster() {
+      return (sessionKey, payload) => {
+        events.push({ sessionKey, payload });
+        return 1;
+      };
+    },
+    _sessionRouteKeys(opts) {
+      return [opts.sessionKey, 'shared:dm:web:tester'];
+    },
+  };
+  const agent = {
+    activeRuns: new Set(),
+    async processMessage(opts) {
+      opts.onTextDelta?.('hello');
+      return { text: 'done' };
+    },
+  };
+  const queue = makeQueue(fixture.sessions, { agent, tools });
+  const inserted = fixture.db.prepare('INSERT INTO wakeups (fired, failed) VALUES (0, 0)').run();
+  const wakeupId = inserted.lastInsertRowid;
+
+  try {
+    await queue.submitWorkerJob('wakeup.fire', {
+      wakeupId,
+      opts: {
+        content: 'visible reminder',
+        channelId: 'web:control-panel',
+        userId: 'tester',
+        platform: 'web',
+        isDm: true,
+        sessionKey: 'dm:tester',
+      },
+    }, {
+      id: `wakeup-${wakeupId}`,
+      persistent: true,
+      awaitResult: true,
+      lane: 'deferred',
+      sessionKey: 'dm:tester',
+    });
+
+    assert.deepEqual(events.map(e => e.sessionKey), ['dm:tester', 'dm:tester', 'dm:tester']);
+    assert.deepEqual(events.map(e => e.payload.type), ['chat:start', 'chat:delta', 'chat:done']);
+  } finally {
+    queue.stop();
+    fixture.cleanup();
+  }
+});

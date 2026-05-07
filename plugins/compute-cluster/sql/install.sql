@@ -44,6 +44,12 @@ INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
          9, 'seed', 'seed'
   WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-compute-cluster' AND name='settings_source')
     AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-compute-cluster' AND name='settings_source') AND content LIKE 'Before any cluster work%');
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+  SELECT (SELECT id FROM aspects WHERE node_id='ref-compute-cluster' AND name='settings_source'),
+         'Cluster SSH auth uses the ssh-sidecar credential profile `cluster-default`. Generated keys are created inside the sidecar and only the public key/fingerprint are exposed to the app. Never ask the operator to reveal or print the private key.',
+         10, 'seed', 'seed'
+  WHERE EXISTS (SELECT 1 FROM aspects WHERE node_id='ref-compute-cluster' AND name='settings_source')
+    AND NOT EXISTS (SELECT 1 FROM attributes WHERE aspect_id=(SELECT id FROM aspects WHERE node_id='ref-compute-cluster' AND name='settings_source') AND content LIKE 'Cluster SSH auth uses the ssh-sidecar%');
 
 INSERT INTO aspects (node_id, name, weight, extracted_with)
   SELECT 'ref-compute-cluster', 'workflow_sbatch', 10, 'seed'
@@ -255,3 +261,9 @@ INSERT INTO edges (source, target, type, weight, extracted_with)
   WHERE EXISTS (SELECT 1 FROM nodes WHERE id='ref-compute-cluster')
     AND EXISTS (SELECT 1 FROM nodes WHERE id='ref-ssh-remote')
     AND NOT EXISTS (SELECT 1 FROM edges WHERE source='ref-compute-cluster' AND target='ref-ssh-remote' AND type='depends_on');
+
+INSERT INTO edges (source, target, type, weight, extracted_with)
+  SELECT 'ref-compute-cluster', 'ref-ssh-sidecar', 'depends_on', 0.9, 'seed'
+  WHERE EXISTS (SELECT 1 FROM nodes WHERE id='ref-compute-cluster')
+    AND EXISTS (SELECT 1 FROM nodes WHERE id='ref-ssh-sidecar')
+    AND NOT EXISTS (SELECT 1 FROM edges WHERE source='ref-compute-cluster' AND target='ref-ssh-sidecar' AND type='depends_on');

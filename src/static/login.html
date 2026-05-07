@@ -8,29 +8,76 @@
   @font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 400 600; font-display: swap; src: url('/fonts/fraunces.woff2?v=20260425b') format('woff2'); }
   @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/jetbrainsmono.woff2?v=20260425b') format('woff2'); }
   @font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 300 700; font-display: swap; src: url('/fonts/spacegrotesk.woff2?v=20260425b') format('woff2'); }
-  /* Dark Petri baseline — values from dir-petri.jsx PETRI_THEMES.dark.
-     Accent is leaf green (not amber); ink-chip pattern handles buttons
-     so we don't rely on accent-as-button-bg contrast. */
+  /* Dark Petri baseline — mirrors the onboarding overlay and graph canvas. */
   :root {
-    --bg:#131511; --surface:#1a1d17; --panel:#21241d;
-    --border:#2c2f26; --text:#b5b0a0; --text-dim:#706c62; --text-bright:#ece7d5;
-    --accent:#8eb77c; --accent2:#7aa583; --danger:#d94e3a;
+    --bg:#131511; --surface:#1a1d17; --panel:#21241d; --element:#2a2d24;
+    --border:#2c2f26; --border-active:#4a4d42; --border-subtle:#1f221b;
+    --graph-bg:#0d100b; --graph-cream:var(--graph-bg);
+    --graph-glow-1:rgba(227,139,95,.13);
+    --graph-glow-2:rgba(142,183,124,.15);
+    --graph-glow-3:rgba(58,106,163,.12);
+    --hl-rgb:255,255,255;
+    --text:#b5b0a0; --text-dim:#706c62; --text-bright:#ece7d5; --text-muted:#5c5849;
+    --accent:#8eb77c; --accent2:#7aa583; --accent3:#e38b5f;
+    --danger:#d94e3a; --warn:#e38b5f; --success:#8eb77c; --info:#7aa7d6;
+    --font-body:'Space Grotesk',system-ui,-apple-system,'Segoe UI','Helvetica Neue',sans-serif;
+    --font-mono:'JetBrains Mono',ui-monospace,monospace;
+    --font-serif:'Fraunces','Newsreader',Georgia,serif;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',system-ui,-apple-system,'Segoe UI','Helvetica Neue',sans-serif}
-  body{min-height:100vh;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;transition:background-color .3s ease,color .3s ease}
-  #particles{position:absolute;inset:0;z-index:0}
-  .login-box{position:relative;z-index:1;width:380px;padding:48px 40px 32px;background:var(--surface);border:1px solid var(--border);border-radius:14px;text-align:center;transition:background-color .3s ease,border-color .3s ease;box-shadow:0 20px 60px rgba(0,0,0,.4)}
-  .login-eyebrow{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.62rem;color:var(--text-dim);letter-spacing:.22em;text-transform:lowercase}
+  html,body{height:100%;background:var(--graph-bg);color:var(--text);font-family:var(--font-body);font-weight:400;font-variation-settings:'wght' 450}
+  body{
+    min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;
+    position:relative;overflow:hidden;padding:24px;
+    background-color:var(--graph-bg);
+    background-image:
+      radial-gradient(circle at 22% 32%,var(--graph-glow-1) 0%,transparent 42%),
+      radial-gradient(circle at 78% 68%,var(--graph-glow-2) 0%,transparent 48%),
+      radial-gradient(circle at 55% 85%,var(--graph-glow-3) 0%,transparent 40%);
+    transition:background-color .3s ease,color .3s ease;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(ellipse at center,rgba(var(--hl-rgb),.05) 0%,transparent 55%),
+      linear-gradient(180deg,transparent 0%,rgba(0,0,0,.16) 100%);
+    opacity:.9;
+  }
+  [data-theme="light"] body::before{
+    background:
+      radial-gradient(ellipse at center,rgba(var(--hl-rgb),.045) 0%,transparent 58%),
+      linear-gradient(180deg,rgba(255,255,255,.10) 0%,rgba(29,33,27,.05) 100%);
+    opacity:.72;
+  }
+  #particles{position:fixed;inset:0;z-index:0;opacity:.42}
+  [data-theme="light"] #particles{opacity:.24}
+  .login-box{
+    position:relative;z-index:1;width:min(380px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;
+    padding:46px 40px 32px;background:color-mix(in srgb,var(--surface) 94%,transparent);
+    border:1px solid var(--border);border-radius:14px;text-align:center;
+    transition:background-color .3s ease,border-color .3s ease,box-shadow .3s ease;
+    box-shadow:0 20px 60px rgba(0,0,0,.5);
+    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  }
+  [data-theme="light"] .login-box{
+    background:color-mix(in srgb,var(--surface) 96%,white 4%);
+    box-shadow:0 20px 60px rgba(29,33,27,.18);
+  }
+  .login-eyebrow{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:18px;font-family:var(--font-mono);font-size:.62rem;color:var(--text-dim);letter-spacing:.22em;text-transform:lowercase}
   .login-eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
   .login-logo{display:flex;justify-content:center;margin-bottom:14px}
-  .login-logo svg{width:96px;height:96px;opacity:.95}
-  h1{font-family:'Fraunces','Newsreader',Georgia,serif;font-size:2.6rem;font-weight:400;letter-spacing:-.035em;color:var(--text-bright);margin:8px 0 2px;line-height:1}
-  .tagline{font-family:'Fraunces','Newsreader',Georgia,serif;font-size:1rem;color:var(--text);margin-bottom:18px;font-weight:400;font-style:italic;letter-spacing:-.005em}
+  .login-logo svg{width:96px;height:96px;opacity:.96;filter:drop-shadow(0 12px 26px color-mix(in srgb,var(--accent3) 16%,transparent))}
+  h1{
+    font-family:var(--font-serif);font-size:2.6rem;font-weight:400;letter-spacing:-.035em;
+    margin:8px 0 2px;line-height:1;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  }
+  .tagline{font-family:var(--font-serif);font-size:1rem;color:var(--text);margin-bottom:18px;font-weight:400;font-style:italic;letter-spacing:-.005em}
   .hint{font-size:.78rem;color:var(--text-dim);margin-bottom:22px}
   .err{color:var(--danger);font-size:.82rem;margin-bottom:10px;display:none}
   label{display:block;text-align:left;font-size:.7rem;color:var(--text-dim);letter-spacing:.06em;text-transform:uppercase;margin-bottom:5px;margin-top:14px;font-weight:500}
-  input{width:100%;padding:11px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text-bright);font-size:.92rem;outline:none;transition:border-color .2s,box-shadow .2s;font-family:'Space Grotesk',system-ui,sans-serif}
+  input{width:100%;padding:11px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text-bright);font-size:.92rem;outline:none;transition:border-color .2s,box-shadow .2s,background-color .2s;font-family:var(--font-body)}
   input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent)}
   /* Ink-chip primary CTA — mirrors PetriChat send button (`background:
      t.ink, color: t.bg`). Avoids the white-on-leaf-green contrast issue
@@ -41,6 +88,19 @@
   .mode-toggle{margin-top:16px;text-align:center;font-size:.82rem}
   .mode-toggle a{color:var(--text-dim);text-decoration:none;transition:color .15s ease;cursor:pointer}
   .mode-toggle a:hover{color:var(--accent)}
+  @supports not ((-webkit-background-clip:text) or (background-clip:text)) {
+    h1{color:var(--text-bright);background:none;-webkit-text-fill-color:currentColor}
+  }
+  @media (max-width:520px){
+    body{padding:16px}
+    .login-box{padding:36px 24px 26px}
+    .login-logo svg{width:84px;height:84px}
+    h1{font-size:2.25rem}
+  }
+  @media (prefers-reduced-motion:reduce){
+    #particles{display:none}
+    *{transition:none !important;animation:none !important}
+  }
 </style>
 </head>
 <body>
@@ -51,16 +111,16 @@
   <div class="tagline" id="tagline">memory that grows with you.</div>
   <div class="hint" id="hint">sign in to continue</div>
   <div class="err" id="err"></div>
-  <form id="f" autocomplete="on">
+  <form id="f" method="post" action="api/auth/login" autocomplete="on">
     <label for="u">Username</label>
-    <input type="text" id="u" name="username" autocomplete="username" required>
+    <input type="text" id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
     <label for="p">Password</label>
     <input type="password" id="p" name="password" autocomplete="current-password" required>
-    <div id="create-fields" class="hidden">
+    <div id="create-fields" class="hidden" aria-hidden="true">
       <label for="p2">Confirm password</label>
-      <input type="password" id="p2" name="password2" autocomplete="new-password">
+      <input type="password" id="p2" name="password2" autocomplete="new-password" disabled>
       <label for="akey">Invite key</label>
-      <input type="password" id="akey" name="inviteKey" autocomplete="off">
+      <input type="password" id="akey" name="inviteKey" autocomplete="off" disabled>
     </div>
     <button type="submit" class="btn" id="submit-btn">Sign in</button>
     <div class="mode-toggle">
@@ -87,10 +147,14 @@
   const THEMES = {
     dark: {},
     light: {
-      '--bg':'#ece7dc','--surface':'#f3eddc','--panel':'#f7f1e0',
-      '--border':'rgba(29,33,27,0.12)',
-      '--text':'#4a4e46','--text-dim':'#8a8c82','--text-bright':'#1d211b',
-      '--accent':'#5a7a4a','--accent2':'#3e6b47','--danger':'#b8341c',
+      '--bg':'#ece7dc','--surface':'#f3eddc','--panel':'#f7f1e0','--element':'#f7f1e0',
+      '--border':'rgba(29,33,27,0.12)','--border-active':'rgba(29,33,27,0.32)','--border-subtle':'rgba(29,33,27,0.08)',
+      '--graph-bg':'#f7f1e0','--graph-cream':'#f7f1e0',
+      '--graph-glow-1':'rgba(184,84,42,.10)','--graph-glow-2':'rgba(90,122,74,.12)','--graph-glow-3':'rgba(58,106,163,.08)',
+      '--hl-rgb':'29,33,27',
+      '--text':'#4a4e46','--text-dim':'#8a8c82','--text-bright':'#1d211b','--text-muted':'#b1aa9c',
+      '--accent':'#b8542a','--accent2':'#b8542a','--accent3':'#b8542a',
+      '--danger':'#b8341c','--warn':'#b8542a','--success':'#5a7a4a','--info':'#3a6aa3',
     },
   };
   function normalizeThemeName(name) {
@@ -156,11 +220,18 @@
   const createToggle = document.getElementById('create-toggle');
   const backToggle = document.getElementById('back-toggle');
   const passInput = document.getElementById('p');
+  const confirmInput = document.getElementById('p2');
+  const inviteInput = document.getElementById('akey');
   const errEl = document.getElementById('err');
   function setMode(m) {
     mode = m;
     if (m === 'create') {
       fields.classList.remove('hidden');
+      fields.setAttribute('aria-hidden', 'false');
+      confirmInput.disabled = false;
+      inviteInput.disabled = false;
+      confirmInput.required = true;
+      inviteInput.required = true;
       submitBtn.textContent = 'Create account';
       createToggle.classList.add('hidden');
       backToggle.classList.remove('hidden');
@@ -168,6 +239,11 @@
       document.getElementById('hint').textContent = 'Register with the invite key from your operator';
     } else {
       fields.classList.add('hidden');
+      fields.setAttribute('aria-hidden', 'true');
+      confirmInput.disabled = true;
+      inviteInput.disabled = true;
+      confirmInput.required = false;
+      inviteInput.required = false;
       submitBtn.textContent = 'Sign in';
       createToggle.classList.remove('hidden');
       backToggle.classList.add('hidden');
@@ -218,32 +294,48 @@
     }
   });
 
-  // Lightweight particle backdrop so the page isn't dead flat
+  // Petri mote backdrop; the page-level radial glows carry the main image,
+  // while these add the same living-canvas feel as the onboarding welcome.
   const canvas = document.getElementById('particles');
   const ctx = canvas.getContext('2d');
   let w, h, parts;
+  function cssVar(name, fallback) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  }
+  function particlePalette() {
+    return [
+      cssVar('--accent3', '#e38b5f'),
+      cssVar('--accent', '#8eb77c'),
+      cssVar('--info', '#7aa7d6'),
+    ];
+  }
   function resize() {
     w = canvas.width = window.innerWidth;
     h = canvas.height = window.innerHeight;
-    parts = Array.from({ length: 60 }, () => ({
+    const colors = particlePalette();
+    parts = Array.from({ length: Math.min(72, Math.max(38, Math.round((w * h) / 26000))) }, (_, i) => ({
       x: Math.random() * w, y: Math.random() * h,
-      vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25,
-      r: Math.random() * 1.5 + 0.5,
+      vx: (Math.random() - 0.5) * 0.18, vy: (Math.random() - 0.5) * 0.18,
+      r: Math.random() * 2.1 + 0.6,
+      a: Math.random() * 0.16 + 0.08,
+      color: colors[i % colors.length],
     }));
   }
   resize();
   window.addEventListener('resize', resize);
   function tick() {
     ctx.clearRect(0, 0, w, h);
-    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#8eb77c';
-    ctx.fillStyle = accent;
-    ctx.globalAlpha = 0.25;
+    ctx.globalCompositeOperation = themeName === 'light' ? 'multiply' : 'screen';
     for (const p of parts) {
       p.x += p.vx; p.y += p.vy;
       if (p.x < 0) p.x += w; if (p.x > w) p.x -= w;
       if (p.y < 0) p.y += h; if (p.y > h) p.y -= h;
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = p.a;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
     }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
     requestAnimationFrame(tick);
   }
   tick();

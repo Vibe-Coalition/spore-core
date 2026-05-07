@@ -56,6 +56,7 @@ class GraphMaintenanceCoordinator {
     this.registry = registry || null;
     this.activeMaintainer = deps.maintainer || null;
     this.activeJanitor = deps.janitor || null;
+    this.scopedDistiller = deps.channelDistiller || deps.scopedDistiller || null;
     this.backup = deps.backup || null;
     this.agent = deps.agent || null;
     this.queue = deps.queue || null;
@@ -92,7 +93,7 @@ class GraphMaintenanceCoordinator {
 
   policyFor(graph, { active = false } = {}) {
     const role = _role(graph);
-    const managed = role === 'project' || role === 'channel' || role === 'general_kb';
+    const managed = role === 'project' || role === 'channel' || role === 'user' || role === 'general_kb';
     return {
       role,
       structural: true,
@@ -100,6 +101,7 @@ class GraphMaintenanceCoordinator {
       janitor: active && !managed ? 'active' : (role === 'general_kb' ? 'bin' : 'temp'),
       backup: true,
       research: role === 'general_kb',
+      distill: role === 'project' || role === 'channel' || role === 'user',
       activeFullMaintainer: active && !managed,
     };
   }
@@ -174,6 +176,7 @@ class GraphMaintenanceCoordinator {
       role: policy.role,
       structural: false,
       janitor: null,
+      distill: null,
       research: null,
       backup: null,
     };
@@ -205,6 +208,10 @@ class GraphMaintenanceCoordinator {
       } else if (policy.janitor && policy.janitor !== 'active') {
         summary.janitor = await this._runScopedJanitor(graph, db, { force });
         if (summary.janitor) this.stats.janitorRuns++;
+      }
+
+      if (policy.distill && this.scopedDistiller?.distillGraph && (force || graph.distillDirty)) {
+        summary.distill = await this.scopedDistiller.distillGraph(graph);
       }
 
       if (policy.research) {

@@ -199,8 +199,8 @@ class Maintainer {
       if (newModel && newModel !== this.model) {
         this.model = newModel;
       }
-      const { createClientForModel } = require('../providers');
-      const fresh = createClientForModel(this.model, this.config);
+      const { MultiProvider } = require('../providers');
+      const fresh = new MultiProvider(this.config);
       if (fresh) this.client = fresh;
     } catch (e) {
       this.log.warn(`[maintainer] client refresh failed: ${e.message}`);

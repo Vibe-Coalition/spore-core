@@ -5,6 +5,7 @@
  *
  */
 
+const fs = require('fs');
 const path = require('path');
 const feed = require('./feed.js');
 
@@ -20,6 +21,45 @@ function _parseIsoDateOnly(s) {
   if (!m) return null;
   const d = new Date(`${m[1]}T00:00:00.000Z`);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function _readSavedSshHosts(config = {}) {
+  const candidates = [
+    config.sshSidecarStore,
+    config.dataDir ? path.join(config.dataDir, 'ssh-sidecar', 'ssh-hosts.json') : null,
+    '/data/ssh-sidecar/ssh-hosts.json',
+    config.dataDir ? path.join(config.dataDir, 'ssh-hosts.json') : null,
+  ].filter(Boolean);
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const hosts = Array.isArray(parsed.hosts) ? parsed.hosts : (Array.isArray(parsed) ? parsed : []);
+      return hosts
+        .filter(h => h && h.id && h.hostname)
+        .slice(0, 12)
+        .map(h => ({
+          id: String(h.id),
+          name: h.name ? String(h.name) : String(h.hostname),
+          hostname: String(h.hostname),
+          username: h.username ? String(h.username) : null,
+        }));
+    } catch {}
+  }
+  return [];
+}
+
+function _hidePrivateRemoteAccessForPrompt(opts = {}) {
+  const platform = String(opts.platform || '').trim().toLowerCase();
+  const mode = String(opts.memoryEnvelope?.mode || '').trim().toLowerCase();
+  const source = String(opts.memoryEnvelope?.source || '').trim().toLowerCase();
+  const hasProjectContext = !!(opts.projectContext?.cwd || opts.projectContext?.clientCwd);
+
+  if (opts.allowPrivateRemoteAccess === true) return false;
+  if (platform === 'cli') return true;
+  if (mode === 'codebase-session') return true;
+  if (source === 'spore-code' && hasProjectContext) return true;
+  return false;
 }
 
 // ── Mixin: attaches prompt section methods to GraphContext.prototype ────────
@@ -759,8 +799,17 @@ function applyPromptSectionsMixin(GraphContext) {
     return null;
   };
 
-  proto._buildPersonSection = function _buildPersonSection(userId, userName) {
+  proto._buildPersonSection = function _buildPersonSection(userId, userName, scopeOpts = {}) {
     if (!userName) return null;
+
+    const isCodebaseSession = scopeOpts?.memoryEnvelope?.mode === 'codebase-session'
+      || (scopeOpts?.platform === 'cli' && scopeOpts?.projectContext?.cwd);
+    if (isCodebaseSession) {
+      return `## Current Speaker
+- **Identifier**: ${userName}${userId && userId !== userName ? ` (id: ${userId})` : ''}
+- **Scope**: Fresh Spore Code project session.
+- **Boundary**: Use the project graph, current project context, and reusable engineering memory. Do not import unrelated web chat, default-graph person context, or operator activity unless the user explicitly asks for it.`;
+    }
 
     let person = this.getNodeByLabel(userName);
 
@@ -921,7 +970,9 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('### Tool Selection Rules');
     lines.push('- **read_file** for ALL file reading. Never use exec with grep/cat/sed/head/tail to read files.');
     lines.push('- **graph_delete** to remove nodes, aspects, attributes, or edges. NEVER use exec/sqlite3 to modify graph.db directly.');
-    lines.push('- Detailed tool workflows live in reference nodes: `ref-tool-workflows`, `ref-web-search`, `ref-web-architecture`, `ref-cron-runtime`, `ref-browser-automation`, `ref-image-display`, and `ref-code-viewer`. Query them when a task depends on those mechanics.');
+    lines.push('- **graph_query** for graph discovery. Use `graph_query({ mode: "graphs" })` to list graph scopes, and `graph_query({ graph: "spore-knowledge-base", mode: "overview", limit, offset })` to inspect the General Knowledge Base. Never use exec to read `/data/graphs` or `_registry.json` for normal graph discovery.');
+    lines.push('- For shared/stored graph skills, distilled skills, reusable lessons, or "what does the shared graph know?", query the General Knowledge Base directly: `graph_query({ graph: "spore-knowledge-base", type: "skill" })`, `graph_query({ graph: "spore-knowledge-base", query: "skill" })`, or a paged overview. Do not describe it as empty/fresh if the result contains nodes.');
+    lines.push('- Detailed tool workflows live in reference nodes: `ref-tool-workflows`, `ref-web-search`, `ref-web-architecture`, `ref-cron-runtime`, `ref-browser-automation`, and `ref-image-display`. Query them when a task depends on those mechanics.');
     lines.push('');
     lines.push('### Tool Efficiency');
     lines.push('- **Read your own output.** If a tool call already returned the information you need (file size, install confirmation, etc.), do not call another tool to re-verify it.');
@@ -962,7 +1013,7 @@ function applyPromptSectionsMixin(GraphContext) {
       }
       lines.push('- The user is chatting from a browser.');
       lines.push('- Do NOT use message_send for the current web chat. Your response text is sent back automatically. If you want to share an image/video/audio/file with the web user, reply with the `/workspace/...` path in normal assistant text and the UI will render or link it.');
-      lines.push('- Web-chat media/path details live in `ref-image-display`; built-in panel behavior lives in `ref-code-viewer` and `ref-browser-automation`.');
+      lines.push('- Web-chat media/path details live in `ref-image-display`; browser panel behavior lives in `ref-browser-automation`; code-viewer behavior is summarized in `ref-tool-workflows`.');
     }
     if (this.config.superAgent) {
       lines.push('');
@@ -982,6 +1033,7 @@ function applyPromptSectionsMixin(GraphContext) {
         lines.push('');
         lines.push('### Shared Skills Library');
         lines.push('You have access to a **shared skills library** — a knowledge base that all Spore Core agents can read and write.');
+        lines.push('This file-backed skills library is separate from the **General Knowledge Base** graph. If the user asks about shared graph knowledge or graph-distilled skills, query `spore-knowledge-base` with `graph_query`; do not answer from this file-backed catalog alone.');
         lines.push('- **skill_lookup**: Search or read skills. Use `action: "list"` to see all, `action: "search"` with a query/tags, or `action: "read"` with a slug to get full content.');
         lines.push('- **skill_update**: Create or update a skill. Share what you\'ve learned so other agents don\'t have to rediscover it.');
         lines.push('');
@@ -1272,15 +1324,17 @@ function applyPromptSectionsMixin(GraphContext) {
   /**
    * Dynamic snapshot of cluster access so the agent knows what's actually
    * wired up on THIS deployment without having to query tools. Pulled fresh
-   * at every prompt assembly: tailscale state, cluster SSH config, whether
-   * the cluster private key exists. Returns null when nothing is configured
+   * at every prompt assembly: tailscale state and cluster SSH config.
+   * Returns null when nothing is configured
    * (avoids prompt clutter on deployments that don't use the cluster).
    */
-  proto._buildClusterAccessSection = function _buildClusterAccessSection() {
+  proto._buildClusterAccessSection = function _buildClusterAccessSection(opts = {}) {
+    if (_hidePrivateRemoteAccessForPrompt(opts)) return null;
     const c = this.config || {};
     const anyClusterConfig = c.clusterUsername || c.clusterLoginHost || (Array.isArray(c.clusterHosts) && c.clusterHosts.length);
     const tailscaleLikelyOn = c.tailscaleEnabled === true;
-    if (!anyClusterConfig && !tailscaleLikelyOn) return null;
+    const savedSshHosts = _readSavedSshHosts(c);
+    if (!anyClusterConfig && !tailscaleLikelyOn && !savedSshHosts.length) return null;
 
     const lines = ['## Cluster access (live state)'];
 
@@ -1305,7 +1359,7 @@ function applyPromptSectionsMixin(GraphContext) {
     if (tsState === 'Running') {
       lines.push(`- **Tailscale**: connected · self ${tsSelfIp || '?'} · ${tsOnlineCount ?? '?'}/${tsPeerCount ?? '?'} peers online. MagicDNS names (short hostnames) resolve against the tailnet.`);
     } else if (tsState === 'NeedsLogin') {
-      lines.push('- **Tailscale**: daemon running but not logged in. Tell the operator to visit Settings → Compute Cluster → Log in to Tailscale. Do NOT attempt cluster commands until this is Running.');
+      lines.push('- **Tailscale**: daemon running but not logged in. Tell the operator to visit Settings → Plugins → Tailscale → Log in to Tailscale. Do NOT attempt cluster commands until this is Running.');
     } else if (tsState === 'daemon-unreachable') {
       lines.push('- **Tailscale**: daemon not running or socket unreachable. Enable via SPORE_TAILSCALE_ENABLED=true and restart, or this deployment doesn\'t use the cluster.');
     } else {
@@ -1344,25 +1398,20 @@ function applyPromptSectionsMixin(GraphContext) {
         else if (cl.host) bits.push(`→ \`${cl.host}\``);
         lines.push(`  - ${bits.join(' · ')}`);
       }
-      lines.push('  All clusters are login nodes; partitions/GPU allocations are decided per-job at sbatch/srun time (ask the operator which partition to use if unclear). Pass the target cluster explicitly in remote_exec when you have more than one.');
+      lines.push('  All clusters are login nodes; partitions/GPU allocations are decided per-job at sbatch/srun time (ask the operator which partition to use if unclear). Sidecar-backed remote host IDs are `cluster-login` for the primary and `cluster-<name>` for additional clusters once the cluster credential is installed.');
     }
     if (c.clusterTmuxPrefix) lines.push(`- **tmux session prefix**: \`${c.clusterTmuxPrefix}-\` (every remote_exec tmux_session gets this applied)`);
 
-    // SSH key presence (no content, just yes/no + fingerprint)
-    try {
-      const fsm = require('fs');
-      const KEY_PATH = '/data/.ssh/id_cluster';
-      if (fsm.existsSync(KEY_PATH)) {
-        let fp = '';
-        try {
-          const { execFileSync } = require('child_process');
-          fp = execFileSync('ssh-keygen', ['-l', '-f', KEY_PATH], { timeout: 2000, encoding: 'utf8' }).trim();
-        } catch (e) { this.log.warn('[prompt-sections] require failed: ' + e.message); }
-        lines.push(`- **Cluster SSH key**: installed at /data/.ssh/id_cluster${fp ? ` (\`${fp.split(' ').slice(0, 2).join(' ')}\`)` : ''}. Used automatically by remote_exec and the cluster test endpoint.`);
-      } else {
-        lines.push('- **Cluster SSH key**: *not installed*. Operator needs to paste/upload/generate one in Settings → Compute Cluster → Cluster SSH key and install the public half on the login node\'s ~/.ssh/authorized_keys.');
+    if (savedSshHosts.length) {
+      lines.push(`- **Saved SSH hosts available through sidecar remote tools** (${savedSshHosts.length}):`);
+      for (const h of savedSshHosts) {
+        const target = h.username ? `${h.username}@${h.hostname}` : h.hostname;
+        lines.push(`  - \`${h.id}\` (${h.name}) → \`${target}\``);
       }
-    } catch (e) { this.log.warn('[prompt-sections] require failed: ' + e.message); }
+      lines.push('  Use `remote_exec`, `remote_read_file`, and `remote_write_file` with these host IDs. Do NOT use `tailscale ssh` for saved hosts: Tailscale SSH is a separate ACL/control-plane auth flow and can fail with host-key/control-plane errors even when sidecar OpenSSH works.');
+    }
+
+    lines.push('- **Cluster SSH credential**: managed by ssh-sidecar profile `cluster-default`. Private keys are not readable by the agent. If cluster remote tools are missing or SSH auth fails, ask the operator to use Settings → Compute Cluster to generate/copy the public key and run Test SSH.');
 
     // Pointer into graph for workflow details
     lines.push('- For SLURM + tmux workflows, read `ref-compute-cluster`. For tailscale CLI + troubleshooting, read `ref-tailscale`. Both connect to your self-node via `documents` edges.');
@@ -1404,7 +1453,38 @@ function applyPromptSectionsMixin(GraphContext) {
 
     const workspace = this.config.workspacePath || process.cwd();
     parts.push(`- Workspace: ${workspace}`);
-    parts.push(`- Graph DB: ${this.config.graphDbPath}`);
+    parts.push(`- Active process graph DB: ${this.config.graphDbPath}`);
+
+    const env = opts.memoryEnvelope || null;
+    if (env?.primarySlug || env?.readScopes?.length) {
+      const readScopes = Array.isArray(env.readScopes) ? env.readScopes.filter(Boolean) : [];
+      const primary = readScopes.find(s => s.slug === env.primarySlug) || readScopes[0] || null;
+      const defaultWrite = env.writeScopes?.defaultSlug || env.primarySlug || null;
+      const writeScope = readScopes.find(s => s.slug === defaultWrite) || primary || null;
+      const scopeLabel = (scope) => scope
+        ? `${scope.label || scope.slug}${scope.role ? ` (${scope.role})` : ''}`
+        : 'unknown';
+      parts.push('');
+      parts.push('### Current Memory Scope');
+      parts.push(`- Scope mode: ${env.mode || 'scoped'}`);
+      if (writeScope || defaultWrite) {
+        parts.push(`- Default write graph: \`${defaultWrite || writeScope.slug}\`${writeScope ? ` — ${scopeLabel(writeScope)}` : ''}`);
+      }
+      if (primary) {
+        parts.push(`- Primary local truth for this conversation: \`${primary.slug}\` — ${scopeLabel(primary)}`);
+      }
+      if (readScopes.length) {
+        parts.push(`- Read scopes in order: ${readScopes.map(s => `\`${s.slug}\`${s.role ? ` (${s.role})` : ''}`).join(' → ')}`);
+      }
+      parts.push('- `graph_query`, `query_about`, `graph_update`, and `graph_delete` without an explicit graph/project target route through this session memory scope, not necessarily the active process graph DB above.');
+      if (env.mode === 'web-user-session') {
+        parts.push('- If asked which graph you are on, answer with the web user graph as the current/default write graph. Mention the main/default graph only as a secondary read scope for global agent/system preferences.');
+      } else if (env.mode === 'codebase-session') {
+        parts.push('- If asked which graph you are on, answer with the project graph as the current/default write graph.');
+      } else if (String(env.mode || '').includes('channel')) {
+        parts.push('- If asked which graph you are on, answer with the channel/user thread graph as the current/default write graph.');
+      }
+    }
     parts.push('');
     if (opts.clientCwd) {
       parts.push(`**Current project directory: ${opts.clientCwd}** — This is the user's active project. When reading files, searching code, or answering questions about "the codebase" or "this project", scope your work to this directory. Do NOT read or reference files from other projects in the workspace unless the user explicitly asks.`);
@@ -1433,7 +1513,11 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push('');
       parts.push('**All installs persist across restarts**: pip packages (/workspace/.venv), npm global packages, Go binaries, Cargo crates, Ruby gems, Playwright/Puppeteer browsers, and apt packages are all stored on persistent volumes. You do NOT need to reinstall them after a restart. Before installing something, check if it already exists (`which <cmd>`, `pip list | grep <pkg>`, etc.).');
 
-      parts.push('You can read/write your own config at /app/spore.json and your graph at ' + this.config.graphDbPath + ' via the exec tool.');
+      if (env?.primarySlug && env.primarySlug !== this._graphRegistry?.getActiveSlug?.()) {
+        parts.push('Use graph tools for memory writes so they route to the current scoped graph. Do not infer the current conversation graph from the process DB path.');
+      } else {
+        parts.push('You can read/write your own config at /app/spore.json and your graph at ' + this.config.graphDbPath + ' via the exec tool.');
+      }
       parts.push('If a tool returns an absolute `filePath` (for example from `browser({ action: "screenshot" })`), you can deliver that file to the user with `message_send`.');
 
       const keyStatus = [];
@@ -1468,7 +1552,7 @@ function applyPromptSectionsMixin(GraphContext) {
     if (opts.platform === 'web' || opts.platform === 'discord' || !opts.platform) {
       parts.push('');
       parts.push('### Web Panel: Built-in Features');
-      parts.push('- Code viewer, browser preview, screenshot, and web-chat media behavior are built in. Source-of-truth docs: `ref-code-viewer`, `ref-browser-automation`, `ref-image-display`.');
+      parts.push('- Code viewer, browser preview, screenshot, and web-chat media behavior are built in. Source-of-truth docs: `ref-tool-workflows`, `ref-browser-automation`, `ref-image-display`.');
     }
 
     if (opts.platform === 'chatroom') {

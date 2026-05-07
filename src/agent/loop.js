@@ -64,6 +64,9 @@ const TOOL_RESULT_CAPS = {
   message_read:  15000,
   graph_query:   15000,
 };
+const DUPLICATE_TOOL_BATCH_CRITICAL = 10;
+const CONTEXT_OVERFLOW_RETRY_FLOOR_TOKENS = 4000;
+const CONTEXT_OVERFLOW_RETRY_FRACTION = 0.55;
 // Compaction message-window shape:
 //   PROTECT_HEAD_COUNT — head messages always kept verbatim (system intro,
 //                        first user/assistant exchange).
@@ -121,6 +124,24 @@ class AgentLoop {
     ].filter(Boolean).join(' ');
     this.log.info(`Agent loop initialized — tiers: casual=${this.config.casualModel} normal=${this.config.normalModel} planner=${this.config.plannerModel}${multimodal ? ` ${multimodal}` : ''} (${backend})`);
     return true;
+  }
+
+  _graphEventScope(sessionKey, opts = {}) {
+    const env = opts.memoryEnvelope || null;
+    const scopes = Array.isArray(env?.readScopes) ? env.readScopes.map(s => s?.slug).filter(Boolean) : [];
+    const out = {
+      sessionKey,
+      channelId: opts.channelId || null,
+      platform: opts.platform || null,
+      userId: opts.userId || null,
+      userName: opts.userName || null,
+      isDm: opts.isDm !== false,
+      trigger: opts.trigger || null,
+      route: opts.trigger || null,
+    };
+    if (scopes.length) out.graphs = scopes;
+    else if (env?.primarySlug) out.graph = env.primarySlug;
+    return out;
   }
 
   _runtimeToolNames(opts = {}) {
@@ -205,6 +226,9 @@ class AgentLoop {
     }
     if (has('graph_query')) {
       lines.push('- When the user asks about your graph, memory, nodes, edges, or stored context, use `graph_query` instead of answering from the prompt projection alone.');
+      lines.push('- For graph discovery, call `graph_query({ mode: "graphs" })` once. For the General Knowledge Base, use `graph_query({ graph: "spore-knowledge-base", mode: "overview", limit, offset })`; do not inspect `/data/graphs` or registry files through shell commands.');
+      lines.push('- When the user asks about shared/stored graph knowledge, reusable lessons, distilled skills, or what the shared graph knows, query the General Knowledge Base directly. For stored skills use `graph_query({ graph: "spore-knowledge-base", type: "skill" })` or `graph_query({ graph: "spore-knowledge-base", query: "skill" })`, then answer from those results. Do not call it empty or "fresh" if the General KB overview/list returned nodes.');
+      lines.push('- Keep local graph and General Knowledge Base separate in replies: local graph = this conversation/user/project context; General Knowledge Base = protected reusable shared knowledge across instances.');
     }
     if (has('settings_read')) {
       lines.push('- For current Spore settings/configuration (public URL, web port, model routing, providers, plugins, hot reload, browser backend), use `settings_read`. Do not infer these from `.env`, `spore.json`, shell env, or old prompt memory.');
@@ -217,6 +241,11 @@ class AgentLoop {
     }
     if (has('web_serve')) {
       lines.push('- Use `web_serve` action:"status" to check the hosted app URL/status, action:"start" for static apps, or action:"backend" for apps with an API backend.');
+    }
+    if (opts.platform === 'cli' && opts.projectContext) {
+      lines.push('- In coding/project sessions, prefer repository/file/shell tools for repo inspection and verification. Use browser/web tools only when the user explicitly asks for live web research or external docs.');
+      lines.push('- After edits, final verification claims must be command-derived: list exact commands run and outcomes. Say "focused tests" when you used grep, -k, a named test file, or another filter. Do not say "all tests", "full suite", or quote a total test count unless an unfiltered full-suite command produced that output.');
+      lines.push('- Keep public API and behavior changes scoped to the user request. If you intentionally add optional surface area beyond the minimal request, call that out briefly and justify it.');
     }
 
     return lines.join('\n');
@@ -363,10 +392,20 @@ class AgentLoop {
     this.activeRuns.add(sessionKey);
 
     const ac = new AbortController();
+    const queueSignal = opts.queueJob?.signal || null;
+    let onQueueAbort = null;
     opts._abortController = ac;
     opts._abortSignal = ac.signal;
     if (!this._activeAbortControllers) this._activeAbortControllers = new Map();
     this._activeAbortControllers.set(sessionKey, ac);
+
+    if (queueSignal) {
+      onQueueAbort = () => {
+        if (!ac.signal.aborted) ac.abort(queueSignal.reason || new Error('queue job aborted'));
+      };
+      if (queueSignal.aborted) onQueueAbort();
+      else queueSignal.addEventListener('abort', onQueueAbort, { once: true });
+    }
 
     // Safety: if an aborted run hangs for >10s, force-release the session lock
     // so new messages aren't permanently blocked.
@@ -407,6 +446,9 @@ class AgentLoop {
     try {
       return await this._runLoop(sessionKey, opts);
     } finally {
+      if (queueSignal && onQueueAbort) {
+        try { queueSignal.removeEventListener('abort', onQueueAbort); } catch {}
+      }
       if (forceReleaseTimer) clearTimeout(forceReleaseTimer);
       this.activeRuns.delete(sessionKey);
       this._activeAbortControllers.delete(sessionKey);
@@ -581,6 +623,9 @@ class AgentLoop {
         ctx.projectContext = opts.projectContext || null;
       }
       this.tools._currentMemoryEnvelope = memoryEnvelope;
+      if (memoryEnvelope.mode && memoryEnvelope.mode !== 'normal-chat') {
+        this.log.info(`[memory] session=${sessionKey} mode=${memoryEnvelope.mode} write=${memoryEnvelope.writeScopes?.defaultSlug || memoryEnvelope.primarySlug || '(none)'} reads=${(memoryEnvelope.readScopes || []).map(s => s.slug).join(',')}`);
+      }
     }
 
     // Detect casual chat for lighter prompt mode
@@ -645,7 +690,7 @@ class AgentLoop {
     // `let` (not `const`) so a mid-loop mode toggle via interjection can
     // rebuild it — see _injectPendingInterjections.
     const llmClient = this.tools?.llmClient || null;
-    let systemPrompt = await this.graph.buildSystemPromptAsync({
+    const promptBuildOpts = {
       ...dynamicOpts,
       promptMode,
       _llmClient: llmClient,
@@ -655,7 +700,11 @@ class AgentLoop {
       cachedProjectHasPriorSessions,
       cachedProjectHasPriorActivity,
       cachedProjectHasPriorMemory,
-    });
+    };
+    let systemPrompt = await graphEvents.withGraph(
+      this._graphEventScope(sessionKey, promptBuildOpts),
+      () => this.graph.buildSystemPromptAsync(promptBuildOpts)
+    );
     systemPrompt = this._withRuntimeToolContract(systemPrompt, dynamicOpts);
     // DEBUG: dump the assembled system prompt + tool list to disk so we can
     // inspect exactly what hit the model. Toggle with SPORE_DEBUG_DUMP_PROMPT=1.
@@ -813,9 +862,7 @@ class AgentLoop {
       this.log.debug(`[budget] No modelLimits entry for ${activeModel || '(no model)'}; falling back to ${contextWindow.toLocaleString()}-token default. Set per-model context in Settings → Providers to scale budgets correctly.`);
     }
     const systemTokens = this._estimateTokens(systemPrompt);
-    let msgTokens = messages.reduce((sum, m) => sum + this._estimateTokens(
-      typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
-    ), 0);
+    let msgTokens = this._estimateMessageTokens(messages);
 
     // Complexity-aware message budget: casual chat gets a tight budget so
     // simple greetings don't drag 30K of history. Complex requests get more
@@ -863,8 +910,10 @@ class AgentLoop {
     let iterations = 0;
     let apiRetries = 0;
     let sessionRecoveredThisCall = false;
+    let contextOverflowRecoveredThisCall = false;
     let loopBroken = false;
     let delegatedThisTurn = false;
+    let responseRepair = null;
 
     // Collect tool call summaries for the learner (procedural knowledge)
     const toolLog = [];
@@ -1013,6 +1062,10 @@ class AgentLoop {
           tools: chatTools,
           model: activeModel,
           platform: opts.platform,
+          channelName: opts.channelName,
+          channelId: opts.channelId,
+          trigger: opts.trigger,
+          sessionKey,
           projectContext: opts.projectContext,
           forceToolName: forcedToolName,
           abortSignal,
@@ -1132,27 +1185,22 @@ class AgentLoop {
               last.content += `\n\n--- 🚨 CONTEXT CRITICAL: ${Math.round((systemTokens + msgTokens) / hardCeiling * 100)}% of context used. STOP using tools and respond immediately with what you know. Compaction is imminent. ---`;
             }
           }
+          this._anchorPlanModeToolResults(toolResults, opts);
 
           this._persistToolResults(sessionKey, messages, toolResults, iterations);
 
-          // Mid-loop token check: use API-reported input tokens (accurate) when available,
-          // otherwise estimate from the last two messages we just pushed (assistant + tool results).
-          // Avoids re-serializing the entire message array every iteration.
-          const apiInputTokens = iterUsage.input_tokens || 0;
-          if (apiInputTokens > 0) {
-            msgTokens = apiInputTokens - systemTokens;
-          } else {
-            const lastAssistant = messages[messages.length - 2];
-            const lastToolResults = messages[messages.length - 1];
-            if (lastAssistant) msgTokens += this._estimateTokens(typeof lastAssistant.content === 'string' ? lastAssistant.content : JSON.stringify(lastAssistant.content));
-            if (lastToolResults) msgTokens += this._estimateTokens(typeof lastToolResults.content === 'string' ? lastToolResults.content : JSON.stringify(lastToolResults.content));
-          }
+          // Mid-loop token check must include the tool results we just appended.
+          // Provider usage for this iteration only describes the request before
+          // the current assistant/tool messages existed, so using it here misses
+          // large result batches and can let the next request exceed context.
+          msgTokens = this._estimateMessageTokens(messages);
           if (systemTokens + msgTokens > hardCeiling) {
-            const target = hardCeiling - systemTokens - RESPONSE_HEADROOM_TOKENS;
+            const beforeTrimTokens = msgTokens;
+            const target = Math.max(1, hardCeiling - systemTokens - RESPONSE_HEADROOM_TOKENS);
             messages = this._trimMessagesToTokenBudget(messages, target);
             messages = this._sanitizeMessages(messages);
-            msgTokens = target;
-            this.log.warn(`Mid-loop token trim at iter ${iterations}: ${msgTokens} → ~${target} tokens`);
+            msgTokens = this._estimateMessageTokens(messages);
+            this.log.warn(`Mid-loop token trim at iter ${iterations}: ${beforeTrimTokens} → ~${msgTokens} msg tokens (target ${target})`);
           }
 
           if (criticalBlock) {
@@ -1170,11 +1218,12 @@ class AgentLoop {
         break;
 
       } catch (e) {
-        const errState = { sessionRecoveredThisCall, apiRetries };
+        const errState = { sessionRecoveredThisCall, contextOverflowRecoveredThisCall, apiRetries };
         const result = await this._handleIterationError(e, {
-          abortSignal, sessionKey, iterations, opts, messages, state: errState,
+          abortSignal, sessionKey, iterations, opts, messages, state: errState, systemPrompt, hardCeiling,
         });
         sessionRecoveredThisCall = errState.sessionRecoveredThisCall;
+        contextOverflowRecoveredThisCall = errState.contextOverflowRecoveredThisCall;
         apiRetries = errState.apiRetries;
         if (result.messages) messages = result.messages;
         if (result.action === 'break') { loopBroken = true; break; }
@@ -1205,6 +1254,10 @@ class AgentLoop {
           onTextDelta: opts.onTextDelta,
           onThinkingDelta: opts.onThinkingDelta,
           platform: opts.platform,
+          channelName: opts.channelName,
+          channelId: opts.channelId,
+          trigger: opts.trigger,
+          sessionKey,
           projectContext: opts.projectContext,
         });
         if (finalResponse.usage) {
@@ -1218,6 +1271,23 @@ class AgentLoop {
         }
       } catch (e) {
         this.log.error(`[loop-detect] Forced response failed: ${e.message}`);
+      }
+    }
+
+    if (this._shouldRepairEmptyDirectToolReply({ finalText, isDirect, wasUserAbort, opts, toolLog })) {
+      responseRepair = await this._repairEmptyDirectToolReply({
+        systemPrompt,
+        staticPrompt,
+        dynamicContext,
+        messages,
+        opts,
+        sessionKey,
+        totalUsage,
+        toolLog,
+      });
+      if (responseRepair?.text) {
+        finalText = responseRepair.text;
+        this.sessions.addMessage(sessionKey, 'assistant', finalText);
       }
     }
 
@@ -1248,7 +1318,7 @@ class AgentLoop {
       }
     }
 
-    if (opts.onComplete) opts.onComplete(finalText, totalUsage);
+    if (opts.onComplete) opts.onComplete(finalText, totalUsage, { responseRepair });
 
     // Summarise tool usage: { toolName: callCount }
     const toolUsage = toolLog.reduce((acc, t) => {
@@ -1262,6 +1332,7 @@ class AgentLoop {
       toolUsage: Object.keys(toolUsage).length > 0 ? toolUsage : undefined,
       iterations,
       sessionKey,
+      responseRepair,
     };
   }
 
@@ -1442,6 +1513,41 @@ class AgentLoop {
     if (e.stack) this.log.error('  stack:', e.stack);
     if (e.error) this.log.error('API error detail:', JSON.stringify(e.error));
 
+    // Provider context-limit 400s are recoverable if we compact the live
+    // message array before retrying. This is distinct from malformed
+    // tool_use/tool_result 400s below: the session itself is valid, but the
+    // current request is too large.
+    if (this._isContextOverflowError(e) && !state.contextOverflowRecoveredThisCall) {
+      state.contextOverflowRecoveredThisCall = true;
+      const beforeTokens = this._estimateMessageTokens(messages);
+      const systemTokens = this._estimateTokens(ctx.systemPrompt || '');
+      const ceiling = Number(ctx.hardCeiling) > 0 ? Number(ctx.hardCeiling) : DEFAULT_CONTEXT_WINDOW;
+      const modelRoom = Math.max(
+        CONTEXT_OVERFLOW_RETRY_FLOOR_TOKENS,
+        ceiling - systemTokens - RESPONSE_HEADROOM_TOKENS,
+      );
+      const target = Math.max(
+        CONTEXT_OVERFLOW_RETRY_FLOOR_TOKENS,
+        Math.min(modelRoom, Math.floor(ceiling * CONTEXT_OVERFLOW_RETRY_FRACTION)),
+      );
+      this.log.warn(`[budget] Context overflow in ${sessionKey}; compacting ${beforeTokens} msg tokens to retry under ~${target}`);
+      if (opts.onStatus) {
+        try { opts.onStatus({ type: 'context_overflow_recover', beforeTokens, targetTokens: target }); } catch { /* silent: best-effort UI callback */ }
+      }
+      let compacted = await this._compactHistory(sessionKey, messages, target, opts.onStatus);
+      compacted = this._sanitizeMessages(compacted);
+      let afterTokens = this._estimateMessageTokens(compacted);
+      if (afterTokens >= beforeTokens) {
+        compacted = this._sanitizeMessages(this._trimMessagesToTokenBudget(messages, target));
+        afterTokens = this._estimateMessageTokens(compacted);
+      }
+      if (opts.onStatus) {
+        try { opts.onStatus({ type: 'context_overflow_retry', beforeTokens, afterTokens, targetTokens: target }); } catch { /* silent: best-effort UI callback */ }
+      }
+      this.log.warn(`[budget] Context overflow recovery retry: ${beforeTokens} → ${afterTokens} msg tokens`);
+      return { action: 'continue', messages: compacted };
+    }
+
     // 400 with mismatched tool_use/tool_result pairs — try to recover by
     // re-sanitizing, then fall back to clearing the session entirely.
     if (e.status === 400 && e.message?.includes('tool_use') && e.message?.includes('tool_result') && !state.sessionRecoveredThisCall) {
@@ -1539,6 +1645,46 @@ class AgentLoop {
     }
   }
 
+  _duplicateToolResult(toolBlock, firstToolUseId) {
+    return {
+      type: 'tool_result',
+      tool_use_id: toolBlock.id,
+      content: JSON.stringify({
+        error: `Duplicate ${toolBlock.name} call skipped: identical input was already requested in this tool batch.`,
+        duplicateOf: firstToolUseId,
+        note: 'Use the first matching result already returned in this batch. Do not call the same tool with the same input again.',
+      }),
+    };
+  }
+
+  _dedupeToolBlocksForBatch(toolBlocks) {
+    const seen = new Map();
+    const executable = [];
+    const skippedById = new Map();
+    const duplicateCounts = new Map();
+
+    for (const tb of toolBlocks || []) {
+      const callHash = this._hashToolCall(tb.name, tb.input);
+      const first = seen.get(callHash);
+      if (!first) {
+        seen.set(callHash, { id: tb.id, name: tb.name });
+        executable.push(tb);
+        continue;
+      }
+      skippedById.set(tb.id, this._duplicateToolResult(tb, first.id));
+      duplicateCounts.set(tb.name, (duplicateCounts.get(tb.name) || 0) + 1);
+    }
+
+    const duplicateCount = skippedById.size;
+    return {
+      executable,
+      skippedById,
+      duplicateCount,
+      duplicateCounts,
+      critical: duplicateCount >= DUPLICATE_TOOL_BATCH_CRITICAL,
+    };
+  }
+
   /**
    * Run all tool_use blocks in this turn, returning the collected
    * tool_result blocks plus aggregated flags. Handles:
@@ -1559,7 +1705,7 @@ class AgentLoop {
    */
   async _executeToolBatch(toolBlocks, ctx) {
     const { abortSignal, sessionKey, loopTracker, toolLog, opts } = ctx;
-    const toolResults = [];
+    let toolResults = [];
     let criticalBlock = false;
     let delegated = false;
 
@@ -1593,38 +1739,57 @@ class AgentLoop {
       }),
     ]) : runOne;
 
-    const allParallel = toolBlocks.length > 1 && toolBlocks.every(t => PARALLEL_SAFE.has(t.name));
+    const deduped = this._dedupeToolBlocksForBatch(toolBlocks);
+    if (deduped.duplicateCount > 0) {
+      const detail = [...deduped.duplicateCounts.entries()].map(([name, count]) => `${name}×${count}`).join(', ');
+      this.log.warn(`[loop-detect] Skipped ${deduped.duplicateCount} duplicate tool calls in one batch (${detail})`);
+      if (opts.onStatus) {
+        try { opts.onStatus({ type: 'duplicate_tool_batch', skipped: deduped.duplicateCount, tools: Object.fromEntries(deduped.duplicateCounts) }); } catch { /* silent: best-effort UI callback */ }
+      }
+      if (deduped.critical) criticalBlock = true;
+    }
+
+    const executableBlocks = deduped.executable;
+    const actualResults = [];
+    const allParallel = executableBlocks.length > 1 && executableBlocks.every(t => PARALLEL_SAFE.has(t.name));
     if (allParallel) {
-      this.log.info(`[agent] Executing ${toolBlocks.length} tools in parallel: ${toolBlocks.map(t => t.name).join(', ')}`);
-      if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: toolBlocks.length, tools: toolBlocks.map(t => t.name) }); } catch { /* silent: best-effort UI callback */ } }
-      const results = await Promise.all(toolBlocks.map(tb => abortRace(tb)));
-      toolResults.push(...results);
+      this.log.info(`[agent] Executing ${executableBlocks.length} tools in parallel: ${executableBlocks.map(t => t.name).join(', ')}`);
+      if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: executableBlocks.length, tools: executableBlocks.map(t => t.name) }); } catch { /* silent: best-effort UI callback */ } }
+      const results = await Promise.all(executableBlocks.map(tb => abortRace(tb)));
+      actualResults.push(...results);
     } else {
       // Mixed batch: run parallel-safe prefix concurrently, then sequential remainder
       let i = 0;
-      while (i < toolBlocks.length && !abortSignal?.aborted) {
+      while (i < executableBlocks.length && !abortSignal?.aborted) {
         // Collect contiguous parallel-safe run
         const batch = [];
-        while (i < toolBlocks.length && PARALLEL_SAFE.has(toolBlocks[i].name)) {
-          batch.push(toolBlocks[i]);
+        while (i < executableBlocks.length && PARALLEL_SAFE.has(executableBlocks[i].name)) {
+          batch.push(executableBlocks[i]);
           i++;
         }
         if (batch.length > 1) {
           this.log.info(`[agent] Parallel batch: ${batch.length} tools (${batch.map(t => t.name).join(', ')})`);
           if (opts.onStatus) { try { opts.onStatus({ type: 'parallel_exec', count: batch.length, tools: batch.map(t => t.name) }); } catch { /* silent: best-effort UI callback */ } }
           const results = await Promise.all(batch.map(tb => abortRace(tb)));
-          toolResults.push(...results);
+          actualResults.push(...results);
         } else if (batch.length === 1) {
-          toolResults.push(await abortRace(batch[0]));
+          actualResults.push(await abortRace(batch[0]));
         }
         if (abortSignal?.aborted) break;
         // Execute next sequential tool
-        if (i < toolBlocks.length) {
-          toolResults.push(await abortRace(toolBlocks[i]));
+        if (i < executableBlocks.length) {
+          actualResults.push(await abortRace(executableBlocks[i]));
           i++;
         }
       }
     }
+
+    const actualById = new Map(actualResults.map(r => [r?.tool_use_id, r]).filter(([id]) => Boolean(id)));
+    toolResults = toolBlocks.map(tb => (
+      actualById.get(tb.id)
+      || deduped.skippedById.get(tb.id)
+      || interruptedToolResult(tb)
+    ));
 
     const seen = new Set(toolResults.map(r => r?.tool_use_id).filter(Boolean));
     for (const tb of toolBlocks) {
@@ -1674,6 +1839,18 @@ class AgentLoop {
     const { response, responseText, sessionKey, opts, messages } = ctx;
     let { finalText, lastSentIntermediate } = ctx;
     finalText = responseText || '';
+    const pendingIj = this._pendingInterjections.get(sessionKey);
+    const hasPendingInterjection = pendingIj && pendingIj.length > 0;
+    if (!hasPendingInterjection) {
+      const repair = this._planModeEndTurnRepair({ responseText: finalText, opts, messages });
+      if (repair) {
+        this.log.warn(`[plan-mode] Final output missing required ${repair.phase} marker; asking model to repair instead of persisting it`);
+        messages.push({ role: 'assistant', content: response.content || [{ type: 'text', text: finalText }] });
+        messages.push({ role: 'user', content: repair.prompt });
+        if (finalText) lastSentIntermediate = finalText;
+        return { action: 'continue', finalText: null, lastSentIntermediate };
+      }
+    }
     // Store in session regardless (for context continuity)
     if (finalText) this.sessions.addMessage(sessionKey, 'assistant', finalText);
     // If the final text was already sent as intermediate, don't re-send it
@@ -1681,8 +1858,7 @@ class AgentLoop {
     // Before breaking: if a user interjection arrived while we were streaming,
     // don't exit — send the current text as intermediate and continue the loop
     // so the interjection gets processed on the next iteration.
-    const pendingIj = this._pendingInterjections.get(sessionKey);
-    if (pendingIj && pendingIj.length > 0) {
+    if (hasPendingInterjection) {
       this.log.info(`[interject] Interjection pending at end_turn — continuing loop`);
       if (finalText && opts.onTextDelta) {
         // The text was already streamed via deltas, just record it
@@ -1693,6 +1869,100 @@ class AgentLoop {
       return { action: 'continue', finalText, lastSentIntermediate };
     }
     return { action: 'break', finalText, lastSentIntermediate };
+  }
+
+  _isNoReplyText(text) {
+    const s = String(text || '').trim();
+    return !s || s === 'NO_REPLY' || s.includes('NO_REPLY');
+  }
+
+  _shouldRepairEmptyDirectToolReply({ finalText, isDirect, wasUserAbort, opts = {}, toolLog = [] } = {}) {
+    if (wasUserAbort || !isDirect) return false;
+    if (!opts.projectContext) return false;
+    if (!Array.isArray(toolLog) || toolLog.length === 0) return false;
+    if (opts.trigger === 'lull' || opts.trigger === 'proactive') return false;
+    return this._isNoReplyText(finalText);
+  }
+
+  _cloneMessagesForRepair(messages = []) {
+    return messages.map(msg => ({
+      ...msg,
+      content: Array.isArray(msg.content)
+        ? msg.content.map(block => (block && typeof block === 'object' ? { ...block } : block))
+        : msg.content,
+    }));
+  }
+
+  _toolLogEvidenceSummary(toolLog = []) {
+    const items = Array.isArray(toolLog) ? toolLog.slice(-8) : [];
+    if (!items.length) return '';
+    return items.map((t, i) => {
+      const name = t?.tool || 'tool';
+      const input = String(t?.input || '').replace(/\s+/g, ' ').slice(0, 220);
+      const result = String(t?.resultPreview || '').replace(/\s+/g, ' ').slice(0, 320);
+      const exit = t?.exitCode == null ? '' : ` exitCode=${t.exitCode}`;
+      const ok = t?.succeeded === false ? 'failed' : 'succeeded';
+      return `${i + 1}. ${name} ${ok}${exit}; input=${input}; result=${result}`;
+    }).join('\n');
+  }
+
+  async _repairEmptyDirectToolReply({
+    systemPrompt,
+    staticPrompt,
+    dynamicContext,
+    messages,
+    opts = {},
+    sessionKey,
+    totalUsage,
+    toolLog = [],
+  } = {}) {
+    const evidence = this._toolLogEvidenceSummary(toolLog);
+    const repairPrompt = [
+      '[SYSTEM: The last direct Spore Code turn used tools but ended with an empty or NO_REPLY final answer.',
+      'Do not call tools. Give the user a concise status response based on the latest tool evidence, not an earlier failed attempt.',
+      'Say what changed or was attempted, exact verification commands if known, and any blocker or next step.',
+      'Do not claim tests passed unless the prior transcript or tool evidence contains the command output. If you are unsure what verification ran, say so.',
+      evidence ? `Latest tool evidence:\n${evidence}` : '',
+      ']',
+    ].join(' ');
+    try {
+      this.log.warn(`[response-repair] Empty direct tool reply in ${sessionKey}; requesting no-tool status response`);
+      if (opts.onStatus) {
+        try { opts.onStatus({ type: 'response_repair', reason: 'empty_tool_reply' }); } catch {}
+      }
+      const repairMessages = this._cloneMessagesForRepair(messages);
+      repairMessages.push({ role: 'user', content: repairPrompt });
+      const response = await this._callLLM(systemPrompt, repairMessages, {
+        staticPrompt,
+        dynamicContext,
+        platform: opts.platform,
+        channelName: opts.channelName,
+        channelId: opts.channelId,
+        trigger: opts.trigger,
+        sessionKey,
+        projectContext: opts.projectContext,
+        tools: [],
+        route: 'response-repair',
+      });
+      if (response.usage && totalUsage) {
+        totalUsage.input_tokens += response.usage.input_tokens || 0;
+        totalUsage.output_tokens += response.usage.output_tokens || 0;
+        totalUsage.cache_read_input_tokens += response.usage.cache_read_input_tokens || 0;
+        totalUsage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens || 0;
+      }
+      const text = (response.content || [])
+        .filter(b => b.type === 'text')
+        .map(b => b.text || '')
+        .join('')
+        .trim();
+      if (this._isNoReplyText(text)) {
+        return { attempted: true, reason: 'empty_tool_reply', repaired: false, error: 'repair returned empty response' };
+      }
+      return { attempted: true, reason: 'empty_tool_reply', repaired: true, text };
+    } catch (e) {
+      this.log.warn(`[response-repair] Failed for ${sessionKey}: ${e.message}`);
+      return { attempted: true, reason: 'empty_tool_reply', repaired: false, error: e.message };
+    }
   }
 
   /**
@@ -1749,7 +2019,7 @@ class AgentLoop {
         // Adopt the new projectContext for the rest of the loop.
         opts.projectContext = items.map(ij => ij.opts?.projectContext).filter(Boolean).pop() || opts.projectContext;
         try {
-          systemPrompt = await this.graph.buildSystemPromptAsync({
+          const rebuildOpts = {
             ...ctx.dynamicOpts,
             promptMode: ctx.promptMode,
             projectContext: opts.projectContext,
@@ -1760,7 +2030,11 @@ class AgentLoop {
             cachedProjectHasPriorSessions: ctx.cachedProjectHasPriorSessions,
             cachedProjectHasPriorActivity: ctx.cachedProjectHasPriorActivity,
             cachedProjectHasPriorMemory: ctx.cachedProjectHasPriorMemory,
-          });
+          };
+          systemPrompt = await graphEvents.withGraph(
+            this._graphEventScope(sessionKey, rebuildOpts),
+            () => this.graph.buildSystemPromptAsync(rebuildOpts)
+          );
           systemPrompt = this._withRuntimeToolContract(systemPrompt, {
             ...ctx.dynamicOpts,
             projectContext: opts.projectContext,
@@ -2032,6 +2306,16 @@ class AgentLoop {
 
     const resultHash = this._hashResult(resultContent);
     this._recordToolResult(loopTracker, callHash, resultHash);
+
+    const graphDiscoveryCheck = this._recordGraphDiscoveryProgress(loopTracker, toolBlock.name, toolBlock.input, resultContent);
+    if (graphDiscoveryCheck.blocked) {
+      this.log.warn(`[loop-detect] CRITICAL: ${graphDiscoveryCheck.message}`);
+      criticalBlock = true;
+      resultContent += `\n\n--- BLOCKED: ${graphDiscoveryCheck.message} ---`;
+    } else if (graphDiscoveryCheck.warning) {
+      this.log.warn(`[loop-detect] WARNING: ${graphDiscoveryCheck.message}`);
+      resultContent += `\n\n--- WARNING: ${graphDiscoveryCheck.message} ---`;
+    }
 
     if (loopCheck.warning) {
       this.log.warn(`[loop-detect] WARNING: ${loopCheck.message}`);
@@ -2308,6 +2592,19 @@ class AgentLoop {
     return toolName + ':' + JSON.stringify(input);
   }
 
+  _estimateMessageTokens(messages) {
+    if (!Array.isArray(messages)) return 0;
+    return messages.reduce((sum, m) => sum + this._estimateTokens(
+      typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+    ), 0);
+  }
+
+  _isContextOverflowError(e) {
+    const msg = `${e?.message || ''} ${e?.cause?.message || ''} ${e?.error ? JSON.stringify(e.error) : ''}`;
+    const isBadRequest = e?.status === 400 || /\bHTTP 400\b/i.test(msg);
+    return isBadRequest && /maximum context length|context length|too many tokens|prompt contains at least \d+ input tokens|requested \d+ output tokens/i.test(msg);
+  }
+
   _hashResult(resultStr) {
     return String(resultStr).substring(0, 500);
   }
@@ -2384,6 +2681,84 @@ class AgentLoop {
     }
 
     return { blocked: false, warning: false };
+  }
+
+  _graphDiscoveryCategory(toolName, input = {}) {
+    if (toolName !== 'graph_query') return null;
+    const mode = String(input.mode || '').toLowerCase();
+    const query = String(input.query || '').trim().toLowerCase();
+    const selector = String(input.graph || input.project || '').trim().toLowerCase();
+    if (mode === 'graphs' || mode === 'overview') return 'graph-discovery';
+    if (!input.nodeId && !input.type && (!query || query === '*')) return 'graph-discovery';
+    if (selector === 'spore-knowledge-base' && !input.nodeId && !input.source_id && !input.target_id) return 'graph-discovery';
+    if (/\b(graphs?|knowledge graph|general knowledge|shared graph|shared knowledge|stored skills?|distilled skills?|reusable lessons?|memory graph|current graph)\b/.test(query)) return 'graph-discovery';
+    return null;
+  }
+
+  _recordGraphDiscoveryProgress(tracker, toolName, input, resultContent) {
+    const category = this._graphDiscoveryCategory(toolName, input);
+    if (!category) return { blocked: false, warning: false };
+
+    if (!tracker.graphDiscovery) {
+      tracker.graphDiscovery = {
+        calls: 0,
+        noNewInfo: 0,
+        seen: new Set(),
+      };
+    }
+    const state = tracker.graphDiscovery;
+    state.calls++;
+
+    const keys = this._graphDiscoveryResultKeys(resultContent);
+    let newKeys = 0;
+    for (const key of keys) {
+      if (state.seen.has(key)) continue;
+      state.seen.add(key);
+      newKeys++;
+    }
+    if (newKeys > 0) state.noNewInfo = 0;
+    else state.noNewInfo++;
+
+    const warnAt = this.config.loopDetection?.graphDiscoveryWarn || 5;
+    const criticalAt = this.config.loopDetection?.graphDiscoveryCritical || 8;
+    const noNewWarn = this.config.loopDetection?.graphDiscoveryNoNewWarn || 2;
+    const noNewCritical = this.config.loopDetection?.graphDiscoveryNoNewCritical || 4;
+    const message = `Repeated graph-discovery queries are not adding new information. Use graph_query({ mode: "graphs" }) once, then graph_query({ graph: "spore-knowledge-base", mode: "overview", limit, offset }) for paginated General Knowledge Base inspection, and answer the user from the results already returned.`;
+
+    if (state.calls >= criticalAt && state.noNewInfo >= noNewCritical) {
+      return { blocked: true, warning: false, message };
+    }
+    if (state.calls >= warnAt && state.noNewInfo >= noNewWarn) {
+      return { blocked: false, warning: true, message };
+    }
+    return { blocked: false, warning: false };
+  }
+
+  _graphDiscoveryResultKeys(resultContent) {
+    const keys = new Set();
+    const visit = (value) => {
+      if (!value || keys.size >= 200) return;
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item);
+        return;
+      }
+      if (typeof value !== 'object') return;
+      if (value.slug) keys.add(`graph:${value.slug}`);
+      if (value.graph) keys.add(`graph:${value.graph}`);
+      if (value.id) keys.add(`node:${value.id}`);
+      if (value.nodeId) keys.add(`node:${value.nodeId}`);
+      if (value.type && value.count !== undefined) keys.add(`type:${value.type}:${value.count}`);
+      if (value.mode) keys.add(`mode:${value.mode}`);
+      for (const child of Object.values(value)) visit(child);
+    };
+    try {
+      visit(JSON.parse(String(resultContent || '')));
+    } catch {
+      const fallback = this._hashResult(resultContent);
+      if (fallback) keys.add(`raw:${fallback}`);
+    }
+    if (!keys.size) keys.add(`empty:${this._hashResult(resultContent)}`);
+    return keys;
   }
 
   /**
@@ -2551,6 +2926,15 @@ class AgentLoop {
       max_tokens: maxTokens,
       ...resolvedRequest,
       model,
+      _usageMeta: {
+        source: opts.projectContext ? 'spore-code' : 'agent',
+        route: opts.route || opts.trigger || opts.platform || null,
+        platform: opts.platform || null,
+        channelName: opts.channelName || opts.channelId || null,
+        channelId: opts.channelId || null,
+        trigger: opts.trigger || null,
+        sessionKey: opts.sessionKey || null,
+      },
     };
     if (forceToolName && !Array.isArray(requestOpts.tools)) {
       requestOpts.tools = tools;
@@ -3035,6 +3419,88 @@ class AgentLoop {
   _hasWorkflowMarker(text) {
     if (!text || typeof text !== 'string') return false;
     return /\b(RESEARCH_DONE:|PLAN_READY|NO_INTERVIEW_NEEDED:|NO_FOLLOWUP_QUESTIONS:|QUESTIONS:|\[BUILD_PLAN\]|\[REVIEW\]|\[RESEARCH\])/.test(text);
+  }
+
+  _isCliPlanMode(opts = {}) {
+    return opts.platform === 'cli' && opts.projectContext?.mode === 'plan';
+  }
+
+  _planModePhase(opts = {}) {
+    const content = typeof opts.content === 'string' ? opts.content : '';
+    if (/^\s*\[BUILD_PLAN\]/.test(content)) return 'build';
+    if (/^\s*\[RESEARCH\]/.test(content)) return 'research';
+    if (/^\s*\[REVIEW\]/.test(content)) return 'post_research_router';
+    return 'interview_router';
+  }
+
+  _planModeExpectedMarkers(opts = {}) {
+    switch (this._planModePhase(opts)) {
+      case 'build':
+        return {
+          phase: 'build',
+          markers: [/^\s*PLAN_READY\s*$/m],
+          instruction: 'This is the BUILDING turn. Produce the final plan and end with PLAN_READY on its own line. Do not redo research.',
+        };
+      case 'research':
+        return {
+          phase: 'research',
+          markers: [/\bRESEARCH_DONE:/, /\bQUESTIONS:/],
+          instruction: 'This is the RESEARCH turn. Continue from the tool results and emit RESEARCH_DONE: as the final block, or emit QUESTIONS: only if a blocker preference is needed. Do not emit PLAN_READY in this turn.',
+        };
+      case 'post_research_router':
+        return {
+          phase: 'post_research_router',
+          markers: [/\bNO_FOLLOWUP_QUESTIONS:/, /\bQUESTIONS:/],
+          instruction: 'This is the post-research router turn. Emit only NO_FOLLOWUP_QUESTIONS: or QUESTIONS:. Do not write the final plan.',
+        };
+      default:
+        return {
+          phase: 'interview_router',
+          markers: [/\bNO_INTERVIEW_NEEDED:/, /\bQUESTIONS:/],
+          instruction: 'This is the first plan-mode router turn. Emit only NO_INTERVIEW_NEEDED: or QUESTIONS:. Do not perform the implementation.',
+        };
+    }
+  }
+
+  _planModeRepairAlreadyRequested(messages = []) {
+    return messages.some(msg => {
+      if (msg?.role !== 'user') return false;
+      const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || '');
+      return content.includes('[SYSTEM: Plan Mode output repair]');
+    });
+  }
+
+  _planModeEndTurnRepair({ responseText = '', opts = {}, messages = [] } = {}) {
+    if (!this._isCliPlanMode(opts)) return null;
+    if (this._planModeRepairAlreadyRequested(messages)) return null;
+    const expected = this._planModeExpectedMarkers(opts);
+    const text = String(responseText || '');
+    if (expected.markers.some(re => re.test(text))) return null;
+    return {
+      phase: expected.phase,
+      prompt: [
+        '[SYSTEM: Plan Mode output repair]',
+        'Your previous response did not follow the active Spore Code plan-mode marker protocol, so it was not accepted.',
+        expected.instruction,
+        'Do not greet, restart the conversation, or answer an older message. Use the current request and the tool results already above.',
+        'Plan mode remains read-only: do not call mutating tools or run implementation commands.',
+      ].join('\n'),
+    };
+  }
+
+  _anchorPlanModeToolResults(toolResults = [], opts = {}) {
+    if (!this._isCliPlanMode(opts) || !Array.isArray(toolResults) || toolResults.length === 0) return;
+    const expected = this._planModeExpectedMarkers(opts);
+    const last = toolResults[toolResults.length - 1];
+    if (!last || typeof last.content !== 'string') return;
+    last.content += [
+      '',
+      '',
+      '--- PLAN MODE CONTINUATION ANCHOR ---',
+      expected.instruction,
+      'You are continuing the current Spore Code plan-mode turn. Do not answer an earlier greeting or restart the conversation. Use the tool results above as the newest context.',
+      '--- END PLAN MODE CONTINUATION ANCHOR ---',
+    ].join('\n');
   }
 
   async _compactHistory(sessionKey, messages, targetTokens, onStatus) {

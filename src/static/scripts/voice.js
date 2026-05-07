@@ -1,5 +1,5 @@
 // voice.js — Chat input handling: file attachments, clipboard paste, mic push-to-talk,
-// voice call, interrupt listener, sendChat / _dispatchChat / _interruptAndSend.
+// voice call, interrupt listener, sendChat / _dispatchChat / busy follow-up send.
 // Extracted from src/static/scripts/app.js (was lines 7296-8083 of the post-Phase-2 monolith).
 
 // ── File Attachments ──
@@ -100,17 +100,26 @@ function sendChat() {
   if ((!text && !pendingFiles.length) || !ws || ws.readyState !== 1) return;
 
   if (chatBusy) {
-    _interruptAndSend(text);
+    _sendFollowupWhileBusy(text);
     return;
   }
 
   _dispatchChat(text);
 }
 
+function _restoreChatDraft(text, attachments = []) {
+  const input = document.getElementById('chat-input');
+  input.value = text || '';
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  pendingFiles = [...attachments];
+  updateAttachmentUI();
+}
+
 function _dispatchChat(text) {
   const input = document.getElementById('chat-input');
   const attachments = [...pendingFiles];
-  addChatMessage('user', text || '(attached files)', attachments.length ? attachments : undefined);
+  const userBubble = addChatMessage('user', text || '(attached files)', attachments.length ? attachments : undefined);
 
   const images = attachments
     .filter(f => f.type.startsWith('image/'))
@@ -119,48 +128,33 @@ function _dispatchChat(text) {
     .filter(f => !f.type.startsWith('image/'))
     .map(f => ({ name: f.name, data: f.data, mediaType: f.type }));
 
-  ws.send(JSON.stringify({
-    type: 'chat',
-    content: text || 'I\'ve attached some files. Please look at them.',
-    userName: _currentUserDisplayName || _currentUserName,
-    userId: _currentUserName,
-    images: images.length ? images : undefined,
-    files: files.length ? files : undefined,
-  }));
+  try {
+    ws.send(JSON.stringify({
+      type: 'chat',
+      content: text || 'I\'ve attached some files. Please look at them.',
+      userName: _currentUserDisplayName || _currentUserName,
+      userId: _currentUserName,
+      images: images.length ? images : undefined,
+      files: files.length ? files : undefined,
+    }));
+  } catch (e) {
+    if (typeof _removeChatBubble === 'function') _removeChatBubble(userBubble);
+    _restoreChatDraft(text, attachments);
+    addChatMessage('system', 'Message was not sent — connection lost. Your draft was restored.');
+    return false;
+  }
   input.value = '';
   input.style.height = 'auto';
   pendingFiles = [];
   updateAttachmentUI();
+  return true;
 }
 
-function _interruptAndSend(newText) {
-  _chatStopped = true;
-  ws.send(JSON.stringify({ type: 'chat:stop' }));
-  finalizeStreamingMsg();
-
-  const input = document.getElementById('chat-input');
-  input.value = '';
-  input.style.height = 'auto';
-  pendingFiles = [];
-  updateAttachmentUI();
-
-  // Queue the new message — wait for the abort to release the session,
-  // then send. Poll briefly since abort is near-instant.
-  let attempts = 0;
-  const trySend = () => {
-    attempts++;
-    if (!chatBusy) {
-      _dispatchChat(newText);
-      return;
-    }
-    if (attempts < 30) {
-      setTimeout(trySend, 100);
-    } else {
-      addChatMessage('system', 'Could not interrupt — try again.');
-      setChatBusy(false);
-    }
-  };
-  setTimeout(trySend, 50);
+function _sendFollowupWhileBusy(newText) {
+  // Do not abort the active run. The server queues this as an
+  // interjection and folds it into the in-flight turn at the next safe
+  // iteration boundary. Failed WebSocket delivery restores the draft.
+  _dispatchChat(newText);
 }
 
 document.getElementById('chat-send').addEventListener('click', sendChat);
@@ -734,7 +728,10 @@ function handleVoiceMessage(msg) {
     _voiceStreamEl.classList.add('streaming');
   } else if (msg.type === 'voice:delta') {
     _voiceStreamText += msg.text;
-    if (_voiceStreamEl) _voiceStreamEl.textContent = _voiceStreamText;
+    if (_voiceStreamEl) {
+      _voiceStreamEl.textContent = _voiceStreamText;
+      if (typeof _syncAssistantRowVisibility === 'function') _syncAssistantRowVisibility(_voiceStreamEl);
+    }
     voiceStatusText.textContent = 'responding...';
   } else if (msg.type === 'voice:tool') {
     addChatMessage('system', '\u2699 ' + msg.tool);
@@ -742,11 +739,17 @@ function handleVoiceMessage(msg) {
   } else if (msg.type === 'voice:response') {
     if (_voiceStreamEl) {
       _voiceStreamEl.classList.remove('streaming');
-      if (msg.text) _voiceStreamEl.innerHTML = formatAssistantMsg(msg.text, msg);
+      if (msg.text) {
+        _voiceStreamEl.innerHTML = formatAssistantMsg(msg.text, msg);
+        if (typeof _syncAssistantRowVisibility === 'function') _syncAssistantRowVisibility(_voiceStreamEl);
+      } else if (typeof _removeChatBubble === 'function') {
+        _removeChatBubble(_voiceStreamEl);
+      }
       _voiceStreamEl = null; _voiceStreamText = '';
     } else if (msg.text) {
       const el = addChatMessage('assistant', '');
       el.innerHTML = formatAssistantMsg(msg.text, msg);
+      if (typeof _syncAssistantRowVisibility === 'function') _syncAssistantRowVisibility(el);
     }
     if (msg.audio) {
       const audioBlob = base64ToBlob(msg.audio, msg.audioMime || 'audio/mp3');

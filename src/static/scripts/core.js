@@ -72,10 +72,10 @@ const THEMES = {
       '--text-bright': '#1d211b',
       '--text-dim': '#8a8c82',
       '--text-muted': '#b1aa9c',
-      // Accent is leaf green per the Petri prototype (PETRI_THEMES.light.accent).
-      // Warm/coral lives on accent3, mirroring the dark palette's structure.
-      '--accent': '#5a7a4a',
-      '--accent2': '#3e6b47',
+      // Light-theme UI accent is warm rust-orange; green stays reserved for
+      // semantic success states and graph type colors.
+      '--accent': '#b8542a',
+      '--accent2': '#b8542a',
       '--accent3': '#b8542a',
       '--danger': '#b8341c',
       '--warn': '#b8542a',
@@ -83,20 +83,20 @@ const THEMES = {
       '--info': '#3a6aa3',
       // Tier 2 — markdown
       '--md-heading': '#1d211b',
-      '--md-heading-marker': '#5a7a4a',
+      '--md-heading-marker': '#b8542a',
       '--md-link': '#3a6aa3',
       '--md-link-text': '#b8542a',
-      '--md-code': '#5a7a4a',
-      '--md-code-bg': 'rgba(90,122,74,.08)',
+      '--md-code': '#b8542a',
+      '--md-code-bg': 'rgba(184,84,42,.08)',
       '--md-code-block-bg': 'rgba(29,33,27,.04)',
       '--md-code-block-border': 'rgba(29,33,27,0.12)',
       '--md-blockquote': '#6b6760',
-      '--md-blockquote-border': '#5a7a4a',
+      '--md-blockquote-border': '#b8542a',
       '--md-emph': '#b8542a',
       '--md-strong': '#8a3a1f',
-      '--md-list-marker': '#5a7a4a',
+      '--md-list-marker': '#b8542a',
       '--md-hr': 'rgba(29,33,27,0.12)',
-      '--md-table-header-bg': 'rgba(90,122,74,.06)',
+      '--md-table-header-bg': 'rgba(184,84,42,.06)',
       '--md-table-border': 'rgba(29,33,27,0.12)',
       // Tier 3 — diffs
       '--diff-added': '#5a7a4a',
@@ -1007,19 +1007,18 @@ function populateSettingsPanel(data) {
 
   const inviteInput = document.getElementById('settings-invite-key');
   if (inviteInput) {
-    let onboardingInviteKey = '';
-    try { onboardingInviteKey = sessionStorage.getItem('spore-onboarding-invite-key') || ''; } catch {}
-    inviteInput.value = onboardingInviteKey || data.inviteKey || '';
-    inviteInput.type = onboardingInviteKey ? 'text' : 'password';
+    try { sessionStorage.removeItem('spore-onboarding-invite-key'); } catch {}
+    inviteInput.value = data.inviteKey || '';
+    inviteInput.type = 'password';
+    inviteInput.dataset.secretSet = data.inviteKeySet ? '1' : '0';
+    inviteInput.dataset.revealed = data.inviteKey ? '1' : '0';
     inviteInput.placeholder = data.inviteKeySet ? 'stored - leave blank to keep' : 'empty = self-register + Spore Code disabled';
     const showBtn = document.getElementById('settings-invite-key-show');
-    if (showBtn) showBtn.textContent = onboardingInviteKey ? 'hide' : 'show';
+    if (showBtn) showBtn.textContent = 'show';
     const inviteNote = document.getElementById('settings-invite-key-note');
-    if (inviteNote) inviteNote.textContent = onboardingInviteKey
-      ? 'Invite key was generated during onboarding. Copy it now; it will be hidden after this browser session.'
-      : (data.inviteKeySet
-        ? 'Invite key is stored. Leave blank to keep it, type a replacement, clear to disable, or regen to mint a new key.'
-        : 'No invite key set — self-registration + Spore Code auth are disabled.');
+    if (inviteNote) inviteNote.textContent = data.inviteKeySet
+      ? 'Invite key is stored. Use show/copy to reveal the current key, leave blank to keep it, type a replacement, clear to disable, or regen to mint a new key.'
+      : 'No invite key set — self-registration + Spore Code auth are disabled.';
   }
 
   document.getElementById('settings-websearch-searxng-url').value = data.webSearch?.searxngUrl || '';
@@ -1042,6 +1041,26 @@ function populateSettingsPanel(data) {
   document.getElementById('settings-runtime-agent-id').textContent = _settingsValue(data.identity?.agentId);
   const pubUrlInput = document.getElementById('settings-runtime-public-url-input');
   if (pubUrlInput) pubUrlInput.value = data.runtime?.publicUrl || '';
+  const nodePerfMetricViz = !!_settingsCanonicalValue(data, 'nodePerformanceMetricViz', false);
+  const nodePerfMetricVizInput = document.getElementById('settings-node-performance-metric-viz');
+  if (nodePerfMetricVizInput) {
+    nodePerfMetricVizInput.checked = nodePerfMetricViz;
+    if (!nodePerfMetricVizInput.dataset.bound) {
+      nodePerfMetricVizInput.dataset.bound = '1';
+      nodePerfMetricVizInput.addEventListener('change', () => {
+        if (typeof window._setGraphNodePerformanceMetricViz === 'function') {
+          window._setGraphNodePerformanceMetricViz(!!nodePerfMetricVizInput.checked);
+        } else {
+          window.__sporeNodePerformanceMetricViz = !!nodePerfMetricVizInput.checked;
+        }
+      });
+    }
+  }
+  if (typeof window._setGraphNodePerformanceMetricViz === 'function') {
+    window._setGraphNodePerformanceMetricViz(nodePerfMetricViz);
+  } else {
+    window.__sporeNodePerformanceMetricViz = nodePerfMetricViz;
+  }
   document.getElementById('settings-runtime-web-port').textContent = _settingsValue(data.runtime?.webPort);
   document.getElementById('settings-runtime-workspace').textContent = _settingsValue(data.runtime?.workspacePath);
   document.getElementById('settings-runtime-data-dir').textContent = _settingsValue(data.runtime?.dataDir);

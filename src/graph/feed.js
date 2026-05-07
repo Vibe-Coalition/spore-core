@@ -11,10 +11,22 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 const { DatabaseSync } = require('node:sqlite');
 
 function graphDbPath() {
-  return process.env.GRAPH_DB_PATH || path.join(__dirname, 'data', 'graph.db');
+  const configured = process.env.GRAPH_DB_PATH || path.join(__dirname, 'data', 'graph.db');
+  const dataDir = process.env.SPORE_DATA_DIR
+    || (process.env.GRAPH_DB_PATH ? path.dirname(process.env.GRAPH_DB_PATH) : path.join(__dirname, 'data'));
+  const activePath = path.join(dataDir, 'graphs', '_active');
+  try {
+    if (!String(configured).includes(`${path.sep}graphs${path.sep}`) && fs.existsSync(activePath)) {
+      const slug = fs.readFileSync(activePath, 'utf8').trim();
+      const activeDb = slug ? path.join(dataDir, 'graphs', `${slug}.db`) : null;
+      if (activeDb && fs.existsSync(activeDb)) return activeDb;
+    }
+  } catch { /* fallback to configured path */ }
+  return configured;
 }
 const ACTIVITY_NODE_ID = 'spore-activity-log';
 const TOKEN_NODE_ID = 'spore-token-log';
@@ -22,9 +34,7 @@ const MAX_ENTRIES = 200;
 const MAX_TOKEN_DAYS = 90;     // Keep 90 daily rollups (~3 months)
 const CONTEXT_LINES = 30;
 
-// Rough cost estimates (USD per million tokens) — update if pricing changes
-const COST_PER_M_INPUT = 3.00;
-const COST_PER_M_OUTPUT = 15.00;
+const DEFAULT_COST_RATES = { inputPerM: 3.00, outputPerM: 15.00 };
 
 let _db = null;
 
@@ -126,10 +136,6 @@ function log({ channelName, userName, userMessage, myResponse, trigger, usage, i
   const entry = `[${ts}] #${channelName || 'dm'} | ${userName}: "${userSnip}" → Agent: "${respSnip}"`;
 
   appendEntry(ACTIVITY_NODE_ID, 'SPORE Activity Log', 'entries', entry, MAX_ENTRIES);
-
-  if (usage) {
-    logTokens({ channelName, trigger, usage, iterations });
-  }
 }
 
 // ── Token tracking ─────────────────────────────────────────────────────────────
@@ -138,17 +144,95 @@ function _derivePlatform(channel) {
   if (!channel) return 'unknown';
   if (channel.startsWith('telegram:')) return 'telegram';
   if (channel.startsWith('discord:')) return 'discord';
+  if (channel.startsWith('slack:')) return 'slack';
   if (channel === 'dm') return 'dm';
   return 'other';
 }
 
-function _incDim(map, key, input, output, iters) {
-  const e = map[key] || { in: 0, out: 0, calls: 0, iters: 0 };
+function _usageIn(usage) {
+  return (usage?.input_tokens || 0)
+    + (usage?.cache_read_input_tokens || 0)
+    + (usage?.cache_creation_input_tokens || 0);
+}
+
+function _usageOut(usage) {
+  return usage?.output_tokens || 0;
+}
+
+function _incDim(map, key, input, output, iters, cached = 0) {
+  const safeKey = String(key || 'unknown');
+  const e = map[safeKey] || { in: 0, out: 0, cached: 0, calls: 0, iters: 0 };
   e.in    += input;
   e.out   += output;
+  e.cached += cached;
   e.calls += 1;
   e.iters += iters;
-  map[key] = e;
+  map[safeKey] = e;
+}
+
+function _normaliseDimMap(map) {
+  const out = {};
+  for (const [key, raw] of Object.entries(map || {})) {
+    out[key] = {
+      in: raw.in != null ? raw.in : raw.input || 0,
+      out: raw.out != null ? raw.out : raw.output || 0,
+      cached: raw.cached || 0,
+      calls: raw.calls || 0,
+      iters: raw.iters || 0,
+    };
+  }
+  return out;
+}
+
+function _normalisePricing(raw) {
+  const pricing = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const out = {};
+  for (const [key, val] of Object.entries(pricing)) {
+    if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
+    const inputPerM = Number(val.inputPerM ?? val.input ?? val.promptPerM ?? val.prompt);
+    const outputPerM = Number(val.outputPerM ?? val.output ?? val.completionPerM ?? val.completion);
+    out[key] = {
+      inputPerM: Number.isFinite(inputPerM) ? inputPerM : DEFAULT_COST_RATES.inputPerM,
+      outputPerM: Number.isFinite(outputPerM) ? outputPerM : DEFAULT_COST_RATES.outputPerM,
+    };
+  }
+  if (!out.default) out.default = { ...DEFAULT_COST_RATES };
+  return out;
+}
+
+function readTokenPricing() {
+  let raw = null;
+  try {
+    const settings = require('../settings');
+    raw = settings.get('tokenPricing');
+  } catch { /* settings may not be booted in tests */ }
+  if (!raw || typeof raw !== 'object') {
+    try {
+      const config = require('../config').loadConfig();
+      raw = config.tokenPricing;
+    } catch { /* fallback below */ }
+  }
+  return _normalisePricing(raw);
+}
+
+function _rateForModel(model, pricing) {
+  const safeModel = String(model || '').trim();
+  if (safeModel && pricing[safeModel]) return pricing[safeModel];
+  const slash = safeModel.indexOf('/');
+  if (slash > 0) {
+    const bare = safeModel.slice(slash + 1);
+    const provider = safeModel.slice(0, slash);
+    if (pricing[bare]) return pricing[bare];
+    if (pricing[`${provider}/*`]) return pricing[`${provider}/*`];
+  }
+  return pricing.default || DEFAULT_COST_RATES;
+}
+
+function _costFor(input, output, model, pricing) {
+  const rates = _rateForModel(model, pricing);
+  const inputCost = (Number(input || 0) / 1_000_000) * rates.inputPerM;
+  const outputCost = (Number(output || 0) / 1_000_000) * rates.outputPerM;
+  return { inputCost, outputCost, totalCost: inputCost + outputCost, rates };
 }
 
 /**
@@ -158,21 +242,20 @@ function _incDim(map, key, input, output, iters) {
  *
  * Dimensions per day:
  *   totals: input, output, calls, iters
- *   byChannel:  { "telegram:Kyle": { in, out, calls, iters }, ... }
- *   byTrigger:  { "mention": ..., "lull": ..., "dm": ..., "voice": ... }
- *   byPlatform: { "telegram": ..., "discord": ... }
+ *   byModel/bySource/byRoute/byChannel/byTrigger/byPlatform dimension maps
  */
-function logTokens({ channelName, trigger, usage, iterations }) {
+function logTokens({ channelName, trigger, usage, iterations, model, source, route, platform, sessionKey }) {
   if (!usage) return;
-  const newIn    = (usage.input_tokens || 0)
-    + (usage.cache_read_input_tokens || 0)
-    + (usage.cache_creation_input_tokens || 0);
-  const newOut   = usage.output_tokens || 0;
+  const newIn = _usageIn(usage);
+  const newOut = _usageOut(usage);
   const newCacheRead = usage.cache_read_input_tokens || 0;
   const newIters = iterations || 1;
   const channel  = channelName || 'dm';
-  const trig     = trigger || 'unknown';
-  const platform = _derivePlatform(channel);
+  const src      = source || 'unknown';
+  const trig     = trigger || route || src || 'unknown';
+  const rte      = route || trig || src;
+  const plat     = platform || _derivePlatform(channel);
+  const mdl      = model || usage.model || 'unknown';
   const today    = new Date().toISOString().slice(0, 10);
 
   try {
@@ -189,33 +272,33 @@ function logTokens({ channelName, trigger, usage, iterations }) {
     if (existing) {
       try { day = JSON.parse(existing.content); } catch { day = null; }
     }
-    if (!day || !day.date) {
-      day = { date: today, input: 0, output: 0, cached: 0, calls: 0, iters: 0, byChannel: {}, byTrigger: {}, byPlatform: {} };
-    }
-    // Normalise old entries (had `input`/`output` at top level and in sub-maps)
+    if (!day || !day.date) day = { date: today };
     day.input  = day.input  || 0;
     day.output = day.output || 0;
     day.cached = day.cached || 0;
     day.calls  = day.calls  || 0;
     day.iters  = day.iters  || 0;
-    // Normalise any old byChannel entries that used `input`/`output` keys
-    for (const k of Object.keys(day.byChannel || {})) {
-      const c = day.byChannel[k];
-      if (c.input != null && c.in == null) { c.in = c.input; c.out = c.output || 0; delete c.input; delete c.output; }
-    }
+    day.byChannel  = _normaliseDimMap(day.byChannel);
+    day.byTrigger  = _normaliseDimMap(day.byTrigger);
+    day.byPlatform = _normaliseDimMap(day.byPlatform);
+    day.byModel    = _normaliseDimMap(day.byModel);
+    day.bySource   = _normaliseDimMap(day.bySource);
+    day.byRoute    = _normaliseDimMap(day.byRoute);
+    day.bySession  = _normaliseDimMap(day.bySession);
 
     day.input  += newIn;
     day.output += newOut;
     day.cached += newCacheRead;
     day.calls  += 1;
     day.iters  += newIters;
-    day.byChannel  = day.byChannel  || {};
-    day.byTrigger  = day.byTrigger  || {};
-    day.byPlatform = day.byPlatform || {};
 
-    _incDim(day.byChannel,  channel,  newIn, newOut, newIters);
-    _incDim(day.byTrigger,  trig,     newIn, newOut, newIters);
-    _incDim(day.byPlatform, platform, newIn, newOut, newIters);
+    _incDim(day.byChannel,  channel, newIn, newOut, newIters, newCacheRead);
+    _incDim(day.byTrigger,  trig,    newIn, newOut, newIters, newCacheRead);
+    _incDim(day.byPlatform, plat,    newIn, newOut, newIters, newCacheRead);
+    _incDim(day.byModel,    mdl,     newIn, newOut, newIters, newCacheRead);
+    _incDim(day.bySource,   src,     newIn, newOut, newIters, newCacheRead);
+    _incDim(day.byRoute,    rte,     newIn, newOut, newIters, newCacheRead);
+    if (sessionKey) _incDim(day.bySession, sessionKey, newIn, newOut, newIters, newCacheRead);
 
     if (existing) {
       db.prepare('UPDATE attributes SET content = ? WHERE id = ?').run(JSON.stringify(day), existing.id);
@@ -236,10 +319,43 @@ function logTokens({ channelName, trigger, usage, iterations }) {
   }
 }
 
-function _addCost(stats) {
-  const inputCost  = (stats.input  / 1_000_000) * COST_PER_M_INPUT;
-  const outputCost = (stats.output / 1_000_000) * COST_PER_M_OUTPUT;
-  return { ...stats, inputCost: inputCost.toFixed(4), outputCost: outputCost.toFixed(4), totalCost: (inputCost + outputCost).toFixed(4) };
+function _formatCost(stats, inputCost, outputCost) {
+  return {
+    ...stats,
+    inputCost: inputCost.toFixed(4),
+    outputCost: outputCost.toFixed(4),
+    totalCost: (inputCost + outputCost).toFixed(4),
+  };
+}
+
+function _addCost(stats, pricing, model = null) {
+  if (stats?.byModel && Object.keys(stats.byModel).length > 0 && !model) {
+    let inputCost = 0;
+    let outputCost = 0;
+    for (const [modelKey, dim] of Object.entries(stats.byModel)) {
+      const cost = _costFor(dim.in ?? dim.input ?? 0, dim.out ?? dim.output ?? 0, modelKey, pricing);
+      inputCost += cost.inputCost;
+      outputCost += cost.outputCost;
+    }
+    return _formatCost(stats, inputCost, outputCost);
+  }
+  const cost = _costFor(stats.input || 0, stats.output || 0, model, pricing);
+  return _formatCost(stats, cost.inputCost, cost.outputCost);
+}
+
+function _addCostToDimMap(map, pricing) {
+  const out = {};
+  for (const [key, raw] of Object.entries(map || {})) {
+    const dim = {
+      in: raw.in != null ? raw.in : raw.input || 0,
+      out: raw.out != null ? raw.out : raw.output || 0,
+      cached: raw.cached || 0,
+      calls: raw.calls || 0,
+      iters: raw.iters || 0,
+    };
+    out[key] = _addCost({ ...dim, input: dim.in, output: dim.out }, pricing, key);
+  }
+  return out;
 }
 
 /**
@@ -266,14 +382,16 @@ function readTokenSummary() {
     }
 
     const daily = Object.values(dailyMap).sort((a, b) => b.date.localeCompare(a.date));
+    const pricing = readTokenPricing();
 
     // Merge a dimension map (byChannel / byTrigger / byPlatform) into an accumulator
     // Handles both old schema (input/output) and new schema (in/out)
     function mergeDim(acc, dimMap) {
       for (const [key, s] of Object.entries(dimMap || {})) {
-        const e = acc[key] || { in: 0, out: 0, calls: 0, iters: 0 };
+        const e = acc[key] || { in: 0, out: 0, cached: 0, calls: 0, iters: 0 };
         e.in    += (s.in    != null ? s.in    : s.input  || 0);
         e.out   += (s.out   != null ? s.out   : s.output || 0);
+        e.cached += s.cached || 0;
         e.calls += s.calls || 0;
         e.iters += s.iters || 0;
         acc[key] = e;
@@ -289,13 +407,17 @@ function readTokenSummary() {
         (acc, d) => ({ input: acc.input + (d.input||0), output: acc.output + (d.output||0), calls: acc.calls + (d.calls||0), iters: acc.iters + (d.iters||0) }),
         { input: 0, output: 0, calls: 0, iters: 0 }
       );
-      const byChannel = {}, byTrigger = {}, byPlatform = {};
+      const byChannel = {}, byTrigger = {}, byPlatform = {}, byModel = {}, bySource = {}, byRoute = {}, bySession = {};
       for (const d of subset) {
         mergeDim(byChannel,  d.byChannel);
         mergeDim(byTrigger,  d.byTrigger);
         mergeDim(byPlatform, d.byPlatform);
+        mergeDim(byModel,    d.byModel);
+        mergeDim(bySource,   d.bySource);
+        mergeDim(byRoute,    d.byRoute);
+        mergeDim(bySession,  d.bySession);
       }
-      return { ...totals, byChannel, byTrigger, byPlatform };
+      return { ...totals, byChannel, byTrigger, byPlatform, byModel, bySource, byRoute, bySession };
     }
 
     const todayStr     = new Date().toISOString().slice(0, 10);
@@ -305,21 +427,26 @@ function readTokenSummary() {
     const allTime      = sumDays(99999);
 
     return {
-      today:     _addCost({ date: todayStr,     ...todayData }),
-      yesterday: _addCost({ date: yesterdayStr, ...yestData }),
+      today:     _addCost({ date: todayStr,     ...todayData }, pricing),
+      yesterday: _addCost({ date: yesterdayStr, ...yestData }, pricing),
       windows: {
-        '7d':    _addCost(sumDays(7)),
-        '30d':   _addCost(sumDays(30)),
-        allTime: _addCost(allTime),
+        '7d':    _addCost(sumDays(7), pricing),
+        '30d':   _addCost(sumDays(30), pricing),
+        allTime: _addCost(allTime, pricing),
       },
       // All-time dimension breakdowns (most useful for the overview)
       byChannel:  allTime.byChannel,
       byTrigger:  allTime.byTrigger,
       byPlatform: allTime.byPlatform,
+      byModel:    _addCostToDimMap(allTime.byModel, pricing),
+      bySource:   allTime.bySource,
+      byRoute:    allTime.byRoute,
       daily: daily.slice(0, 30).map(d => _addCost({
         date: d.date, input: d.input||0, output: d.output||0, calls: d.calls||0, iters: d.iters||0,
-      })),
-      costRates: { inputPerM: COST_PER_M_INPUT, outputPerM: COST_PER_M_OUTPUT },
+        byModel: d.byModel || {},
+      }, pricing)),
+      pricing,
+      costRates: pricing.default || DEFAULT_COST_RATES,
     };
   } catch (e) {
     console.error('[feed] readTokenSummary failed:', e.message);
@@ -350,6 +477,7 @@ module.exports = {
   log,
   logTokens,
   readTokenSummary,
+  readTokenPricing,
   readActivityLog,
   INTERNAL_LOG_NODE_IDS: [ACTIVITY_NODE_ID, TOKEN_NODE_ID],
   _closeDb,

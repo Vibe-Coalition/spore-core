@@ -1,9 +1,10 @@
 /**
  * ssh-manager.js — SSH Manager (Sidecar Client + Local Fallback)
  *
- * When a sidecar socket is available at /run/ssh-sidecar/sidecar.sock,
- * all SSH key operations and connections are delegated to the isolated
- * sidecar process. Decrypted keys never enter this process.
+ * When the ssh-sidecar plugin is installed and a sidecar socket is available
+ * at /run/ssh-sidecar/sidecar.sock, saved-host operations and interactive SSH
+ * sessions are delegated to the isolated sidecar process. Decrypted keys for
+ * those flows never enter this process.
  *
  * When no sidecar is detected, falls back to in-process mode with
  * AES-256-GCM encrypted key storage (Phase 1 behavior).
@@ -14,9 +15,13 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const SIDECAR_SOCKET = '/run/ssh-sidecar/sidecar.sock';
+const DEFAULT_SIDECAR_SOCKET = '/run/ssh-sidecar/sidecar.sock';
 const PBKDF2_ITERATIONS = 100000;
 const ALGORITHM = 'aes-256-gcm';
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
 
 class SSHManager {
   constructor(config, log) {
@@ -27,8 +32,10 @@ class SSHManager {
     this._pending = new Map();
     this._sidecarConn = null;
     this._sidecarReady = false;
+    this._sidecarSocket = config.sshSidecarSocket || process.env.SIDECAR_SOCKET || DEFAULT_SIDECAR_SOCKET;
     this._eventHandlers = new Map();
     this._buffer = '';
+    this._closing = false;
 
     // Paths derived from config
     this._storeFile = path.join(config.dataDir, 'ssh-hosts.json');
@@ -38,6 +45,7 @@ class SSHManager {
     this._localMode = false;
     this._encryptionKey = null;
     this.hosts = [];
+    this._sidecarHostRefreshInFlight = null;
     this._activeSessions = new Map();
 
     this._initAuditLog();
@@ -47,18 +55,27 @@ class SSHManager {
   // ── Sidecar Connection ──────────────────────────────────────────────
 
   _connectSidecar() {
-    if (!fs.existsSync(SIDECAR_SOCKET)) {
-      this.log.info('[ssh] No sidecar socket found — running in local (in-process) mode');
+    if (this.config.sshSidecarEnabled !== true) {
+      this.log.info('[ssh] SSH sidecar plugin inactive — running in local (in-process) mode');
       this._initLocal();
       return;
     }
 
-    this._sidecarConn = net.createConnection(SIDECAR_SOCKET);
+    if (!fs.existsSync(this._sidecarSocket)) {
+      this.log.info('[ssh] SSH sidecar plugin active, but no socket found — running in local (in-process) mode');
+      this._initLocal();
+      return;
+    }
+
+    this._sidecarConn = net.createConnection(this._sidecarSocket);
 
     this._sidecarConn.on('connect', () => {
       this._sidecarReady = true;
       this._localMode = false;
       this.log.info('[ssh] Connected to credential isolation sidecar');
+      this._refreshSidecarHosts().catch(e => {
+        this.log.warn('[ssh] Failed to refresh sidecar host cache: ' + e.message);
+      });
     });
 
     this._sidecarConn.on('data', (chunk) => {
@@ -95,7 +112,10 @@ class SSHManager {
 
     this._sidecarConn.on('close', () => {
       this._sidecarReady = false;
-      this.log.warn('[ssh] Sidecar disconnected');
+      if (!this._closing) {
+        this.log.warn('[ssh] Sidecar disconnected — falling back to local mode');
+        if (!this._localMode) this._initLocal();
+      }
     });
   }
 
@@ -103,10 +123,150 @@ class SSHManager {
     if (!this._sidecarReady) return Promise.resolve({ _error: 'Sidecar not connected' });
     return new Promise((resolve) => {
       const id = ++this._rpcId;
-      this._pending.set(id, { resolve, timer: setTimeout(() => { this._pending.delete(id); resolve({ _error: 'Timeout' }); }, 30000) });
+      const timer = setTimeout(() => { this._pending.delete(id); resolve({ _error: 'Timeout' }); }, 30000);
+      this._pending.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, timer });
       try { this._sidecarConn.write(JSON.stringify({ id, method, params }) + '\n'); }
-      catch (e) { this._pending.delete(id); resolve({ _error: e.message }); }
+      catch (e) { this._pending.delete(id); clearTimeout(timer); resolve({ _error: e.message }); }
     });
+  }
+
+  async _sidecarRpcOrThrow(method, params = {}) {
+    const r = await this._rpc(method, params);
+    if (r?._error) throw new Error(r._error);
+    return r;
+  }
+
+  async _refreshSidecarHosts() {
+    if (this._localMode || !this._sidecarReady) return this.hosts;
+    if (this._sidecarHostRefreshInFlight) return this._sidecarHostRefreshInFlight;
+    this._sidecarHostRefreshInFlight = (async () => {
+      const r = await this._rpc('hosts.list');
+      if (r?._error) throw new Error(r._error);
+      this.hosts = Array.isArray(r) ? r : [];
+      return this.hosts;
+    })().finally(() => {
+      this._sidecarHostRefreshInFlight = null;
+    });
+    return this._sidecarHostRefreshInFlight;
+  }
+
+  getKnownHosts() {
+    return Array.isArray(this.hosts) ? this.hosts : [];
+  }
+
+  _normalizeHostRef(value) {
+    if (value == null) return '';
+    let ref = String(value).trim();
+    if (!ref) return '';
+    ref = ref.replace(/^ssh:\/\//i, '');
+    ref = ref.replace(/\/.*$/, '');
+    return ref.toLowerCase();
+  }
+
+  _hostAliases(host = {}) {
+    const aliases = new Set();
+    const add = (value) => {
+      const normalized = this._normalizeHostRef(value);
+      if (normalized) aliases.add(normalized);
+    };
+    add(host.id);
+    add(host.name);
+    add(host.hostname);
+    const hostname = String(host.hostname || '').trim();
+    const shortHost = hostname.includes('.') ? hostname.split('.')[0] : hostname;
+    add(shortHost);
+    if (host.username && hostname) {
+      add(`${host.username}@${hostname}`);
+      add(`${host.username}@${shortHost}`);
+      if (host.port) add(`${host.username}@${hostname}:${host.port}`);
+    }
+    if (hostname && host.port) add(`${hostname}:${host.port}`);
+    return [...aliases];
+  }
+
+  _knownHostHint() {
+    const hosts = this.getKnownHosts();
+    if (!hosts.length) {
+      return 'No SSH hosts are configured. Add a host in the SSH Sidecar plugin settings first.';
+    }
+    const items = hosts.map(h => {
+      const aliases = this._hostAliases(h)
+        .filter(a => a !== this._normalizeHostRef(h.id))
+        .slice(0, 5);
+      return aliases.length ? `${h.id} (aliases: ${aliases.join(', ')})` : String(h.id);
+    });
+    return `Available SSH host IDs/aliases: ${items.join('; ')}`;
+  }
+
+  _unknownHostMessage(hostRef) {
+    return `Unknown host: ${hostRef}. ${this._knownHostHint()}. Use a saved host ID or alias from the remote tool catalog; do not shell out to ssh or tailscale ssh for configured hosts.`;
+  }
+
+  _resolveHostRefSync(hostRef) {
+    const target = this._normalizeHostRef(hostRef);
+    if (!target) return null;
+    for (const host of this.getKnownHosts()) {
+      if (this._hostAliases(host).includes(target)) return host.id;
+    }
+    return null;
+  }
+
+  async _resolveHostRef(hostRef) {
+    if (!this._localMode) {
+      try { await this._refreshSidecarHosts(); }
+      catch (e) { this.log.warn('[ssh] Failed to refresh sidecar hosts before host resolution: ' + e.message); }
+    }
+    const resolved = this._resolveHostRefSync(hostRef);
+    if (!resolved) throw new Error(this._unknownHostMessage(hostRef));
+    return resolved;
+  }
+
+  supportsTunnels() {
+    return this._localMode;
+  }
+
+  isSidecarReady() {
+    return this.config.sshSidecarEnabled === true && this._sidecarReady && !this._localMode;
+  }
+
+  async waitForSidecarReady(timeoutMs = 1000) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (Date.now() <= deadline) {
+      if (this.isSidecarReady()) return true;
+      if (this.config.sshSidecarEnabled !== true || !fs.existsSync(this._sidecarSocket)) return false;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    return this.isSidecarReady();
+  }
+
+  getStatus() {
+    return {
+      sidecarEnabled: this.config.sshSidecarEnabled === true,
+      sidecarReady: this._sidecarReady,
+      localMode: this._localMode,
+      socketPath: this._sidecarSocket,
+      socketPresent: fs.existsSync(this._sidecarSocket),
+      keystoreUnlocked: this.keystoreUnlocked,
+      keystoreSource: this.keystoreSource || null,
+      hostCount: this.hosts.length,
+      activeSessionCount: this._activeSessions.size,
+      tunnelCount: this._tunnels ? this._tunnels.size : 0,
+    };
+  }
+
+  reconnectSidecar(socketPath = null) {
+    if (socketPath) this._sidecarSocket = socketPath;
+    this._closing = true;
+    if (this._sidecarConn) {
+      try { this._sidecarConn.end(); } catch {}
+      try { this._sidecarConn.destroy(); } catch {}
+    }
+    this._sidecarConn = null;
+    this._sidecarReady = false;
+    this._localMode = false;
+    this._closing = false;
+    this._connectSidecar();
+    return this.getStatus();
   }
 
   // ── Local Fallback ──────────────────────────────────────────────────
@@ -211,15 +371,29 @@ class SSHManager {
 
   async listHosts() {
     if (!this._localMode) {
-      const r = await this._rpc('hosts.list');
-      return r._error ? [] : r;
+      try { return await this._refreshSidecarHosts(); }
+      catch { return []; }
     }
-    return this.hosts.map(h => ({ id: h.id, name: h.name, hostname: h.hostname, port: h.port, username: h.username, hasKey: !!h.encryptedKey, hasPassword: !!h.encryptedPassword }));
+    return this.hosts.map(h => ({
+      id: h.id,
+      name: h.name,
+      hostname: h.hostname,
+      port: h.port,
+      username: h.username,
+      hasKey: !!h.encryptedKey,
+      hasPassword: !!h.encryptedPassword,
+      credentialId: h.credentialId || null,
+      proxy: h.proxy || null,
+      metadata: h.metadata || null,
+    }));
   }
 
   async saveHost(opts) {
     if (!this._localMode) {
       const r = await this._rpc('hosts.save', opts);
+      if (!r._error) {
+        try { await this._refreshSidecarHosts(); } catch (e) { this.log.warn('[ssh] Failed to refresh sidecar hosts after save: ' + e.message); }
+      }
       return r._error ? { error: r._error } : r;
     }
     const { id, name, hostname, port, username, privateKey, password } = opts;
@@ -229,6 +403,9 @@ class SSHManager {
     entry.hostname = hostname || entry.hostname;
     entry.port = port || entry.port || 22;
     entry.username = username || entry.username;
+    if (opts.credentialId !== undefined) entry.credentialId = opts.credentialId || null;
+    if (opts.proxy !== undefined) entry.proxy = opts.proxy || null;
+    if (opts.metadata !== undefined) entry.metadata = opts.metadata || null;
     if (privateKey) entry.encryptedKey = this._encrypt(privateKey);
     if (password) entry.encryptedPassword = this._encrypt(password);
     if (!existing) this.hosts.push(entry);
@@ -237,7 +414,11 @@ class SSHManager {
   }
 
   async deleteHost(id) {
-    if (!this._localMode) { await this._rpc('hosts.delete', { id }); return true; }
+    if (!this._localMode) {
+      const r = await this._rpc('hosts.delete', { id });
+      if (!r._error) this.hosts = this.hosts.filter(h => h.id !== id);
+      return !r._error && r !== false;
+    }
     const idx = this.hosts.findIndex(h => h.id === id);
     if (idx === -1) return false;
     this.hosts.splice(idx, 1);
@@ -245,20 +426,60 @@ class SSHManager {
     return true;
   }
 
+  async getCredentialPublic(id) {
+    if (!this.isSidecarReady()) {
+      return { id, hasPrivate: false, publicKey: null, fingerprint: null, error: 'SSH sidecar is not connected' };
+    }
+    const r = await this._rpc('credentials.public', { id });
+    if (r?._error) return { id, hasPrivate: false, publicKey: null, fingerprint: null, error: r._error };
+    return r || { id, hasPrivate: false, publicKey: null, fingerprint: null };
+  }
+
+  async generateCredential({ id, name, comment, metadata } = {}) {
+    if (!this.isSidecarReady()) {
+      throw new Error('SSH sidecar is required for automatic credential generation. Start the ssh-sidecar service and retry.');
+    }
+    return this._sidecarRpcOrThrow('credentials.generate', { id, name, comment, metadata });
+  }
+
+  async saveCredentialPrivateKey({ id, name, privateKey, metadata } = {}) {
+    if (!this.isSidecarReady()) {
+      throw new Error('SSH sidecar is required for cluster credential storage. Start the ssh-sidecar service and retry.');
+    }
+    return this._sidecarRpcOrThrow('credentials.savePrivateKey', { id, name, privateKey, metadata });
+  }
+
+  async deleteCredential(id) {
+    if (!this.isSidecarReady()) {
+      throw new Error('SSH sidecar is required for cluster credential management. Start the ssh-sidecar service and retry.');
+    }
+    return this._sidecarRpcOrThrow('credentials.delete', { id });
+  }
+
   async testConnection(hostId) {
+    let resolvedHostId;
+    try { resolvedHostId = await this._resolveHostRef(hostId); }
+    catch (e) { return { success: false, error: e.message }; }
     if (!this._localMode) {
-      const r = await this._rpc('hosts.test', { id: hostId });
+      const r = await this._rpc('hosts.test', { id: resolvedHostId });
       return r._error ? { success: false, error: r._error } : r;
     }
-    return this._localTestConnection(hostId);
+    return this._localTestConnection(resolvedHostId);
   }
 
   connect(hostId, callbacks) {
+    const resolvedHostId = this._resolveHostRefSync(hostId);
+    if (!resolvedHostId) {
+      const error = this._unknownHostMessage(hostId);
+      callbacks?.onError?.(error);
+      return { error };
+    }
     if (!this._localMode) {
       const sessionId = `ssh_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       this._eventHandlers.set(sessionId, callbacks);
-      this._rpc('session.open', { hostId, cols: 80, rows: 24 }).then(r => {
+      this._rpc('session.open', { hostId: resolvedHostId, cols: 80, rows: 24 }).then(r => {
         if (r._error) { callbacks.onError?.(r._error); this._eventHandlers.delete(sessionId); }
+        else if (r.error) { callbacks.onError?.(r.error); this._eventHandlers.delete(sessionId); }
         else if (r.sessionId) {
           this._eventHandlers.delete(sessionId);
           this._eventHandlers.set(r.sessionId, callbacks);
@@ -266,7 +487,7 @@ class SSHManager {
       });
       return { sessionId };
     }
-    return this._localConnect(hostId, callbacks);
+    return this._localConnect(resolvedHostId, callbacks);
   }
 
   write(sessionId, data) {
@@ -345,20 +566,25 @@ class SSHManager {
   // ── Connection Pool (for SFTP / exec reuse) ─────────────────────────
 
   _getPooledConnection(hostId) {
+    if (!this._localMode) {
+      return Promise.reject(new Error('Connection pooling is not available for sidecar-backed SSH hosts'));
+    }
+    const resolvedHostId = this._resolveHostRefSync(hostId);
+    if (!resolvedHostId) return Promise.reject(new Error(this._unknownHostMessage(hostId)));
     if (!this._connPool) this._connPool = new Map();
-    const existing = this._connPool.get(hostId);
+    const existing = this._connPool.get(resolvedHostId);
     if (existing?.conn?._sock?.writable) {
       existing.lastUsed = Date.now();
       return Promise.resolve(existing);
     }
     if (existing) {
       try { existing.conn.end(); } catch (e) { this.log.warn('[ssh-manager] existing.conn.end failed: ' + e.message); }
-      this._connPool.delete(hostId);
+      this._connPool.delete(resolvedHostId);
     }
 
     const { Client: SSHClient } = require('ssh2');
-    const host = this.hosts.find(h => h.id === hostId);
-    if (!host) return Promise.reject(new Error(`Unknown host: ${hostId}`));
+    const host = this.hosts.find(h => h.id === resolvedHostId);
+    if (!host) return Promise.reject(new Error(this._unknownHostMessage(hostId)));
 
     return new Promise((resolve, reject) => {
       const conn = new SSHClient();
@@ -374,10 +600,10 @@ class SSHManager {
       conn.on('ready', () => {
         clearTimeout(timeout);
         const entry = { conn, sftp: null, lastUsed: Date.now(), hostName: host.name };
-        this._connPool.set(hostId, entry);
-        conn.on('end', () => this._connPool.delete(hostId));
-        conn.on('error', () => this._connPool.delete(hostId));
-        this.log.info(`[ssh] Pool: connected to ${host.hostname} (${hostId})`);
+        this._connPool.set(resolvedHostId, entry);
+        conn.on('end', () => this._connPool.delete(resolvedHostId));
+        conn.on('error', () => this._connPool.delete(resolvedHostId));
+        this.log.info(`[ssh] Pool: connected to ${host.hostname} (${resolvedHostId})`);
         resolve(entry);
       });
       conn.on('error', (err) => { clearTimeout(timeout); reject(err); });
@@ -417,9 +643,13 @@ class SSHManager {
   // ── SFTP Operations ─────────────────────────────────────────────────
 
   async sftpListDir(hostId, remotePath) {
+    const resolvedHostId = await this._resolveHostRef(hostId);
+    if (!this._localMode) {
+      return this._sidecarRpcOrThrow('sftp.listDir', { hostId: resolvedHostId, remotePath });
+    }
     this._startPoolCleanup();
-    const sftp = await this._getSftp(hostId);
-    this.audit('sftp', 'listDir', { hostId, path: remotePath });
+    const sftp = await this._getSftp(resolvedHostId);
+    this.audit('sftp', 'listDir', { hostId: resolvedHostId, path: remotePath });
     return new Promise((resolve, reject) => {
       sftp.readdir(remotePath || '/', (err, list) => {
         if (err) return reject(err);
@@ -435,8 +665,12 @@ class SSHManager {
   }
 
   async sftpStat(hostId, remotePath) {
+    const resolvedHostId = await this._resolveHostRef(hostId);
+    if (!this._localMode) {
+      return this._sidecarRpcOrThrow('sftp.stat', { hostId: resolvedHostId, remotePath });
+    }
     this._startPoolCleanup();
-    const sftp = await this._getSftp(hostId);
+    const sftp = await this._getSftp(resolvedHostId);
     return new Promise((resolve, reject) => {
       sftp.stat(remotePath, (err, stats) => {
         if (err) return reject(err);
@@ -451,12 +685,17 @@ class SSHManager {
   }
 
   async sftpReadFile(hostId, remotePath, opts = {}) {
+    const resolvedHostId = await this._resolveHostRef(hostId);
     this._startPoolCleanup();
     const maxBytes = opts.maxBytes || 2 * 1024 * 1024;
-    const sftp = await this._getSftp(hostId);
-    this.audit('sftp', 'readFile', { hostId, path: remotePath });
+    if (!this._localMode) {
+      const r = await this._sidecarRpcOrThrow('sftp.readFile', { hostId: resolvedHostId, remotePath, maxBytes });
+      return Buffer.from(r.dataBase64 || '', 'base64');
+    }
+    const sftp = await this._getSftp(resolvedHostId);
+    this.audit('sftp', 'readFile', { hostId: resolvedHostId, path: remotePath });
 
-    const stat = await this.sftpStat(hostId, remotePath);
+    const stat = await this.sftpStat(resolvedHostId, remotePath);
     if (stat.isDir) throw new Error(`${remotePath} is a directory`);
     if (stat.size > maxBytes) throw new Error(`File too large: ${stat.size} bytes (max ${maxBytes})`);
 
@@ -475,14 +714,18 @@ class SSHManager {
   }
 
   async sftpWriteFile(hostId, remotePath, content) {
+    const resolvedHostId = await this._resolveHostRef(hostId);
     const MAX_WRITE_BYTES = 10 * 1024 * 1024;
     const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
     if (buf.length > MAX_WRITE_BYTES) {
       throw new Error(`Write payload too large: ${buf.length} bytes exceeds ${MAX_WRITE_BYTES} byte limit`);
     }
+    if (!this._localMode) {
+      return this._sidecarRpcOrThrow('sftp.writeFile', { hostId: resolvedHostId, remotePath, contentBase64: buf.toString('base64') });
+    }
     this._startPoolCleanup();
-    const sftp = await this._getSftp(hostId);
-    this.audit('sftp', 'writeFile', { hostId, path: remotePath, size: buf.length });
+    const sftp = await this._getSftp(resolvedHostId);
+    this.audit('sftp', 'writeFile', { hostId: resolvedHostId, path: remotePath, size: buf.length });
     return new Promise((resolve, reject) => {
       const stream = sftp.createWriteStream(remotePath);
       stream.on('close', () => resolve({ written: buf.length, path: remotePath }));
@@ -492,9 +735,13 @@ class SSHManager {
   }
 
   async sftpMkdir(hostId, remotePath) {
+    const resolvedHostId = await this._resolveHostRef(hostId);
+    if (!this._localMode) {
+      return this._sidecarRpcOrThrow('sftp.mkdir', { hostId: resolvedHostId, remotePath });
+    }
     this._startPoolCleanup();
-    const sftp = await this._getSftp(hostId);
-    this.audit('sftp', 'mkdir', { hostId, path: remotePath });
+    const sftp = await this._getSftp(resolvedHostId);
+    this.audit('sftp', 'mkdir', { hostId: resolvedHostId, path: remotePath });
     return new Promise((resolve, reject) => {
       sftp.mkdir(remotePath, (err) => {
         if (err) return reject(err);
@@ -504,11 +751,15 @@ class SSHManager {
   }
 
   async sftpDelete(hostId, remotePath) {
+    const resolvedHostId = await this._resolveHostRef(hostId);
+    if (!this._localMode) {
+      return this._sidecarRpcOrThrow('sftp.delete', { hostId: resolvedHostId, remotePath });
+    }
     this._startPoolCleanup();
-    const sftp = await this._getSftp(hostId);
-    this.audit('sftp', 'delete', { hostId, path: remotePath });
+    const sftp = await this._getSftp(resolvedHostId);
+    this.audit('sftp', 'delete', { hostId: resolvedHostId, path: remotePath });
 
-    const stat = await this.sftpStat(hostId, remotePath);
+    const stat = await this.sftpStat(resolvedHostId, remotePath);
     return new Promise((resolve, reject) => {
       if (stat.isDir) {
         sftp.rmdir(remotePath, (err) => err ? reject(err) : resolve({ deleted: remotePath }));
@@ -521,11 +772,15 @@ class SSHManager {
   // ── Remote Exec (single command, not shell) ─────────────────────────
 
   async remoteExec(hostId, command, opts = {}) {
-    this._startPoolCleanup();
+    const resolvedHostId = await this._resolveHostRef(hostId);
     const timeout = Math.min(opts.timeout || 30000, 120000);
+    if (!this._localMode) {
+      return this._sidecarRpcOrThrow('exec.run', { hostId: resolvedHostId, command, cwd: opts.cwd || null, timeout });
+    }
+    this._startPoolCleanup();
     const maxBuffer = 1024 * 1024;
-    const entry = await this._getPooledConnection(hostId);
-    this.audit('exec', 'remoteExec', { hostId, command: command.substring(0, 200) });
+    const entry = await this._getPooledConnection(resolvedHostId);
+    this.audit('exec', 'remoteExec', { hostId: resolvedHostId, command: command.substring(0, 200) });
 
     return new Promise((resolve, reject) => {
       let _stream = null;
@@ -537,7 +792,7 @@ class SSHManager {
       const execOpts = {};
       if (opts.cwd) execOpts.env = { ...execOpts.env, PWD: opts.cwd };
 
-      const cmd = opts.cwd ? `cd ${JSON.stringify(opts.cwd)} && ${command}` : command;
+      const cmd = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ${command}` : command;
       entry.conn.exec(cmd, execOpts, (err, stream) => {
         if (err) { clearTimeout(timer); return reject(err); }
         _stream = stream;
@@ -562,6 +817,10 @@ class SSHManager {
   // ── SSH Tunnels (local port forwarding) ─────────────────────────────
 
   async createTunnel(hostId, { remoteHost = 'localhost', remotePort, localPort } = {}) {
+    const resolvedHostId = await this._resolveHostRef(hostId);
+    if (!this._localMode) {
+      throw new Error('SSH tunnels are not supported for sidecar-backed hosts yet because the forwarded local port must live in the main container. Use local fallback for tunnels.');
+    }
     if (!this._tunnels) this._tunnels = new Map();
     const MAX_TUNNELS = 5;
     const PORT_MIN = 19000, PORT_MAX = 19999;
@@ -591,8 +850,8 @@ class SSHManager {
     }
 
     this._startPoolCleanup();
-    const entry = await this._getPooledConnection(hostId);
-    const host = this.hosts.find(h => h.id === hostId);
+    const entry = await this._getPooledConnection(resolvedHostId);
+    const host = this.hosts.find(h => h.id === resolvedHostId);
 
     const server = net.createServer((sock) => {
       entry.conn.forwardOut('127.0.0.1', localPort, remoteHost, remotePort, (err, stream) => {
@@ -610,7 +869,7 @@ class SSHManager {
 
     const tunnelInfo = {
       localPort, remoteHost, remotePort,
-      hostId, hostName: host?.name || hostId,
+      hostId: resolvedHostId, hostName: host?.name || resolvedHostId,
       server, createdAt: Date.now(),
     };
     this._tunnels.set(localPort, tunnelInfo);
@@ -621,10 +880,10 @@ class SSHManager {
     tunnelInfo._onConnClose = onConnClose;
     tunnelInfo._conn = entry.conn;
 
-    this.log.info(`[ssh] Tunnel: localhost:${localPort} → ${remoteHost}:${remotePort} via ${hostId}`);
-    this.audit('tunnel', 'createTunnel', { hostId, localPort, remoteHost, remotePort });
+    this.log.info(`[ssh] Tunnel: localhost:${localPort} -> ${remoteHost}:${remotePort} via ${resolvedHostId}`);
+    this.audit('tunnel', 'createTunnel', { hostId: resolvedHostId, localPort, remoteHost, remotePort });
 
-    return { localPort, remoteHost, remotePort, hostId };
+    return { localPort, remoteHost, remotePort, hostId: resolvedHostId };
   }
 
   _closeTunnelByPort(localPort) {
@@ -657,6 +916,7 @@ class SSHManager {
   // ── Cleanup ─────────────────────────────────────────────────────────
 
   closeAll() {
+    this._closing = true;
     if (this._tunnels) {
       for (const [port] of this._tunnels) this._closeTunnelByPort(port);
     }

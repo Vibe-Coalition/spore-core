@@ -1,8 +1,8 @@
 // Compute-cluster plugin settings UI — loaded by graph-viewer.html
 // when the plugin is installed. Populates the plugin's settings pane
 // in the Plugins tab with cluster username/host/tmux fields, the
-// Test SSH button, the additional clusters list, and the SSH key
-// management block.
+// Test SSH button, the additional clusters list, and the sidecar-backed
+// SSH credential block.
 //
 // All endpoints are under /api/cluster/* (path alias to
 // /api/plugins/compute-cluster/*).
@@ -19,51 +19,57 @@
   let _mountEl = null;
 
   const HTML = `
-    <div class="settings-note" style="margin-top:4px">SLURM cluster access over SSH (typically over a tailnet). Reachability further depends on the Tailscale plugin being installed and connected.</div>
-    <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px">
-      <label style="font-size:.7rem">Cluster SSH username
-        <input id="cl-username" type="text" autocomplete="off" style="display:block;margin-top:3px;width:100%;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+    <div class="settings-note settings-muted">SLURM cluster access over Tailscale. SSH credentials are stored by the SSH Sidecar, so there is no manual keystore unlock and private keys are not readable back through the app.</div>
+    <div class="settings-field-grid compact settings-subsection">
+      <label>Cluster SSH username
+        <input id="cl-username" type="text" autocomplete="off">
       </label>
-      <label style="font-size:.7rem">Login host (MagicDNS)
-        <input id="cl-loginhost" type="text" autocomplete="off" placeholder="login.tailnet.ts.net" style="display:block;margin-top:3px;width:100%;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+      <label>Login host (MagicDNS)
+        <input id="cl-loginhost" type="text" autocomplete="off" placeholder="login.tailnet.ts.net">
       </label>
-      <label style="font-size:.7rem;grid-column:1/-1">tmux session prefix
-        <input id="cl-tmux" type="text" autocomplete="off" placeholder="spore" style="display:block;margin-top:3px;width:100%;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-size:.72rem;border-radius:4px">
+      <label class="settings-field-wide">tmux session prefix
+        <input id="cl-tmux" type="text" autocomplete="off" placeholder="spore">
       </label>
     </div>
-    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-      <button class="settings-btn-secondary" id="cl-save"  type="button" style="font-size:.66rem;padding:3px 8px">Save settings</button>
-      <button class="settings-btn-secondary" id="cl-test"  type="button" style="font-size:.68rem;padding:3px 8px">Test SSH</button>
+    <div class="settings-plugin-actions">
+      <button class="settings-btn-secondary settings-compact-btn" id="cl-save" type="button">Save settings</button>
+      <button class="settings-btn-secondary settings-compact-btn" id="cl-test" type="button">Test SSH</button>
     </div>
-    <div id="cl-test-result" style="margin-top:6px;font-family:var(--font-body);font-size:.64rem;color:var(--text-dim);white-space:pre-wrap"></div>
+    <div id="cl-test-result" class="settings-status-muted settings-status-prewrap"></div>
 
-    <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border)">
-      <div style="font-size:.72rem;font-weight:600;display:flex;justify-content:space-between;align-items:center">
-        <span>Additional clusters</span>
-        <button class="settings-btn-secondary" id="cl-hosts-add" type="button" style="font-size:.62rem;padding:2px 6px">+ Add cluster</button>
+    <div class="settings-subsection">
+      <div class="settings-row spaced">
+        <div class="settings-subtitle">Additional clusters</div>
+        <button class="settings-btn-secondary settings-compact-btn" id="cl-hosts-add" type="button">+ Add cluster</button>
       </div>
-      <div class="settings-note" style="margin-top:2px">Extra SLURM clusters reachable over the same tailnet. Username falls back to the primary cluster's if left blank.</div>
-      <div id="cl-hosts-list" style="margin-top:8px;display:flex;flex-direction:column;gap:6px"></div>
-      <div style="margin-top:6px;display:flex;gap:6px"><button class="settings-btn-secondary" id="cl-hosts-save" type="button" style="font-size:.62rem;padding:2px 6px">Save additional clusters</button></div>
-      <div id="cl-hosts-status" style="margin-top:4px;font-family:var(--font-body);font-size:.62rem;color:var(--text-dim)"></div>
+      <div class="settings-note settings-muted-soft">Extra SLURM clusters reachable over the same tailnet. Username falls back to the primary cluster's if left blank.</div>
+      <div id="cl-hosts-list" class="settings-stack-tight settings-plugin-list"></div>
+      <div class="settings-plugin-actions"><button class="settings-btn-secondary settings-compact-btn" id="cl-hosts-save" type="button">Save additional clusters</button></div>
+      <div id="cl-hosts-status" class="settings-status-muted"></div>
     </div>
 
-    <div style="margin-top:16px;padding-top:10px;border-top:1px dashed var(--border)">
-      <div style="font-size:.72rem;font-weight:600">Cluster SSH key</div>
-      <div class="settings-note" style="margin-top:2px">Stored at <code>/data/.ssh/id_cluster</code> (0600, owned by spore). Used by Test SSH and by the agent's cluster tools.</div>
-      <div id="cl-key-status" style="margin-top:6px;font-family:var(--font-body);font-size:.64rem;color:var(--text-dim)">loading…</div>
-      <div id="cl-pubkey-wrap" style="display:none;margin-top:6px">
-        <div style="font-size:.66rem;color:var(--text-dim)">Public key (install on the cluster: <code>~/.ssh/authorized_keys</code>):</div>
-        <textarea id="cl-pubkey" readonly rows="2" style="display:block;width:100%;margin-top:3px;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);padding:4px 6px;font-family:var(--font-mono,monospace);font-size:.62rem;border-radius:4px;resize:vertical;word-break:break-all"></textarea>
-        <button class="settings-btn-secondary" id="cl-copypub" type="button" style="margin-top:4px;font-size:.62rem;padding:2px 6px">Copy public key</button>
+    <div class="settings-subsection">
+      <div class="settings-subtitle">Cluster SSH credential</div>
+      <div class="settings-note settings-muted-soft">Stored as sidecar credential profile <code>cluster-default</code>. Generated keys are created inside the sidecar; the app only receives public key + fingerprint.</div>
+      <div id="cl-key-status" class="settings-status-muted">loading…</div>
+      <div id="cl-pubkey-wrap" class="settings-subsection" hidden>
+        <div class="settings-note settings-muted">Public key (install on the cluster: <code>~/.ssh/authorized_keys</code>):</div>
+        <textarea id="cl-pubkey" class="settings-code-textarea" readonly rows="2"></textarea>
+        <button class="settings-btn-secondary settings-compact-btn" id="cl-copypub" type="button">Copy public key</button>
       </div>
-      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
-        <button class="settings-btn-secondary" id="cl-gen-key"    type="button" style="font-size:.66rem;padding:3px 8px">Generate new ed25519 key</button>
-        <button class="settings-btn-secondary" id="cl-paste-key"  type="button" style="font-size:.66rem;padding:3px 8px">Paste private key…</button>
-        <button class="settings-btn-secondary" id="cl-del-key"    type="button" style="font-size:.66rem;padding:3px 8px;color:var(--danger);display:none">Remove key</button>
+      <div class="settings-plugin-actions">
+        <button class="settings-btn-secondary settings-compact-btn" id="cl-gen-key" type="button">Generate sidecar key</button>
+        <button class="settings-btn-secondary settings-compact-btn" id="cl-paste-key" type="button">Import private key…</button>
+        <button class="settings-btn-secondary settings-compact-btn settings-danger-title" id="cl-del-key" type="button" hidden>Remove credential</button>
       </div>
     </div>
   `;
+
+  function setStatus(el, text, kind = '') {
+    if (!el) return;
+    el.textContent = text;
+    el.dataset.kind = kind;
+  }
 
   // ── Settings load/save ───────────────────────────────────────────
   async function loadSettings() {
@@ -102,19 +108,16 @@
   // ── Test SSH ─────────────────────────────────────────────────────
   async function testSsh() {
     const out = _mountEl.querySelector('#cl-test-result');
-    out.textContent = 'testing…';
-    out.style.color = 'var(--text-dim)';
+    setStatus(out, 'testing…');
     try {
       const r = await fetch(apiBase() + '/api/cluster/test-ssh', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' });
       const d = await r.json();
       if (d.ok) {
-        out.textContent = '✓ ' + (d.output || 'connected');
-        out.style.color = 'var(--text)';
+        setStatus(out, '✓ ' + (d.output || 'connected'), 'ok');
       } else {
-        out.textContent = '✗ ' + (d.hint || d.stderr || d.error || 'failed');
-        out.style.color = 'var(--danger)';
+        setStatus(out, '✗ ' + (d.hint || d.stderr || d.error || 'failed'), 'err');
       }
-    } catch (e) { out.textContent = 'error: ' + e.message; out.style.color = 'var(--danger)'; }
+    } catch (e) { setStatus(out, 'error: ' + e.message, 'err'); }
   }
 
   // ── Additional clusters list ─────────────────────────────────────
@@ -122,13 +125,13 @@
   function renderHosts(hosts) {
     _hosts = Array.isArray(hosts) ? hosts.map(h => ({ ...h })) : [];
     const list = _mountEl.querySelector('#cl-hosts-list');
-    if (!_hosts.length) { list.innerHTML = '<div class="settings-note" style="opacity:.6;font-size:.66rem">none added yet</div>'; return; }
+    if (!_hosts.length) { list.innerHTML = '<div class="settings-note settings-muted-soft">none added yet</div>'; return; }
     list.innerHTML = _hosts.map((h, i) => `
-      <div style="display:grid;grid-template-columns:1fr 1.5fr 1fr auto;gap:6px;align-items:center">
-        <input data-idx="${i}" data-field="name"     value="${(h.name||'').replace(/"/g,'&quot;')}"     placeholder="name"     style="font-size:.66rem;padding:3px 6px;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);border-radius:4px">
-        <input data-idx="${i}" data-field="host"     value="${(h.host||'').replace(/"/g,'&quot;')}"     placeholder="host"     style="font-size:.66rem;padding:3px 6px;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);border-radius:4px">
-        <input data-idx="${i}" data-field="username" value="${(h.username||'').replace(/"/g,'&quot;')}" placeholder="username" style="font-size:.66rem;padding:3px 6px;background:var(--bg-2,var(--surface));border:1px solid var(--border);color:var(--text);border-radius:4px">
-        <button class="settings-btn-secondary" data-remove="${i}" type="button" style="font-size:.6rem;padding:2px 6px;color:var(--danger)">×</button>
+      <div class="settings-plugin-host-row">
+        <input data-idx="${i}" data-field="name" value="${(h.name||'').replace(/"/g,'&quot;')}" placeholder="name">
+        <input data-idx="${i}" data-field="host" value="${(h.host||'').replace(/"/g,'&quot;')}" placeholder="host">
+        <input data-idx="${i}" data-field="username" value="${(h.username||'').replace(/"/g,'&quot;')}" placeholder="username">
+        <button class="settings-btn-secondary settings-compact-btn settings-danger-title" data-remove="${i}" type="button">×</button>
       </div>
     `).join('');
     list.querySelectorAll('input').forEach(el => el.addEventListener('input', (e) => {
@@ -144,14 +147,14 @@
   }
   async function saveHosts() {
     const status = _mountEl.querySelector('#cl-hosts-status');
-    status.textContent = 'saving…';
+    setStatus(status, 'saving…');
     try {
       const r = await fetch(apiBase() + '/api/cluster/hosts', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ hosts: _hosts }) });
       const d = await r.json();
-      if (!d.ok) { status.textContent = 'save failed: ' + (d.error || ''); status.style.color = 'var(--danger)'; return; }
-      status.textContent = 'saved'; status.style.color = 'var(--text-dim)';
+      if (!d.ok) { setStatus(status, 'save failed: ' + (d.error || ''), 'err'); return; }
+      setStatus(status, 'saved');
       renderHosts(d.hosts || []);
-    } catch (e) { status.textContent = 'error: ' + e.message; status.style.color = 'var(--danger)'; }
+    } catch (e) { setStatus(status, 'error: ' + e.message, 'err'); }
   }
 
   // ── SSH key block ────────────────────────────────────────────────
@@ -163,20 +166,24 @@
     try {
       const r = await fetch(apiBase() + '/api/cluster/ssh-key', { headers: authHeaders() });
       const d = await r.json();
-      if (d.hasPrivate && d.publicKey) {
-        status.textContent = 'key installed · ' + (d.fingerprint || '');
-        pubWrap.style.display = '';
+      if (d.error && !d.sidecarReady) {
+        setStatus(status, d.error, 'err');
+        pubWrap.hidden = true;
+        delBtn.hidden = true;
+      } else if (d.hasPrivate && d.publicKey) {
+        setStatus(status, 'key installed · ' + (d.fingerprint || ''), 'ok');
+        pubWrap.hidden = false;
         pub.value = d.publicKey;
-        delBtn.style.display = '';
+        delBtn.hidden = false;
       } else {
-        status.textContent = 'no key installed';
-        pubWrap.style.display = 'none';
-        delBtn.style.display = 'none';
+        setStatus(status, 'no key installed');
+        pubWrap.hidden = true;
+        delBtn.hidden = true;
       }
     } catch {}
   }
   async function generateKey() {
-    if (!confirm('Generate a fresh ed25519 key? This overwrites any existing key at /data/.ssh/id_cluster.')) return;
+    if (!confirm('Generate a fresh ed25519 cluster key inside the SSH sidecar? This replaces the existing cluster credential profile.')) return;
     try {
       const r = await fetch(apiBase() + '/api/cluster/ssh-key/generate', { method: 'POST', headers: authHeaders() });
       const d = await r.json();
@@ -185,7 +192,7 @@
     } catch (e) { alert('Generate error: ' + e.message); }
   }
   async function pasteKey() {
-    const k = prompt('Paste private key (BEGIN/END markers required):');
+    const k = prompt('Paste private key to import into the SSH sidecar (BEGIN/END markers required). Generated keys are safer because the private key never enters the app process.');
     if (!k) return;
     try {
       const r = await fetch(apiBase() + '/api/cluster/ssh-key', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ privateKey: k }) });
@@ -195,7 +202,7 @@
     } catch (e) { alert('Paste error: ' + e.message); }
   }
   async function deleteKey() {
-    if (!confirm('Remove the cluster SSH key?')) return;
+    if (!confirm('Remove the cluster SSH credential from the sidecar?')) return;
     try {
       const r = await fetch(apiBase() + '/api/cluster/ssh-key', { method: 'DELETE', headers: authHeaders() });
       const d = await r.json();

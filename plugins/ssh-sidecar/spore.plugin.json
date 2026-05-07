@@ -1,0 +1,9 @@
+{
+  "id": "ssh-sidecar",
+  "name": "SSH Sidecar",
+  "version": "1.0.0",
+  "kind": "system",
+  "entry": "./index.js",
+  "description": "Optional SSH credential-isolation sidecar. Owns Docker packaging, status UI, and agent docs for saved-host, interactive SSH, remote exec, and SFTP isolation; core falls back to local encrypted storage when it is not installed or the socket is unavailable.",
+  "category": "spore-core"
+}

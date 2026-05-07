@@ -366,20 +366,22 @@ class ToolSystem {
       },
       {
         name: 'graph_query',
-        description: 'Query the knowledge graph. Default behavior (no `mode`): get a node by ID (use `nodeId` — preferred when you already know the id/label), search by content (use `query` — for fuzzy/topic lookup), or list by type (use `type`). When `query` exactly matches a node\'s id/label/alias, the response is the matching node only; otherwise it\'s a hybrid (vector + keyword) search returning up to 10 hits.\n\n' +
+        description: 'Query the knowledge graph. Default behavior (no `mode`): get a node by ID (use `nodeId` — preferred when you already know the id/label), search by content (use `query` — for fuzzy/topic lookup), list by type (use `type`), or overview the current graph when the input is empty / `query:"*"`. When `query` exactly matches a node\'s id/label/alias, the response is the matching node only; otherwise it\'s a hybrid (vector + keyword) search returning up to 10 hits.\n\n' +
           'Advanced modes for navigating graph structure:\n' +
+          '- `mode:"graphs"` — list available graph scopes from the registry, including the protected General Knowledge Base slug. Use this instead of shelling out to /data/graphs or reading registry files.\n' +
+          '- `mode:"overview"` — summarize a graph and return a paginated node listing. Use `limit` and `offset` to page through nodes without repeated searches.\n' +
           '- `mode:"neighbors"` — list 1-hop neighbors of a node with relation type, weight, and confidence. Optional `relation_filter` narrows by relation. Use to explore who/what a node connects to.\n' +
           '- `mode:"walk"` — depth-bounded BFS from a seed node (or top hits of `query`). Returns a token-budgeted text rendering of the subgraph (nodes + edges with labels/relations/confidence). Use when you need structural context around a topic without dumping the whole graph.\n' +
           '- `mode:"path"` — shortest path between two nodes (`source_id` → `target_id`). Returns the chain of edges with relation labels. Use to answer "how is X connected to Y" questions structurally instead of guessing.\n' +
           '- `mode:"community"` — list all nodes in a community group (Louvain-clustered by the maintainer). Pass `group_id` (integer). Use to enumerate everything the graph thinks belongs together with a topic.\n' +
           '- `mode:"hyperedges"` — list n-ary relationships touching a node. Pass `nodeId`. Use when you suspect group facts ("the kickoff meeting") are stored as hyperedges rather than star-shaped binary edges.\n\n' +
-          'When a shared project graph is available, set `project` to query that graph instead of the local one.',
+          'Use `graph:"spore-knowledge-base"` to query the separate protected General Knowledge Base. For shared/stored graph skills or distilled skills, use `graph:"spore-knowledge-base"` with `type:"skill"` or a `query:"skill"` search and answer from that graph result, not from only the local graph or file-backed skill catalog. `project` is still accepted as a legacy alias for `graph`.',
         input_schema: {
           type: 'object',
           properties: {
             mode: {
               type: 'string',
-              enum: ['neighbors', 'walk', 'path', 'community', 'hyperedges'],
+              enum: ['graphs', 'overview', 'neighbors', 'walk', 'path', 'community', 'hyperedges'],
               description: 'Optional traversal mode. Omit for default search/lookup behavior.',
             },
             query: {
@@ -422,9 +424,21 @@ class ToolSystem {
               type: 'integer',
               description: '(mode:"community") Community group ID. Use the integer from a previous overview/community result.',
             },
+            graph: {
+              type: 'string',
+              description: 'Graph slug to query. Use "spore-knowledge-base" for the protected General Knowledge Base. Preferred over legacy `project`.',
+            },
             project: {
               type: 'string',
-              description: 'Shared project slug to query (e.g. "research-alpha"). Omit for local graph.',
+              description: 'Legacy alias for `graph`. Kept for older prompts and shared project graph calls.',
+            },
+            limit: {
+              type: 'integer',
+              description: '(mode:"overview") Page size for listed nodes. Default 20, max 100.',
+            },
+            offset: {
+              type: 'integer',
+              description: '(mode:"overview") Node-list offset for pagination. Default 0.',
             },
           },
         },
@@ -1145,12 +1159,47 @@ class ToolSystem {
     return all;
   }
 
-_getRemoteToolDefinitions() {
+  _remoteHostAliases(host = {}) {
+    const aliases = new Set();
+    const add = (value) => {
+      const s = String(value || '').trim();
+      if (s) aliases.add(s);
+    };
+    add(host.hostname);
+    const hostname = String(host.hostname || '').trim();
+    const shortHost = hostname.includes('.') ? hostname.split('.')[0] : hostname;
+    add(shortHost);
+    if (host.username && hostname) {
+      add(`${host.username}@${hostname}`);
+      add(`${host.username}@${shortHost}`);
+    }
+    return [...aliases].filter(alias => alias && alias !== host.id);
+  }
+
+  _formatRemoteHostCatalog(hosts = []) {
+    const refs = [];
+    const lines = hosts.map(host => {
+      if (!host?.id) return null;
+      refs.push(host.id);
+      const aliases = this._remoteHostAliases(host);
+      refs.push(...aliases);
+      const target = [host.username, host.hostname].filter(Boolean).join('@');
+      const label = host.name || target || host.hostname || host.id;
+      return aliases.length
+        ? `${host.id} (${label}; aliases: ${aliases.join(', ')})`
+        : `${host.id} (${label})`;
+    }).filter(Boolean);
+    return {
+      hostRefs: [...new Set(refs)].join(', '),
+      hostList: lines.join(', '),
+    };
+  }
+
+  _getRemoteToolDefinitions() {
     const mgr = this._ensureSSHManager();
     const hosts = (mgr?.getKnownHosts?.() || mgr?.hosts || []).filter(h => h?.id);
     if (!mgr || hosts.length === 0) return [];
-    const hostIds = hosts.map(h => h.id).join(', ');
-    const hostList = hosts.map(h => `${h.id} (${h.name || h.hostname})`).join(', ');
+    const { hostRefs, hostList } = this._formatRemoteHostCatalog(hosts);
     return [
       {
         name: 'remote_exec',
@@ -1164,7 +1213,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
+            host: { type: 'string', description: `Host ID or shown alias. Use one of: ${hostRefs}` },
             command: { type: 'string', description: 'Shell command to execute' },
             workdir: { type: 'string', description: 'Remote working directory (optional)' },
             timeout: { type: 'number', description: 'Timeout in ms (default 30000, max 120000)' },
@@ -1180,7 +1229,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
+            host: { type: 'string', description: `Host ID or shown alias. Use one of: ${hostRefs}` },
             tmux_session: { type: 'string', description: 'Session name (prefix auto-applied if missing).' },
             lines: { type: 'number', description: 'Number of lines of scrollback to capture (default 200, max 2000).' },
           },
@@ -1193,7 +1242,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
+            host: { type: 'string', description: `Host ID or shown alias. Use one of: ${hostRefs}` },
             tmux_session: { type: 'string', description: 'Session name (prefix auto-applied if missing).' },
           },
           required: ['host', 'tmux_session'],
@@ -1205,7 +1254,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
+            host: { type: 'string', description: `Host ID or shown alias. Use one of: ${hostRefs}` },
             path: { type: 'string', description: 'Absolute path on the remote host' },
             offset: { type: 'number', description: 'Line offset (0-based, optional)' },
             limit: { type: 'number', description: 'Max lines to return (optional)' },
@@ -1219,7 +1268,7 @@ Set wait:false when you've submitted a long background job and just want to retu
         input_schema: {
           type: 'object',
           properties: {
-            host: { type: 'string', description: `Host ID — one of: ${hostIds}` },
+            host: { type: 'string', description: `Host ID or shown alias. Use one of: ${hostRefs}` },
             path: { type: 'string', description: 'Absolute path on the remote host' },
             content: { type: 'string', description: 'File content to write' },
             append: { type: 'boolean', description: 'Append instead of overwrite (default false)' },
@@ -1234,7 +1283,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           type: 'object',
           properties: {
             action: { type: 'string', enum: ['create', 'close', 'list'], description: 'create = new tunnel, close = tear down by localPort, list = show active tunnels' },
-            host: { type: 'string', description: `Host ID for create — one of: ${hostIds}` },
+            host: { type: 'string', description: `Host ID or shown alias for create. Use one of: ${hostRefs}` },
             remoteHost: { type: 'string', description: 'Remote hostname to forward to (default: localhost)' },
             remotePort: { type: 'number', description: 'Remote port to forward (required for create)' },
             localPort: { type: 'number', description: 'Local port 19000-19999 (auto-assigned if omitted)' },
@@ -1265,7 +1314,7 @@ Set wait:false when you've submitted a long background job and just want to retu
           type: 'object',
           properties: {
             action: { type: 'string', enum: ['start', 'stop', 'list', 'templates'], description: 'start = begin polling, stop = stop a poller, list = show active pollers, templates = show available templates' },
-            host: { type: 'string', description: `Host ID (for start) — one of: ${hostIds}` },
+            host: { type: 'string', description: `Host ID or shown alias (for start). Use one of: ${hostRefs}` },
             template: { type: 'string', description: 'Predefined command template ID (for start)' },
             interval: { type: 'number', description: 'Poll interval in seconds (minimum 60, default 120)' },
             pollerId: { type: 'string', description: 'Poller ID (for stop)' },
@@ -2165,235 +2214,284 @@ Set wait:false when you've submitted a long background job and just want to retu
   /**
    * Query the knowledge graph
    */
-  async _graphQueryTool(input) {
-    const { query, nodeId, type, project, mode } = input;
+  async _graphQueryTool(input = {}) {
+    if (!this.graph) {
+      return { error: 'Graph context not available' };
+    }
 
-	    if (!this.graph) {
-	      return { error: 'Graph context not available' };
-	    }
+    const graph = input.graph ? String(input.graph).trim() : null;
+    const project = input.project ? String(input.project).trim() : null;
+    if (graph && project && graph !== project) {
+      return { error: `Conflicting graph selectors: graph="${graph}" and project="${project}". Use only graph.` };
+    }
 
-	    const scopedSlug = this._resolveGraphSlugForTool(project, { force: !!project });
+    const targetGraph = graph || project || null;
+    const query = typeof input.query === 'string' ? input.query.trim() : input.query;
+    const normalizedInput = { ...input, query };
+    let mode = input.mode || null;
+    if (!mode && !input.nodeId && !input.type && (!query || query === '*')) {
+      mode = 'overview';
+      normalizedInput.mode = mode;
+    }
+
+    if (mode === 'graphs') {
+      return this._graphQueryGraphs();
+    }
+
+    const scopedSlug = this._resolveGraphSlugForTool(targetGraph, { force: !!targetGraph });
     const activeGraphMeta = this._graphResultMeta();
+    const structuralModes = new Set(['neighbors', 'walk', 'path', 'community', 'hyperedges']);
 
-	    // Mode dispatcher — runs before the default search/lookup path.
-	    // When a memory envelope is active, run graph modes against the
-	    // scoped graph rather than silently falling back to the active graph.
-	    if (mode && scopedSlug) {
-	      const registry = this._graphRegistry;
-	      const entry = registry?.get?.(scopedSlug);
-	      const dbPath = registry?.getDbPath?.(scopedSlug);
-	      if (!dbPath) return { error: `Graph "${scopedSlug}" not found` };
-	      const { GraphContext } = require('../graph/context');
-	      const originalGraph = this.graph;
-	      const scopedGraph = new GraphContext({ ...this.config, graphDbPath: dbPath }, this.log);
-	      try {
-	        if (!scopedGraph.init()) return { error: `Could not open graph "${scopedSlug}"` };
-	        this.graph = scopedGraph;
-	        let result;
-	        switch (mode) {
-	          case 'neighbors':  result = this._graphQueryNeighbors(input); break;
-	          case 'walk':       result = await this._graphQueryWalk(input); break;
-	          case 'path':       result = this._graphQueryPath(input); break;
-	          case 'community':  result = this._graphQueryCommunity(input); break;
-	          case 'hyperedges': result = this._graphQueryHyperedges(input); break;
-	          default:
-	            return { error: `Unknown mode "${mode}". Valid: neighbors, walk, path, community, hyperedges.` };
-	        }
-	        if (result && typeof result === 'object' && !result.error) {
-	          result.graph = scopedSlug;
-	          result.graphName = entry?.name;
-	        }
-	        return result;
-	      } catch (e) {
-	        return { error: `mode="${mode}" failed on graph "${scopedSlug}": ${e.message}` };
-	      } finally {
-	        this.graph = originalGraph;
-	        try { scopedGraph.close(); } catch {}
-	      }
-	    }
+    if (mode) {
+      const runMode = async () => {
+        switch (mode) {
+          case 'overview':   return this._graphQueryOverview(normalizedInput, scopedSlug || activeGraphMeta.graph);
+          case 'neighbors':  return this._graphQueryNeighbors(normalizedInput);
+          case 'walk':       return this._graphQueryWalk(normalizedInput);
+          case 'path':       return this._graphQueryPath(normalizedInput);
+          case 'community':  return this._graphQueryCommunity(normalizedInput);
+          case 'hyperedges': return this._graphQueryHyperedges(normalizedInput);
+          default:
+            return { error: `Unknown mode "${mode}". Valid: graphs, overview, neighbors, walk, path, community, hyperedges.` };
+        }
+      };
 
-	    if (mode && !project) {
-	      try {
-          const runMode = async () => {
-            switch (mode) {
-              case 'neighbors':  return this._graphQueryNeighbors(input);
-              case 'walk':       return this._graphQueryWalk(input);
-              case 'path':       return this._graphQueryPath(input);
-              case 'community':  return this._graphQueryCommunity(input);
-              case 'hyperedges': return this._graphQueryHyperedges(input);
-              default:
-                return { error: `Unknown mode "${mode}". Valid: neighbors, walk, path, community, hyperedges.` };
-            }
-          };
-          const result = await graphEvents.withGraph(activeGraphMeta.graph ? { graph: activeGraphMeta.graph } : null, runMode);
-          if (result && typeof result === 'object' && !result.error) Object.assign(result, activeGraphMeta);
-          return result;
+      if (scopedSlug) {
+        try {
+          return await this._withScopedGraphForTool(scopedSlug, runMode);
+        } catch (e) {
+          return { error: `mode="${mode}" failed on graph "${scopedSlug}": ${e.message}` };
+        }
+      }
+
+      if (targetGraph && this.graph._sharedGraphs?.length > 0 && !structuralModes.has(mode)) {
+        return this._graphQuerySharedProject(normalizedInput, targetGraph);
+      }
+
+      if (targetGraph && !this.graph._sharedGraphs?.some(s => s.slug === targetGraph)) {
+        return { error: `Graph "${targetGraph}" not found. Use graph_query({ mode: "graphs" }) to list available graphs.` };
+      }
+
+      try {
+        const result = await graphEvents.withGraph(activeGraphMeta.graph ? { graph: activeGraphMeta.graph } : null, runMode);
+        if (result && typeof result === 'object' && !result.error) Object.assign(result, activeGraphMeta);
+        return result;
       } catch (e) {
         return { error: `mode="${mode}" failed: ${e.message}` };
       }
     }
-    if (mode && project) {
-      return { error: `mode="${mode}" is not supported on shared project graphs — only on the local graph. Drop the project parameter to use ${mode}.` };
+
+    // Query a legacy ATTACH-style shared project graph.
+    if (targetGraph && this.graph._sharedGraphs?.length > 0) {
+      return this._graphQuerySharedProject(normalizedInput, targetGraph);
     }
 
-    // Query a shared project graph via ATTACH alias
-    if (project && this.graph._sharedGraphs?.length > 0) {
-      const sg = this.graph._sharedGraphs.find(s => s.slug === project);
-      if (!sg) return { error: `Project "${project}" not found or not a member. Available: ${this.graph._sharedGraphs.map(s => s.slug).join(', ')}` };
-
-      try {
-        if (nodeId) {
-          const row = this.graph.db.prepare(`SELECT * FROM ${sg.alias}.nodes WHERE id = ?`).get(nodeId);
-          if (!row) return { error: `Node '${nodeId}' not found in project "${project}"` };
-          const node = this.graph._hydrateSharedNode(row, sg);
-          return { node: this._formatNodeForTool(node), project };
-        }
-        if (query) {
-          const results = this.graph._searchSharedGraphs(query, 10);
-          const projResults = results.filter(n => n._project === project);
-          return {
-            nodes: projResults.map(n => this._formatNodeForTool(n)),
-            total: projResults.length,
-            project,
-          };
-        }
-        if (type) {
-          const rows = this.graph.db.prepare(`SELECT * FROM ${sg.alias}.nodes WHERE type = ? ORDER BY importance DESC LIMIT 20`).all(type);
-          const nodes = rows.map(r => this.graph._hydrateSharedNode(r, sg));
-          return {
-            nodes: nodes.map(n => this._formatNodeBrief(n)),
-            total: nodes.length,
-            project,
-          };
-        }
-      } catch (e) {
-        return { error: `Shared graph query failed: ${e.message}` };
-      }
+    if (targetGraph && !scopedSlug) {
+      return { error: `Graph "${targetGraph}" not found. Use graph_query({ mode: "graphs" }) to list available graphs.` };
     }
 
-	    if (scopedSlug) {
-      const registry = this._graphRegistry;
-      const entry = registry?.get?.(scopedSlug);
-      const dbPath = registry?.getDbPath?.(scopedSlug);
-      if (!dbPath) return { error: `Graph "${scopedSlug}" not found` };
-      const { GraphContext } = require('../graph/context');
-      const scopedGraph = new GraphContext({ ...this.config, graphDbPath: dbPath }, this.log);
+    if (scopedSlug) {
       try {
-        if (!scopedGraph.init()) return { error: `Could not open graph "${scopedSlug}"` };
-        if (nodeId) {
-          const node = scopedGraph.getNode(nodeId);
-          if (!node) return { error: `Node '${nodeId}' not found in graph "${scopedSlug}"` };
-          node.edges = scopedGraph.getEdges(nodeId);
-          graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId], source: 'graph_query', graph: scopedSlug });
-          return { node: this._formatNodeForTool(node), graph: scopedSlug, graphName: entry?.name };
-        }
-        if (type && !query) {
-          const nodes = scopedGraph.getNodesByType(type);
-          const shown = nodes.slice(0, 20);
-          if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: scopedSlug });
-          return { nodes: shown.map(n => this._formatNodeBrief(n)), total: nodes.length, graph: scopedSlug, graphName: entry?.name };
-        }
-        if (query) {
-          const q = String(query).trim();
-          const qLower = q.toLowerCase();
-          const exactRows = scopedGraph.db.prepare(`
-            SELECT DISTINCT n.id FROM nodes n
-            LEFT JOIN aliases a ON a.node_id = n.id
-            WHERE LOWER(n.id) = ? OR LOWER(n.label) = ? OR LOWER(a.alias) = ?
-            LIMIT 5
-          `).all(qLower, qLower, qLower);
-          if (exactRows.length > 0) {
-            const exactNodes = exactRows.map(r => scopedGraph.getNode(r.id)).filter(Boolean);
-            for (const n of exactNodes) n.edges = scopedGraph.getEdges(n.id);
-            graphEvents.emit('change', { op: 'node:accessed', nodeIds: exactNodes.map(n => n.id), source: 'graph_query', graph: scopedSlug });
-            return { nodes: exactNodes.map(n => this._formatNodeForTool(n)), total: exactNodes.length, shown: exactNodes.length, search: 'exact', graph: scopedSlug, graphName: entry?.name };
-          }
-          const results = await scopedGraph.hybridSearch(query);
-          const shown = results.slice(0, 10);
-          for (const node of shown) node.edges = scopedGraph.getEdges(node.id);
-          if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: scopedSlug });
-          return { nodes: shown.map(n => this._formatNodeForTool(n)), total: results.length, shown: shown.length, search: 'hybrid', graph: scopedSlug, graphName: entry?.name };
-        }
+        return await this._withScopedGraphForTool(scopedSlug, () => this._graphQueryDefault(normalizedInput, scopedSlug));
       } catch (e) {
         return { error: `Graph "${scopedSlug}" query failed: ${e.message}` };
-      } finally {
-        try { scopedGraph.close(); } catch {}
       }
     }
 
     try {
-      // Direct node lookup
-      if (nodeId) {
-        const node = this.graph.getNode(nodeId);
-        if (!node) return { error: `Node '${nodeId}' not found` };
-        node.edges = this.graph.getEdges(nodeId);
-        graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId], source: 'graph_query', graph: activeGraphMeta.graph });
-        return { node: this._formatNodeForTool(node), ...activeGraphMeta };
-      }
-
-      // Type filter
-      if (type && !query) {
-        const nodes = this.graph.getNodesByType(type);
-        const shown = nodes.slice(0, 20);
-        if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: activeGraphMeta.graph });
-        return {
-          nodes: shown.map(n => this._formatNodeBrief(n)),
-          total: nodes.length,
-          ...activeGraphMeta,
-        };
-      }
-
-      // Hybrid search: vector similarity + keyword LIKE merged, across all nodes
-      if (query) {
-        // Exact-match fast-path: if the query matches a node id, label, or
-        // alias verbatim (case-insensitive), short-circuit to that node
-        // alone. Without this, hybrid search on a short query like "yam3"
-        // pulls in 10 results — including vector-similarity noise on small
-        // graphs (e.g. a "react" node ranking high on a username query).
-        const db = this.graph.db;
-        const q = String(query).trim();
-        const qLower = q.toLowerCase();
-        const exactRows = db.prepare(`
-          SELECT DISTINCT n.id FROM nodes n
-          LEFT JOIN aliases a ON a.node_id = n.id
-          WHERE LOWER(n.id) = ? OR LOWER(n.label) = ? OR LOWER(a.alias) = ?
-          LIMIT 5
-        `).all(qLower, qLower, qLower);
-        if (exactRows.length > 0) {
-          const exactNodes = exactRows
-            .map(r => this.graph.getNode(r.id))
-            .filter(Boolean);
-          for (const n of exactNodes) n.edges = this.graph.getEdges(n.id);
-          graphEvents.emit('change', { op: 'node:accessed', nodeIds: exactNodes.map(n => n.id), source: 'graph_query', graph: activeGraphMeta.graph });
-          return {
-            nodes: exactNodes.map(n => this._formatNodeForTool(n)),
-            total: exactNodes.length,
-            shown: exactNodes.length,
-            search: 'exact',
-            ...activeGraphMeta,
-          };
-        }
-
-        const results = await this.graph.hybridSearch(query);
-        const cap = 10;
-        const shown = results.slice(0, cap);
-        for (const node of shown) {
-          node.edges = this.graph.getEdges(node.id);
-        }
-        if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: activeGraphMeta.graph });
-        return {
-          nodes: shown.map(n => this._formatNodeForTool(n)),
-          total: results.length,
-          shown: shown.length,
-          search: 'hybrid',
-          ...activeGraphMeta,
-        };
-      }
-
-      return { error: 'Provide query, nodeId, or type' };
+      const result = await this._graphQueryDefault(normalizedInput, activeGraphMeta.graph);
+      if (result && typeof result === 'object' && !result.error) Object.assign(result, activeGraphMeta);
+      return result;
     } catch (e) {
       return { error: e.message };
     }
+  }
+
+  _graphQuerySharedProject(input, project) {
+    const { query, nodeId, type } = input;
+    const sg = this.graph._sharedGraphs?.find(s => s.slug === project);
+    if (!sg) {
+      const available = this.graph._sharedGraphs?.map(s => s.slug).join(', ') || '(none)';
+      return { error: `Project "${project}" not found or not a member. Available: ${available}` };
+    }
+
+    try {
+      if (nodeId) {
+        const row = this.graph.db.prepare(`SELECT * FROM ${sg.alias}.nodes WHERE id = ?`).get(nodeId);
+        if (!row) return { error: `Node '${nodeId}' not found in project "${project}"` };
+        const node = this.graph._hydrateSharedNode(row, sg);
+        return { node: this._formatNodeForTool(node), project, graph: project };
+      }
+      if (query) {
+        const results = this.graph._searchSharedGraphs(query, 10);
+        const projResults = results.filter(n => n._project === project);
+        return {
+          nodes: projResults.map(n => this._formatNodeForTool(n)),
+          total: projResults.length,
+          project,
+          graph: project,
+        };
+      }
+      if (type) {
+        const rows = this.graph.db.prepare(`SELECT * FROM ${sg.alias}.nodes WHERE type = ? ORDER BY importance DESC LIMIT 20`).all(type);
+        const nodes = rows.map(r => this.graph._hydrateSharedNode(r, sg));
+        return {
+          nodes: nodes.map(n => this._formatNodeBrief(n)),
+          total: nodes.length,
+          project,
+          graph: project,
+        };
+      }
+      return { error: 'Provide query, nodeId, or type for shared project graph query' };
+    } catch (e) {
+      return { error: `Shared graph query failed: ${e.message}` };
+    }
+  }
+
+  async _graphQueryDefault(input, eventGraph) {
+    const { query, nodeId, type } = input;
+
+    if (nodeId) {
+      const node = this.graph.getNode(nodeId);
+      if (!node) return { error: `Node '${nodeId}' not found` };
+      node.edges = this.graph.getEdges(nodeId);
+      graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId], source: 'graph_query', graph: eventGraph });
+      return { node: this._formatNodeForTool(node) };
+    }
+
+    if (type && !query) {
+      const nodes = this.graph.getNodesByType(type);
+      const shown = nodes.slice(0, 20);
+      if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: eventGraph });
+      return {
+        nodes: shown.map(n => this._formatNodeBrief(n)),
+        total: nodes.length,
+      };
+    }
+
+    if (query) {
+      const q = String(query).trim();
+      if (!q || q === '*') return this._graphQueryOverview(input, eventGraph);
+      const db = this.graph.db;
+      const qLower = q.toLowerCase();
+      const exactRows = db.prepare(`
+        SELECT DISTINCT n.id FROM nodes n
+        LEFT JOIN aliases a ON a.node_id = n.id
+        WHERE LOWER(n.id) = ? OR LOWER(n.label) = ? OR LOWER(a.alias) = ?
+        LIMIT 5
+      `).all(qLower, qLower, qLower);
+      if (exactRows.length > 0) {
+        const exactNodes = exactRows
+          .map(r => this.graph.getNode(r.id))
+          .filter(Boolean);
+        for (const n of exactNodes) n.edges = this.graph.getEdges(n.id);
+        graphEvents.emit('change', { op: 'node:accessed', nodeIds: exactNodes.map(n => n.id), source: 'graph_query', graph: eventGraph });
+        return {
+          nodes: exactNodes.map(n => this._formatNodeForTool(n)),
+          total: exactNodes.length,
+          shown: exactNodes.length,
+          search: 'exact',
+        };
+      }
+
+      const results = await this.graph.hybridSearch(query);
+      const cap = 10;
+      const shown = results.slice(0, cap);
+      for (const node of shown) {
+        node.edges = this.graph.getEdges(node.id);
+      }
+      if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: eventGraph });
+      return {
+        nodes: shown.map(n => this._formatNodeForTool(n)),
+        total: results.length,
+        shown: shown.length,
+        search: 'hybrid',
+      };
+    }
+
+    return this._graphQueryOverview(input);
+  }
+
+  _graphQueryGraphs() {
+    const registry = this._graphRegistry;
+    const graphs = registry?.list
+      ? registry.list().map(g => this._formatGraphForTool(g))
+      : [];
+    const active = registry?.getActiveSlug?.() || this._activeGraphSlug();
+    const generalKnowledgeGraph = registry?.getGeneralKnowledgeSlug?.() || 'spore-knowledge-base';
+    return {
+      mode: 'graphs',
+      graphs,
+      total: graphs.length,
+      active,
+      generalKnowledgeGraph,
+      hint: 'Use graph_query({ graph: "spore-knowledge-base", mode: "overview" }) to inspect the General Knowledge Base. Use graph_query({ graph: "<slug>", mode: "overview", limit, offset }) to page through any graph.',
+    };
+  }
+
+  _formatGraphForTool(graph) {
+    const nodeCount = graph.nodeCount ?? graph.stats?.node_count ?? graph.stats?.nodes ?? null;
+    const out = {
+      slug: graph.slug,
+      name: graph.name,
+      role: graph.role,
+      description: graph.description || '',
+      protected: graph.protected === true,
+      managed: graph.managed === true,
+      inspectOnly: graph.inspectOnly === true || graph.activationLocked === true,
+      active: graph.active === true,
+    };
+    if (nodeCount !== null && nodeCount !== undefined) out.nodeCount = nodeCount;
+    return out;
+  }
+
+  _graphQueryOverview(input = {}, eventGraph = null) {
+    const db = this.graph?.db;
+    if (!db) return { error: 'Graph context not available' };
+
+    const limit = Math.max(1, Math.min(100, parseInt(input.limit, 10) || 20));
+    const offset = Math.max(0, parseInt(input.offset, 10) || 0);
+    const type = input.type ? String(input.type).trim() : null;
+
+    const total = db.prepare('SELECT COUNT(*) AS c FROM nodes').get()?.c || 0;
+    const nodeTypes = db.prepare(`
+      SELECT type, COUNT(*) AS count
+      FROM nodes
+      GROUP BY type
+      ORDER BY count DESC, type ASC
+      LIMIT 50
+    `).all();
+
+    const where = type ? 'WHERE type = ?' : '';
+    const params = type ? [type] : [];
+    const filteredTotal = db.prepare(`SELECT COUNT(*) AS c FROM nodes ${where}`).get(...params)?.c || 0;
+    const rows = db.prepare(`
+      SELECT id, label, type, description, importance
+      FROM nodes
+      ${where}
+      ORDER BY importance DESC, updated DESC, id ASC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+    const nextOffset = offset + rows.length < filteredTotal ? offset + rows.length : null;
+
+    if (rows.length) {
+      graphEvents.emit('change', { op: 'node:accessed', nodeIds: rows.map(n => n.id), source: 'graph_query:overview', graph: eventGraph || this._activeGraphSlug() });
+    }
+    return {
+      mode: 'overview',
+      total,
+      filteredTotal,
+      nodeTypes,
+      nodes: rows.map(n => this._formatNodeBrief(n)),
+      shown: rows.length,
+      limit,
+      offset,
+      nextOffset,
+      done: nextOffset === null,
+      hint: nextOffset === null
+        ? 'Overview complete.'
+        : `More nodes are available. Call graph_query({ mode: "overview", limit: ${limit}, offset: ${nextOffset} }) for the next page.`,
+    };
   }
 
   // ── graph_query mode handlers ────────────────────────────────────────────

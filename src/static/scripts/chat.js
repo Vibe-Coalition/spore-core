@@ -17,10 +17,20 @@ async function fetchGraph(opts = {}) {
   const preserveViewed = opts?.preserveViewed !== false;
   const viewedSlug = preserveViewed && typeof _viewedGraphSlug !== 'undefined' ? _viewedGraphSlug : null;
   const slug = explicitSlug || viewedSlug;
-  const url = slug
-    ? `/api/graphs/${encodeURIComponent(slug)}/data`
-    : '/api/graph';
-  const res = await fetch(API + url);
+  const state = window._graphViewState || {};
+  const mode = opts.mode || state.mode || 'auto';
+  const params = new URLSearchParams();
+  params.set('mode', mode);
+  const root = opts.root || state.root || '';
+  if (mode === 'slice' && root) params.set('root', root);
+  if (opts.nodeLimit) params.set('nodeLimit', String(opts.nodeLimit));
+  if (opts.edgeLimit) params.set('edgeLimit', String(opts.edgeLimit));
+  if (opts.details) params.set('details', String(opts.details));
+  const path = '/api/graph?' + params.toString();
+  const url = explicitSlug
+    ? `/api/graphs/${encodeURIComponent(explicitSlug)}/data?${params.toString()}`
+    : (slug ? graphApiUrl(path) : API + path);
+  const res = await fetch(explicitSlug ? API + url : url);
   const data = await res.json();
   if (data?.graph && typeof _setViewedGraph === 'function') {
     _setViewedGraph(data, slug);
@@ -250,6 +260,8 @@ function finalizeStreamingMsg() {
   streamingMsgEl.classList.remove('streaming');
   if (!_streamDelta) {
     _removeChatBubble(streamingMsgEl);
+  } else {
+    _syncAssistantRowVisibility(streamingMsgEl);
   }
   streamingMsgEl = null;
 }
@@ -258,6 +270,33 @@ function _removeChatBubble(el) {
   if (!el) return;
   const row = el.closest?.('.chat-row');
   (row || el).remove();
+}
+
+function _chatBubbleHasVisibleContent(el) {
+  if (!el) return false;
+  if ((el.textContent || '').trim()) return true;
+  return !!el.querySelector?.('img,video,audio,canvas,iframe,svg,table,pre,ul,ol,blockquote,.media-grid,.tool-tag,.usage-tag');
+}
+
+function _syncAssistantRowVisibility(el) {
+  if (!el?.classList?.contains('assistant')) return true;
+  const row = el.closest?.('.chat-row');
+  const hasContent = _chatBubbleHasVisibleContent(el);
+  if (row) row.hidden = !hasContent;
+  return hasContent;
+}
+
+function _pruneEmptyAssistantRows() {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  container.querySelectorAll('.chat-msg.assistant').forEach(el => {
+    if (el === streamingMsgEl || el.classList.contains('streaming')) {
+      _syncAssistantRowVisibility(el);
+      return;
+    }
+    if (!_chatBubbleHasVisibleContent(el)) _removeChatBubble(el);
+    else _syncAssistantRowVisibility(el);
+  });
 }
 
 // Lazy-create the streaming assistant bubble. Lets us avoid blank
@@ -569,6 +608,7 @@ function handleWsMessage(msg) {
     setActivity('responding...');
     _ensureStreamingBubble();
     streamingMsgEl.textContent = _streamDelta;
+    _syncAssistantRowVisibility(streamingMsgEl);
     if (_userWasAtBottom) chatScrollToBottom();
   } else if (msg.type === 'chat:tool') {
     _chatToolCount++;
@@ -632,6 +672,7 @@ function handleWsMessage(msg) {
     _ensureStreamingBubble();
     streamingMsgEl.textContent = msg.text;
     _streamDelta = msg.text;
+    _syncAssistantRowVisibility(streamingMsgEl);
     if (_userWasAtBottom) chatScrollToBottom();
   } else if (msg.type === 'chat:done') {
     setActivity(null);
@@ -641,6 +682,7 @@ function handleWsMessage(msg) {
       const content = _streamDelta || '';
       if (content.trim()) {
         streamingMsgEl.innerHTML = formatAssistantMsg(content, msg);
+        _syncAssistantRowVisibility(streamingMsgEl);
       } else {
         _removeChatBubble(streamingMsgEl);
         // Append tool tags and usage to the last assistant bubble
@@ -664,6 +706,7 @@ function handleWsMessage(msg) {
       }
     }
     streamingMsgEl = null;
+    _pruneEmptyAssistantRows();
     setChatBusy(false);
     if (_userWasAtBottom) chatScrollToBottom();
   } else if (msg.type === 'chat:error') {
@@ -691,6 +734,7 @@ function handleWsMessage(msg) {
           continue;
         }
         const role = m.role === 'assistant' ? 'assistant' : 'user';
+        if (role === 'assistant' && !(m.text || '').trim()) continue;
         const el = document.createElement('div');
         el.className = 'chat-msg ' + role;
         if (role === 'assistant') {
@@ -702,7 +746,9 @@ function handleWsMessage(msg) {
           el.textContent = m.text;
         }
         container.appendChild(_wrapChatBubble(el, role));
+        _syncAssistantRowVisibility(el);
       }
+      _pruneEmptyAssistantRows();
       container.scrollTop = container.scrollHeight;
     }
   } else if (msg.type === 'chat:cleared') {
@@ -2338,6 +2384,7 @@ function addChatMessage(role, text, attachments) {
   }
   const wasAtBottom = chatShouldAutoScroll();
   container.appendChild(_wrapChatBubble(el, role));
+  _syncAssistantRowVisibility(el);
   if (wasAtBottom) container.scrollTop = container.scrollHeight;
   return el;
 }

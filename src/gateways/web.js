@@ -181,8 +181,12 @@ function _graphAccessMatches(values, candidates) {
 }
 
 function _projectUserFromIdentityKey(identityKey) {
-  const match = String(identityKey || '').match(/^cwd:([^:]+):/i);
-  return match ? match[1] : null;
+  const s = String(identityKey || '');
+  if (!s.startsWith('cwd:')) return null;
+  const parts = s.slice(4).split(':');
+  if (parts.length < 3) return null;
+  const looksLikeNewWindowsKey = /^[a-z]$/i.test(parts[1]) && /^[\\/]/.test(parts[2] || '');
+  return looksLikeNewWindowsKey ? null : parts[0];
 }
 
 function _webUserFromIdentityKey(identityKey) {
@@ -344,6 +348,16 @@ function _graphIntParam(params, name, fallback, min, max) {
   const raw = Number(rawValue);
   if (!Number.isFinite(raw)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(raw)));
+}
+
+function _graphWantsFullDetails(params) {
+  const raw = String(
+    params?.get?.('details') ??
+    params?.get?.('includeDetails') ??
+    params?.get?.('content') ??
+    ''
+  ).trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'full' || raw === 'details';
 }
 
 function _graphJsonExtra(value) {
@@ -541,6 +555,10 @@ function _graphDedupeAspects(aspects = []) {
 }
 
 function _graphShapeNode(row, details = {}) {
+  const aspects = _graphDedupeAspects(details.aspects || []);
+  const attrCountFromAspects = () => aspects.reduce((sum, aspect) => sum + (Array.isArray(aspect.attributes) ? aspect.attributes.length : 0), 0);
+  const aspectCount = Number(row.aspect_count ?? row.aspectCount ?? details.aspectCount ?? aspects.length) || 0;
+  const attributeCount = Number(row.attribute_count ?? row.attributeCount ?? details.attributeCount ?? attrCountFromAspects()) || 0;
   return {
     id: row.id,
     label: row.label,
@@ -551,7 +569,10 @@ function _graphShapeNode(row, details = {}) {
     created: row.created || null,
     updated: row.updated || null,
     aliases: details.aliases || [],
-    aspects: _graphDedupeAspects(details.aspects || []),
+    aspects,
+    aspectCount,
+    attributeCount,
+    ...(details.detailsLoaded ? { _detailsLoaded: true } : {}),
     extra: _graphJsonExtra(row.extra),
     degree: row.degree_score ?? row.degree ?? undefined,
   };
@@ -659,6 +680,39 @@ function _graphRowsByIds(db, ids) {
   return orderedIds.map(id => byId.get(id)).filter(Boolean);
 }
 
+function _graphContentCountMap(db, ids = null) {
+  const nodeIds = ids ? Array.from(new Set((ids || []).filter(Boolean))) : null;
+  if (nodeIds && !nodeIds.length) return new Map();
+  const where = nodeIds
+    ? `a.node_id IN (${nodeIds.map(() => '?').join(',')})`
+    : `a.node_id IN (SELECT n.id FROM nodes n WHERE ${_graphVisibleNodeWhere('n')})`;
+  const params = nodeIds || GRAPH_INTERNAL_NODE_IDS;
+  const rows = db.prepare(
+    `SELECT
+       a.node_id,
+       COUNT(DISTINCT a.id) AS aspect_count,
+       COUNT(attr.id) AS attribute_count
+     FROM aspects a
+     LEFT JOIN attributes attr ON attr.aspect_id = a.id
+     WHERE ${where}
+     GROUP BY a.node_id`
+  ).all(...params);
+  return new Map(rows.map(row => [row.node_id, {
+    aspectCount: Number(row.aspect_count) || 0,
+    attributeCount: Number(row.attribute_count) || 0,
+  }]));
+}
+
+function _graphRowWithContentCounts(row, countMap) {
+  if (!row) return row;
+  const counts = countMap?.get?.(row.id) || {};
+  return {
+    ...row,
+    aspect_count: counts.aspectCount || 0,
+    attribute_count: counts.attributeCount || 0,
+  };
+}
+
 function _graphCollapseVisualEdges(edges = []) {
   const byKey = new Map();
   for (const edge of edges || []) {
@@ -713,48 +767,59 @@ function _graphEdgesForNodeSet(db, ids, limit) {
 }
 
 function _graphBuildFullPayload(db, meta = {}) {
+  const includeDetails = meta.includeDetails === true;
   let nodes = db.prepare(`SELECT * FROM nodes n WHERE ${_graphVisibleNodeWhere('n')}`).all(...GRAPH_INTERNAL_NODE_IDS);
   let edges = db.prepare(
     `SELECT source, target, type, weight FROM edges
      WHERE source NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})
        AND target NOT IN (${GRAPH_INTERNAL_NODE_IDS.map(() => '?').join(',')})`
   ).all(...GRAPH_INTERNAL_NODE_IDS, ...GRAPH_INTERNAL_NODE_IDS);
-  const aspects = db.prepare('SELECT * FROM aspects').all();
-  const attrs = db.prepare('SELECT * FROM attributes').all();
-  const aliases = db.prepare('SELECT * FROM aliases').all();
-  const visibleIds = new Set(nodes.map(n => n.id));
-  const visibleAspects = aspects.filter(a => visibleIds.has(a.node_id));
-  const visibleAspectIds = new Set(visibleAspects.map(a => a.id));
-  const visibleAttrs = attrs.filter(a => visibleAspectIds.has(a.aspect_id));
-  const visibleAliases = aliases.filter(a => visibleIds.has(a.node_id));
-
-  const attrsByAspect = {};
-  for (const a of visibleAttrs) {
-    (attrsByAspect[a.aspect_id] ||= []).push({
-      id: a.id,
-      content: a.content,
-      importance: a.importance,
-      eventDate: a.event_date || null,
-      source: a.source || null,
-      extracted_with: a.extracted_with || null,
-    });
-  }
+  const visibleIds = nodes.map(n => n.id);
+  const countMap = _graphContentCountMap(db);
+  let visibleAspects = [];
+  let visibleAttrs = [];
+  let visibleAliases = [];
   const aspectsByNode = {};
-  for (const a of visibleAspects) {
-    (aspectsByNode[a.node_id] ||= []).push({
-      id: a.id,
-      name: a.name,
-      weight: a.weight,
-      attributes: attrsByAspect[a.id] || [],
-    });
-  }
   const aliasesByNode = {};
-  for (const a of visibleAliases) (aliasesByNode[a.node_id] ||= []).push(a.alias);
+
+  if (includeDetails && visibleIds.length) {
+    const visibleNodeSubquery = `SELECT n.id FROM nodes n WHERE ${_graphVisibleNodeWhere('n')}`;
+    visibleAspects = db.prepare(`SELECT * FROM aspects WHERE node_id IN (${visibleNodeSubquery})`).all(...GRAPH_INTERNAL_NODE_IDS);
+    visibleAliases = db.prepare(`SELECT * FROM aliases WHERE node_id IN (${visibleNodeSubquery})`).all(...GRAPH_INTERNAL_NODE_IDS);
+    visibleAttrs = db.prepare(
+      `SELECT * FROM attributes
+       WHERE aspect_id IN (
+         SELECT a.id FROM aspects a WHERE a.node_id IN (${visibleNodeSubquery})
+       )`
+    ).all(...GRAPH_INTERNAL_NODE_IDS);
+
+    const attrsByAspect = {};
+    for (const a of visibleAttrs) {
+      (attrsByAspect[a.aspect_id] ||= []).push({
+        id: a.id,
+        content: a.content,
+        importance: a.importance,
+        eventDate: a.event_date || null,
+        source: a.source || null,
+        extracted_with: a.extracted_with || null,
+      });
+    }
+    for (const a of visibleAspects) {
+      (aspectsByNode[a.node_id] ||= []).push({
+        id: a.id,
+        name: a.name,
+        weight: a.weight,
+        attributes: attrsByAspect[a.id] || [],
+      });
+    }
+    for (const a of visibleAliases) (aliasesByNode[a.node_id] ||= []).push(a.alias);
+  }
 
   const layout = _graphBuildVisibleLayout(db);
-  const shapedNodes = nodes.map(n => _graphShapeNode(n, {
+  const shapedNodes = nodes.map(n => _graphShapeNode(_graphRowWithContentCounts(n, countMap), {
     aliases: aliasesByNode[n.id] || [],
     aspects: aspectsByNode[n.id] || [],
+    detailsLoaded: includeDetails,
   }));
   _graphApplySharedLayout(shapedNodes, layout);
   const shapedEdges = _graphCollapseVisualEdges(edges);
@@ -764,12 +829,12 @@ function _graphBuildFullPayload(db, meta = {}) {
     ...(meta.graph ? { graph: meta.graph } : {}),
     nodes: shapedNodes,
     edges: shapedEdges,
-    aspects: visibleAspects,
-    attributes: visibleAttrs,
-    aliases: visibleAliases,
+    ...(includeDetails ? { aspects: visibleAspects, attributes: visibleAttrs, aliases: visibleAliases } : {}),
     meta: {
       ...counts,
       mode: 'full',
+      contentMode: includeDetails ? 'full' : 'lean',
+      detailsLoaded: includeDetails,
       displayedNodeCount: nodes.length,
       displayedEdgeCount: shapedEdges.length,
       representedEdgeCount: counts.edgeCount,
@@ -882,7 +947,8 @@ function _graphBuildTypeSlicePayload(db, type, opts = {}) {
   const edges = _graphEdgesForNodeSet(db, nodeIds, edgeLimit);
   const counts = _graphVisibleCounts(db);
   const layout = _graphBuildVisibleLayout(db);
-  const shapedNodes = rows.map(n => _graphShapeNode(n));
+  const contentCounts = _graphContentCountMap(db, nodeIds);
+  const shapedNodes = rows.map(n => _graphShapeNode(_graphRowWithContentCounts(n, contentCounts)));
   _graphApplySharedLayout(shapedNodes, layout);
   return {
     ...(opts.graph ? { graph: opts.graph } : {}),
@@ -1036,7 +1102,8 @@ function _graphBuildSlicePayload(db, rootId, opts = {}) {
   const edges = _graphEdgesForNodeSet(db, nodeIds, edgeLimit);
   const counts = _graphVisibleCounts(db);
   const layout = _graphBuildVisibleLayout(db);
-  const shapedNodes = nodes.map(n => _graphShapeNode(n));
+  const contentCounts = _graphContentCountMap(db, nodeIds);
+  const shapedNodes = nodes.map(n => _graphShapeNode(_graphRowWithContentCounts(n, contentCounts)));
   _graphApplySharedLayout(shapedNodes, layout);
   return {
     ...(opts.graph ? { graph: opts.graph } : {}),
@@ -1060,6 +1127,7 @@ function _graphBuildSlicePayload(db, rootId, opts = {}) {
 
 function _graphBuildPayload(db, params, meta = {}) {
   const mode = String(params?.get?.('mode') || 'auto').toLowerCase();
+  const includeDetails = _graphWantsFullDetails(params);
   if (mode === 'auto') {
     const counts = _graphVisibleCounts(db);
     const nodeLimit = _graphIntParam(params, 'nodeLimit', GRAPH_WEBGL_NODE_LIMIT, 1000, 500000);
@@ -1078,6 +1146,7 @@ function _graphBuildPayload(db, params, meta = {}) {
     }
     return _graphBuildFullPayload(db, {
       graph: meta.graph,
+      includeDetails,
       extra: { ...extra, renderer: 'svg' },
     });
   }
@@ -1102,7 +1171,7 @@ function _graphBuildPayload(db, params, meta = {}) {
       edgeLimit: _graphIntParam(params, 'edgeLimit', GRAPH_SLICE_EDGE_LIMIT, 25, 4000),
     });
   }
-  return _graphBuildFullPayload(db, { graph: meta.graph });
+  return _graphBuildFullPayload(db, { graph: meta.graph, includeDetails });
 }
 
 function _graphBuildNodeDetails(db, nodeId, meta = {}) {
@@ -1132,10 +1201,15 @@ function _graphBuildNodeDetails(db, nodeId, meta = {}) {
      LIMIT 500`
   ).all(nodeId, nodeId).map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight || 1 })));
   const neighborIds = Array.from(new Set(edges.map(e => e.source === nodeId ? e.target : e.source).filter(id => id && !GRAPH_INTERNAL_NODE_IDS.includes(id)))).slice(0, 500);
-  const neighbors = _graphRowsByIds(db, neighborIds).map(n => _graphShapeNode(n));
+  const neighborCounts = _graphContentCountMap(db, neighborIds);
+  const neighbors = _graphRowsByIds(db, neighborIds).map(n => _graphShapeNode(_graphRowWithContentCounts(n, neighborCounts)));
   return {
     ...(meta.graph ? { graph: meta.graph } : {}),
-    node: _graphShapeNode(node, {
+    node: _graphShapeNode({
+      ...node,
+      aspect_count: aspects.length,
+      attribute_count: attrs.length,
+    }, {
       aliases,
       aspects: aspects.map(a => ({
         id: a.id,
@@ -1143,11 +1217,125 @@ function _graphBuildNodeDetails(db, nodeId, meta = {}) {
         weight: a.weight,
         attributes: attrsByAspect[a.id] || [],
       })),
+      detailsLoaded: true,
     }),
     edges,
     neighbors,
     meta: { mode: 'node', nodeId, neighborCount: neighbors.length, edgeCount: edges.length },
   };
+}
+
+function _graphSearchLikeTerm(query) {
+  return `%${String(query || '').trim().toLowerCase().replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+function _graphSearchPrefixTerm(query) {
+  return `${String(query || '').trim().toLowerCase().replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+function _graphSearchSnippet(text, query, max = 180) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  const q = String(query || '').trim().toLowerCase();
+  const idx = q ? raw.toLowerCase().indexOf(q) : -1;
+  if (idx < 0 || raw.length <= max) return raw.slice(0, max);
+  const start = Math.max(0, idx - 52);
+  const end = Math.min(raw.length, start + max);
+  return `${start > 0 ? '...' : ''}${raw.slice(start, end)}${end < raw.length ? '...' : ''}`;
+}
+
+function _graphSearchNodes(db, query, { limit = 20 } = {}) {
+  const q = String(query || '').trim();
+  if (q.length < 2) return [];
+  const qLower = q.toLowerCase();
+  const like = _graphSearchLikeTerm(q);
+  const prefix = _graphSearchPrefixTerm(q);
+  const max = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
+  const rows = db.prepare(`
+    SELECT n.*,
+           CASE
+             WHEN lower(n.id) = ? OR lower(n.label) = ? THEN 0
+             WHEN lower(n.label) LIKE ? ESCAPE '\\' THEN 1
+             WHEN lower(n.id) LIKE ? ESCAPE '\\' THEN 2
+             WHEN lower(COALESCE(n.type, '')) LIKE ? ESCAPE '\\' THEN 3
+             WHEN lower(COALESCE(n.description, '')) LIKE ? ESCAPE '\\' THEN 4
+             ELSE 5
+           END AS search_rank,
+           (
+             SELECT asp.name
+               FROM aspects asp
+               JOIN attributes a ON a.aspect_id = asp.id
+              WHERE asp.node_id = n.id
+                AND lower(a.content) LIKE ? ESCAPE '\\'
+              ORDER BY a.importance DESC, a.id DESC
+              LIMIT 1
+           ) AS match_aspect,
+           (
+             SELECT a.content
+               FROM aspects asp
+               JOIN attributes a ON a.aspect_id = asp.id
+              WHERE asp.node_id = n.id
+                AND lower(a.content) LIKE ? ESCAPE '\\'
+              ORDER BY a.importance DESC, a.id DESC
+              LIMIT 1
+           ) AS match_attr
+      FROM nodes n
+     WHERE ${_graphVisibleNodeWhere('n')}
+       AND (
+            lower(n.id) = ?
+         OR lower(n.label) = ?
+         OR lower(n.id) LIKE ? ESCAPE '\\'
+         OR lower(n.label) LIKE ? ESCAPE '\\'
+         OR lower(COALESCE(n.type, '')) LIKE ? ESCAPE '\\'
+         OR lower(COALESCE(n.description, '')) LIKE ? ESCAPE '\\'
+         OR EXISTS (
+              SELECT 1
+                FROM aspects asp
+                JOIN attributes a ON a.aspect_id = asp.id
+               WHERE asp.node_id = n.id
+                 AND (
+                      lower(asp.name) LIKE ? ESCAPE '\\'
+                   OR lower(a.content) LIKE ? ESCAPE '\\'
+                 )
+            )
+       )
+     ORDER BY search_rank ASC, COALESCE(n.importance, 5) DESC, datetime(n.updated) DESC, n.id ASC
+     LIMIT ?
+  `).all(
+    qLower, qLower, prefix, prefix, like, like,
+    like, like,
+    ...GRAPH_INTERNAL_NODE_IDS,
+    qLower, qLower, like, like, like, like, like, like,
+    max,
+  );
+
+  return rows.map(row => {
+    const node = _graphShapeNode(row);
+    let matched = 'node';
+    let snippet = '';
+    if (String(row.label || '').toLowerCase().includes(qLower)) {
+      matched = 'label';
+      snippet = _graphSearchSnippet(row.label, q);
+    } else if (String(row.id || '').toLowerCase().includes(qLower)) {
+      matched = 'id';
+      snippet = _graphSearchSnippet(row.id, q);
+    } else if (String(row.type || '').toLowerCase().includes(qLower)) {
+      matched = 'type';
+      snippet = row.type || '';
+    } else if (String(row.description || '').toLowerCase().includes(qLower)) {
+      matched = 'description';
+      snippet = _graphSearchSnippet(row.description, q);
+    } else if (row.match_attr) {
+      matched = row.match_aspect ? `aspect:${row.match_aspect}` : 'attribute';
+      snippet = _graphSearchSnippet(row.match_attr, q);
+    }
+    return {
+      node,
+      matched,
+      snippet,
+      score: Number(row.search_rank) || 0,
+    };
+  });
 }
 
 // ── Provider / model smoke-test helpers ──
@@ -1651,6 +1839,31 @@ class WebGateway {
     return this.tools?._agent?.processMessage(opts);
   }
 
+  _decorateGraphEventForClient(evt = {}) {
+    const out = { ...(evt || {}) };
+    try {
+      const registry = this.tools?._graphRegistry;
+      let graph = out.graph || out.graphSlug || out.slug || null;
+      if (!graph && Array.isArray(out.graphs) && out.graphs.length) {
+        graph = out.graphs.filter(Boolean).map(String).join(', ');
+      }
+      // Only graph-domain events get an active-graph fallback. Transient
+      // agent activity such as tool:call/read_file/exec is session-scoped,
+      // not graph-scoped; labeling it as "default" makes it look like the
+      // default graph is reading files or executing commands.
+      const op = String(out.op || '');
+      const graphDomainEvent = /^(graph|node|edge|aspect|attribute):/.test(op);
+      if (!graph && graphDomainEvent && registry?.getActiveSlug) graph = registry.getActiveSlug();
+      if (graph && !out.graph) out.graph = String(graph);
+      if (out.graph && !out.graphName && registry?.get) {
+        const single = String(out.graph).includes(',') ? null : String(out.graph);
+        const meta = single ? registry.get(single) : null;
+        if (meta?.name) out.graphName = meta.name;
+      }
+    } catch {}
+    return out;
+  }
+
   /**
    * Wire the settings store's reactive subscribers to the WebGateway's
    * caches. Fires on every applyPatch (via transport) and on plugin
@@ -1998,6 +2211,119 @@ class WebGateway {
     return { backup, before, after, graph: registry.get(slug) };
   }
 
+  async _resetCoreGraphsAndPruneExtras() {
+    const registry = this.tools?._graphRegistry;
+    if (!registry) {
+      const fallback = await this._resetGraphToSeeds();
+      return {
+        mode: 'legacy',
+        defaultGraph: fallback,
+        generalGraph: null,
+        prunedGraphs: [],
+        beforeGraphs: [],
+        afterGraphs: [],
+      };
+    }
+
+    const generalSlug = registry.getGeneralKnowledgeSlug?.() || 'spore-knowledge-base';
+    if (!registry.get(generalSlug) && registry.ensureSystemGraph) {
+      registry.ensureSystemGraph({
+        slug: generalSlug,
+        name: 'General Knowledge Base',
+        description: 'Protected reusable knowledge distilled from projects and sessions',
+        role: 'general_kb',
+      });
+    }
+
+    let defaultSlug = registry.get('default') ? 'default' : (registry.getMainSlug?.() || 'default');
+    if (!registry.get(defaultSlug)) {
+      defaultSlug = registry.create('Default', 'Initial knowledge graph', {
+        slug: 'default',
+        role: 'main',
+        source: 'system',
+        createdBy: 'system',
+      });
+    }
+
+    const beforeGraphs = registry.list().map(g => ({
+      slug: g.slug,
+      name: g.name,
+      role: g.role || null,
+      active: !!g.active,
+      nodeCount: g.nodeCount || 0,
+    }));
+
+    if (registry.getActiveSlug?.() !== defaultSlug) {
+      this.tools?.switchGraph?.(defaultSlug);
+      graphEvents.emit('change', { op: 'graph:switched', slug: defaultSlug, source: 'reset-core-graphs' });
+    }
+
+    const defaultGraph = await this._resetGraphToSeeds();
+    const generalGraph = registry.get(generalSlug)
+      ? await this._resetGeneralKnowledgeGraph(generalSlug)
+      : null;
+
+    const learner = this.tools?.learner || this.tools?._agent?.learner || null;
+    const keep = new Set([defaultSlug, generalSlug].filter(Boolean));
+    const prunedGraphs = [];
+    const failedPrunes = [];
+
+    for (const graph of registry.list()) {
+      if (!graph?.slug || keep.has(graph.slug)) continue;
+      try {
+        learner?.closeGraphDb?.(graph.slug);
+        if (registry.getActiveSlug?.() === graph.slug) {
+          this.tools?.switchGraph?.(defaultSlug);
+        }
+        registry.delete(graph.slug, { allowProtected: true });
+        prunedGraphs.push({
+          slug: graph.slug,
+          name: graph.name,
+          role: graph.role || null,
+          nodeCount: graph.nodeCount || 0,
+        });
+        graphEvents.emit('change', { op: 'graph:deleted', slug: graph.slug, graph: graph.slug, source: 'reset-core-graphs' });
+      } catch (e) {
+        failedPrunes.push({
+          slug: graph.slug,
+          name: graph.name,
+          role: graph.role || null,
+          error: e.message,
+        });
+      }
+    }
+
+    try { registry.refreshStats(defaultSlug); } catch {}
+    try { if (registry.get(generalSlug)) registry.refreshStats(generalSlug); } catch {}
+
+    const afterGraphs = registry.list().map(g => ({
+      slug: g.slug,
+      name: g.name,
+      role: g.role || null,
+      active: !!g.active,
+      nodeCount: g.nodeCount || 0,
+    }));
+
+    if (failedPrunes.length) {
+      const err = new Error(`Failed to prune ${failedPrunes.length} graph(s)`);
+      err.details = { failedPrunes, defaultGraph, generalGraph, prunedGraphs, beforeGraphs, afterGraphs };
+      throw err;
+    }
+
+    this.log.warn(`[reset-core-graphs] reset default=${defaultSlug} general=${generalSlug}; pruned=${prunedGraphs.length}; before=${beforeGraphs.length} after=${afterGraphs.length}`);
+    graphEvents.emit('change', { op: 'graph:reset-core', slug: defaultSlug, generalSlug, source: 'reset-core-graphs' });
+    return {
+      mode: 'multi-graph-core',
+      defaultSlug,
+      generalSlug,
+      defaultGraph,
+      generalGraph,
+      prunedGraphs,
+      beforeGraphs,
+      afterGraphs,
+    };
+  }
+
   _readSettingsConfigFile() {
     return this._settingsService.readSettingsConfigFile();
   }
@@ -2308,6 +2634,27 @@ class WebGateway {
     return null;
   }
 
+  _sessionKeyClientMatches(ws, sessionKey, channelId = null) {
+    if (!ws) return false;
+    const keys = new Set();
+    const add = (value) => {
+      if (!value) return;
+      const raw = String(value);
+      keys.add(raw);
+      const channelMatch = raw.match(/^(?:(?:shared|private):)?channel:(.+)$/);
+      if (channelMatch) keys.add(channelMatch[1]);
+    };
+    add(sessionKey);
+    add(channelId);
+    if (channelId) add(`channel:${channelId}`);
+    for (const key of keys) {
+      const clients = this._sessionClients.get(key);
+      if (!clients) continue;
+      for (const entry of clients) if (entry.ws === ws) return true;
+    }
+    return false;
+  }
+
   broadcastBinary(buffer) {
     if (!this._wss) return;
     const WebSocket = require('ws');
@@ -2502,6 +2849,7 @@ class WebGateway {
             usage: result.usage,
             iterations: result.iterations,
             toolUsage: result.toolUsage,
+            responseRepair: result.responseRepair || null,
           });
           this.log.info(`[proactive:web] Delivered proactive message (${(text || '').length} chars)`);
 
@@ -4587,13 +4935,11 @@ class WebGateway {
         }
       }
 
-      // ── Reset graph (creator only, destructive) ──────────────────
-      // Wipes every user-data table in the graph DB and re-applies the
-      // seeded reference nodes from /app/reference-nodes.sql plus every
-      // /app/migrate-ref-*.sql. Designed for "I want to start fresh"
-      // moments — operator changed their mind about the agent, dev
-      // testing, etc. Always backs up the DB first to
-      // <dbPath>.pre-reset.<ts> so the action is recoverable.
+      // ── Reset core graphs (creator only, destructive) ─────────────
+      // Multi-graph reset for "start fresh": keep only the default/main
+      // graph and General Knowledge graph, reset both to seeds, and
+      // delete every project/channel/user/custom graph. Each reset backs
+      // up its DB first so the action is recoverable.
       //
       // Body: { confirm: "RESET" } — typed-string guard so a stray
       // POST can't trash the graph. Returns before/after counts +
@@ -4615,13 +4961,13 @@ class WebGateway {
           return;
         }
         try {
-          const result = await this._resetGraphToSeeds();
+          const result = await this._resetCoreGraphsAndPruneExtras();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (e) {
           this.log.error('[reset-graph] failed:', e?.message);
           res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: e?.message || 'reset failed' }));
+          res.end(JSON.stringify({ error: e?.message || 'reset failed', details: e?.details || null }));
         }
         return;
       }
@@ -5846,22 +6192,12 @@ class WebGateway {
       // graph mutation the agent makes.
       const CLI_FORWARD_OPS = new Set(['recall:start', 'recall:decompose', 'recall:empty', 'recall:fail']);
       const onGraphEvent = (evt) => {
-        if (isCliClient && !CLI_FORWARD_OPS.has(String(evt?.op || ''))) return;
-        const out = { ...(evt || {}) };
-        try {
-          const registry = this.tools?._graphRegistry;
-          let graph = out.graph || out.graphSlug || out.slug || null;
-          if (!graph && Array.isArray(out.graphs) && out.graphs.length) {
-            graph = out.graphs.filter(Boolean).map(String).join(', ');
-          }
-          if (!graph && registry?.getActiveSlug) graph = registry.getActiveSlug();
-          if (graph && !out.graph) out.graph = String(graph);
-          if (out.graph && !out.graphName && registry?.get) {
-            const single = String(out.graph).includes(',') ? null : String(out.graph);
-            const meta = single ? registry.get(single) : null;
-            if (meta?.name) out.graphName = meta.name;
-          }
-        } catch {}
+        if (isCliClient) {
+          const op = String(evt?.op || '');
+          if (!CLI_FORWARD_OPS.has(op)) return;
+          if (!this._sessionKeyClientMatches(ws, evt?.sessionKey, evt?.channelId)) return;
+        }
+        const out = this._decorateGraphEventForClient(evt || {});
         try { ws.send(JSON.stringify({ type: 'graph:event', ...out })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
       };
       graphEvents.on('change', onGraphEvent);
@@ -6581,6 +6917,7 @@ class WebGateway {
               usage: result.usage,
               iterations: result.iterations,
               toolUsage: result.toolUsage,
+              responseRepair: result.responseRepair || null,
             };
             if (isCli) {
               this._sendToSession(sessionId, donePayload);
@@ -7239,6 +7576,67 @@ class WebGateway {
       } catch (e) {
         return jsonRes({ error: e.message }, 400);
       }
+    }
+
+    if (urlPath === '/api/graphs/search' && req.method === 'GET') {
+      const query = new URL(req.url || '', 'http://localhost').searchParams;
+      const q = String(query.get('q') || '').trim();
+      const limit = Math.max(1, Math.min(100, Number(query.get('limit')) || 50));
+      const perGraphLimit = Math.max(1, Math.min(30, Number(query.get('perGraphLimit')) || 12));
+      if (q.length < 2) return jsonRes({ query: q, results: [], graphCount: 0, searchedGraphCount: 0 });
+
+      const { DatabaseSync } = require('node:sqlite');
+      const graphs = registry.list().filter(g => canViewGraph(g));
+      const results = [];
+      let searchedGraphCount = 0;
+      for (const graph of graphs) {
+        let graphDb = null;
+        try {
+          const dbPath = registry.getDbPath?.(graph.slug);
+          if (!dbPath) continue;
+          graphDb = new DatabaseSync(dbPath, { readOnly: true });
+          searchedGraphCount++;
+          const graphMeta = shapeGraph({
+            ...registry.get(graph.slug),
+            active: graph.slug === registry.getActiveSlug?.(),
+            inspectOnly: registry.isActivationLocked?.(graph.slug) || false,
+          });
+          delete graphMeta.dbPath;
+          const hits = _graphSearchNodes(graphDb, q, { limit: perGraphLimit });
+          for (const hit of hits) {
+            results.push({
+              ...hit,
+              graph: {
+                slug: graphMeta.slug,
+                name: graphMeta.name,
+                role: graphMeta.role,
+                active: graphMeta.active === true,
+                inspectOnly: graphMeta.inspectOnly === true,
+                readOnly: graphMeta.readOnly === true,
+                currentScope: graphMeta.currentScope === true,
+                scopedActive: graphMeta.scopedActive === true,
+              },
+            });
+          }
+        } catch (e) {
+          this.log?.debug?.(`[graph-search] ${graph.slug} skipped: ${e.message}`);
+        } finally {
+          try { graphDb?.close(); } catch {}
+        }
+      }
+      results.sort((a, b) =>
+        (a.score - b.score) ||
+        ((b.graph?.active === true) - (a.graph?.active === true)) ||
+        String(a.graph?.name || a.graph?.slug || '').localeCompare(String(b.graph?.name || b.graph?.slug || '')) ||
+        String(a.node?.label || a.node?.id || '').localeCompare(String(b.node?.label || b.node?.id || ''))
+      );
+      return jsonRes({
+        query: q,
+        results: results.slice(0, limit),
+        graphCount: graphs.length,
+        searchedGraphCount,
+        limit,
+      });
     }
 
     const match = urlPath.match(/^\/api\/graphs\/([a-z0-9-]+)(\/(.+))?$/);

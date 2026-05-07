@@ -567,6 +567,7 @@ window.addEventListener('resize', () => {
   const canvasEl = document.getElementById('canvas');
   if (!canvasEl || typeof ResizeObserver === 'undefined') return;
   let prevWidth = canvasEl.clientWidth;
+  let prevHeight = canvasEl.clientHeight;
   let pending = false;
   const ro = new ResizeObserver(() => {
     if (pending) return;
@@ -574,9 +575,13 @@ window.addEventListener('resize', () => {
     requestAnimationFrame(() => {
       pending = false;
       const newWidth = canvasEl.clientWidth;
+      const newHeight = canvasEl.clientHeight;
       const delta = newWidth - prevWidth;
+      const deltaHeight = newHeight - prevHeight;
       prevWidth = newWidth;
-      if (Math.abs(delta) < 1) return;
+      prevHeight = newHeight;
+      if (Math.abs(delta) < 1 && Math.abs(deltaHeight) < 1) return;
+      if (typeof window._webglHandleContainerResize === 'function' && window._webglHandleContainerResize(delta, deltaHeight)) return;
       if (typeof svg === 'undefined' || !svg || !zoom) return;
       const t = d3.zoomTransform(svg.node());
       const next = d3.zoomIdentity.translate(t.x + delta / 2, t.y).scale(t.k);
@@ -1468,14 +1473,150 @@ document.getElementById('filter-type').onchange = (e) => {
   if (typeof window._applyGraphFilters === 'function') window._applyGraphFilters();
 };
 
+const _graphSearchState = {
+  timer: null,
+  seq: 0,
+  lastQuery: '',
+};
+
+function _graphSearchEsc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function _ensureGraphSearchResultsEl() {
+  let el = document.getElementById('graph-search-results');
+  if (el) return el;
+  const wrap = document.getElementById('search');
+  if (!wrap) return null;
+  el = document.createElement('div');
+  el.id = 'graph-search-results';
+  el.setAttribute('role', 'listbox');
+  el.setAttribute('aria-label', 'Graph search results');
+  wrap.appendChild(el);
+  el.addEventListener('mousedown', (event) => {
+    const item = event.target.closest?.('[data-graph-search-result]');
+    if (!item) return;
+    event.preventDefault();
+    const graph = item.getAttribute('data-graph') || '';
+    const node = item.getAttribute('data-node') || '';
+    if (graph && node) _openGraphSearchResult(graph, node);
+  });
+  return el;
+}
+
+function _hideGraphSearchResults() {
+  const el = document.getElementById('graph-search-results');
+  if (el) {
+    el.classList.remove('open');
+    el.innerHTML = '';
+  }
+}
+
+function _renderGraphSearchResults(payload, query) {
+  const el = _ensureGraphSearchResultsEl();
+  if (!el) return;
+  const results = Array.isArray(payload?.results) ? payload.results : [];
+  if (!query || query.length < 2) {
+    _hideGraphSearchResults();
+    return;
+  }
+  const countText = `${results.length} result${results.length === 1 ? '' : 's'} across ${payload?.searchedGraphCount || payload?.graphCount || 0} graph${(payload?.searchedGraphCount || payload?.graphCount || 0) === 1 ? '' : 's'}`;
+  let html = `<div class="gsr-head">${_graphSearchEsc(countText)}</div>`;
+  if (!results.length) {
+    html += '<div class="gsr-empty">No matching nodes across graphs</div>';
+  } else {
+    html += results.map((hit) => {
+      const node = hit.node || {};
+      const graph = hit.graph || {};
+      const graphLabel = graph.name || graph.slug || 'graph';
+      const role = graph.role ? ` / ${graph.role}` : '';
+      const active = graph.active ? ' / active' : '';
+      const match = hit.matched ? ` / ${hit.matched}` : '';
+      const snippet = hit.snippet || node.description || '';
+      return `
+        <button type="button" class="gsr-item" data-graph-search-result data-graph="${_graphSearchEsc(graph.slug || '')}" data-node="${_graphSearchEsc(node.id || '')}">
+          <span class="gsr-title">${_graphSearchEsc(node.label || node.id || '(node)')}</span>
+          <span class="gsr-meta">${_graphSearchEsc(graphLabel + role + active + match)}</span>
+          ${snippet ? `<span class="gsr-snippet">${_graphSearchEsc(snippet)}</span>` : ''}
+        </button>
+      `;
+    }).join('');
+  }
+  el.innerHTML = html;
+  el.classList.add('open');
+}
+
+async function _runGraphSearch(query) {
+  const q = String(query || '').trim();
+  const seq = ++_graphSearchState.seq;
+  _graphSearchState.lastQuery = q;
+  if (q.length < 2) {
+    _hideGraphSearchResults();
+    return;
+  }
+  try {
+    const res = await fetch(API + `/api/graphs/search?q=${encodeURIComponent(q)}&limit=40&perGraphLimit=12`);
+    const payload = await res.json().catch(() => ({}));
+    if (seq !== _graphSearchState.seq || q !== _graphSearchState.lastQuery) return;
+    if (!res.ok || payload.error) throw new Error(payload.error || 'Search failed');
+    _renderGraphSearchResults(payload, q);
+  } catch (e) {
+    const el = _ensureGraphSearchResultsEl();
+    if (el) {
+      el.innerHTML = `<div class="gsr-empty">Search failed: ${_graphSearchEsc(e.message || e)}</div>`;
+      el.classList.add('open');
+    }
+  }
+}
+
+async function _openGraphSearchResult(graphSlug, nodeId) {
+  try {
+    _hideGraphSearchResults();
+    const data = await fetchGraph({ slug: graphSlug, mode: 'slice', root: nodeId, preserveViewed: false });
+    if (data.error) throw new Error(data.error);
+    await _swapGraphWithFade(() => {
+      if (typeof renderGraphPayload === 'function') renderGraphPayload(data);
+      else initGraph(data);
+    });
+    const node = (graphData?.nodes || []).find(n => n.id === nodeId);
+    if (node && typeof selectNode === 'function') {
+      selectNode(node);
+      if (typeof _focusGraphOnNode === 'function' && data?.meta?.mode === 'slice') {
+        _focusGraphOnNode(nodeId, { fitAnimate: true });
+      }
+    }
+    if (typeof loadGraphsList === 'function') loadGraphsList();
+    toast(`Opened ${node?.label || nodeId}`);
+  } catch (e) {
+    toast('Open search result failed: ' + (e.message || e), true);
+  }
+}
+
 document.getElementById('search-input').oninput = (e) => {
   // Funnel through the unified filter state — search composes with the
   // type-filter and timeline-filter, and the marquee-selection
   // visibility check skips dimmed nodes for all three.
+  const rawQuery = e.target.value || '';
   window._graphFilterState = window._graphFilterState || { typeFilter: '', timeMin: null, timeMax: null, searchQuery: '' };
-  window._graphFilterState.searchQuery = (e.target.value || '').toLowerCase();
+  window._graphFilterState.searchQuery = rawQuery.toLowerCase();
   if (typeof window._applyGraphFilters === 'function') window._applyGraphFilters();
+  clearTimeout(_graphSearchState.timer);
+  _graphSearchState.timer = setTimeout(() => _runGraphSearch(rawQuery), 180);
 };
+
+document.getElementById('search-input')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') _hideGraphSearchResults();
+});
+
+document.addEventListener('mousedown', (event) => {
+  const wrap = document.getElementById('search');
+  if (wrap && !wrap.contains(event.target)) _hideGraphSearchResults();
+});
 
 // ── Resizable Panels ──
 function initResize(handleId, targetId, side) {

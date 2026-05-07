@@ -4,6 +4,7 @@
 // ── Auth check & login ──
 let _authenticated = false;
 let _userRole = null;
+let _currentUserGraphSlug = null;
 
 let _currentUserName = 'Operator';
 async function checkAuthState() {
@@ -12,6 +13,7 @@ async function checkAuthState() {
     const data = await r.json();
     if (data.role) _userRole = data.role;
     if (data.username) _currentUserName = data.username;
+    _currentUserGraphSlug = data.userGraphSlug || null;
     const authed = (data.authenticated && (data.role === 'admin' || data.role === 'creator' || data.role === 'webapp'))
       || (!data.needsAuth && !data.hasWebappUsers);
     if (authed && !data.role && !data.needsAuth) _userRole = 'admin';
@@ -31,6 +33,7 @@ function showApp() {
   // Pull the user's chosen displayName so the agent can address them properly.
   _loadCurrentUserProfile();
   if (typeof initApp === 'function') initApp();
+  if (typeof maybeStartFirstRunTour === 'function') maybeStartFirstRunTour();
   // Mode-selector pill needs a re-measure now that the canvas is visible.
   // Use a double rAF so layout settles before measuring.
   if (typeof window._updateViewModePill === 'function') {
@@ -70,7 +73,13 @@ let _appBooted = false;
 function initApp() {
   if (_appBooted) return;
   _appBooted = true;
-  fetchGraph().then(data => initGraph(data)).catch(e => {
+  const graphLoad = (_userRole === 'webapp' && _currentUserGraphSlug)
+    ? fetchGraph({ slug: _currentUserGraphSlug, mode: 'auto', preserveViewed: false })
+    : fetchGraph();
+  graphLoad.then(data => {
+    if (typeof renderGraphPayload === 'function') renderGraphPayload(data);
+    else initGraph(data);
+  }).catch(e => {
     document.getElementById('stats').textContent = 'Failed to load graph: ' + e.message;
   });
   connectWs();
@@ -91,5 +100,3 @@ function initApp() {
   syncRpButtons();
   if (typeof _syncUtilBar === 'function') _syncUtilBar();
 }
-
-

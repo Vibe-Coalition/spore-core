@@ -161,7 +161,7 @@ Available tools:
 | `graph_query` / `graph_update` / `graph_delete` | Direct knowledge graph manipulation |
 | `message_send` | Cross-platform messaging |
 | `env_manage` | Environment variable access (redacted — writes to temp file) |
-| `remote_exec` / `remote_read_file` / `remote_write_file` | SSH operations via sidecar |
+| `remote_exec` / `remote_read_file` / `remote_write_file` | SSH operations via SSHManager; sidecar-backed when `ssh-sidecar` is active |
 | `ssh_tunnel` | SSH port forwarding |
 | `save_tool` | Create persistent custom tools |
 | `skill_lookup` / `skill_update` | Skill system for reusable knowledge |
@@ -196,6 +196,6 @@ The `Maintainer` runs on a heartbeat timer (default: every 2 hours, first run 30
 
 **Why dynamic prompts from a graph?** Static system prompts can't grow. The graph lets the agent accumulate knowledge over months of conversation and surface only what's relevant per-turn, staying within context window limits.
 
-**Why a sidecar for SSH?** Process isolation. Even if an attacker gets RCE in the main container, they can't extract SSH private keys — those only exist decrypted in the sidecar's memory, and the sidecar has no network access to exfiltrate them.
+**Why a sidecar for SSH?** Process isolation for saved-host credentials, interactive SSH sessions, remote exec, and SFTP. If the optional `ssh-sidecar` plugin and socket are active, raw decrypted saved-host keys live in the sidecar process instead of the main container. The sidecar also supports credential profiles so plugins can share a generated key across related hosts without reading it back. The sidecar has no inbound ports and should be constrained with host allowlists/firewall policy because it needs outbound network access to open SSH connections.
 
 **Why CommonJS?** Pragmatic choice. The codebase predates widespread ESM adoption in the Node ecosystem, and several dependencies (`discord.js`, `node:sqlite`) work fine with `require()`. No build step means less tooling to maintain.

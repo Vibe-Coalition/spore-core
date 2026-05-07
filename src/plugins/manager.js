@@ -8,6 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { DatabaseSync } = require('node:sqlite');
 const { PluginAPI } = require('./api');
 
 const VALID_KINDS = new Set([
@@ -16,6 +17,7 @@ const VALID_KINDS = new Set([
   'gateway',
   'worker-hook',
   'middleware',
+  'system',
 ]);
 
 class PluginManager {
@@ -307,6 +309,71 @@ class PluginManager {
     )`);
   }
 
+  _getGraphRegistry() {
+    return this._appContext?.tools?._graphRegistry || this._appContext?.graph?._graphRegistry || null;
+  }
+
+  _activeGraphDbPath() {
+    return this._appContext?.config?.graphDbPath
+      || this._appContext?.graph?.config?.graphDbPath
+      || this._getGraphRegistry()?.getActiveDbPath?.()
+      || null;
+  }
+
+  _openGraphDb(dbPath) {
+    if (!dbPath) return null;
+    const activeDb = this._appContext?.graph?.db || null;
+    const activePath = this._activeGraphDbPath();
+    if (activeDb && activePath && path.resolve(activePath) === path.resolve(dbPath)) {
+      return { db: activeDb, close: () => {}, owned: false };
+    }
+
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode=WAL');
+    db.exec('PRAGMA busy_timeout=5000');
+    db.exec('PRAGMA foreign_keys=ON');
+    return { db, close: () => { try { db.close(); } catch {} }, owned: true };
+  }
+
+  _openReferenceGraphDb() {
+    const registry = this._getGraphRegistry();
+    if (!registry?.getGeneralKnowledgeSlug || !registry?.getDbPath) {
+      const db = this._appContext?.graph?.db;
+      if (!db) return null;
+      return {
+        db,
+        close: () => {},
+        slug: this._appContext?.graph?._graphRegistry?.getActiveSlug?.() || 'active',
+        dbPath: this._activeGraphDbPath(),
+        isGeneralKnowledge: false,
+      };
+    }
+
+    const slug = registry.getGeneralKnowledgeSlug();
+    const dbPath = registry.getDbPath(slug);
+    if (!slug || !dbPath || !fs.existsSync(dbPath)) {
+      this.log.warn(`[plugins] General Knowledge graph unavailable — skipping plugin reference-node installs${slug ? ` (${slug})` : ''}`);
+      return null;
+    }
+
+    const handle = this._openGraphDb(dbPath);
+    if (!handle?.db) return null;
+    return {
+      ...handle,
+      slug,
+      dbPath,
+      isGeneralKnowledge: true,
+    };
+  }
+
+  _tableExists(db, name) {
+    try {
+      return !!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Resolve the on-disk path for the disabled-plugins ledger.
    *
@@ -477,51 +544,114 @@ class PluginManager {
    * against stale rows.
    */
   _runReferenceNodeInstalls() {
-    const graph = this._appContext?.graph;
-    const db = graph?.db;
+    const handle = this._openReferenceGraphDb();
+    const db = handle?.db;
     if (!db) {
-      this.log.debug('[plugins] No graph DB available — skipping reference-node installs');
+      this.log.debug('[plugins] No reference graph DB available — skipping reference-node installs');
       return;
     }
 
-    this._ensurePluginInstallsTable(db);
+    const installedOrCurrent = new Map();
+    try {
+      this._ensurePluginInstallsTable(db);
 
-    for (const [id, plugin] of this.plugins) {
-      const api = plugin.instance;
-      if (!api) continue;
-      const refs = api.getReferenceNodes();
-      if (!refs) continue;
+      for (const [id, plugin] of this.plugins) {
+        const api = plugin.instance;
+        if (!api) continue;
+        const refs = api.getReferenceNodes();
+        if (!refs) continue;
 
-      try {
-        const existing = db.prepare(
-          'SELECT schema_version FROM plugin_installs WHERE plugin_id = ?'
-        ).get(id);
-
-        if (existing && existing.schema_version >= refs.schemaVersion) {
-          this.log.debug(`[plugins] ${id} ref nodes already at v${existing.schema_version}`);
-          continue;
-        }
-
-        if (existing && existing.schema_version < refs.schemaVersion) {
-          this.log.info(`[plugins] ${id} ref nodes upgrading v${existing.schema_version} → v${refs.schemaVersion}`);
-          this._executeUninstallFor(id, api, db);
-        }
-
-        const sql = this._substituteTokens(this._resolveSqlSource(api, refs.install), id);
-        db.exec('BEGIN');
         try {
-          db.exec(sql);
-          db.prepare(
-            'INSERT OR REPLACE INTO plugin_installs (plugin_id, schema_version, installed_at, manifest_version) VALUES (?, ?, CURRENT_TIMESTAMP, ?)'
-          ).run(id, refs.schemaVersion, plugin.manifest.version || null);
-          db.exec('COMMIT');
-          this.log.info(`[plugins] Installed ref nodes for ${id} (v${refs.schemaVersion})`);
+          const existing = db.prepare(
+            'SELECT schema_version FROM plugin_installs WHERE plugin_id = ?'
+          ).get(id);
+
+          if (existing && existing.schema_version >= refs.schemaVersion) {
+            this.log.debug(`[plugins] ${id} ref nodes already at v${existing.schema_version} in ${handle.slug || 'reference graph'}`);
+            installedOrCurrent.set(id, api);
+            continue;
+          }
+
+          if (existing && existing.schema_version < refs.schemaVersion) {
+            this.log.info(`[plugins] ${id} ref nodes upgrading v${existing.schema_version} → v${refs.schemaVersion} in ${handle.slug || 'reference graph'}`);
+            this._executeUninstallFor(id, api, db);
+          }
+
+          const sql = this._substituteTokens(this._resolveSqlSource(api, refs.install), id);
+          db.exec('BEGIN');
+          try {
+            db.exec(sql);
+            db.prepare(
+              'INSERT OR REPLACE INTO plugin_installs (plugin_id, schema_version, installed_at, manifest_version) VALUES (?, ?, CURRENT_TIMESTAMP, ?)'
+            ).run(id, refs.schemaVersion, plugin.manifest.version || null);
+            db.exec('COMMIT');
+            installedOrCurrent.set(id, api);
+            this.log.info(`[plugins] Installed ref nodes for ${id} (v${refs.schemaVersion}) in ${handle.slug || 'reference graph'}`);
+          } catch (e) {
+            db.exec('ROLLBACK');
+            throw e;
+          }
         } catch (e) {
-          db.exec('ROLLBACK');
-          throw e;
+          this.log.error(`[plugins] Failed to install ref nodes for ${id}: ${e.message}`);
+        }
+      }
+    } finally {
+      handle.close?.();
+    }
+
+    if (handle.isGeneralKnowledge && installedOrCurrent.size > 0) {
+      this._cleanupReferenceNodeInstallsOutsideGeneral(handle.slug, installedOrCurrent);
+    }
+  }
+
+  _cleanupReferenceNodeInstallsOutsideGeneral(generalSlug, installedOrCurrent) {
+    const registry = this._getGraphRegistry();
+    if (!registry?.list || !generalSlug || !installedOrCurrent?.size) return;
+
+    for (const graph of registry.list()) {
+      if (!graph?.slug || graph.slug === generalSlug) continue;
+      const dbPath = graph.dbPath || registry.getDbPath?.(graph.slug);
+      if (!dbPath || !fs.existsSync(dbPath)) continue;
+
+      const resolved = path.resolve(dbPath);
+      const handle = this._openGraphDb(dbPath);
+      const db = handle?.db;
+      if (!db) continue;
+
+      let cleaned = 0;
+      try {
+        const hasInstallTable = this._tableExists(db, 'plugin_installs');
+        for (const [pluginId, api] of Array.from(installedOrCurrent).reverse()) {
+          let hasMarker = false;
+          if (hasInstallTable) {
+            try {
+              hasMarker = !!db.prepare('SELECT plugin_id FROM plugin_installs WHERE plugin_id = ?').get(pluginId);
+            } catch {}
+          }
+          let hasOwnedRows = false;
+          if (!hasMarker) {
+            try {
+              hasOwnedRows = !!db.prepare(`
+                SELECT 1 FROM nodes WHERE extracted_with = ?
+                UNION ALL SELECT 1 FROM aspects WHERE extracted_with = ?
+                UNION ALL SELECT 1 FROM attributes WHERE extracted_with = ?
+                UNION ALL SELECT 1 FROM edges WHERE extracted_with = ?
+                LIMIT 1
+              `).get(pluginId, pluginId, pluginId, pluginId);
+            } catch {}
+          }
+          if (!hasMarker && !hasOwnedRows) continue;
+          this._executeUninstallFor(pluginId, api, db);
+          cleaned++;
         }
       } catch (e) {
-        this.log.error(`[plugins] Failed to install ref nodes for ${id}: ${e.message}`);
+        this.log.warn(`[plugins] Reference-node cleanup failed for ${graph.slug || resolved}: ${e.message}`);
+      } finally {
+        handle.close?.();
+      }
+
+      if (cleaned > 0) {
+        this.log.info(`[plugins] Removed ${cleaned} plugin reference bundle(s) from ${graph.slug || resolved}; General Knowledge owns them now`);
       }
     }
   }
@@ -532,6 +662,7 @@ class PluginManager {
    */
   _executeUninstallFor(pluginId, api, db) {
     const refs = api?.getReferenceNodes?.();
+    this._ensurePluginInstallsTable(db);
     db.exec('BEGIN');
     try {
       if (refs && refs.uninstall) {
@@ -1315,15 +1446,30 @@ class PluginManager {
       }
     }
 
-    const db = this._appContext?.graph?.db;
+    const refHandle = this._openReferenceGraphDb();
+    let cleanupOutsideGeneralSlug = null;
+    const db = refHandle?.db;
     if (db && api?.getReferenceNodes?.()) {
-      removed.refNodes = db.prepare(
-        'SELECT COUNT(*) as c FROM nodes WHERE extracted_with = ?'
-      ).get(pluginId)?.c || 0;
-      this._executeUninstallFor(pluginId, api, db);
+      try {
+        removed.refNodes = db.prepare(
+          'SELECT COUNT(*) as c FROM nodes WHERE extracted_with = ?'
+        ).get(pluginId)?.c || 0;
+        this._executeUninstallFor(pluginId, api, db);
+        if (refHandle.isGeneralKnowledge) cleanupOutsideGeneralSlug = refHandle.slug;
+      } finally {
+        refHandle.close?.();
+      }
     } else if (db) {
       // No registered ref bundle, but plugin may still have left rows behind.
-      this._runAutoUninstall(db, pluginId);
+      try {
+        this._runAutoUninstall(db, pluginId);
+      } finally {
+        refHandle.close?.();
+      }
+    }
+
+    if (cleanupOutsideGeneralSlug && api?.getReferenceNodes?.()) {
+      this._cleanupReferenceNodeInstallsOutsideGeneral(cleanupOutsideGeneralSlug, new Map([[pluginId, api]]));
     }
 
     // Persist the uninstall — without this entry, the plugin's folder

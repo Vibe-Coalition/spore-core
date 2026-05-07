@@ -6,6 +6,68 @@
   let currentView = 'graph';
   let selectedListId = null;
 
+  function _dedupeAspectsForDisplay(aspects = []) {
+    if (typeof window.dedupeNodeAspects === 'function') return window.dedupeNodeAspects(aspects);
+    const out = [];
+    const byName = new Map();
+    const keyOf = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const attrKeyOf = attr => keyOf(typeof attr === 'string' ? attr : attr?.content);
+    for (const aspect of aspects || []) {
+      const key = keyOf(aspect?.name);
+      if (!key) continue;
+      let merged = byName.get(key);
+      if (!merged) {
+        merged = { ...aspect, attributes: [], duplicateCount: 0 };
+        byName.set(key, merged);
+        out.push(merged);
+      } else {
+        merged.weight = Math.max(Number(merged.weight) || 5, Number(aspect.weight) || 5);
+      }
+      merged.duplicateCount++;
+      const seen = merged._seenAttrs || (merged._seenAttrs = new Set());
+      for (const attr of aspect?.attributes || []) {
+        const attrKey = attrKeyOf(attr);
+        if (!attrKey || seen.has(attrKey)) continue;
+        seen.add(attrKey);
+        merged.attributes.push(attr);
+      }
+    }
+    for (const aspect of out) delete aspect._seenAttrs;
+    return out;
+  }
+
+  function _altViewEdges(data = graphData) {
+    const nodes = data?.nodes || [];
+    const rawEdges = (Array.isArray(data?.edges) && data.edges.length)
+      ? data.edges
+      : (Array.isArray(data?.webglEdges) ? data.webglEdges : []);
+    const out = [];
+    for (const edge of rawEdges) {
+      if (Array.isArray(edge)) {
+        const sourceNode = nodes[edge[0] >>> 0];
+        const targetNode = nodes[edge[1] >>> 0];
+        if (!sourceNode?.id || !targetNode?.id) continue;
+        out.push({
+          source: sourceNode.id,
+          target: targetNode.id,
+          type: edge[3] || 'linked',
+          weight: Number(edge[2]) || 1,
+        });
+        continue;
+      }
+      const source = edge?.source?.id || edge?.source;
+      const target = edge?.target?.id || edge?.target;
+      if (!source || !target) continue;
+      out.push({
+        source,
+        target,
+        type: edge?.type || 'linked',
+        weight: Number(edge?.weight) || 1,
+      });
+    }
+    return out;
+  }
+
   function _updateViewModePill() {
     const bar = document.getElementById('view-mode-bar');
     if (!bar) return;
@@ -134,6 +196,47 @@
       el.classList.toggle('active', el.__nodeId === id);
     });
     renderNodeDetail(id);
+    const node = (graphData?.nodes || []).find(n => n.id === id);
+    if (node && !node._detailsLoaded && typeof _loadNodeDetails === 'function') {
+      _loadNodeDetails(id);
+    }
+  }
+
+  function _listDetailEdgeGroups(edges, direction) {
+    const byType = new Map();
+    for (const edge of edges || []) {
+      const type = String(edge?.type || 'linked').trim() || 'linked';
+      let group = byType.get(type);
+      if (!group) {
+        group = { type, direction, count: 0, peers: [], seenPeers: new Set() };
+        byType.set(type, group);
+      }
+      const peerId = direction === 'out'
+        ? (edge.target?.id || edge.target)
+        : (edge.source?.id || edge.source);
+      group.count += 1;
+      if (peerId && !group.seenPeers.has(peerId)) {
+        group.seenPeers.add(peerId);
+        const peerNode = (graphData.nodes || []).find(n => n.id === peerId);
+        group.peers.push({ id: peerId, label: peerNode?.label || peerId });
+      }
+    }
+    return Array.from(byType.values())
+      .sort((a, b) => (b.count - a.count) || a.type.localeCompare(b.type));
+  }
+
+  function _listDetailEdgeGroupHtml(group) {
+    const shown = group.peers.slice(0, 5);
+    const peerHtml = shown.map(peer =>
+      `<span class="vld-edge-target" data-target="${esc(peer.id)}">${esc(peer.label)}</span>`
+    ).join('<span style="color:var(--text-dim);opacity:.55">, </span>');
+    const overflow = group.peers.length > shown.length
+      ? `<span style="color:var(--text-dim);opacity:.7"> +${group.peers.length - shown.length} more</span>`
+      : '';
+    return `
+      <span class="vld-edge-direction">${group.direction === 'out' ? '→' : '←'}</span>
+      <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${peerHtml}${overflow || (!shown.length ? '<span style="color:var(--text-dim)">(none)</span>' : '')}</span>
+      <span class="vld-edge-type">${esc(group.type)}${group.count > 1 ? ` ×${group.count}` : ''}</span>`;
   }
 
   function renderNodeDetail(id) {
@@ -145,9 +248,11 @@
     if (!card) return;
     card.classList.add('active');
 
-    const incoming = (graphData.edges || []).filter(e => (e.target?.id || e.target) === id);
-    const outgoing = (graphData.edges || []).filter(e => (e.source?.id || e.source) === id);
-    const aspects = node.aspects || [];
+    const detailEdges = _altViewEdges();
+    const incoming = detailEdges.filter(e => e.target === id);
+    const outgoing = detailEdges.filter(e => e.source === id);
+    const aspects = _dedupeAspectsForDisplay(node.aspects || []);
+    const detailsLoading = !node._detailsLoaded;
 
     let aspectsHtml = '';
     for (const asp of aspects) {
@@ -158,16 +263,13 @@
       aspectsHtml += `<div class="vld-aspect"><div class="vld-aspect-name">${esc(asp.name)} <span style="opacity:.5">·${asp.weight || 5}</span></div>${attrsHtml || '<div class="vld-attr" style="opacity:.5">(no attributes)</div>'}</div>`;
     }
 
+    const edgeGroups = [
+      ..._listDetailEdgeGroups(outgoing, 'out'),
+      ..._listDetailEdgeGroups(incoming, 'in'),
+    ];
     let edgesHtml = '<div class="vld-edges-list">';
-    for (const e of outgoing) {
-      const tid = e.target?.id || e.target;
-      const tn = (graphData.nodes || []).find(n => n.id === tid);
-      edgesHtml += `<span class="vld-edge-direction">→</span><span class="vld-edge-target" data-target="${esc(tid)}">${esc(tn?.label || tid)}</span><span class="vld-edge-type">${esc(e.type)}</span>`;
-    }
-    for (const e of incoming) {
-      const sid = e.source?.id || e.source;
-      const sn = (graphData.nodes || []).find(n => n.id === sid);
-      edgesHtml += `<span class="vld-edge-direction">←</span><span class="vld-edge-target" data-target="${esc(sid)}">${esc(sn?.label || sid)}</span><span class="vld-edge-type">${esc(e.type)}</span>`;
+    for (const group of edgeGroups) {
+      edgesHtml += _listDetailEdgeGroupHtml(group);
     }
     edgesHtml += '</div>';
 
@@ -178,7 +280,8 @@
         <span style="opacity:.5;font-size:.7rem;font-family:var(--font-body)">imp ${node.importance || 0} · ${node.mentions || 0} mentions</span>
       </div>
       ${node.description ? `<div class="vld-section"><div class="vld-section-title">description</div><div class="vld-desc">${esc(node.description)}</div></div>` : ''}
-      ${aspects.length ? `<div class="vld-section"><div class="vld-section-title">aspects</div>${aspectsHtml}</div>` : ''}
+      ${detailsLoading ? `<div class="vld-section"><div class="vld-section-title">aspects</div><div class="vld-attr" style="opacity:.65">Loading node details...</div></div>` : ''}
+      ${!detailsLoading && aspects.length ? `<div class="vld-section"><div class="vld-section-title">aspects</div>${aspectsHtml}</div>` : ''}
       ${(incoming.length + outgoing.length) ? `<div class="vld-section"><div class="vld-section-title">connections (${incoming.length + outgoing.length})</div>${edgesHtml}</div>` : ''}
       <div class="vld-section"><div class="vld-section-title">neighborhood</div><div class="vld-mini" id="vld-mini"></div></div>
     `;
@@ -192,19 +295,19 @@
     const container = document.getElementById('vld-mini');
     if (!container) return;
     const nodes = graphData?.nodes || [];
-    const edges = graphData?.edges || [];
+    const edges = _altViewEdges();
     const center = nodes.find(n => n.id === centerId);
     if (!center) return;
     const neighborIds = new Set([centerId]);
     for (const e of edges) {
-      const s = e.source?.id || e.source;
-      const t = e.target?.id || e.target;
+      const s = e.source;
+      const t = e.target;
       if (s === centerId) neighborIds.add(t);
       if (t === centerId) neighborIds.add(s);
     }
     const subNodes = nodes.filter(n => neighborIds.has(n.id)).map(n => ({...n, x: undefined, y: undefined, vx: 0, vy: 0}));
     const subEdges = edges.filter(e => {
-      const s = e.source?.id || e.source, t = e.target?.id || e.target;
+      const s = e.source, t = e.target;
       return neighborIds.has(s) && neighborIds.has(t);
     }).map(e => ({source: e.source?.id || e.source, target: e.target?.id || e.target, type: e.type}));
 
@@ -250,6 +353,44 @@
   // Search state shared across the type-map view + drilldown window.
   let _tmSearch = '';
   let _tmNodeSelRef = null; // last-rendered bubble selection (for re-highlighting)
+  const TM_MAX_DOTS_PER_TYPE = 240;
+
+  function _tmBubbleRadius(count) {
+    const n = Math.max(1, Number(count) || 1);
+    // The old power scale made 10k+ type buckets physically enormous.
+    // Keep the map compact and let the inner dots/count label carry density.
+    return Math.round(Math.max(34, Math.min(132, 30 + Math.log1p(n) * 7 + Math.sqrt(n) * 0.18)));
+  }
+
+  function _tmDotPackScale(type) {
+    const shape = getNodeVisual(type).shape;
+    if (shape === 'circle' || shape === 'rosette') return 0.74;
+    if (shape === 'rounded-square' || shape === 'square' || shape === 'octagon') return 0.62;
+    if (shape === 'hexagon' || shape === 'shield') return 0.54;
+    if (shape === 'pill') return 0.46;
+    return 0.42; // triangle, diamond, pentagon: stay inside the central body.
+  }
+
+  function _tmDotSample(items, maxDots = TM_MAX_DOTS_PER_TYPE) {
+    if (!items || items.length <= maxDots) return items || [];
+    const ordered = items.slice().sort((a, b) =>
+      (b.importance || 0) - (a.importance || 0)
+      || (b.mentions || 0) - (a.mentions || 0)
+      || String(a.id).localeCompare(String(b.id))
+    );
+    const keep = new Map();
+    const priority = Math.min(48, Math.floor(maxDots * 0.25));
+    for (const n of ordered.slice(0, priority)) keep.set(n.id, n);
+    const byId = items.slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const remaining = maxDots - keep.size;
+    if (remaining > 0) {
+      for (let i = 0; i < remaining; i++) {
+        const idx = Math.floor((i * Math.max(1, byId.length - 1)) / Math.max(1, remaining - 1));
+        keep.set(byId[idx].id, byId[idx]);
+      }
+    }
+    return [...keep.values()].slice(0, maxDots);
+  }
 
   function tmSearchMatchSet() {
     const q = _tmSearch.trim().toLowerCase();
@@ -287,12 +428,12 @@
             .text(`${cnt} match${cnt === 1 ? '' : 'es'}`);
         }
       }
-      // Update the inner dots: highlight matching ones
+      // Update the inner dots: highlight sampled matching ones. The badge
+      // remains authoritative for total matches in very large type buckets.
       sel.selectAll('.tm-bubble-dot').classed('tm-dot-match', false);
       if (matches) {
-        const items = (graphData?.nodes || []).filter(n => (n.type || 'unknown') === d.type);
-        sel.selectAll('.tm-bubble-dot').each(function(_, i) {
-          const node = items[i];
+        sel.selectAll('.tm-bubble-dot').each(function(dotDatum) {
+          const node = dotDatum?.data?.node || dotDatum?.node || null;
           if (node && matches.has(node.id)) this.classList.add('tm-dot-match');
         });
       }
@@ -313,21 +454,29 @@
     svgEl.setAttribute('viewBox', `0 0 ${w} ${h}`);
 
     const nodes = graphData?.nodes || [];
-    const edges = graphData?.edges || [];
+    const edges = _altViewEdges();
     const counts = new Map();
-    for (const n of nodes) counts.set(n.type || 'unknown', (counts.get(n.type || 'unknown') || 0) + 1);
+    const metaTypeCounts = Array.isArray(graphData?.meta?.typeCounts) ? graphData.meta.typeCounts : [];
+    if (metaTypeCounts.length) {
+      for (const row of metaTypeCounts) {
+        counts.set(row.type || 'unknown', Number(row.count || 0));
+      }
+    } else {
+      for (const n of nodes) counts.set(n.type || 'unknown', (counts.get(n.type || 'unknown') || 0) + 1);
+    }
 
     // Bubble radius: log-scaled so big types don't dwarf small ones.
     // Bigger overall so packed dots inside are legible.
     const typeNodes = [...counts.entries()].map(([type, n]) => ({
       id: type, type, count: n,
-      r: Math.round(22 + Math.pow(n, 0.6) * 10),
+      r: _tmBubbleRadius(n),
     }));
 
     const edgeMap = new Map();
+    const nodesById = new Map(nodes.map(n => [n.id, n]));
     for (const e of edges) {
-      const s = nodes.find(n => n.id === (e.source?.id || e.source));
-      const t = nodes.find(n => n.id === (e.target?.id || e.target));
+      const s = nodesById.get(e.source);
+      const t = nodesById.get(e.target);
       if (!s || !t || s.type === t.type) continue;
       const key = s.type < t.type ? s.type + '|' + t.type : t.type + '|' + s.type;
       edgeMap.set(key, (edgeMap.get(key) || 0) + 1);
@@ -349,6 +498,13 @@
     root.append('rect').attr('class', 'tm-bg-rect')
       .attr('x', -10000).attr('y', -10000).attr('width', 30000).attr('height', 30000)
       .attr('fill', 'url(#tm-dot-grid)');
+    if (graphData?.meta?.truncated) {
+      svgSel.append('text')
+        .attr('class', 'tm-sample-note')
+        .attr('x', 16)
+        .attr('y', h - 16)
+        .text(`sampled overview: ${nodes.length.toLocaleString()} loaded of ${Number(graphData.meta.nodeCount || nodes.length).toLocaleString()}`);
+    }
 
     const linkG = root.append('g').attr('class', 'tm-edges-layer');
     const nodeG = root.append('g').attr('class', 'tm-bubbles-layer');
@@ -390,26 +546,32 @@
     // Pack the actual nodes as small dots inside the bubble — visualizes count.
     nodeSel.each(function(d) {
       const sel = d3.select(this);
-      const innerR = Math.max(2, d.r - 5);
       const items = nodes.filter(n => (n.type || 'unknown') === d.type);
       if (!items.length) return;
+      const dotItems = _tmDotSample(items);
+      const innerR = Math.max(3, (d.r - 8) * _tmDotPackScale(d.type));
       if (items.length === 1) {
         sel.append('circle').attr('class', 'tm-bubble-dot')
-          .attr('r', Math.min(innerR * 0.55, 5))
+          .datum({ node: items[0] })
+          .attr('r', Math.min(innerR * 0.35, 5))
           .attr('fill', getColor(d.type))
           .attr('fill-opacity', 0.85);
         return;
       }
-      // d3.pack inside a circle of radius innerR.
+      // d3.pack inside a conservative shape-safe circle. Large buckets render
+      // a representative sample so dots remain distinct instead of becoming an
+      // overlapping ink blob.
       // Use sqrt(importance) for a tiny visual weight bias.
-      const childData = items.map(n => ({ value: 1 + Math.sqrt(n.importance || 0) * 0.4 }));
+      const childData = dotItems.map(n => ({ node: n, value: 1 + Math.sqrt(n.importance || 0) * 0.4 }));
       const packRoot = d3.hierarchy({ children: childData }).sum(c => c.value);
       d3.pack().size([innerR * 2, innerR * 2]).padding(1.2)(packRoot);
-      const dotG = sel.append('g').attr('class', 'tm-dots').attr('transform', `translate(${-innerR},${-innerR})`);
+      const dotG = sel.append('g')
+        .attr('class', 'tm-dots')
+        .attr('transform', `translate(${-innerR},${-innerR})`);
       dotG.selectAll('circle').data(packRoot.leaves()).join('circle')
         .attr('class', 'tm-bubble-dot')
         .attr('cx', n => n.x).attr('cy', n => n.y)
-        .attr('r', n => Math.max(1, Math.min(n.r * 0.92, 6)))
+        .attr('r', n => Math.max(0.45, Math.min(n.r * 0.84, items.length > 500 ? 2.8 : 5)))
         .attr('fill', getColor(d.type))
         .attr('fill-opacity', 0.78);
     });
@@ -543,10 +705,10 @@
       ...n, x: undefined, y: undefined, vx: 0, vy: 0,
       radius: 6 + Math.min(n.importance || 5, 10),
     }));
-    const subEdges = (graphData?.edges || []).filter(e => {
-      const s = e.source?.id || e.source, t = e.target?.id || e.target;
+    const subEdges = _altViewEdges().filter(e => {
+      const s = e.source, t = e.target;
       return ids.has(s) && ids.has(t);
-    }).map(e => ({source: e.source?.id || e.source, target: e.target?.id || e.target, type: e.type}));
+    }).map(e => ({source: e.source, target: e.target, type: e.type}));
 
     // Pre-seed in a phyllotaxis spread so layout starts well
     const cx = w / 2, cy = h / 2;
@@ -703,9 +865,9 @@
 
     // Build edge index once for fast per-card rendering
     const outs = new Map(), ins = new Map();
-    for (const e of (data.edges || [])) {
-      const s = e.source?.id || e.source;
-      const t = e.target?.id || e.target;
+    for (const e of _altViewEdges(data)) {
+      const s = e.source;
+      const t = e.target;
       if (!outs.has(s)) outs.set(s, []);
       outs.get(s).push({ peerId: t, edgeType: e.type });
       if (!ins.has(t)) ins.set(t, []);
@@ -713,12 +875,9 @@
     }
 
     const projectsById = new Map(projects.map(n => [n.id, n]));
-    // Only show people who have at least one project-type relation
-    const people = allPeople.filter(p => {
-      for (const r of (outs.get(p.id) || [])) if (projectsById.has(r.peerId)) return true;
-      for (const r of (ins.get(p.id)  || [])) if (projectsById.has(r.peerId)) return true;
-      return false;
-    }).sort((a,b) => (b.importance||0) - (a.importance||0) || String(a.id).localeCompare(b.id));
+    const people = allPeople
+      .slice()
+      .sort((a,b) => (b.importance||0) - (a.importance||0) || String(a.id).localeCompare(b.id));
     const peopleById = new Map(people.map(n => [n.id, n]));
 
     const peopleGrid = document.getElementById('vw-people-grid');
@@ -762,7 +921,7 @@
     const desc = node.description ? `<div class="vw-desc">${esc(node.description)}</div>` : '';
 
     // Top 3 aspects by weight, each with up to 3 attributes
-    const aspects = (node.aspects || [])
+    const aspects = _dedupeAspectsForDisplay(node.aspects || [])
       .slice()
       .sort((a,b) => (b.weight||0) - (a.weight||0))
       .slice(0, 3);
@@ -803,7 +962,7 @@
 
     // Build a search haystack so filter is instant and complete
     const haystackParts = [node.id, node.label, node.description || '', node.type];
-    for (const a of (node.aspects || [])) {
+    for (const a of _dedupeAspectsForDisplay(node.aspects || [])) {
       haystackParts.push(a.name || '');
       for (const at of (a.attributes || [])) haystackParts.push(at.content || '');
     }

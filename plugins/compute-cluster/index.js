@@ -1,16 +1,15 @@
-// compute-cluster plugin — SLURM cluster integration over SSH (and
-// usually over a tailnet, though the plugin itself doesn't depend on
-// the tailscale plugin being installed).
+// compute-cluster plugin — SLURM cluster integration over Tailscale
+// and SSH sidecar-managed credentials.
 //
 // Routes:
 //   GET  /api/cluster/settings          — current cluster config
 //   POST /api/cluster/settings          — save cluster config
 //   POST /api/cluster/hosts             — replace additional clusters list
 //   POST /api/cluster/test-ssh          — try SSH'ing to the configured login host
-//   GET  /api/cluster/ssh-key           — current key + public + fingerprint
-//   POST /api/cluster/ssh-key           — paste a private key
-//   POST /api/cluster/ssh-key/generate  — mint a fresh ed25519 key
-//   DELETE /api/cluster/ssh-key         — remove the key
+//   GET  /api/cluster/ssh-key           — current sidecar credential public metadata
+//   POST /api/cluster/ssh-key           — import a private key into ssh-sidecar
+//   POST /api/cluster/ssh-key/generate  — mint a fresh ed25519 key inside ssh-sidecar
+//   DELETE /api/cluster/ssh-key         — remove the sidecar credential profile
 //
 // Path-aliased: /api/cluster/* rewrites to /api/plugins/compute-cluster/*
 // via registerPathAlias so the existing UI keeps working.
@@ -23,7 +22,7 @@ module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
     uninstall: './sql/uninstall.sql',
-    schemaVersion: 1,
+    schemaVersion: 2,
   });
 
   api.registerPathAlias('cluster', { notFoundCode: 'CLUSTER_ROUTE_NOT_FOUND' });
@@ -42,7 +41,7 @@ module.exports = function register(api) {
   // populates it on the spore-plugin-panes-rendered event.
   api.registerSettingsPane({
     title: 'Compute Cluster',
-    description: 'SLURM cluster access over SSH (typically over a tailnet).',
+    description: 'SLURM cluster access over Tailscale using SSH credentials stored by the SSH sidecar.',
     html: '<div data-plugin-mount="compute-cluster">Loading…</div>',
   });
   api.registerFrontendAsset('cluster-settings.js');

@@ -104,6 +104,60 @@ test('WebGateway broadcasts channel:cli session keys to cli-prefixed session cli
   assert.deepEqual(sent, [{ type: 'ask_user', qid: 'q1' }]);
 });
 
+test('WebGateway does not treat non-web shared dm/channel keys as web sessions', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const gateway = new WebGateway(tools);
+  const sent = [];
+  const webWs = {
+    readyState: 1,
+    _user: '123',
+    send(data) { sent.push(JSON.parse(data)); },
+  };
+  const channelWs = {
+    readyState: 1,
+    send(data) { sent.push(JSON.parse(data)); },
+  };
+  gateway._wss = { clients: new Set([webWs]) };
+  gateway._sessionClients.set('123', new Set([{ ws: channelWs, role: 'origin' }]));
+
+  assert.equal(gateway._broadcastToSessionKey('shared:dm:telegram:123', { type: 'leak' }), 0);
+  assert.equal(gateway._broadcastToSessionKey('shared:channel:telegram:123', { type: 'leak' }), 0);
+  assert.deepEqual(sent, []);
+
+  assert.equal(gateway._broadcastToSessionKey('shared:dm:web:123', { type: 'ok' }), 1);
+  assert.deepEqual(sent, [{ type: 'ok' }]);
+});
+
+test('WebGateway matches CLI graph events only to their registered session', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const gateway = new WebGateway(tools);
+  const cliWs = { readyState: 1, _role: 'cli', _user: 'yam', send() {} };
+  gateway._sessionClients.set('cli:yam@project-a', new Set([{ ws: cliWs, role: 'origin' }]));
+
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'channel:cli:yam@project-a'), true);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, null, 'cli:yam@project-a'), true);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'channel:cli:yam@project-b'), false);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'dm:yam'), false);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, null, null), false);
+});
+
+test('WebGateway does not label unscoped tool activity as the active graph', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  tools._graphRegistry = {
+    getActiveSlug: () => 'default',
+    get: slug => ({ slug, name: slug === 'default' ? 'Default' : slug }),
+  };
+  const gateway = new WebGateway(tools);
+
+  const toolEvent = gateway._decorateGraphEventForClient({ op: 'tool:call', tool: 'exec', source: 'agent' });
+  assert.equal(toolEvent.graph, undefined);
+  assert.equal(toolEvent.graphName, undefined);
+
+  const nodeEvent = gateway._decorateGraphEventForClient({ op: 'node:update', nodeId: 'n1', source: 'editor' });
+  assert.equal(nodeEvent.graph, 'default');
+  assert.equal(nodeEvent.graphName, 'Default');
+});
+
 test('web_serve gateway creation wires ask_user broadcaster', () => {
   const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
   const result = tools._webServeTool({ action: 'status' });
@@ -160,6 +214,30 @@ test('subagent events for cli do not fall back to web dm routes', () => {
   assert.equal(globalBroadcasts, 0);
   assert.equal(calls.includes('dm:yam'), false);
   assert.equal(calls.includes('shared:dm:cli:yam'), false);
+});
+
+test('subagent events for channel routes do not fall back to web dm or global broadcast', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const calls = [];
+  let globalBroadcasts = 0;
+  tools._wsBroadcast = (sessionKey) => {
+    calls.push(sessionKey);
+    return 0;
+  };
+  tools.broadcast = () => { globalBroadcasts++; };
+
+  const delivered = tools._broadcastTaskEvent({
+    taskId: 'task_telegram',
+    sessionKey: 'shared:dm:telegram:123',
+    channelId: 'telegram:123',
+    platform: 'telegram',
+    userId: '123',
+  }, { type: 'subagent:done', taskId: 'task_telegram' });
+
+  assert.equal(delivered, 0);
+  assert.equal(globalBroadcasts, 0);
+  assert.equal(calls.includes('dm:123'), false);
+  assert.equal(calls.includes('shared:dm:web:123'), false);
 });
 
 test('subagent delivery for cli preserves project session key', () => {
