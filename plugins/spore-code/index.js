@@ -31,6 +31,7 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const { coreRequire, modelForTier } = require('../core-require');
 const { projectIdentityFromContext } = coreRequire('graph/scopes');
@@ -125,7 +126,26 @@ function requestIp(req) {
 
 function isLocalRequest(req) {
   const addr = String(req?.socket?.remoteAddress || '');
-  return !addr || addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+  return !addr || isPrivateOrLocalAddress(addr);
+}
+
+function isPrivateOrLocalAddress(addr) {
+  let ip = String(addr || '').trim().toLowerCase();
+  if (!ip) return true;
+  if (ip.startsWith('::ffff:')) ip = ip.slice('::ffff:'.length);
+  if (ip === 'localhost' || ip === '127.0.0.1' || ip === '::1') return true;
+  if (net.isIP(ip) === 4) {
+    const parts = ip.split('.').map(n => Number(n));
+    return parts[0] === 10
+      || parts[0] === 127
+      || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+      || (parts[0] === 192 && parts[1] === 168)
+      || (parts[0] === 169 && parts[1] === 254);
+  }
+  if (net.isIP(ip) === 6) {
+    return ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80:');
+  }
+  return false;
 }
 
 function isSecureRequest(req) {
@@ -317,7 +337,7 @@ function issueCliToken(api, res, username, authKind, opts = {}) {
 async function handleAuth(api, req, res) {
   if (!insecureAuthAllowed(req)) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
     return;
   }
   let body = '';
@@ -384,7 +404,7 @@ async function handleAuth(api, req, res) {
 async function handleDeviceSession(api, req, res) {
   if (!insecureAuthAllowed(req)) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
     return;
   }
   const token = bearerToken(req);
@@ -400,7 +420,7 @@ async function handleDeviceSession(api, req, res) {
 async function handleLogout(api, req, res) {
   if (!insecureAuthAllowed(req)) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
     return;
   }
   const token = bearerToken(req);

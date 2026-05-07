@@ -41,9 +41,10 @@ function makeApi(dataDir, host = {}) {
   };
 }
 
-function makeReq(body, headers = {}) {
+function makeReq(body, headers = {}, socket = null) {
   const req = Readable.from([JSON.stringify(body || {})]);
   req.headers = headers;
+  if (socket) req.socket = socket;
   return req;
 }
 
@@ -120,6 +121,29 @@ test('spore-code password auth reports credentials errors, not invite key errors
 
     assert.equal(res.statusCode, 401);
     assert.equal(JSON.parse(res.body).error, 'Invalid credentials');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('spore-code auth allows private LAN HTTP but rejects public HTTP', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
+  try {
+    const { api } = makeApi(dataDir, { inviteKey: 'invite-key' });
+
+    const lanRes = makeRes();
+    await sporeCode._test.handleAuth(api, makeReq({
+      username: 'cli-user',
+      key: 'invite-key',
+    }, {}, { remoteAddress: '192.168.1.45' }), lanRes);
+    assert.equal(lanRes.statusCode, 200);
+
+    const publicRes = makeRes();
+    await sporeCode._test.handleAuth(api, makeReq({
+      username: 'cli-user',
+      key: 'invite-key',
+    }, {}, { remoteAddress: '203.0.113.10' }), publicRes);
+    assert.equal(publicRes.statusCode, 403);
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
