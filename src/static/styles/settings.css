@@ -987,8 +987,7 @@
   }
   .ml-card-meta span { white-space: nowrap; }
   .ml-card-actions {
-    display: flex; gap: 6px; justify-content: flex-end;
-    flex-wrap: wrap;
+    display: block; text-align: right;
     margin-top: 2px; padding-top: 8px;
     border-top: 1px solid var(--border-subtle);
   }
