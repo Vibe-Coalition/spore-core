@@ -1,168 +1,99 @@
 # For AI Coding Assistants
 
-If you are an AI agent (Cursor, Copilot, Claude Code, Windsurf, etc.) helping a user install or configure Anima, read this first. It will prevent you from making incorrect assumptions.
+This repository is Spore Core, the server/runtime for a persistent AI agent. It
+is not just a web app: it owns graph memory, websocket sessions, channel
+gateways, plugins, tools, workers, model routing, and deployment packaging.
 
-## What Anima Is
+## First Principles
 
-Anima is a **visual agentic system** — autonomous AI agents with persistent knowledge graph memory. Each agent has its own identity, SQLite knowledge graph (visualized in a live web canvas), conversation history, and multi-platform presence (Discord, Telegram, Slack, web UI).
+- Read the relevant code before changing behavior. Many features are routed
+  through plugins or lifecycle hooks rather than obvious top-level files.
+- Do not use stale `*.bak*` files as source of truth.
+- Do not treat `spores/` runtime data as source code. It contains local
+  instances, databases, generated data, and operator state.
+- Prefer focused tests over broad guesses. The test suite has targeted coverage
+  for auth, queueing, scoped memory, plugins, browser routing, settings, and
+  Spore Code.
+- Never hard-code private paths, hostnames, usernames, tokens, or local runtime
+  assumptions into docs or source.
 
-## Critical Facts (Read These Before Doing Anything)
+## High-Value Source Files
 
-### No API Key Is Required By Default
+- `src/app.js`: boot sequence and component wiring.
+- `src/gateways/web.js`: web UI, HTTP API, websocket sessions, auth, graph API.
+- `src/tools/tools.js` and `src/tools/builtin-registry.js`: built-in tool
+  catalog and implementations.
+- `src/agent/loop.js`: agent loop, prompt assembly, tool execution, learning
+  kickoff, compaction, interjection.
+- `src/graph/multi.js` and `src/graph/scopes.js`: multi-graph registry and
+  memory scope resolution.
+- `src/settings/defs.core.js`: canonical core settings and env vars.
+- `src/plugins/manager.js` and `src/plugins/api.js`: plugin lifecycle and API.
+- `plugins/*/spore.plugin.json`: bundled plugin metadata.
 
-Anima does **NOT** require an Anthropic API key. It does not default to Anthropic. The installer guides the user through a **provider setup wizard** in the Manager UI where they choose their provider. Supported options include:
+## Memory Scoping Rules
 
-- Anthropic (Claude)
-- OpenAI
-- Google Gemini
-- OpenRouter
-- Together AI
-- Groq
-- Any OpenAI-compatible endpoint (local or remote)
+Spore has multiple graph types:
 
-Do **not** tell the user they need an Anthropic key. Do **not** assume Claude is the default model. The user picks their provider and model during first-time setup in the Manager UI.
+- `default` is the main graph.
+- `spore-knowledge-base` is the protected shared reusable knowledge graph.
+- `project-*` graphs are for Spore Code project memory.
+- `channel-*` graphs are for channel/person memory.
+- `user-*` graphs are for webapp user memory.
 
-### The Install Script Handles Everything
+When changing recall, learning, distillation, proactive thoughts, plugins, or
+session routing, verify the graph target. The expected pattern is:
 
-The correct way to install is:
+- Code sessions write project memory and read project plus General Knowledge.
+- Channel sessions write channel/person memory and read channel plus General
+  Knowledge.
+- Plugin reference nodes install into General Knowledge.
+- Reusable distilled lessons can move to General Knowledge; scoped details stay
+  scoped.
 
-```bash
-git clone https://github.com/Klace/Anima-AI.git && cd Anima-AI
-chmod +x install.sh new-agent.sh setup-manager.sh setup-traefik.sh configure-anima.sh
-./install.sh
-```
+## Tool Catalog Boundaries
 
-That's it. The script:
-1. Auto-detects the environment (macOS, Linux, WSL, server)
-2. Installs Docker/Node.js if missing
-3. Sets up Traefik as the reverse proxy
-4. Builds and starts the Manager UI
-5. Waits for everything to be ready
-6. Opens the Manager URL in the browser
+Tool availability is context-sensitive. CLI/Spore Code sessions must not see
+tools that belong to web-only surfaces, global webapp sessions, or server-only
+operator workflows. Plan mode also hides mutating execution tools.
 
-The user then configures their provider and creates their first agent through the Manager web UI. **Do not try to manually create .env files, write docker-compose configs, or configure providers via the command line.** The Manager UI handles all of this.
+Check `getToolDefinitions`, `TOOLS_EXCLUDED_FROM_CLI`, plugin `available`
+callbacks, and tests under `tests/tools/` when editing tool exposure.
 
-### Install Modes
-
-| Flag | Effect |
-|------|--------|
-| *(none)* | Default Docker install with Traefik. Auto-detects local vs server. |
-| `--quick` | Minimal prompts, sensible defaults. |
-| `--bare` | No Docker — runs directly with Node.js. Simplest for testing. |
-
-`--bare --quick` is the fastest path for trying it out. No containers, no compose, just Node.js.
-
-### Ports (Local Install)
-
-| Service | Default Port | Notes |
-|---------|-------------|-------|
-| Traefik (HTTP) | **18000** | NOT 80. Port 80 is only used when a domain is configured. |
-| Manager (direct) | 18900 | Usually accessed through Traefik at `http://localhost:18000/manager/` |
-| Agent web UI | via Traefik | Accessed at `http://localhost:18000/animas/<agent-id>/` |
-| Traefik dashboard | 8080 | `http://localhost:8080` (bound to 127.0.0.1) |
-
-**Traefik defaults to port 18000 for local installs to avoid conflicts with other services.** Only VPS installs with a configured domain use port 80/443.
-
-### Agent Creation
-
-Agents are created through the **Manager UI**, not the command line. After install:
-
-1. Open `http://localhost:18000/manager/` (or the URL shown by the installer)
-2. Log in with the credentials shown at the end of install
-3. The welcome screen guides you to set up a default AI provider
-4. Then create your first agent through the wizard
-
-You can also use `./new-agent.sh` from the command line, but the Manager UI is the recommended path.
-
-### Running install.sh From a Script or AI Agent
-
-If you are running `install.sh` from a non-interactive context (piped stdin, background process, etc.), the script **automatically enables `--quick` mode** when it detects stdin is not a terminal. This skips all interactive prompts and uses sensible defaults (auto-generated credentials, default ports, no domain).
-
-On a headless server without `--quick`, the script will prompt for a domain and Let's Encrypt email. If you're just testing locally on a server, use `--quick` to skip those prompts:
+## Common Test Commands
 
 ```bash
-./install.sh --quick
+node --test tests/tools/ask-user.test.js
+node --test tests/graph/scoped-memory.test.js
+node --test tests/runtime/job-queue.test.js
+node --test tests/plugins/channel-routing.test.js
+node --test tests/settings/registry.test.js
+node --check src/gateways/web.js
+git diff --check
 ```
 
-### What NOT To Do
+Use the smallest relevant set first. Add or update focused tests when changing a
+boundary or public behavior.
 
-- **Do not create .env files manually** — the Manager generates these
-- **Do not assume Anthropic/Claude** — the user picks their provider
-- **Do not write docker-compose.yml files** — generated by the installer and Manager
-- **Do not manually configure Traefik** — handled by `setup-traefik.sh`
-- **Do not set `ANIMA_INGRESS_*` env vars on agents** — ingress is centralized in `animas/.ingress.json`
-- **Do not use port 80 for local installs** — Traefik uses 18000 locally
-- **Do not pipe install.sh through `tee` or redirect stdin** — if you must capture output, use `./install.sh --quick 2>&1 | tee log.txt` (quick mode avoids hanging on prompts)
+## Documentation Work
 
-### Architecture Summary
+When updating docs, use the current codebase as the source of truth. In
+particular:
 
-```
-Traefik (:18000 local, :80/:443 with domain)
-  ├── /manager/          → Manager UI (fleet dashboard, provider config, agent creation)
-  ├── /animas/<agent>/   → Agent web UI (knowledge graph, chat, terminal, files)
-  └── /animas/<agent>/   → Agent API endpoints
-```
+- Plugin lists come from `plugins/*/spore.plugin.json`.
+- Settings come from `src/settings/defs.core.js` plus plugin settings.
+- API paths come from `src/gateways/web.js` and plugin route registration.
+- Tool lists come from `src/tools/builtin-registry.js` and plugin tool
+  registrations.
+- Behavior claims should be backed by tests or source inspection.
 
-Each agent runs as a Docker container (or bare Node.js process in `--bare` mode) with:
-- SQLite knowledge graph (`graph.db`) with FTS5 + optional vector embeddings
-- Background workers: Learner (extracts facts from conversations) and Maintainer (graph health)
-- Multi-platform gateways: Discord, Telegram, Slack, Web
-- Tool system: shell, file I/O, web search/fetch, SSH, sub-agent delegation
-- Voice pipeline: Deepgram STT + ElevenLabs/OpenAI/Edge TTS
+## What Not To Do
 
-### Configuration After Install
-
-All configuration is done through the Manager UI at `/manager/`:
-
-- **Settings → AI Providers**: API keys, default model, tier models (casual/normal/planner/subagent)
-- **Settings → Ingress**: Domain configuration, HTTPS/Let's Encrypt
-- **Providers page**: Custom OpenAI-compatible endpoints
-- **Vault page**: Secure key storage for external APIs
-- **Per-agent settings**: Personality, platform tokens, permissions
-
-### Custom Providers
-
-To use a local LLM or non-standard API, add it as a custom provider in the Manager UI (Providers page). The provider name becomes a model prefix:
-
-```
-Provider name: together    → Model: together/meta-llama/Llama-4-Maverick-17B-128E
-Provider name: groq        → Model: groq/llama-4-scout-17b-16e
-Provider name: local       → Model: local/my-model
-```
-
-Alternatively, set via environment variables:
-```
-ANIMA_PROVIDER_TOGETHER_URL=https://api.together.xyz/v1
-ANIMA_PROVIDER_TOGETHER_KEY=your-key
-```
-
-### File Structure
-
-```
-install.sh          Entry point — run this
-setup-traefik.sh    Traefik reverse proxy setup (called by install.sh)
-setup-manager.sh    Manager UI setup (called by install.sh)
-new-agent.sh        Create additional agents
-configure-anima.sh  Reconfigure an existing agent
-manager/            Manager UI (Node.js server + static frontend)
-src/                Agent runtime (Node.js application)
-animas/             Per-agent data directories (gitignored)
-docs/               Extended documentation
-```
-
-### Coexistence With Other Services
-
-Anima uses non-standard ports by default (18000, 18900, 18800) to avoid conflicts. If the user has other services:
-- Check for port conflicts on 18000 (Traefik HTTP) and 18900 (Manager direct)
-- Telegram bot tokens can only be held by one process at a time — stop other bots first
-- Discord bot tokens similarly require exclusive access
-
-### Bare Mode Specifics
-
-In `--bare` mode (no Docker):
-- Everything runs as native Node.js processes
-- Requires Node.js 22+ (uses built-in `node:sqlite`)
-- Manager runs as a background process (logs in `manager/manager.log`)
-- Watcher daemon manages agent lifecycle (logs in `watcher.log`)
-- No Traefik — Manager is accessed directly at `http://localhost:18900`
-- Agents are accessed directly at `http://localhost:<web-port>`
+- Do not reset, prune, delete, or migrate live data unless the user explicitly
+  asks for that operation.
+- Do not restart or hotpatch containers for docs-only work.
+- Do not install plugins or dependencies just to inspect manifests.
+- Do not add broad prompt text to hide capabilities that should be removed from
+  the actual tool catalog.
+- Do not rely on model reasoning to enforce privacy or graph isolation when code
+  can enforce it.

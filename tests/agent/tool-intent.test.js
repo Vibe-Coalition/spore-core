@@ -78,6 +78,18 @@ test('tool intent detector does not force a tool for generic chat', () => {
   assert.equal(agent._detectForcedToolNameForIntent('hello there', { platform: 'web' }), null);
 });
 
+test('tool intent detector ignores background worker prompts', () => {
+  const agent = makeAgent(['ask_user', 'graph_query']);
+
+  assert.equal(
+    agent._detectForcedToolNameForIntent('Research ask_user Tool and record findings with graph_query.', {
+      platform: 'system',
+      trigger: 'worker',
+    }),
+    null,
+  );
+});
+
 test('retry intent inherits the previous explicit tool request', () => {
   const agent = makeAgent(['browser', 'graph_query']);
 
@@ -227,6 +239,9 @@ test('runtime contract adds a non-droppable cli plan-mode guard', () => {
   assert.match(contract, /QUESTIONS:/);
   assert.match(contract, /PLAN_READY/);
   assert.match(contract, /Do NOT call `exec`/);
+  assert.match(contract, /Evidence discipline/);
+  assert.match(contract, /stale context/);
+  assert.match(contract, /Ask the user when uncertainty is about intent/);
   assert.match(contract, /final verification claims must be command-derived/);
   assert.match(contract, /focused tests/);
 });

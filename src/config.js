@@ -13,6 +13,7 @@
  */
 
 const fs = require('fs');
+const { createLogger } = require('./observability/logger');
 const path = require('path');
 
 // Resolve dataDir at module-load time (before functions are called)
@@ -1064,32 +1065,6 @@ function _settingsValuesEqual(type, a, b) {
 
 function resetConfigCache() {
   _configCache = null;
-}
-
-// Logger utility
-function createLogger(level = 'info') {
-  const levels = { debug: 0, info: 1, warn: 2, error: 3 };
-  const threshold = levels[level] ?? 1;
-  const ring = [];
-  const RING_MAX = 2000;
-
-  const log = (lvl, ...args) => {
-    if ((levels[lvl] ?? 1) >= threshold) {
-      const ts = new Date().toISOString().substring(11, 19);
-      const line = `[${ts}] [${lvl}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`;
-      console[lvl === 'debug' ? 'log' : lvl](`[${ts}] [${lvl}]`, ...args);
-      ring.push(line);
-      if (ring.length > RING_MAX) ring.splice(0, ring.length - RING_MAX);
-    }
-  };
-
-  return {
-    debug: (...args) => log('debug', ...args),
-    info: (...args) => log('info', ...args),
-    warn: (...args) => log('warn', ...args),
-    error: (...args) => log('error', ...args),
-    _ring: ring,
-  };
 }
 
 module.exports = { loadConfig, loadConfigFresh, resetConfigCache, createLogger };

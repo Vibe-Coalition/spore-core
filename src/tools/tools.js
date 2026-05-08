@@ -74,17 +74,18 @@ const CLI_NEW_LOCAL_TOOL_NAMES = new Set([
 // catalog reclaims ~1800 tokens per prompt and prevents the agent from
 // reaching for tools it can't usefully invoke (web_serve is refused locally
 // by the Go binary; spore_*/spore_message target the multi-agent mesh;
-// remote_*/ssh_tunnel are server-side SSH flows; webapp_request acts as a
-// web-panel browser session and is not a CLI capability; message_* are
-// Discord/Telegram surfaces distinct from the cli TUI; env_manage /
+// remote_*/ssh_tunnel are server-side SSH flows; webapp_request and browser
+// are web-panel/browser surfaces and not Spore Code capabilities; message_*
+// are Discord/Telegram surfaces distinct from the cli TUI; env_manage /
 // startup_tasks / data_poller / list_custom_tools are SPORE-server admin).
-// Keep useful server-side capabilities such as browser, graph_*, query_about,
+// Keep useful server-side capabilities such as graph_*, query_about,
 // delegate_task, web_search, web_fetch, ask_user, sleep, skill_*, plus
 // plugin-contributed project tools — those can route through SPORE while local
 // file tools route through the CLI.
 const TOOLS_EXCLUDED_FROM_CLI = new Set([
   'web_serve',
   'webapp_request',
+  'browser',
   'message_send', 'message_react', 'message_edit', 'message_read',
   'env_manage', 'settings_read',
   'analyze_media', 'analyze_image', 'analyze_video', 'analyze_audio',
@@ -1229,8 +1230,17 @@ class ToolSystem {
     const projectMode = projectContext?.mode
       || _execContext.getStore()?.projectContext?.mode
       || this._currentProjectContext?.mode;
+    const trigger = opts.trigger
+      || _execContext.getStore()?.trigger
+      || this._currentTrigger
+      || null;
+    const modalAskUserCapable = platform === 'web' || platform === 'cli';
+    const backgroundTrigger = ['worker', 'maintenance', 'background', 'task_complete', 'model-test'].includes(String(trigger || '').toLowerCase());
+    const available = (!modalAskUserCapable || backgroundTrigger)
+      ? all.filter(t => t.name !== 'ask_user')
+      : all;
     if (platform === 'cli') {
-      let filtered = all.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
+      let filtered = available.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
       const advertised = Array.isArray(toolCtx.clientTools) && toolCtx.clientTools.length > 0
         ? new Set(toolCtx.clientTools)
         : null;
@@ -1244,7 +1254,7 @@ class ToolSystem {
       }
       return filtered.map(t => this._sanitizeCliToolDefinition(t));
     }
-    return all;
+    return available;
   }
 
   _remoteHostAliases(host = {}) {
@@ -1988,17 +1998,17 @@ Set wait:false when you've submitted a long background job and just want to retu
             const sessionCtx = (sessionKey && this._sessionContexts?.get(sessionKey)) || {};
             const pluginResult = await this._pluginManager.executePluginTool(normalizedName, input, {
               sessionKey,
-              trigger:        sessionCtx.trigger        ?? this._currentTrigger ?? null,
-              channelId:      sessionCtx.channelId      ?? this._currentChannelId ?? null,
-              platform:       sessionCtx.platform       ?? this._currentPlatform ?? null,
-              userId:         sessionCtx.userId         ?? this._currentUserId ?? null,
-              userName:       sessionCtx.userName       ?? this._currentUserName ?? null,
-              userRole:       sessionCtx.userRole       ?? this._currentUserRole ?? null,
-              userMessage:    sessionCtx.userMessage    ?? this._currentUserMessage ?? null,
-              sessionToken:   sessionCtx.sessionToken   ?? this._currentSessionToken ?? null,
-              projectContext: sessionCtx.projectContext ?? this._currentProjectContext ?? null,
-              memoryEnvelope: sessionCtx.memoryEnvelope ?? this._currentMemoryEnvelope ?? null,
-              abortSignal:    sessionCtx.abortSignal    ?? this._abortSignal ?? null,
+              trigger:        ctx0.trigger        ?? sessionCtx.trigger        ?? this._currentTrigger ?? null,
+              channelId:      ctx0.channelId      ?? sessionCtx.channelId      ?? this._currentChannelId ?? null,
+              platform:       ctx0.platform       ?? sessionCtx.platform       ?? this._currentPlatform ?? null,
+              userId:         ctx0.userId         ?? sessionCtx.userId         ?? this._currentUserId ?? null,
+              userName:       ctx0.userName       ?? sessionCtx.userName       ?? this._currentUserName ?? null,
+              userRole:       ctx0.userRole       ?? sessionCtx.userRole       ?? this._currentUserRole ?? null,
+              userMessage:    ctx0.userMessage    ?? sessionCtx.userMessage    ?? this._currentUserMessage ?? null,
+              sessionToken:   ctx0.sessionToken   ?? sessionCtx.sessionToken   ?? this._currentSessionToken ?? null,
+              projectContext: ctx0.projectContext ?? sessionCtx.projectContext ?? this._currentProjectContext ?? null,
+              memoryEnvelope: ctx0.memoryEnvelope ?? sessionCtx.memoryEnvelope ?? this._currentMemoryEnvelope ?? null,
+              abortSignal:    ctx0.abortSignal    ?? sessionCtx.abortSignal    ?? this._abortSignal ?? null,
             });
             if (pluginResult !== null) return pluginResult;
           }
@@ -4022,6 +4032,21 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (opts.fallbackGlobal !== false && this._isWebRoute(route) && !this._isCliRoute(route)) {
       this.broadcast(msg);
       return -1;
+    }
+    return 0;
+  }
+
+  _broadcastSessionBinary(route, buffer, opts = {}) {
+    const broadcaster = this._getSessionBinaryBroadcaster();
+    if (typeof broadcaster === 'function') {
+      for (const key of this._sessionRouteKeys(route)) {
+        try {
+          const delivered = broadcaster(key, buffer);
+          if (delivered > 0) return delivered;
+        } catch (e) {
+          this.log.warn(`[${opts.logPrefix || 'session-binary'}] session binary broadcast failed for ${key}: ${e.message}`);
+        }
+      }
     }
     return 0;
   }
@@ -6866,6 +6891,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       || null;
     if (gw && typeof gw._broadcastToSessionKey === 'function') {
       this._wsBroadcast = (sessionKey, payload) => gw._broadcastToSessionKey(sessionKey, payload);
+      if (typeof gw._broadcastBinaryToSessionKey === 'function') {
+        this._wsBinaryBroadcast = (sessionKey, buffer) => gw._broadcastBinaryToSessionKey(sessionKey, buffer);
+      }
       return true;
     }
     return false;
@@ -6875,6 +6903,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (typeof this._wsBroadcast === 'function') return this._wsBroadcast;
     return this._wireWebGatewayBroadcaster() && typeof this._wsBroadcast === 'function'
       ? this._wsBroadcast
+      : null;
+  }
+
+  _getSessionBinaryBroadcaster() {
+    if (typeof this._wsBinaryBroadcast === 'function') return this._wsBinaryBroadcast;
+    return this._wireWebGatewayBroadcaster() && typeof this._wsBinaryBroadcast === 'function'
+      ? this._wsBinaryBroadcast
       : null;
   }
 
@@ -8350,6 +8385,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           options,
           multi: mode === 'multi',
           sessionKey,
+          channelId: ctx.channelId || null,
         });
         const deliveredCount = Number(delivered);
         if (Number.isFinite(deliveredCount) && deliveredCount <= 0) {
@@ -8453,9 +8489,24 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return direct ? [direct] : null;
   }
 
-  _answerPendingAskUser(qid, answer) {
+  getPendingAskUser(qid) {
     const entry = this._pendingQuestions?.get(qid);
     if (!entry) return null;
+    return {
+      qid,
+      sessionKey: entry.sessionKey,
+      channelId: entry.channelId,
+      question: entry.question,
+      mode: entry.mode || 'single',
+      options: entry.options,
+      createdAt: entry.createdAt,
+    };
+  }
+
+  _answerPendingAskUser(qid, answer, expectedSessionKey = null) {
+    const entry = this._pendingQuestions?.get(qid);
+    if (!entry) return null;
+    if (expectedSessionKey && entry.sessionKey !== expectedSessionKey) return null;
     const mode = entry.mode || 'single';
     let normalizedAnswer = null;
     if (mode === 'open') {
@@ -8476,8 +8527,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return result;
   }
 
-  answerAskUser(qid, answer) {
-    return !!this._answerPendingAskUser(qid, answer);
+  answerAskUser(qid, answer, expectedSessionKey = null) {
+    return !!this._answerPendingAskUser(qid, answer, expectedSessionKey);
   }
 
   answerAskUserForSession(sessionKey, answer) {

@@ -1,178 +1,164 @@
 # Spore Core
 
-Spore Core is the runtime for autonomous AI agents — each one a single process with its own persistent knowledge graph, tool surface, and conversation history across Discord, Telegram, Slack, and a built-in web UI. Memory lives in the graph, not in static prompts; it grows over time and the agent learns from every conversation.
+Spore Core is a persistent AI agent runtime. It combines a web control panel,
+channel gateways, long-term graph memory, local and remote tools, model routing,
+and a plugin system into one containerized service.
 
-Spore Core is the centerpiece of the **Spore** family:
+The runtime is designed for three main workflows:
 
-| Product | What it is | Repo |
-|---|---|---|
-| **Spore Core** | The runtime + graph + web UI (this repo) | `yumlevi/spore` |
-| **Spore Code** | Go CLI binary that pairs a project on your machine to a Spore Core agent for coding sessions | `yumlevi/spore-code` |
-| **Spore Go** | React Native mobile companion to follow / drive Spore Code sessions on the go | `yumlevi/spore-go` |
+- **Operate a personal or team agent** from the web UI, Telegram, Slack, Discord,
+  or Spore Code.
+- **Retain useful context** in scoped knowledge graphs without letting every
+  project, person, or channel pollute every other conversation.
+- **Extend the agent** with providers, tools, gateways, reference nodes, and UI
+  settings through plugins.
 
-The three connect to the same server and share the same graph; sessions stay scoped to their project / device.
+## Quick Start
 
-## What it does
-
-- **Visual knowledge graph** — every fact, person, concept, rule, and project the agent encounters becomes a node in a live graph you can navigate, search, and edit through the web UI. It's the agent's memory, exposed.
-- **Background workers** — a learner extracts new facts after each turn, a maintainer fills knowledge gaps and writes reflections, a janitor prunes drift, a backup worker snapshots the graph on a schedule. Agents improve without being asked.
-- **Multi-platform** — Discord, Telegram (text + voice), Slack (Socket Mode), and a built-in web panel with the graph viewer, file browser, an interactive xterm.js terminal, and a chat surface that mirrors the same agent everywhere.
-- **Hybrid retrieval** — embedding similarity (Gemma / Gemini) + FTS5 full-text + temporal proximity + multi-hop graph walks + raw conversation excerpts. Whatever the question shape, the recall pipeline picks an appropriate tier.
-- **Tool use + delegation** — `read_file`, `write_file`, `edit_file`, `exec`, `grep`, `glob`, `web_search`, `web_fetch`, `analyze_image/video/audio`, `delegate_task` (sub-agents), graph CRUD, cross-platform `message_send`, `schedule_wakeup`, and a managed browser session for click/type/scroll automation.
-- **Voice pipeline** — Deepgram or local Whisper STT, ElevenLabs / OpenAI / Edge TTS, live voice calls with interrupt detection.
-- **SSH terminal** — embedded xterm.js with a local PTY and remote-host SSH. Keys are encrypted at rest (AES-256-GCM, PBKDF2); the optional `ssh-sidecar` plugin can isolate saved-host operations, interactive SSH sessions, remote exec, and SFTP in a separate process.
-- **Plugin system** — providers, embedders, tools, prompt sections, lifecycle hooks, settings panes — all extensible. Bundled plugins ship in the image (see below).
-
-## Quick start
+Build the image from this repository:
 
 ```bash
-# Clone + build the image (build context is the repo root)
-git clone https://github.com/yumlevi/spore.git && cd spore
 docker build -t spore:latest -f src/Dockerfile .
+```
 
-# Create an instance dir with config
-mkdir -p animas/myagent/{data,workspace}
-cp .env.example animas/myagent/.env
-# edit animas/myagent/.env — set SPORE_WEB_PORT, SPORE_HEALTH_PORT, providers, ports, etc.
+Run a local instance:
 
-# Run
-docker run -d --name myagent --restart unless-stopped \
-  --env-file ./animas/myagent/.env \
-  -p 18803:18803 -p 18794:18794 \
-  -v $PWD/animas/myagent/data:/data \
-  -v $PWD/animas/myagent/workspace:/workspace \
-  -v $PWD/animas/myagent/.env:/app/.env \
-  -v $PWD/animas/myagent/.env:/data/.env \
+```bash
+docker run -d --name spore --restart unless-stopped \
+  -p 18803:18803 \
+  -p 127.0.0.1:18790:18790 \
+  -v spore-data:/data \
+  -v spore-workspace:/workspace \
+  -e SPORE_WEB_PORT=18803 \
+  -e SPORE_HEALTH_PORT=18790 \
+  -e SPORE_DATA_DIR=/data \
+  -e SPORE_WORKSPACE_PATH=/workspace \
+  -e GRAPH_DB_PATH=/data/graph.db \
+  -e SESSION_DB_PATH=/data/sessions.db \
+  -e SETTINGS_DB_PATH=/data/settings.db \
+  -e SPORE_PLUGINS_ENABLED=true \
   spore:latest
-
-# First-run setup happens in the browser at http://localhost:18803
-# (theme → user account → plugins → providers → tier routing → done)
 ```
 
-`docker compose build` from the repo root works too; it uses `docker-compose.yml` which targets `src/Dockerfile` with the right context.
+Open `http://localhost:18803` and finish the first-run wizard. The wizard creates
+the first operator account, stores settings in `/data`, and lets you choose
+plugins, providers, model routing, and theme.
 
-Requires [Docker](https://docs.docker.com/get-docker/), Node 22 image base. The first launch shows an in-browser onboarding wizard — no install scripts, no manager UI to wire up. Provider keys you enter there persist into the bind-mounted `.env` and survive container rebuilds.
+For production compose usage, see [deploy/README.md](deploy/README.md).
 
-## Bundled plugins
+## What Is Included
 
-Every plugin below ships in the image. Operators toggle them in **Settings → Plugins** (or via `SPORE_PLUGINS_ENABLED` + per-plugin disable list).
+- **Web control panel:** chat, settings, onboarding, logs, graph viewer, file
+  browser, plugin management, backups, benchmarks, pairing, and model routing.
+- **Multi-graph memory:** default, General Knowledge, user, project, and channel
+  graphs with scoped read/write behavior.
+- **Agent loop:** dynamic prompt assembly, graph recall, tool execution,
+  compaction, task tracking, wakeups, and async learning.
+- **Runtime queue:** priority lanes for interactive turns, channel turns,
+  deferred wakeups, learner jobs, maintenance, and background work.
+- **Tools:** shell/file/git helpers, graph query/update/delete, web search/fetch,
+  media analysis, ask_user, wakeups, tasks, log watches, SSH, web serving, and
+  plugin tools.
+- **Channels:** Telegram, Slack, Discord, web chat, and Spore Code sessions.
+- **Plugins:** bundled providers, browser backends, voice providers, email,
+  Tailscale, SSH sidecar, cron guidance, benchmarks, and session-graph features.
 
-| Plugin | What it does |
-|---|---|
-| `anthropic-provider` | Claude Opus / Sonnet / Haiku (4.x family). Owns `@anthropic-ai/sdk`. |
-| `openai-provider` | OpenAI chat completions. Also serves the whisper plugin's server-side STT. |
-| `openrouter-provider` | OpenRouter (sk-or-…). |
-| `gemini-provider` | Gemini multimodal (vision, audio, video). |
-| `z-ai-provider` | Z.ai (GLM-4.6, GLM-Z1, charglm). |
-| `local-oai-provider` | Any OpenAI-compatible endpoint (vLLM / LM Studio / Ollama / llama.cpp). |
-| `embedder-gemma` | Local Gemma-300M embeddings via `@huggingface/transformers`. No API key. |
-| `gemini-embedder` | Gemini embeddings — shares the GEMINI_API_KEY with `gemini-provider`. |
-| `whisper` | Whisper-tiny browser STT + OpenAI server-side STT fallback. |
-| `deepgram` | Deepgram cloud STT — fast, multilingual. |
-| `elevenlabs` | ElevenLabs TTS + sound effects. |
-| `flux` | FLUX image generation via `api.bfl.ai`. |
-| `email` | SMTP/IMAP via Nodemailer + ImapFlow. |
-| `tailscale` | Tailscale userspace networking. Mesh routing to other Spore Core agents and operator workstations. |
-| `compute-cluster` | SLURM cluster access over Tailscale; depends on `tailscale` + `ssh-sidecar` and stores cluster SSH credentials as sidecar profiles. |
-| `session-graph` | Generic session/project node primitives. Foundation for code-session plugins. |
-| `spore-code` | Pairs CLI sessions (`spore` Go binary) into project-scoped agent contexts; powers `/api/spore-code/auth` + `/sessions`. |
-| `ssh-sidecar` | SSH credential-isolation sidecar packaging, credential profiles, settings status UI, and reference docs. |
+## Memory Model
 
-Plugins declare config schemas with `envFallback`, so wizard-saved values survive container rebuilds — keys persist in `.env` (bind-mounted) and the Settings UI surfaces them on every boot.
+Spore uses SQLite-backed knowledge graphs:
 
-## Web fetch / extraction
+- `default`: the main operator/system graph.
+- `spore-knowledge-base`: protected shared reusable knowledge.
+- `user-*`: private webapp user memory.
+- `project-*`: Spore Code project memory shared by collaborators on the same
+  project identity.
+- `channel-*`: person or channel memory for Telegram, Slack, Discord, and other
+  non-web/CLI channel sessions.
 
-`web_fetch` runs `@teng-lin/agent-fetch` as the primary path:
+Project and channel graphs can read from General Knowledge. Durable reusable
+lessons are distilled back into General Knowledge; private or project-specific
+details stay scoped.
 
-- **Mozilla Readability** (strict + relaxed)
-- **Text-density / CETD** for layouts Readability over-trims
-- **JSON-LD** schema.org parser
-- **`__NEXT_DATA__` / `__NUXT_DATA__`** for SPA frameworks
-- **React Server Components** payload parser (Next.js App Router — react.dev, MS Learn, etc.)
-- **WordPress REST API** (`/wp-json/wp/v2/`) — picks up ~40 % of the web for free
-- **CSS selectors** as fallback for unusual layouts
-- Plus its own Chrome TLS fingerprinting via `httpcloak`
+See [docs/graph.md](docs/graph.md) for the full model.
 
-Strategies run in parallel and the result with the most substantive content wins. The result includes the matched `extractedFrom` so the agent (and you) can see which path solved each fetch. If the package fails to load for any reason, the tool falls back to `curl_cffi` (Python helper) → raw Node HTTP — no extraction degradation, just slower fingerprinting.
+## Bundled Plugins
 
-## Architecture
+Plugins are loaded from `plugins/` when `SPORE_PLUGINS_ENABLED=true`. Bundled
+plugins currently cover:
 
+- Model providers: Anthropic, OpenAI, OpenRouter, Gemini, Z.ai, local/custom
+  OpenAI-compatible endpoints.
+- Embedders: local Gemma and Gemini embedding.
+- Browser automation: browser-core with Zendriver and Playwright backends.
+- Channels: Telegram, Slack, Discord.
+- Voice and media: Deepgram, Whisper, ElevenLabs, FLUX.
+- Operations: Tailscale, SSH sidecar, compute cluster, cron guidance, email.
+- Memory and evaluation: session-graph, LongMemEval, Spore Code benchmark.
+
+Plugin reference nodes are installed into the General Knowledge graph, not the
+default graph. See [docs/plugins.md](docs/plugins.md).
+
+## Spore Code
+
+Spore Code is the CLI/client integration for coding sessions. It authenticates
+to Spore Core, opens websocket-backed sessions, forwards local tool execution to
+the user's machine, and scopes memory to project graphs. Plan mode and execute
+mode expose different tool catalogs.
+
+See [docs/spore-code.md](docs/spore-code.md).
+
+## Repository Layout
+
+```text
+src/                 Core runtime, web gateway, tools, graph, settings, workers
+plugins/             Bundled plugin packages
+docs/                Operator and developer documentation
+deploy/              Production compose and deployment helpers
+tests/               Node test suite
+shared/              Shared graph/skill examples
+spores/              Local runtime instances and data; do not treat as source
 ```
-Platforms (Discord/Telegram/Slack/Web/Spore Code)
-  │
-  ▼
-GatewayManager ─── VoicePipeline (STT → LLM → TTS)
-  │
-  ▼
-AgentLoop ──── PluginManager ──── 17 bundled + user plugins
-  │
-  ▼
-GraphContext ←→ graph.db (SQLite + WAL)
-  │               ├── nodes, edges, attributes, aspects
-  │               ├── episodes (raw conversation FTS5)
-  │               └── embeddings (vector search)
-  │
-SessionManager ←→ sessions.db
-  │
-ToolSystem ←→ SSH Sidecar plugin (optional Unix socket)
-  │
-Learner + Maintainer + Janitor + Backup + Proactive (workers)
+
+## Development
+
+Useful commands:
+
+```bash
+npm --prefix src test
+node --test tests/tools/ask-user.test.js
+docker build -t spore:latest -f src/Dockerfile .
 ```
 
-Each instance runs as a single Docker container with its own bind-mounted `data/` (graph + session DBs + backups) and `workspace/` (writable scratch). Provider keys live in `.env` (also bind-mounted). Spore Core itself is unsandboxed inside the container; the optional SSH sidecar plugin can push SSH credential storage, interactive SSH sessions, remote exec, and SFTP into a separate process with no inbound ports and constrained outbound SSH egress.
+The root `docker-compose.yml` only builds the shared image. Runtime containers
+are normally started with `docker run`, production compose, or the local spore
+instance scripts used by this deployment.
 
-Platform gateways auto-enable when their tokens are set:
-
-| Gateway | Token(s) needed |
-|---|---|
-| Discord | `DISCORD_TOKEN` |
-| Telegram | `TELEGRAM_BOT_TOKEN` |
-| Slack | `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` |
-| Web panel | `SPORE_WEB_PORT` (+ `SPORE_INVITE_KEY` if you want self-register) |
-
-An agent with no platform tokens still works via the web panel + Spore Code CLI. See [.env.example](.env.example) for the full list.
-
-## Repository structure
-
-```
-src/                  Core application
-  agent/              Inference loop, session management, tool dispatch
-  graph/              Context engine, embeddings, retrieval, activity feed
-  workers/            Learner / Maintainer / Janitor / Backup / Proactive
-  tools/              Tool definitions, SSH manager, web/curl fetch helpers
-  gateways/           Discord, Telegram, Slack, Web (HTTP + WS)
-  voice/              STT/TTS pipeline + voice-call orchestrator
-  plugins/            Plugin manager core (api.js, manager.js, openclaw-adapter.js)
-  static/             graph-viewer.html + mobile-viewer.html + login.html + scripts/
-
-plugins/              Bundled plugin packages (provider, tool, embedder, system, …)
-  ssh-sidecar/        SSH credential isolation plugin + sidecar Docker runtime
-docs/                 Extended documentation
-animas/               Per-instance config + data (gitignored)
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
-| Document | Contents |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | System architecture, message flow, design decisions |
-| [docs/user-guide.md](docs/user-guide.md) | Web panel, SSH terminal, voice, chat features |
-| [docs/security.md](docs/security.md) | Auth model, key encryption, sidecar architecture, threat model |
-| [docs/graph.md](docs/graph.md) | Knowledge graph schema reference |
-| [docs/voice.md](docs/voice.md) | Voice pipeline configuration |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, repo layout, code style |
-| [FOR_AGENTS.md](FOR_AGENTS.md) | Notes for AI agents working in this codebase |
+- [User Guide](docs/user-guide.md)
+- [Architecture](docs/architecture.md)
+- [Knowledge Graph](docs/graph.md)
+- [Configuration](docs/configuration.md)
+- [Plugins](docs/plugins.md)
+- [Channels](docs/channels.md)
+- [Spore Code](docs/spore-code.md)
+- [Tools](docs/tools.md)
+- [Session Graph Progress Notes](docs/session-graph-progress.md)
+- [Voice](docs/voice.md)
+- [Security](docs/security.md)
+- [Deployment](deploy/README.md)
 
-## Security overview
+## Security Notes
 
-- Containers run as unprivileged user (UID 2000), `no-new-privileges` enforced
-- Web panel uses session cookies (HttpOnly + SameSite=Lax); webapp self-register gated behind a host-level `SPORE_INVITE_KEY`
-- SSH keys encrypted at rest (AES-256-GCM, PBKDF2); optional sidecar process isolation for saved-host, interactive SSH, remote exec, and SFTP flows
-- `exec` tool blocks dangerous patterns; source editing disabled by default
-- All host ports bind to `127.0.0.1` by convention; reverse-proxy publicly with whatever you already run
+Spore can run shell commands, store credentials, connect to private networks,
+and load unsandboxed plugins. Treat the web UI and plugin directory as privileged
+operator surfaces. Bind the health endpoint to localhost when public access is
+not required, protect the web UI, and only install plugins you trust.
 
-Full details: [docs/security.md](docs/security.md)
+See [docs/security.md](docs/security.md).
 
 ## License
 
-MIT
+See [LICENSE](LICENSE).

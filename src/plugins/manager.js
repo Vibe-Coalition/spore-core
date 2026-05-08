@@ -752,7 +752,11 @@ class PluginManager {
         if (!this._toolAvailable(tool, ctx)) {
           return { error: `Tool ${name} is not available in this ${ctx?.platform || 'current'} context.` };
         }
-        return await tool.definition.execute(input, ctx);
+        try {
+          return await tool.definition.execute(input, ctx);
+        } catch (err) {
+          return { error: `Plugin tool ${name} failed: ${err?.message || err}` };
+        }
       }
     }
     return null;

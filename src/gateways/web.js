@@ -12,6 +12,9 @@ const path = require('path');
 const crypto = require('crypto');
 const graphEvents = require('../graph/events');
 const { WebSettingsService } = require('./web/settings-service');
+const { createWebAuthPolicy } = require('./web/auth-policy');
+const { matchProxyRoute, createApiProxyHandler } = require('./web/api-proxy');
+const { createLoginRateLimiter } = require('./web/login-rate-limit');
 
 function _redactSecrets(value) {
   let s = String(value ?? '');
@@ -2848,6 +2851,55 @@ class WebGateway {
     return count;
   }
 
+  _broadcastBinaryToSessionKey(sessionKey, buffer) {
+    if (!sessionKey || !buffer) return 0;
+
+    const rawKey = String(sessionKey);
+    const tryKeys = new Set([rawKey]);
+    const channelMatch = rawKey.match(/^(?:(?:shared|private):)?channel:(.+)$/);
+    if (channelMatch) {
+      tryKeys.add(channelMatch[1]);
+      const platformMatch = channelMatch[1].match(/^([a-z][a-z0-9_-]*):(.+)$/i);
+      if (platformMatch && ['cli', 'web'].includes(platformMatch[1].toLowerCase())) {
+        tryKeys.add(platformMatch[2]);
+      }
+    }
+    for (const tryKey of tryKeys) {
+      const set = this._sessionClients?.get(tryKey);
+      if (!set) continue;
+      let count = 0;
+      for (const entry of set) {
+        if (entry.ws.readyState === 1) {
+          try { entry.ws.send(buffer); count++; } catch (e) { this.log.warn('[web] entry.ws.send failed: ' + e.message); }
+        }
+      }
+      if (count) return count;
+    }
+
+    let targetUser = null;
+    const dmMatch = rawKey.match(/^(?:(?:shared|private):)?dm:(.+)$/);
+    if (dmMatch) {
+      const rest = dmMatch[1];
+      const platformMatch = rest.match(/^([a-z][a-z0-9_-]*):(.+)$/i);
+      if (platformMatch) {
+        if (platformMatch[1].toLowerCase() !== 'web') return 0;
+        targetUser = platformMatch[2];
+      } else {
+        targetUser = rest;
+      }
+    } else if (/^(merge|link|child|wakeup)[-_]/.test(rawKey)) targetUser = 'operator';
+    if (!targetUser) return 0;
+    let count = 0;
+    for (const wsClient of this._wss?.clients || []) {
+      if (wsClient.readyState !== 1) continue;
+      if (wsClient._role === 'cli') continue;
+      if (wsClient._user === targetUser) {
+        try { wsClient.send(buffer); count++; } catch (e) { this.log.warn('[web] wsClient.send failed: ' + e.message); }
+      }
+    }
+    return count;
+  }
+
   _removeClientFromAllSessions(ws) {
     for (const [sessionId, set] of this._sessionClients) {
       for (const entry of set) {
@@ -2893,6 +2945,46 @@ class WebGateway {
       if (!clients) continue;
       for (const entry of clients) if (entry.ws === ws) return true;
     }
+    return false;
+  }
+
+  _askUserAnswerMatchesClient(ws, msg, pending) {
+    if (!ws || !pending?.sessionKey) return false;
+    const pendingKey = String(pending.sessionKey);
+    const candidates = new Set();
+    const add = (value) => {
+      if (value === undefined || value === null || value === '') return;
+      candidates.add(String(value));
+    };
+    add(msg?.sessionKey);
+    add(msg?.sessionId);
+    if (msg?.sessionId) add(`channel:${msg.sessionId}`);
+
+    try {
+      const userId = ws._user || 'operator';
+      const isCli = ws._role === 'cli';
+      if (msg?.sessionId && this.tools?._sessions?.constructor?.buildKey) {
+        add(this.tools._sessions.constructor.buildKey(
+          isCli ? msg.sessionId : 'web:control-panel',
+          !isCli,
+          userId
+        ));
+      }
+    } catch {}
+
+    if (candidates.has(pendingKey)) return true;
+    if (this._sessionKeyClientMatches(ws, pending.sessionKey, pending.channelId)) return true;
+
+    if (ws._role !== 'cli') {
+      const userId = ws._user || 'operator';
+      if (pendingKey === `dm:${userId}` || pendingKey === `shared:dm:web:${userId}` || pendingKey === `private:dm:web:${userId}`) {
+        return true;
+      }
+      if (/^(merge|link|child|wakeup)[-_]/.test(pendingKey) && userId === 'operator') {
+        return true;
+      }
+    }
+
     return false;
   }
 
@@ -3040,6 +3132,7 @@ class WebGateway {
           trigger: 'proactive',
           platform: 'web',
           isDm: true,
+          suppressLearning: true,
           onTextDelta: (delta) => {
             this._sendToSession(sessionId, { type: 'chat:delta', text: delta });
           },
@@ -3416,44 +3509,91 @@ class WebGateway {
 
     const _sessions = this._webSessions;
 
-    const _loginAttempts = new Map();
     const LOGIN_MAX_ATTEMPTS = 5;
     const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+    const loginRateLimiter = createLoginRateLimiter({
+      maxAttempts: LOGIN_MAX_ATTEMPTS,
+      windowMs: LOGIN_WINDOW_MS,
+    });
 
-	    const _clientIpForRateLimit = (req) => {
-	      const remote = req.socket.remoteAddress || 'unknown';
-	      const trustedProxy = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1' || process.env.SPORE_TRUST_PROXY === 'true';
-	      return trustedProxy
-	        ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || remote)
-	        : remote;
-	    };
-
-	    const _checkLoginRate = (req) => {
-	      const ip = _clientIpForRateLimit(req);
-      const now = Date.now();
-      const entry = _loginAttempts.get(ip);
-      if (entry) {
-        entry.attempts = entry.attempts.filter(t => now - t < LOGIN_WINDOW_MS);
-        if (entry.attempts.length >= LOGIN_MAX_ATTEMPTS) return false;
-      }
-      return true;
+    const _clientIpForRateLimit = (req) => {
+      const remote = req.socket.remoteAddress || 'unknown';
+      const trustedProxy = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1' || process.env.SPORE_TRUST_PROXY === 'true';
+      return trustedProxy
+        ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || remote)
+        : remote;
     };
 
-	    const _recordLoginAttempt = (req) => {
-	      const ip = _clientIpForRateLimit(req);
-      if (!_loginAttempts.has(ip)) _loginAttempts.set(ip, { attempts: [] });
-      _loginAttempts.get(ip).attempts.push(Date.now());
+    const _checkLoginRate = (req) => {
+      const ip = _clientIpForRateLimit(req);
+      return !loginRateLimiter.isLimited(ip);
+    };
+
+    const _recordFailedLoginAttempt = (req) => {
+      const ip = _clientIpForRateLimit(req);
+      return loginRateLimiter.recordFailure(ip);
+    };
+
+    const _clearLoginAttempts = (req) => {
+      loginRateLimiter.clear(_clientIpForRateLimit(req));
+    };
+
+    const _loginRateLimitHeaders = (req) => {
+      const retryAfter = Math.ceil(loginRateLimiter.retryAfterMs(_clientIpForRateLimit(req)) / 1000);
+      return retryAfter > 0 ? { 'Retry-After': String(retryAfter) } : {};
+    };
+
+    const _writeLoginRateLimited = (req, res) => {
+      res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
+      res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
+    };
+
+    const _writeFailedLoginOrRateLimit = (req, res, status = 401, error = 'Invalid credentials') => {
+      if (!_checkLoginRate(req)) {
+        _writeLoginRateLimited(req, res);
+        return;
+      }
+      _recordFailedLoginAttempt(req);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error }));
+    };
+
+    const _closeSocketsForAuthSession = (sid, reason = 'session-ended') => {
+      if (!sid || !this._wss) return 0;
+      let closed = 0;
+      for (const client of this._wss.clients || []) {
+        if (client._role === 'cli') continue;
+        if (client._sourceSession !== sid) continue;
+        try {
+          if (client.readyState === 1) {
+            client.send(JSON.stringify({
+              type: 'auth:error',
+              error: 'Session ended. Please log in again.',
+              code: reason,
+            }));
+          }
+          client.close(4001, 'session ended');
+          closed++;
+        } catch (e) {
+          this.log.warn('[web] Failed to close stale auth websocket: ' + e.message);
+        }
+      }
+      return closed;
+    };
+
+    const _deleteAuthSession = (sid, reason = 'session-ended') => {
+      if (!sid || !_sessions.has(sid)) return false;
+      _sessions.delete(sid);
+      _closeSocketsForAuthSession(sid, reason);
+      return true;
     };
 
     const _sessionSweepInterval = setInterval(() => {
       const now = Date.now();
       for (const [sid, sess] of _sessions) {
-        if (now - sess.created >= SESSION_TTL) _sessions.delete(sid);
+        if (now - sess.created >= SESSION_TTL) _deleteAuthSession(sid, 'session-expired');
       }
-      for (const [ip, entry] of _loginAttempts) {
-        entry.attempts = entry.attempts.filter(t => now - t < LOGIN_WINDOW_MS);
-        if (entry.attempts.length === 0) _loginAttempts.delete(ip);
-      }
+      loginRateLimiter.sweep();
     }, 60 * 60 * 1000);
     _sessionSweepInterval.unref();
 
@@ -3523,52 +3663,6 @@ class WebGateway {
       return false;
     };
 
-    const checkCreatorAuth = (req, res) => {
-      if (managerKey && req.headers['x-service-key'] === managerKey) return true;
-      const cookies = parseCookies(req);
-      const sid = cookies['spore_session'];
-      if (sid && _sessions.has(sid)) {
-        const sess = _sessions.get(sid);
-        if ((sess.type === 'creator' || sess.type === 'admin') && Date.now() - sess.created < SESSION_TTL) {
-          if (sess.viaSSO && !cookies['manager_session']) {
-            _sessions.delete(sid);
-            return false;
-          }
-          return true;
-        }
-        if (sess.type === 'creator' || sess.type === 'admin') _sessions.delete(sid);
-      }
-      // Also accept an spore_webapp session whose user record is role=creator
-      // (covers the case where a browser has the webapp-cookie naming scheme
-      // but the user was created as a creator during onboarding).
-      const wsid = cookies['spore_webapp'];
-      if (wsid && _sessions.has(wsid)) {
-        const sess = _sessions.get(wsid);
-        if (sess && Date.now() - sess.created < SESSION_TTL && sess.user) {
-          const wu = loadWebappUsers().find(u => u.username === sess.user);
-          if (wu && (wu.role === 'creator' || wu.role === 'admin')) return true;
-        }
-      }
-      if (authUser && authPass) {
-        const authHeader = req.headers.authorization || '';
-        if (authHeader.startsWith('Basic ')) {
-          const decoded = Buffer.from(authHeader.slice(6), 'base64').toString();
-          const [u, ...pParts] = decoded.split(':');
-          if (u === authUser && pParts.join(':') === authPass) return true;
-        }
-      }
-      return false;
-    };
-
-    const checkCreatorAuthAsync = async (req, res) => {
-      if (checkCreatorAuth(req, res)) return true;
-      if (await tryManagerSSO(req, res)) return true;
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Creator authentication required' }));
-      return false;
-    };
-    const checkAuth = (req, res) => checkCreatorAuthAsync(req, res);
-
     const WEBAPP_USERS_PATH = path.join(this.config.dataDir, 'webapp-users.json');
     const loadWebappUsers = () => {
       try { return JSON.parse(fs.readFileSync(WEBAPP_USERS_PATH, 'utf8')); } catch { return []; }
@@ -3631,7 +3725,7 @@ class WebGateway {
       if (wsid && _sessions.has(wsid)) {
         const sess = _sessions.get(wsid);
         if (sess.type === 'webapp' && Date.now() - sess.created < SESSION_TTL) return true;
-        if (sess.type === 'webapp') _sessions.delete(wsid);
+        if (sess.type === 'webapp') _deleteAuthSession(wsid, 'session-expired');
       }
       return false;
     };
@@ -3652,7 +3746,7 @@ class WebGateway {
       const csid = cookies['spore_session'];
       if (csid && _sessions.has(csid)) {
         const sess = _sessions.get(csid);
-        if (sess.viaSSO && !cookies['manager_session']) { _sessions.delete(csid); }
+        if (sess.viaSSO && !cookies['manager_session']) { _deleteAuthSession(csid, 'sso-session-ended'); }
         else if (Date.now() - sess.created < SESSION_TTL) return sess.type;
       }
       const wsid = cookies['spore_webapp'];
@@ -3663,70 +3757,27 @@ class WebGateway {
       return null;
     };
 
-    const getSessionFromReq = (req) => {
-      const cookies = parseCookies(req);
-      const sid = cookies['spore_session'];
-      const wsid = cookies['spore_webapp'];
-      const sidValid = sid && _sessions.has(sid);
-      const wsidValid = wsid && _sessions.has(wsid);
-      // When both cookies exist and both are valid, prefer whichever was created
-      // more recently. This prevents a stale creator cookie from shadowing a
-      // fresh webapp login (or vice versa) when both browsers/tabs share a
-      // cookie jar.
-      if (sidValid && wsidValid) {
-        const sCreated = _sessions.get(sid)?.created || 0;
-        const wCreated = _sessions.get(wsid)?.created || 0;
-        return wCreated >= sCreated ? wsid : sid;
-      }
-      if (sidValid) return sid;
-      if (wsidValid) return wsid;
-      return null;
-    };
 
-    const authContextFromReq = (req) => {
-      if (managerKey && req.headers['x-service-key'] === managerKey) {
-        return { type: 'admin', role: 'admin', user: 'service', username: 'service', creator: true, viaServiceKey: true };
-      }
-      const authHeader = req.headers.authorization || '';
-      if (authUser && authPass && authHeader.startsWith('Basic ')) {
-        const decoded = Buffer.from(authHeader.slice(6), 'base64').toString();
-        const [u, ...pParts] = decoded.split(':');
-        if (u === authUser && pParts.join(':') === authPass) {
-          return { type: 'creator', role: 'creator', user: authUser, username: authUser, creator: true, viaBasic: true };
-        }
-      }
-      const cookies = parseCookies(req);
-      const sessionId = getSessionFromReq(req);
-      const sess = sessionId && _sessions.get(sessionId);
-      if (!sess) return null;
-      if (Date.now() - sess.created >= SESSION_TTL) {
-        _sessions.delete(sessionId);
-        return null;
-      }
-      if (sess.viaSSO && !cookies['manager_session']) {
-        _sessions.delete(sessionId);
-        return null;
-      }
-      const userRecord = sess.user ? loadWebappUsers().find(u => u.username === sess.user) : null;
-      if (userRecord?.blocked) {
-        _sessions.delete(sessionId);
-        return null;
-      }
-      const storedRole = String(userRecord?.role || '').toLowerCase();
-      let role = sess.type || 'webapp';
-      if (storedRole === 'creator' || storedRole === 'admin') role = storedRole;
-      const creator = role === 'creator' || role === 'admin';
-      return {
-        type: role,
-        role,
-        user: sess.user || null,
-        username: sess.user || null,
-        sessionId,
-        cookieName: cookies['spore_webapp'] === sessionId ? 'spore_webapp' : 'spore_session',
-        userRecord,
-        creator,
-      };
+    const authPolicy = createWebAuthPolicy({
+      managerKey,
+      authUser,
+      authPass,
+      sessions: _sessions,
+      sessionTtl: SESSION_TTL,
+      loadWebappUsers,
+      deps: { now: () => Date.now() },
+    });
+    const checkCreatorAuth = (req, res) => authPolicy.checkCreatorAuth(req, res);
+    const checkCreatorAuthAsync = async (req, res) => {
+      if (checkCreatorAuth(req, res)) return true;
+      if (await tryManagerSSO(req, res)) return true;
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Creator authentication required' }));
+      return false;
     };
+    const checkAuth = (req, res) => checkCreatorAuthAsync(req, res);
+    const getSessionFromReq = req => authPolicy.getSessionFromReq(req);
+    const authContextFromReq = req => authPolicy.authContextFromReq(req);
 
     const requireGraphApiAuth = async (req, res) => {
       let authContext = authContextFromReq(req);
@@ -3789,16 +3840,10 @@ class WebGateway {
 
       // ── Creator auth endpoints (graph viewer SSO via manager) ──
       if (urlPath === '/api/auth/login' && req.method === 'POST') {
-        if (!_checkLoginRate(req)) {
-          res.writeHead(429, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
-          return;
-        }
         let body = '';
         req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
         req.on('end', async () => {
           try {
-            _recordLoginAttempt(req);
             const { username, password } = JSON.parse(body);
             const serviceKey = managerKey;
             let verified = false;
@@ -3827,8 +3872,7 @@ class WebGateway {
                   verifiedUser = result.body.username || username;
                   req._mgrRole = result.body.role;
                 } else {
-                  res.writeHead(result.status || 401, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ error: result.body?.error || 'Invalid credentials' })); return;
+                  _writeFailedLoginOrRateLimit(req, res, result.status || 401, result.body?.error || 'Invalid credentials'); return;
                 }
               } catch (e) {
                 this.log.warn('[web] Manager SSO unreachable, falling back to local auth:', e.message);
@@ -3842,8 +3886,7 @@ class WebGateway {
                 } else if (authUser && authPass && username === authUser && password === authPass) {
                   verified = true;
                 } else {
-                  res.writeHead(401, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+                  _writeFailedLoginOrRateLimit(req, res); return;
                 }
               }
             } else if (authUser && authPass && username === authUser && password === authPass) {
@@ -3863,23 +3906,28 @@ class WebGateway {
                 // Honor stored role: creator → loginRole 'creator', webapp → 'webapp'.
                 if (wu.role === 'webapp') req._loginRoleHint = 'webapp';
               } else if (authUser && authPass) {
-                res.writeHead(401, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+                _writeFailedLoginOrRateLimit(req, res); return;
               } else if (webappUsers.length === 0) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Auth not configured' })); return;
               } else {
-                res.writeHead(401, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+                _writeFailedLoginOrRateLimit(req, res); return;
               }
             }
 
             if (verified) {
+              _clearLoginAttempts(req);
               const sid = crypto.randomBytes(32).toString('hex');
               let loginRole;
               if (req._loginRoleHint === 'webapp') loginRole = 'webapp';
               else loginRole = req._mgrRole === 'super' ? 'admin' : 'creator';
               const cookieName = loginRole === 'webapp' ? 'spore_webapp' : 'spore_session';
+              const otherCookieName = cookieName === 'spore_session' ? 'spore_webapp' : 'spore_session';
+              const priorCookies = parseCookies(req);
+              for (const staleCookieName of [cookieName, otherCookieName]) {
+                const staleSid = priorCookies[staleCookieName];
+                if (staleSid) _deleteAuthSession(staleSid, 'session-replaced');
+              }
               const userGraphSlug = loginRole === 'webapp'
                 ? ensureAndPersistWebUserGraph(verifiedUser, { reason: 'auth-login' })
                 : null;
@@ -3895,7 +3943,10 @@ class WebGateway {
               }
               res.writeHead(200, {
                 'Content-Type': 'application/json',
-                'Set-Cookie': `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+                'Set-Cookie': [
+                  `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+                  `${otherCookieName}=; Path=/; HttpOnly; Max-Age=0`,
+                ],
               });
               res.end(JSON.stringify({ ok: true, user: verifiedUser, role: loginRole, wizardNeeded, userGraphSlug }));
             }
@@ -3906,7 +3957,7 @@ class WebGateway {
 
       if (urlPath === '/api/auth/logout' && req.method === 'POST') {
         const sid = getSessionFromReq(req);
-        if (sid) _sessions.delete(sid);
+        if (sid) _deleteAuthSession(sid, 'logout');
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Set-Cookie': 'spore_session=; Path=/; HttpOnly; Max-Age=0',
@@ -3962,15 +4013,9 @@ class WebGateway {
 
       // ── Webapp user auth endpoints ──
       if (urlPath === '/api/webapp/login' && req.method === 'POST') {
-        if (!_checkLoginRate(req)) {
-          res.writeHead(429, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
-          return;
-        }
         let body = '';
         req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
         req.on('end', () => {
-          _recordLoginAttempt(req);
           try {
             const { username, password } = JSON.parse(body);
             const users = loadWebappUsers();
@@ -3984,9 +4029,9 @@ class WebGateway {
               res.end(JSON.stringify({ error: 'Your account has been blocked. Contact the operator.' })); return;
             }
             if (!user || !verifyWebappPassword(password, user.salt, user.hash)) {
-              res.writeHead(401, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+              _writeFailedLoginOrRateLimit(req, res); return;
             }
+            _clearLoginAttempts(req);
             const sid = crypto.randomBytes(32).toString('hex');
             const role = user.role === 'creator' ? 'creator' : 'webapp';
             const cookieName = role === 'creator' ? 'spore_session' : 'spore_webapp';
@@ -3999,8 +4044,10 @@ class WebGateway {
             // (which would route chats into the wrong dm:<user> session and
             // show the other user's history).
             const otherCookies = parseCookies(req);
-            const otherSid = otherCookies[otherCookieName];
-            if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
+            for (const staleCookieName of [cookieName, otherCookieName]) {
+              const staleSid = otherCookies[staleCookieName];
+              if (staleSid) _deleteAuthSession(staleSid, 'session-replaced');
+            }
             _sessions.set(sid, { user: username, created: Date.now(), type: role });
             const secure = cookieSecureAttr(req);
             res.writeHead(200, {
@@ -4019,7 +4066,7 @@ class WebGateway {
       if (urlPath === '/api/webapp/logout' && req.method === 'POST') {
         const cookies = parseCookies(req);
         const wsid = cookies['spore_webapp'];
-        if (wsid && _sessions.has(wsid)) _sessions.delete(wsid);
+        if (wsid) _deleteAuthSession(wsid, 'logout');
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Set-Cookie': 'spore_webapp=; Path=/; HttpOnly; Max-Age=0',
@@ -4197,7 +4244,7 @@ class WebGateway {
         const otherCookieName = cookieName === 'spore_session' ? 'spore_webapp' : 'spore_session';
         const otherCookies = parseCookies(req);
         const otherSid = otherCookies[otherCookieName];
-        if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
+        if (otherSid) _deleteAuthSession(otherSid, 'session-replaced');
         _sessions.set(sid, { user: username, created: Date.now(), type: sessType });
         const secure = cookieSecureAttr(req);
         res.writeHead(200, {
@@ -4215,13 +4262,8 @@ class WebGateway {
       // webapp user without operator intervention. Always issues a
       // 'webapp' role session (never creator). When config.inviteKey
       // is empty, self-register is disabled (503).
-	      if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
-	        if (!_checkLoginRate(req)) {
-	          res.writeHead(429, { 'Content-Type': 'application/json' });
-	          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
-	          return;
-	        }
-	        let body = '';
+      if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
+        let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
         let parsed;
         try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
@@ -4231,12 +4273,10 @@ class WebGateway {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
         }
-	        // Accept inviteKey (direct field name) or teamKey (older login UI).
-	        const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
-	        _recordLoginAttempt(req);
-	        if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid invite key' })); return;
+        // Accept inviteKey (direct field name) or teamKey (older login UI).
+        const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
+        if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
+          _writeFailedLoginOrRateLimit(req, res, 401, 'Invalid invite key'); return;
         }
         if (!username || username.length > 64 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -4257,12 +4297,12 @@ class WebGateway {
           // where the user is retrying with the same password) just hand them
           // a fresh session + wizard. If the password is wrong, 409.
           if (!verifyWebappPassword(password, dup.salt, dup.hash)) {
-            res.writeHead(409, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Username already taken' })); return;
+            _writeFailedLoginOrRateLimit(req, res, 409, 'Username already taken'); return;
           }
+          _clearLoginAttempts(req);
           const sid = crypto.randomBytes(32).toString('hex');
           const otherCookies = parseCookies(req);
-          if (otherCookies['spore_session'] && _sessions.has(otherCookies['spore_session'])) _sessions.delete(otherCookies['spore_session']);
+          if (otherCookies['spore_session']) _deleteAuthSession(otherCookies['spore_session'], 'session-replaced');
           const userGraphSlug = ensureAndPersistWebUserGraph(username, { reason: 'self-register-resume', selfRegistered: !!dup.selfRegistered });
           _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
           const secure = cookieSecureAttr(req);
@@ -4289,9 +4329,10 @@ class WebGateway {
         if (userGraphSlug) record.userGraphSlug = userGraphSlug;
         existing.push(record);
         _writeJsonAtomic(WEBAPP_USERS_PATH, existing);
+        _clearLoginAttempts(req);
         const sid = crypto.randomBytes(32).toString('hex');
         const otherCookies = parseCookies(req);
-        if (otherCookies['spore_session'] && _sessions.has(otherCookies['spore_session'])) _sessions.delete(otherCookies['spore_session']);
+        if (otherCookies['spore_session']) _deleteAuthSession(otherCookies['spore_session'], 'session-replaced');
         _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
         const secure = cookieSecureAttr(req);
         res.writeHead(200, {
@@ -4345,7 +4386,7 @@ class WebGateway {
           users.splice(idx, 1);
           _writeJsonAtomic(WEBAPP_USERS_PATH, users);
           // Drop any active session for the deleted user.
-          for (const [k, v] of _sessions) { if (v?.user === target) _sessions.delete(k); }
+          for (const [k, v] of _sessions) { if (v?.user === target) _deleteAuthSession(k, 'user-deleted'); }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
           return;
@@ -4369,7 +4410,7 @@ class WebGateway {
         if (Object.prototype.hasOwnProperty.call(parsed, 'blocked')) {
           users[idx].blocked = !!parsed.blocked;
           if (users[idx].blocked) {
-            for (const [k, v] of _sessions) { if (v?.user === target) _sessions.delete(k); }
+            for (const [k, v] of _sessions) { if (v?.user === target) _deleteAuthSession(k, 'user-blocked'); }
           }
         }
         const userGraphSlug = (users[idx].role || 'webapp') === 'webapp'
@@ -6283,46 +6324,49 @@ class WebGateway {
         socket.destroy(); return;
       }
 
-	      if (url.pathname !== '/ws') { socket.destroy(); return; }
-	      if (!originAllowed(req)) { rejectUpgrade(socket, 403, 'Forbidden'); return; }
+      if (url.pathname !== '/ws') { socket.destroy(); return; }
+      if (!originAllowed(req)) { rejectUpgrade(socket, 403, 'Forbidden'); return; }
 
-	      const webSessions = this._webSessions || new Map();
-	      const token = url.searchParams.get('token');
-	      let wsRole = null;
-	      let wsUser = null;
-	      let tokenSession = null;
-	      if (token && webSessions.has(token)) {
-	        const sess = webSessions.get(token);
-	        const expiresAt = sess.expiresAt || (sess.created + SESSION_TTL);
-	        if (Date.now() < expiresAt) {
-	          wsRole = sess.type || null;
-	          wsUser = sess.user || null;
-	          tokenSession = sess;
-	        } else {
-	          webSessions.delete(token);
-	          socket.destroy(); return;
+      const webSessions = this._webSessions || new Map();
+      const token = url.searchParams.get('token');
+      let wsRole = null;
+      let wsUser = null;
+      let tokenSession = null;
+      let sourceSessionId = null;
+      if (token && webSessions.has(token)) {
+        const sess = webSessions.get(token);
+        const expiresAt = sess.expiresAt || (sess.created + SESSION_TTL);
+        if (Date.now() < expiresAt) {
+          wsRole = sess.type || null;
+          wsUser = sess.user || null;
+          tokenSession = sess;
+          sourceSessionId = sess.sourceSession || (!sess.wsTicket ? token : null);
+        } else {
+          webSessions.delete(token);
+          socket.destroy(); return;
         }
       } else if (authUser && authPass && token) {
         const decoded = Buffer.from(token, 'base64').toString();
         const [u, ...pParts] = decoded.split(':');
         if (u !== authUser || pParts.join(':') !== authPass) { socket.destroy(); return; }
         wsRole = 'creator';
-	      } else if (authUser && authPass) {
-	        socket.destroy(); return;
-	      } else if (token) {
-	        socket.destroy(); return;
-	      } else if (authConfigured()) {
-	        rejectUpgrade(socket, 401, 'Unauthorized'); return;
-	      }
+      } else if (authUser && authPass) {
+        socket.destroy(); return;
+      } else if (token) {
+        socket.destroy(); return;
+      } else if (authConfigured()) {
+        rejectUpgrade(socket, 401, 'Unauthorized'); return;
+      }
 
-	      wss.handleUpgrade(req, socket, head, (ws) => {
-	        ws._role = wsRole;
-	        ws._user = wsUser;
-	        ws._sessionToken = token || null;
-	        ws._deviceId = tokenSession?.deviceId || null;
-	        if (token && tokenSession?.singleUse) webSessions.delete(token);
-	        wss.emit('connection', ws, req);
-	      });
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws._role = wsRole;
+        ws._user = wsUser;
+        ws._sessionToken = token || null;
+        ws._deviceId = tokenSession?.deviceId || null;
+        ws._sourceSession = sourceSessionId;
+        if (token && tokenSession?.singleUse) webSessions.delete(token);
+        wss.emit('connection', ws, req);
+      });
     });
 
     wss.on('connection', (ws) => {
@@ -6452,29 +6496,51 @@ class WebGateway {
       };
       graphEvents.on('change', onGraphEvent);
 
-	      ws.on('message', async (raw) => {
-	        let msg;
-	        try { msg = JSON.parse(raw); } catch { return; }
-	        const msgType = typeof msg.type === 'string' ? msg.type : '';
-	        const isAuthenticated = !!(ws._user || ws._role);
-	        const isCreatorWs = ws._role === 'creator' || ws._role === 'admin';
-	        const requireAuthenticated = () => {
-	          if (isAuthenticated || !authConfigured()) return true;
-	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Authentication required', code: 'auth-required' })); } catch {}
-	          return false;
-	        };
-	        const requireCreatorWs = () => {
-	          if (isCreatorWs) return true;
-	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Creator authentication required', code: 'creator-required' })); } catch {}
-	          return false;
-	        };
-	        if (msgType !== 'ping' && !requireAuthenticated()) return;
-	        if (msgType === 'code:save' && !requireCreatorWs()) return;
-	        if (msgType.startsWith('terminal:') && !requireCreatorWs()) return;
-	        if ((msgType === 'tool:ack' || msgType === 'tool:result' || msgType === 'tool:awaiting-approval' || msgType === 'perm:current-mode') && ws._role !== 'cli') {
-	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
-	          return;
-	        }
+      ws.on('message', async (raw) => {
+        let msg;
+        try { msg = JSON.parse(raw); } catch { return; }
+        const msgType = typeof msg.type === 'string' ? msg.type : '';
+        if (msgType !== 'ping' && ws._role !== 'cli' && ws._sourceSession && authConfigured()) {
+          const webSessions = this._webSessions || new Map();
+          const sess = webSessions.get(ws._sourceSession);
+          const expired = sess && Date.now() - sess.created >= SESSION_TTL;
+          const mismatch = sess && (sess.user !== ws._user || sess.type !== ws._role);
+          if (!sess || expired || mismatch) {
+            if (expired) webSessions.delete(ws._sourceSession);
+            this.log.warn(`[ws] closing stale web auth socket for user=${ws._user || '(unknown)'} reason=${!sess ? 'missing-session' : expired ? 'expired-session' : 'session-mismatch'}`);
+            ws._user = null;
+            ws._role = null;
+            ws._sourceSession = null;
+            try {
+              ws.send(JSON.stringify({
+                type: 'auth:error',
+                error: 'Session expired — reload the page and log in again.',
+                code: 'auth-required',
+              }));
+              ws.close(4001, 'session expired');
+            } catch (e) { this.log.warn('[web] ws auth-expire send failed: ' + e.message); }
+            return;
+          }
+        }
+        const isAuthenticated = !!(ws._user || ws._role);
+        const isCreatorWs = ws._role === 'creator' || ws._role === 'admin';
+        const requireAuthenticated = () => {
+          if (isAuthenticated || !authConfigured()) return true;
+          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Authentication required', code: 'auth-required' })); } catch {}
+          return false;
+        };
+        const requireCreatorWs = () => {
+          if (isCreatorWs) return true;
+          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Creator authentication required', code: 'creator-required' })); } catch {}
+          return false;
+        };
+        if (msgType !== 'ping' && !requireAuthenticated()) return;
+        if (msgType === 'code:save' && !requireCreatorWs()) return;
+        if (msgType.startsWith('terminal:') && !requireCreatorWs()) return;
+        if ((msgType === 'tool:ack' || msgType === 'tool:result' || msgType === 'tool:awaiting-approval' || msgType === 'perm:current-mode') && ws._role !== 'cli') {
+          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
+          return;
+        }
 
 	        // Plugin WS dispatch — message types of the form `plugin:<pluginId>:<msgType>`
         // route to handlers registered via api.registerWsHandler. The pluginId
@@ -6534,7 +6600,22 @@ class WebGateway {
         // Answer to an ask_user tool call — resolves the pending promise on
         // the tools side so the agent's tool_result returns cleanly.
         if (msg.type === 'ask_user_answer' && msg.qid && typeof msg.answer === 'string') {
-          const ok = this.tools.answerAskUser(msg.qid, msg.answer);
+          const pending = typeof this.tools.getPendingAskUser === 'function'
+            ? this.tools.getPendingAskUser(msg.qid)
+            : null;
+          if (!pending || !this._askUserAnswerMatchesClient(ws, msg, pending)) {
+            this.log.warn(`[ask_user] Rejected answer for qid=${msg.qid}: session mismatch or no pending question`);
+            try {
+              ws.send(JSON.stringify({
+                type: 'ask_user_answer_ack',
+                qid: msg.qid,
+                ok: false,
+                error: pending ? 'session-mismatch' : 'not-found',
+              }));
+            } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
+            return;
+          }
+          const ok = this.tools.answerAskUser(msg.qid, msg.answer, pending.sessionKey);
           try { ws.send(JSON.stringify({ type: 'ask_user_answer_ack', qid: msg.qid, ok })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
           return;
         }
@@ -6851,18 +6932,21 @@ class WebGateway {
               return;
             }
             if (pendingAsk?.pending) {
+              const cancelled = typeof this.tools.cancelSessionAskUser === 'function'
+                ? this.tools.cancelSessionAskUser(activeSessionKey)
+                : [];
               const labels = (pendingAsk.options || []).map((o, i) => `${i + 1}. ${o.label}`).join(' | ');
               const status = {
                 type: 'chat:status',
                 status: 'ask_user_superseded',
                 qid: pendingAsk.qid,
+                mode: pendingAsk.mode || 'single',
                 question: pendingAsk.question,
-                message: `Superseded pending question: ${pendingAsk.question}${labels ? ` Options: ${labels}` : ''}`,
+                message: 'Previous picker was cancelled; treating your message as the new instruction.',
               };
-              try { this.tools.cancelSessionAskUser(activeSessionKey); } catch (e) { this.log.warn('[ask_user] supersede cancel failed: ' + e.message); }
               if (isCli) this._sendToSession(sessionId, status);
               else { try { ws.send(JSON.stringify(status)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
-              this.log.info(`[ask_user] Superseded pending question for ${activeSessionKey}; routing unmatched chat as a new message`);
+              this.log.info(`[ask_user] Superseded ${cancelled.length || 0} pending question(s) for ${activeSessionKey}; routing unmatched chat as a new message${labels ? ` (${labels})` : ''}`);
             }
           }
 
@@ -7651,13 +7735,7 @@ class WebGateway {
   }
 
   _matchProxyRoute(proxyRoute, config, req) {
-    for (const [name, route] of Object.entries(config.routes)) {
-      if (proxyRoute === name || proxyRoute.startsWith(name + '/')) {
-        if (route.methods && !route.methods.includes(req.method)) continue;
-        return { name, route, remainder: proxyRoute.slice(name.length) };
-      }
-    }
-    return null;
+    return matchProxyRoute(proxyRoute, config, req);
   }
 
   async _fetchVaultKey(keyName) {
@@ -7692,110 +7770,13 @@ class WebGateway {
   }
 
   async _handleApiProxy(req, res, matched, proxyRoute) {
-    const { name, route, remainder } = matched;
-    if (!route.target) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `Proxy route "${name}" has no target URL` }));
-      return;
-    }
-
-    try {
-      const targetUrl = new URL(remainder || '/', route.target);
-
-      // Forward query params from original request
-      const origUrl = new URL(req.url, 'http://localhost');
-      for (const [k, v] of origUrl.searchParams) targetUrl.searchParams.append(k, v);
-
-      // Build headers: start with allowed incoming headers, then inject key headers
-      const headers = {};
-      const forwardHeaders = ['content-type', 'content-length', 'accept', 'accept-encoding'];
-      for (const h of forwardHeaders) { if (req.headers[h]) headers[h] = req.headers[h]; }
-
-      // Inject API keys from vault or env vars — the core security feature
-      if (route.headers && typeof route.headers === 'object') {
-        for (const [headerName, headerVal] of Object.entries(route.headers)) {
-          if (typeof headerVal === 'string' && headerVal.includes('$VAULT:')) {
-            const vaultKeyName = headerVal.match(/\$VAULT:([A-Z_][A-Z0-9_]*)/)?.[1];
-            if (!vaultKeyName) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: `Invalid $VAULT reference in proxy route "${name}"` }));
-              return;
-            }
-            const vaultVal = await this._fetchVaultKey(vaultKeyName);
-            if (!vaultVal) {
-              const envFallback = process.env[vaultKeyName];
-              if (!envFallback) {
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-	                res.end(JSON.stringify({ error: `Required vault key not found for proxy route "${name}"` }));
-                return;
-              }
-              headers[headerName] = headerVal.replace(`$VAULT:${vaultKeyName}`, envFallback);
-            } else {
-              headers[headerName] = headerVal.replace(`$VAULT:${vaultKeyName}`, vaultVal);
-            }
-          } else if (typeof headerVal === 'string' && headerVal.startsWith('$')) {
-            const envKey = headerVal.slice(1);
-            const envVal = process.env[envKey];
-            if (!envVal) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-	              res.end(JSON.stringify({ error: `Required env credential not set for proxy route "${name}"` }));
-              return;
-            }
-            headers[headerName] = envVal;
-          } else {
-            headers[headerName] = headerVal;
-          }
-        }
-      }
-
-      // Collect request body for non-GET
-      let body = null;
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        body = await new Promise((resolve, reject) => {
-          const chunks = [];
-          req.on('data', c => { chunks.push(c); if (chunks.reduce((s, b) => s + b.length, 0) > 5_000_000) reject(new Error('Body too large')); });
-          req.on('end', () => resolve(Buffer.concat(chunks)));
-          req.on('error', reject);
-        });
-      }
-
-      const fetchOpts = { method: req.method, headers };
-      if (body) fetchOpts.body = body;
-      fetchOpts.signal = AbortSignal.timeout(route.timeout || 30000);
-
-      const upstream = await fetch(targetUrl.toString(), fetchOpts);
-
-      // Stream response back, stripping CORS (we control it)
-      const respHeaders = {};
-      for (const [k, v] of upstream.headers) {
-        if (k.toLowerCase() !== 'access-control-allow-origin') respHeaders[k] = v;
-      }
-      respHeaders['access-control-allow-origin'] = '*';
-      res.writeHead(upstream.status, respHeaders);
-
-      if (upstream.body) {
-        const reader = upstream.body.getReader();
-        const pump = async () => {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) { res.end(); break; }
-            res.write(value);
-          }
-        };
-        pump().catch(() => res.end());
-      } else {
-        const buf = await upstream.arrayBuffer();
-        res.end(Buffer.from(buf));
-      }
-
-      this.log.debug(`[api-proxy] ${req.method} ${name}${remainder} → ${upstream.status}`);
-    } catch (e) {
-      this.log.warn(`[api-proxy] Proxy error for "${name}": ${e.message}`);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `Proxy failed: ${e.message}` }));
-      }
-    }
+    const handler = createApiProxyHandler({
+      fetchVaultKey: keyName => this._fetchVaultKey(keyName),
+      log: this.log,
+      redactSecrets: _redactSecrets,
+      fetchImpl: fetch,
+    });
+    return handler(req, res, matched, proxyRoute);
   }
 
   // ── Graph API Handlers ──────────────────────────────────────────────

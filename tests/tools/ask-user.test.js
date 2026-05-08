@@ -141,6 +141,43 @@ test('ask_user supports open text answers', async () => {
   assert.deepEqual(await pending, { type: 'open', answer: 'free form text' });
 });
 
+test('ask_user is only advertised for modal-capable foreground sessions', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const namesFor = opts => new Set(tools.getToolDefinitions(opts).map(t => t.name));
+
+  assert.equal(namesFor({ platform: 'web', trigger: 'dm' }).has('ask_user'), true);
+  assert.equal(namesFor({ platform: 'cli', trigger: 'dm' }).has('ask_user'), true);
+  assert.equal(namesFor({ platform: 'system', trigger: 'worker' }).has('ask_user'), false);
+  assert.equal(namesFor({ platform: 'cli', trigger: 'worker' }).has('ask_user'), false);
+  assert.equal(namesFor({ platform: 'telegram', trigger: 'dm' }).has('ask_user'), false);
+});
+
+test('ask_user qid answers are bound to the originating session', async () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const payloads = [];
+  tools._wsBroadcast = (sessionKey, payload) => {
+    payloads.push({ sessionKey, payload });
+    return 1;
+  };
+
+  const pending = tools.executeTool('ask_user', {
+    question: 'Which route?',
+    options: [{ label: 'A' }, { label: 'B' }],
+  }, {
+    sessionKey: 'channel:cli:abc',
+    channelId: 'cli:abc',
+    platform: 'cli',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const qid = payloads[0].payload.qid;
+  assert.equal(tools.answerAskUser(qid, 'A', 'channel:cli:other'), false);
+  assert.equal(tools.listPendingQuestions('channel:cli:abc').length, 1);
+  assert.equal(tools.answerAskUser(qid, 'A', 'channel:cli:abc'), true);
+  assert.deepEqual(await pending, { type: 'single', answer: 'A' });
+  assert.deepEqual(tools.listPendingQuestions('channel:cli:abc'), []);
+});
+
 test('WebGateway broadcasts channel:cli session keys to cli-prefixed session clients', () => {
   const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
   const gateway = new WebGateway(tools);
@@ -181,6 +218,40 @@ test('WebGateway does not treat non-web shared dm/channel keys as web sessions',
   assert.deepEqual(sent, [{ type: 'ok' }]);
 });
 
+test('WebGateway scopes binary browser frames to web users and registered session clients', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const gateway = new WebGateway(tools);
+  const sent = [];
+  const webWs = {
+    readyState: 1,
+    _user: 'yam',
+    send(data) { sent.push(data); },
+  };
+  const otherWs = {
+    readyState: 1,
+    _user: 'other',
+    send(data) { sent.push(data); },
+  };
+  const cliWs = {
+    readyState: 1,
+    _role: 'cli',
+    _user: 'yam',
+    send(data) { sent.push(data); },
+  };
+  const frame = Buffer.from('browser-frame');
+  gateway._wss = { clients: new Set([webWs, otherWs, cliWs]) };
+
+  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:telegram:yam', frame), 0);
+  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:web:yam', frame), 1);
+  assert.deepEqual(sent, [frame]);
+
+  const cliSent = [];
+  const originWs = { readyState: 1, send(data) { cliSent.push(data); } };
+  gateway._sessionClients.set('cli:project-a', new Set([{ ws: originWs, role: 'origin' }]));
+  assert.equal(gateway._broadcastBinaryToSessionKey('channel:cli:project-a', frame), 1);
+  assert.deepEqual(cliSent, [frame]);
+});
+
 test('WebGateway matches CLI graph events only to their registered session', () => {
   const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
   const gateway = new WebGateway(tools);
@@ -192,6 +263,25 @@ test('WebGateway matches CLI graph events only to their registered session', () 
   assert.equal(gateway._sessionKeyClientMatches(cliWs, 'channel:cli:yam@project-b'), false);
   assert.equal(gateway._sessionKeyClientMatches(cliWs, 'dm:yam'), false);
   assert.equal(gateway._sessionKeyClientMatches(cliWs, null, null), false);
+});
+
+test('WebGateway only accepts ask_user qid answers from the owning session client', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const gateway = new WebGateway(tools);
+  const cliA = { readyState: 1, _role: 'cli', _user: 'yam', send() {} };
+  const cliB = { readyState: 1, _role: 'cli', _user: 'yam', send() {} };
+  gateway._sessionClients.set('cli:project-a', new Set([{ ws: cliA, role: 'origin' }]));
+  gateway._sessionClients.set('cli:project-b', new Set([{ ws: cliB, role: 'origin' }]));
+
+  const pending = {
+    qid: 'q1',
+    sessionKey: 'channel:cli:project-a',
+    channelId: 'cli:project-a',
+  };
+
+  assert.equal(gateway._askUserAnswerMatchesClient(cliA, { sessionId: 'cli:project-a' }, pending), true);
+  assert.equal(gateway._askUserAnswerMatchesClient(cliB, { sessionId: 'cli:project-b' }, pending), false);
+  assert.equal(gateway._askUserAnswerMatchesClient(cliB, { sessionKey: 'channel:cli:project-b' }, pending), false);
 });
 
 test('WebGateway does not label unscoped tool activity as the active graph', () => {

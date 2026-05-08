@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const { SlackGateway } = require('../../plugins/slack/lib/gateway');
 const { DiscordGateway } = require('../../plugins/discord/lib/gateway');
 const { TelegramGateway } = require('../../plugins/telegram/lib/gateway');
+const { WebGateway } = require('../../src/gateways/web');
 
 class FakeSessions {
   static buildKey(channelIdOrOpts, isDm = false, userId = null) {
@@ -44,6 +45,36 @@ function fakeAgent() {
     processMessage: async () => ({ text: 'ok' }),
   };
 }
+
+test('Web proactive prompt suppresses learner writes', async () => {
+  let observedOpts = null;
+  const gateway = new WebGateway({
+    config: { dataDir: process.cwd(), workspacePath: process.cwd() },
+    log: logger(),
+    graph: null,
+    skills: null,
+    _agent: {},
+    _jobQueue: {
+      submitAgentTurn: async (opts) => {
+        observedOpts = opts;
+        return { text: 'NO_REPLY' };
+      },
+    },
+  });
+  gateway._wss = {
+    clients: new Set([{ readyState: 1, _role: 'creator', _user: 'yam' }]),
+  };
+  gateway.hasOperatorConnected = () => true;
+  gateway._getActiveWebUser = () => 'yam';
+  gateway._sendToSession = () => {};
+
+  gateway.injectProactivePrompt('web:control-panel', 'check in', 'topic');
+  await gateway._proactiveQueue;
+
+  assert.equal(observedOpts.trigger, 'proactive');
+  assert.equal(observedOpts.platform, 'web');
+  assert.equal(observedOpts.suppressLearning, true);
+});
 
 test('Slack task completion preserves original session and thread route', () => {
   const gateway = new SlackGateway({

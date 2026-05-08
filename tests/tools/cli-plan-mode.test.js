@@ -36,6 +36,14 @@ applyPromptSectionsMixin(PromptHarness);
 
 test('cli plan mode hides local execution and write tools from the catalog', () => {
   const tools = makeTools();
+  tools._pluginManager = {
+    getToolDefinitions() {
+      return [
+        { name: 'browser', description: 'browser', input_schema: { type: 'object' } },
+        { name: 'plugin_allowed', description: 'allowed', input_schema: { type: 'object' } },
+      ];
+    },
+  };
   const names = tools.getToolDefinitions({
     platform: 'cli',
     projectContext: { mode: 'plan' },
@@ -47,6 +55,7 @@ test('cli plan mode hides local execution and write tools from the catalog', () 
   assert.ok(!names.includes('write_file'));
   assert.ok(!names.includes('edit_file'));
   assert.ok(!names.includes('web_serve'));
+  assert.ok(!names.includes('browser'));
   assert.ok(!names.includes('env_manage'));
   assert.ok(!names.includes('settings_read'));
   assert.ok(!names.includes('save_tool'));
@@ -54,12 +63,28 @@ test('cli plan mode hides local execution and write tools from the catalog', () 
   assert.ok(!names.includes('session_status'));
   assert.ok(!names.includes('schedule_wakeup'));
   assert.ok(!names.includes('log_watch'));
+  assert.ok(names.includes('plugin_allowed'));
 
   const serialized = JSON.stringify(tools.getToolDefinitions({
     platform: 'cli',
     projectContext: { mode: 'execute' },
   }));
   assert.doesNotMatch(serialized, /\/workspace|\/data\/graphs|\/app\//);
+});
+
+test('cli execute mode still hides the web browser tool from the catalog', () => {
+  const tools = makeTools();
+  tools._pluginManager = {
+    getToolDefinitions() {
+      return [{ name: 'browser', description: 'browser', input_schema: { type: 'object' } }];
+    },
+  };
+  const names = tools.getToolDefinitions({
+    platform: 'cli',
+    projectContext: { mode: 'execute' },
+  }).map(t => t.name);
+
+  assert.ok(!names.includes('browser'));
 });
 
 test('cli sessions hide and block webapp_request', async () => {

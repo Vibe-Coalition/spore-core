@@ -149,6 +149,7 @@ class AgentLoop {
       const defs = this.tools?.getToolDefinitions?.({
         platform: opts.platform,
         projectContext: opts.projectContext,
+        trigger: opts.trigger,
       }) || [];
       return [...new Set(defs.map(t => t?.name).filter(Boolean))].sort();
     } catch (e) {
@@ -248,6 +249,10 @@ class AgentLoop {
     }
     if (opts.platform === 'cli' && opts.projectContext) {
       lines.push('- In coding/project sessions, prefer repository/file/shell tools for repo inspection and verification. Use browser/web tools only when the user explicitly asks for live web research or external docs.');
+      lines.push('- Evidence discipline: treat memory, prompt context, prior failures, and inferred environment details as hints, not proof. Before claiming file state, tool availability, test status, project structure, or what changed, check the current repo or command output with the relevant local tool.');
+      lines.push('- Before declaring a task blocked or asking the user to run something, try the direct local check once when it is safe: read the file/range, inspect git diff/status, or run the narrow command. Do not infer host/container boundaries, missing toolchains, or missing files from stale context.');
+      lines.push('- Ask the user when uncertainty is about intent, desired behavior, acceptable risk, credentials/access, destructive changes, or a product decision that repo/tool evidence cannot answer. Do not silently choose a risky interpretation just to keep moving.');
+      lines.push('- After edits or failed edits, re-read the changed range or inspect the diff before deciding the next step. If a command fails, use the exact error output to guide the next check; do not repeat the same failing call without changing something meaningful.');
       lines.push('- After edits, final verification claims must be command-derived: list exact commands run and outcomes. Say "focused tests" when you used grep, -k, a named test file, or another filter. Do not say "all tests", "full suite", or quote a total test count unless an unfiltered full-suite command produced that output.');
       lines.push('- Keep public API and behavior changes scoped to the user request. If you intentionally add optional surface area beyond the minimal request, call that out briefly and justify it.');
     }
@@ -266,6 +271,10 @@ class AgentLoop {
   _detectForcedToolNameForIntent(content, opts = {}) {
     const text = String(content || '').toLowerCase();
     if (!text.trim()) return null;
+    const platform = String(opts.platform || '').toLowerCase();
+    const trigger = String(opts.trigger || '').toLowerCase();
+    if (!['web', 'cli'].includes(platform)) return null;
+    if (trigger && !['dm', 'mention', 'reply', 'chat', 'manual'].includes(trigger)) return null;
     const names = new Set(this._runtimeToolNames(opts));
     const has = (name) => names.has(name);
 
@@ -739,6 +748,7 @@ class AgentLoop {
         const toolList = (this.tools?.getToolDefinitions?.({
           platform: opts.platform,
           projectContext: opts.projectContext,
+          trigger: opts.trigger,
         }) || []).map(t => t.name);
         const dump = [
           `# trigger=${opts.trigger} platform=${opts.platform} promptMode=${promptMode}`,
@@ -914,12 +924,22 @@ class AgentLoop {
 
     if (msgTokens > softBudget) {
       const targetMsgTokens = Math.min(softBudget, hardCeiling - systemTokens - RESPONSE_HEADROOM_TOKENS);
-      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus);
+      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus, {
+        systemTokens,
+        beforeMessageTokens: msgTokens,
+        limitTokens: systemTokens + softBudget,
+        reason: isCasualChat ? 'casual' : 'complex',
+      });
       messages = this._sanitizeMessages(messages);
       this.log.info(`[compaction] ${isCasualChat ? 'casual' : 'complex'} ${msgTokens} → ~${targetMsgTokens} msg tokens`);
     } else if (systemTokens + msgTokens > hardCeiling) {
       const targetMsgTokens = hardCeiling - systemTokens - RESPONSE_HEADROOM_TOKENS;
-      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus);
+      messages = await this._compactHistory(sessionKey, messages, targetMsgTokens, opts.onStatus, {
+        systemTokens,
+        beforeMessageTokens: msgTokens,
+        limitTokens: hardCeiling,
+        reason: 'hard-ceiling',
+      });
       messages = this._sanitizeMessages(messages);
       this.log.info(`[compaction] hard-ceiling ${msgTokens} → ~${targetMsgTokens} msg tokens`);
     }
@@ -943,10 +963,15 @@ class AgentLoop {
     const isDirect = directTriggers.includes(opts.trigger);
     const lullMaxIter = this.config.lullMaxIterations || eff.lullMaxIterations;
     const safetyCeiling = this.config.loopDetection?.ceiling || 50;
-    const budgetPressureAt = this.config.loopDetection?.budgetPressure || eff.loopDetectionBudgetPressure;
     // Tiered iteration caps: chat/DM gets a tighter leash than proactive/continuation
     const dmMaxIter = this.config.dmMaxIterations || eff.dmMaxIterations;
-    const chatMaxIter = isDirect ? dmMaxIter : safetyCeiling;
+    const isCliExecuteTurn = opts.platform === 'cli' && opts.projectContext?.mode === 'execute';
+    const chatMaxIter = isDirect && !isCliExecuteTurn ? dmMaxIter : safetyCeiling;
+    const activeIterationCeiling = isLull ? lullMaxIter : chatMaxIter;
+    const configuredBudgetPressureAt = this.config.loopDetection?.budgetPressure || eff.loopDetectionBudgetPressure;
+    const budgetPressureAt = isCliExecuteTurn
+      ? Math.max(configuredBudgetPressureAt, Math.floor(activeIterationCeiling * 0.8))
+      : configuredBudgetPressureAt;
     let budgetHintSent = false;
     let tokenBudgetWarned = false;
     let contextPressureLevel = 0; // 0=ok, 1=caution(70%), 2=urgent(90%)
@@ -976,6 +1001,7 @@ class AgentLoop {
     let chatTools = null;
     let forcedToolName = this._detectForcedToolNameForIntent(opts.content, {
       platform: opts.platform,
+      trigger: opts.trigger,
       projectContext: opts.projectContext,
       messages,
     });
@@ -1009,7 +1035,7 @@ class AgentLoop {
       }
 
       // DM/mention/reply: hard cap to prevent runaway tool usage
-      if (isDirect && iterations > chatMaxIter) {
+      if (isDirect && !isCliExecuteTurn && iterations > chatMaxIter) {
         this.log.warn(`Chat hit max iterations (${chatMaxIter}) for session ${sessionKey} — forcing response`);
         break;
       }
@@ -1205,7 +1231,7 @@ class AgentLoop {
             const last = toolResults[toolResults.length - 1];
             if (!budgetHintSent && iterations >= budgetPressureAt) {
               budgetHintSent = true;
-              last.content += `\n\n--- BUDGET: ${iterations} iterations used, ${totalUsage.input_tokens.toLocaleString()} input tokens consumed. Respond to the user now unless you absolutely need one more tool call. ---`;
+              last.content += `\n\n--- BUDGET: ${iterations}/${activeIterationCeiling} iterations used, ${totalUsage.input_tokens.toLocaleString()} input tokens consumed. You are near the turn budget. If implementation or verification is still unfinished, keep going with only high-value tool calls that directly finish the task. If enough is done, respond with exact status and verification. Do not stop solely because this warning appeared. ---`;
             }
             if (contextPressureLevel === 1) {
               last.content += `\n\n--- ⚠ CONTEXT PRESSURE: ${Math.round((systemTokens + msgTokens) / hardCeiling * 100)}% of context used. Be concise in tool calls — old context will be compacted soon. ---`;
@@ -1567,7 +1593,12 @@ class AgentLoop {
       if (opts.onStatus) {
         try { opts.onStatus({ type: 'context_overflow_recover', beforeTokens, targetTokens: target }); } catch { /* silent: best-effort UI callback */ }
       }
-      let compacted = await this._compactHistory(sessionKey, messages, target, opts.onStatus);
+      let compacted = await this._compactHistory(sessionKey, messages, target, opts.onStatus, {
+        systemTokens,
+        beforeMessageTokens: beforeTokens,
+        limitTokens: ceiling,
+        reason: 'context-overflow',
+      });
       compacted = this._sanitizeMessages(compacted);
       let afterTokens = this._estimateMessageTokens(compacted);
       if (afterTokens >= beforeTokens) {
@@ -2914,6 +2945,7 @@ class AgentLoop {
     const tools = opts.tools || this.tools.getToolDefinitions({
       platform: opts.platform,
       projectContext: opts.projectContext,
+      trigger: opts.trigger,
     });
     if (tools.length > 0) {
       const last = tools[tools.length - 1];
@@ -3553,8 +3585,40 @@ class AgentLoop {
     ].join('\n');
   }
 
-  async _compactHistory(sessionKey, messages, targetTokens, onStatus) {
+  async _compactHistory(sessionKey, messages, targetTokens, onStatus, contextMeter = {}) {
     if (messages.length <= 6) return this._trimMessagesToTokenBudget(messages, targetTokens);
+
+    const boundedPercent = (used, limit) => {
+      if (!Number.isFinite(used) || !Number.isFinite(limit) || limit <= 0) return null;
+      return Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
+    };
+    const contextMetric = (messageTokens) => {
+      const systemTokenCount = Number(contextMeter.systemTokens) > 0 ? Number(contextMeter.systemTokens) : 0;
+      const usedTokens = systemTokenCount + Math.max(0, Number(messageTokens) || 0);
+      const fallbackLimit = Math.max(
+        usedTokens,
+        systemTokenCount + Math.max(0, Number(targetTokens) || 0),
+      );
+      const limitTokens = Number(contextMeter.limitTokens) > 0 ? Number(contextMeter.limitTokens) : fallbackLimit;
+      const usedPercent = boundedPercent(usedTokens, limitTokens);
+      const remainingPercent = usedPercent == null ? null : Math.max(0, 100 - usedPercent);
+      return { usedTokens, limitTokens, usedPercent, remainingPercent };
+    };
+    const statusFields = (metric) => {
+      const systemTokenCount = Number(contextMeter.systemTokens) > 0 ? Number(contextMeter.systemTokens) : 0;
+      const fields = {
+        reason: contextMeter.reason || null,
+        targetTokens: Number.isFinite(Number(targetTokens)) ? Math.max(0, Math.round(systemTokenCount + Number(targetTokens))) : 0,
+        limitTokens: Math.round(metric.limitTokens),
+        usedPercent: metric.usedPercent,
+        remainingPercent: metric.remainingPercent,
+      };
+      return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null && value !== undefined));
+    };
+    const beforeMessageTokens = Number(contextMeter.beforeMessageTokens) > 0
+      ? Number(contextMeter.beforeMessageTokens)
+      : this._estimateMessageTokens(messages);
+    const beforeMetric = contextMetric(beforeMessageTokens);
 
     const _msgHasToolUse = (m) => m.role === 'assistant' && Array.isArray(m.content) && m.content.some(b => b.type === 'tool_use');
     const _msgHasToolResult = (m) => m.role === 'user' && Array.isArray(m.content) && m.content.some(b => b.type === 'tool_result');
@@ -3676,6 +3740,8 @@ class AgentLoop {
           type: 'compaction-start',
           count: toDrop.length,
           dropped_useless: droppedUseless.length,
+          beforeTokens: Math.round(beforeMetric.usedTokens),
+          ...statusFields(beforeMetric),
         });
       } catch { /* silent: best-effort UI signal */ }
     }
@@ -3756,6 +3822,9 @@ class AgentLoop {
 
     this.log.info(`[compaction] Compacted ${toDrop.length} messages → ${summaryText.length} char summary (${previousSummary ? 'iterative update' : 'fresh'}${summary ? '' : ', LLM-FAILED-fallback'}), keeping ${toKeep.length} recent`);
 
+    const compactedMessages = [...head, { role: 'user', content: summaryText }, ...toKeep];
+    const afterMetric = contextMetric(this._estimateMessageTokens(compactedMessages));
+
     if (typeof onStatus === 'function') {
       try {
         onStatus({
@@ -3763,11 +3832,14 @@ class AgentLoop {
           count: toDrop.length,
           summary_chars: summaryText.length,
           fallback: summary ? false : true,
+          beforeTokens: Math.round(beforeMetric.usedTokens),
+          afterTokens: Math.round(afterMetric.usedTokens),
+          ...statusFields(afterMetric),
         });
       } catch { /* silent */ }
     }
 
-    return [...head, { role: 'user', content: summaryText }, ...toKeep];
+    return compactedMessages;
   }
 
   /**

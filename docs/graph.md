@@ -1,224 +1,159 @@
 # Knowledge Graph
 
-The knowledge graph is the observable foundation of every Anima agent. It is a SQLite database (`graph.db`) containing typed nodes, facets, facts, and relationships — the agent's long-term memory, identity, and understanding of its world. In the web panel's visual canvas, this graph comes alive as an interactive map you can explore, search, and edit in real time. Nodes form as the agent learns; relationships shift as context evolves.
+Spore stores long-term memory in SQLite knowledge graphs. A graph contains
+typed nodes, aspects, attributes, aliases, edges, episodes, reflections, gaps,
+and derived facts. The web UI renders these databases as an inspectable graph
+and the agent uses scoped recall from them on each turn.
 
----
+## Graph Types
 
-## Schema
+| Graph | Purpose | Typical writer | Typical readers |
+|---|---|---|---|
+| `default` | instance/default graph | default web/operator sessions | default sessions |
+| `spore-knowledge-base` | protected reusable shared knowledge | distillers, plugin reference nodes, research workers | most scoped sessions |
+| `user-*` | private webapp user graph | that webapp user | that user and allowed operators |
+| `project-*` | Spore Code project graph | code sessions for the project | collaborators on the same project |
+| `channel-*` | channel/person graph | Telegram, Slack, Discord, and similar channels | that channel/person session |
 
-### nodes
+General Knowledge is the cross-scope library. It should contain reusable lessons,
+plugin reference nodes, framework/tool knowledge, and stable shared facts. It
+should not become a dumping ground for private chat, project secrets, channel
+noise, or one user's recurring tasks.
 
-The primary entity table.
+## Scope Resolution
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | TEXT PRIMARY KEY | Unique stable identifier (e.g. `harry`, `user:alice`) |
-| `label` | TEXT NOT NULL | Human-readable name |
-| `type` | TEXT NOT NULL | Category: `self`, `person`, `concept`, `system`, `reference`, etc. |
-| `description` | TEXT | Short description |
-| `importance` | INTEGER | 1–10 relevance score (default 5) |
-| `mentions` | INTEGER | Conversation mention count (default 1) |
-| `session_count` | INTEGER | Number of sessions this node appeared in |
-| `provenance` | TEXT | Origin tag (e.g. `self`, `learner`) |
-| `extracted_with` | TEXT | Model/method used for extraction |
-| `extracted_at` | DATETIME | When the extraction occurred |
-| `created` | DATETIME | Row creation timestamp |
-| `updated` | DATETIME | Last update timestamp |
-| `extra` | TEXT | JSON blob for additional metadata (default `{}`) |
+Every session should have an explicit memory scope:
 
-Embeddings are added at runtime as a `TEXT` column by the embedder module.
+- **Web/operator default session:** writes the selected/default graph.
+- **Webapp user session:** writes that user's graph and can read default/general
+  sources allowed by policy.
+- **Spore Code session:** writes the project graph and reads project plus
+  General Knowledge.
+- **Channel session:** writes the channel/person graph and reads that graph plus
+  General Knowledge.
+- **Plugin install/uninstall:** installs reference nodes into General Knowledge.
+- **Proactive/wakeup turns:** use the graph and session that created the wakeup.
 
-### aspects
+When a user switches graphs outside the graph view, subsequent chat and graph
+operations should still use the newly selected graph.
 
-Named facets of a node that group related attributes.
+## Core Schema
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY | Auto-increment ID |
-| `node_id` | TEXT | Foreign key → nodes.id |
-| `name` | TEXT NOT NULL | Aspect name (e.g. `identity`, `voice`, `hard_rules`) |
-| `weight` | INTEGER | Priority weight (default 5) |
-| `extracted_with` | TEXT | Model/method used |
+The schema is intentionally simple and inspectable:
 
-### attributes
-
-Individual facts inside an aspect.
-
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY | Auto-increment ID |
-| `aspect_id` | INTEGER | Foreign key → aspects.id |
-| `content` | TEXT NOT NULL | The fact text |
-| `importance` | INTEGER | 1–10 relevance score (default 5) |
-| `source` | TEXT | Where this fact came from |
-| `created` | DATETIME | Row creation timestamp |
-| `updated_at` | DATETIME | Last update timestamp |
-| `extracted_with` | TEXT | Model/method used |
-| `event_date` | TEXT | When the event occurred (if temporal) |
-| `document_date` | TEXT | Date of the source document |
-| `source_excerpt` | TEXT | Excerpt from the source conversation |
-| `source_episode_id` | INTEGER | Link to episodes table |
-
-### attribute_history
-
-Change log for attribute updates.
-
-| Column | Type | Description |
-|---|---|---|
-| `attribute_id` | INTEGER | The attribute that changed |
-| `old_content` | TEXT | Previous value |
-| `new_content` | TEXT | New value |
-| `changed_at` | DATETIME | When the change occurred |
-| `source_episode_id` | INTEGER | Link to triggering episode |
-
-### edges
-
-Typed directed relationships between nodes.
-
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY | Auto-increment ID |
-| `source` | TEXT | Source node ID |
-| `target` | TEXT | Target node ID |
-| `type` | TEXT NOT NULL | Relationship type (e.g. `knows`, `runs_on`, `uses`) |
-| `weight` | REAL | Relationship strength (default 1.0) |
-| `created` | DATETIME | Row creation timestamp |
-| `extracted_with` | TEXT | Model/method used |
-
-### aliases
-
-Alternate names for nodes, used for fuzzy graph search resolution.
-
-| Column | Description |
+| Table | Purpose |
 |---|---|
-| `node_id` | Canonical node it maps to |
-| `alias` | Alternate name or nickname |
+| `nodes` | primary entities with `id`, `label`, `type`, `description`, importance, provenance, timestamps, and JSON `extra` |
+| `aspects` | named groups on a node such as `identity`, `rules`, `gotchas`, `capabilities`, or `project_notes` |
+| `attributes` | individual facts inside aspects, with importance, source, timestamps, and optional source episode metadata |
+| `edges` | directed typed relationships between nodes |
+| `aliases` | alternate labels for search and fuzzy lookup |
+| `episodes` | transcript snippets and conversation evidence |
+| `gaps` | open questions for maintenance/research |
+| `reflections` | maintainer or model-generated observations |
+| `derived_facts` | inferred facts with confidence and provenance |
+| `attribute_history` | change history for attributes |
 
-### gaps
+Migrations may add supporting tables or columns. Treat the database API and
+graph modules as the source of truth, not this list alone.
 
-Open questions or knowledge gaps the Maintainer should investigate.
+## Learning And Distillation
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY | Auto-increment ID |
-| `node_id` | TEXT | Node this gap is about |
-| `content` | TEXT | The question to investigate |
-| `status` | TEXT | `open`, `answered`, `dormant` (default `open`) |
-| `answer` | TEXT | Resolution text (nullable) |
-| `answered_at` | DATETIME | When resolved |
-| `source` | TEXT | Who answered it |
-| `attempts` | INTEGER | Number of investigation attempts |
-| `dormant_since` | DATETIME | When marked dormant |
-| `created` | DATETIME | Row creation timestamp |
+Spore learns in stages:
 
-### reflections
+1. The active turn is stored in session history.
+2. The learner extracts candidate facts and relationships.
+3. Writes go to the current session's scoped graph.
+4. Session and channel distillers periodically summarize longer arcs.
+5. Reusable lessons can be promoted into General Knowledge.
+6. Temporary or low-value session artifacts are pruned by maintenance.
 
-Periodic self-reflections generated by the Maintainer.
+Project sessions often distill when the session ends. Channel sessions may not
+have a natural end, so the channel distiller uses idle/periodic thresholds to
+summarize progress and promote useful shared knowledge without carrying every
+message forever.
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY | Auto-increment ID |
-| `node_id` | TEXT | Usually the agent's own node |
-| `content` | TEXT | Reflection text |
-| `model` | TEXT | Model used to generate |
-| `source` | TEXT | Origin (default `maintainer`) |
-| `created` | DATETIME | Row creation timestamp |
-| `updated` | DATETIME | Last update timestamp |
+## General Knowledge
 
-### derived_facts
+General Knowledge is available to scoped sessions as a reusable reference layer.
+Examples of good General Knowledge entries:
 
-Cross-node inferences generated by the Maintainer.
+- how a library behaved in a prior project,
+- a framework gotcha that applies across projects,
+- plugin tool capabilities and setup notes,
+- stable operator-level preferences that are intentionally shared,
+- implementation lessons from benchmarks.
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY | Auto-increment ID |
-| `content` | TEXT | The derived fact |
-| `source_node_ids` | TEXT | Comma-separated node IDs used as evidence |
-| `confidence` | TEXT | `low`, `medium`, `high` (default `medium`) |
-| `created` | DATETIME | Row creation timestamp |
-| `invalidated_at` | DATETIME | When the fact was invalidated |
+Examples that should stay scoped:
 
----
+- a person's private reminders or recurring jobs,
+- channel-specific social context,
+- project secrets or local hostnames,
+- transient task chatter,
+- benchmark actor identities.
 
-## Seed Graph
+## Plugin Reference Nodes
 
-`src/seed-graph.sql` provides the starting identity. Before your first run, this file is executed to populate the agent's self-concept, voice, rules, and initial knowledge.
+Bundled and installed plugins can ship reference-node SQL. The plugin manager
+installs those nodes into General Knowledge and removes stale copies from other
+graphs. Reference-node SQL should tag rows with `extracted_with =
+'{{plugin_id}}'` so install/uninstall cleanup can identify ownership.
 
-Customise the seed before creating an agent:
-- Replace `AGENT_ID` with the stable node ID (e.g. `luna`)
-- Replace `AGENT_NAME` with the display name (e.g. `Luna`)
-- Edit `voice` and `hard_rules` aspects to shape initial behaviour
-- Add or remove nodes as needed
+This keeps capability descriptions reusable without polluting `default`.
 
----
+## Retrieval
 
-## Hybrid Search
+Recall can combine:
 
-Anima supports hybrid retrieval that combines:
+- full-text search over nodes, aliases, aspects, attributes, and episodes,
+- optional embeddings,
+- graph walks from matched nodes,
+- recency and importance boosts,
+- scoped graph merging.
 
-1. **Keyword search** — full-text match on labels, descriptions, IDs, aliases, aspects, and attribute values
-2. **Vector similarity** — cosine distance on Gemini embeddings
-3. **Merge + dedup** — results are scored and merged, duplicates collapsed
-
-This makes graph queries resilient to paraphrasing. A query like `"text to speech voice"` can find the relevant voice/TTS nodes even when those exact words are not in any label.
-
-Enable semantic search:
-
-```bash
-GEMINI_API_KEY=AIza...
-```
-
-Without a Gemini key, Anima falls back to keyword-only search.
-
----
-
-## Background Workers
-
-### Learner
-
-Runs after each conversation turn. Scans the recent exchange for extractable facts and relationship signals, then calls `graph_update` to store them. The learner uses a separate (typically cheaper/faster) model configured via `ANIMA_LEARNER_MODEL`.
-
-### Maintainer
-
-Runs on a heartbeat (`ANIMA_HEARTBEAT_MINUTES`, default 120 minutes). It:
-- Identifies and fills knowledge gaps
-- Generates periodic reflections and derived facts
-- Connects sparse or isolated nodes
-- Prunes stale or contradicted attributes
-
----
-
-## Graph API
-
-Each agent exposes a graph API on its web port (when `ANIMA_WEB_PORT` is set).
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/graph` | GET | Full graph dump (nodes, aspects, attributes, edges) |
-| `/api/graph/node` | POST | Create or update a node |
-| `/api/graph/aspect` | POST | Create or update an aspect + attributes |
-| `/api/graph/edge` | POST | Create or update an edge |
-| `/api/graph/node/:id` | DELETE | Delete a node and its aspects/attributes/edges |
-| `/api/tokens` | GET | Token usage summary (JSON) |
-
-The graph API requires authentication when `ANIMA_WEB_AUTH_PASS` is set.
-
----
+Enhanced recall can use a model tier to decompose a user message into multiple
+search queries. That should improve retrieval, but it is not a substitute for
+correct graph scoping.
 
 ## Graph Viewer
 
-Each agent serves an interactive graph constellation viewer at `/graph` (when `ANIMA_WEB_PORT` is set). It uses D3.js force simulation to render nodes and edges with click-to-expand detail.
+The web graph UI supports:
 
-The viewer has its own login form — authentication uses `ANIMA_WEB_AUTH_USER` and `ANIMA_WEB_AUTH_PASS`.
+- graph switching,
+- node search and type filtering,
+- node details with aspects, attributes, and edges,
+- direct edits for supported graph records,
+- graph export/import and backups,
+- SVG rendering for smaller visible sets,
+- WebGL rendering for larger visible sets,
+- optional renderer performance metrics.
 
----
+The renderer is an interface detail. The backing graph may contain far more
+nodes than are comfortable to show at once, so search, filtering, culling, and
+structured focus views matter.
 
-## Token Usage Logging
+## Export, Import, And Backups
 
-Token consumption is logged to `graph.db` as daily rollup nodes. Each day's entry tracks:
+Graph export/import operates on graph databases rather than on one old global
+memory file. Operators should be clear about which graph they are exporting or
+restoring.
 
-- Total input and output tokens
-- Number of API calls and agent iterations
-- Breakdowns by channel, trigger type, and platform
+The global reset action should preserve only the default and General Knowledge
+graphs, reset both, and remove all other graph databases. Individual graph reset
+actions apply only to the selected graph.
 
-Data is retained for 90 days. Access the summary via `/api/tokens` or the Tokens tab in the Anima Manager.
+Backups are controlled by backup settings and normally stored under `/data`.
+Back up `/data` before destructive maintenance.
+
+## Operational Checks
+
+When changing graph behavior, verify:
+
+- code sessions do not read unrelated project/channel/user graphs,
+- channel wakeups return to the originating channel graph and session,
+- learners write to the scoped graph,
+- distillers promote only reusable knowledge into General Knowledge,
+- plugin reference nodes install into General Knowledge,
+- graph switching updates chat/session operations, not only the graph view,
+- webapp users can see their graph, default/general knowledge where allowed, and
+  projects they collaborate on.

@@ -981,7 +981,7 @@ function applyPromptSectionsMixin(GraphContext) {
 
     lines.push('');
     lines.push('### Asking, Waiting, Tracking');
-    lines.push('- Use `ask_user` in web and Spore Code CLI sessions only when you need one blocking modal answer: `type:"single"` for one option, `type:"multi"` for multiple selections, or `type:"open"` for short free text. For non-modal channels, ask in normal reply text. Full protocol is in `ref-tool-workflows`.');
+    lines.push('- Use `ask_user` in direct web and Spore Code CLI sessions only when you need one blocking modal answer: `type:"single"` for one option, `type:"multi"` for multiple selections, or `type:"open"` for short free text. Never use `ask_user` in worker/background/system turns; proceed with available context or report the blocker in normal text. For non-modal channels, ask in normal reply text. Full protocol is in `ref-tool-workflows`.');
     lines.push('- In Spore Code CLI plan mode, use the plan-mode `QUESTIONS:` protocol instead of calling `ask_user`. If the user already gave free-form revision/feedback, incorporate it directly; do not force it into a picker.');
     lines.push('- **Plan mode** behaves differently per session:');
     lines.push('  - **Web session plan mode**: if the operator flipped it ON, your mutating tools (`graph_delete`, `exec`, `write_file`, etc.) get queued for approval instead of executing. Propose the full sequence by CALLING those tools normally; each returns `{queued:true, summary}`. Summarize your plan in a natural-language reply. Operator clicks Approve or Reject in the chat.');
