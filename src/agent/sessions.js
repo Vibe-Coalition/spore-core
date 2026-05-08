@@ -317,6 +317,50 @@ class SessionManager {
   }
 
   /**
+   * True when the persisted tail contains an assistant tool_use that never
+   * received a matching tool_result. This usually means the process restarted
+   * or the CLI reconnected while a local tool was running. The next user turn
+   * should be treated as an interruption/new directive, not as permission to
+   * resume that stale tool plan.
+   */
+  hasDanglingAssistantToolUse(key, limit = 24) {
+    const rows = this.db.prepare(`
+      SELECT role, content
+      FROM messages
+      WHERE session_key = ?
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(key, Math.max(1, limit));
+    rows.reverse();
+
+    const pending = new Set();
+    for (const row of rows) {
+      let content = row.content;
+      try { content = JSON.parse(row.content); } catch {}
+      const blocks = Array.isArray(content) ? content : [];
+
+      if (row.role === 'assistant') {
+        for (const block of blocks) {
+          if (block?.type === 'tool_use' && block.id) pending.add(block.id);
+        }
+      } else if (row.role === 'user') {
+        let sawToolResult = false;
+        for (const block of blocks) {
+          if (block?.type === 'tool_result') {
+            sawToolResult = true;
+            if (block.tool_use_id) pending.delete(block.tool_use_id);
+          }
+        }
+        const hasUserText = typeof content === 'string'
+          ? content.trim().length > 0
+          : blocks.some(block => block?.type === 'text' && String(block.text || '').trim());
+        if (hasUserText && !sawToolResult && pending.size > 0) return true;
+      }
+    }
+    return pending.size > 0;
+  }
+
+  /**
    * Remove the most recent assistant message from a session iff it's
    * literally 'NO_REPLY'. Belt-and-braces cleanup: the addMessage
    * filter should already prevent these from being stored at all,

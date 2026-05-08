@@ -173,33 +173,9 @@ async function applyPreset() {
   if (!name) return;
   try {
     setSettingsBusy?.(true, 'Applying preset…');
-    const data = await _fetchJson(`${_api()}/${encodeURIComponent(name)}`);
-    if (!data?.config) throw new Error('Preset has no config');
-
-    // Build the PATCH payload the same way _buildSettingsPatchPayload does —
-    // only send model tier keys so the existing settings PATCH handler applies them.
-    const patch = {
-      models: {},
-      modelLimits: data.config.modelLimits || {},
-    };
-    for (const [key] of (typeof SETTINGS_MODEL_FIELDS !== 'undefined' ? SETTINGS_MODEL_FIELDS : [])) {
-      const m = data.config.models?.[key];
-      if (m && m.provider && m.model) {
-        patch.models[key] = m.provider + '/' + m.model;
-      } else {
-        patch.models[key] = '';
-      }
-    }
-
-    // PATCH directly — avoids saveAllSettings closing the panel
     const apiRoot = window._settingsApiRoot || '';
-    await fetch(apiRoot + '/api/settings', {
-      method: 'PATCH',
-      headers: _headers(),
-      body: JSON.stringify(patch),
-    }).then(r => {
-      if (!r.ok) return r.text().then(t => { throw new Error(t || r.status); });
-      return r.json();
+    await _fetchJson(`${_api()}/${encodeURIComponent(name)}/apply`, {
+      method: 'POST',
     });
 
     toast?.(`Preset "${name}" applied`);

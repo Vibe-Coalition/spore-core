@@ -74,23 +74,47 @@ const CLI_NEW_LOCAL_TOOL_NAMES = new Set([
 // catalog reclaims ~1800 tokens per prompt and prevents the agent from
 // reaching for tools it can't usefully invoke (web_serve is refused locally
 // by the Go binary; spore_*/spore_message target the multi-agent mesh;
-// remote_*/ssh_tunnel are server-side SSH flows; message_* are
+// remote_*/ssh_tunnel are server-side SSH flows; webapp_request acts as a
+// web-panel browser session and is not a CLI capability; message_* are
 // Discord/Telegram surfaces distinct from the cli TUI; env_manage /
 // startup_tasks / data_poller / list_custom_tools are SPORE-server admin).
 // Keep useful server-side capabilities such as browser, graph_*, query_about,
-// delegate_task, task_*, schedule_*, web_search, web_fetch, ask_user,
-// notify_user, save_tool, sleep, skill_*, session_*, log_watch_*, plus
-// plugin-contributed tools — those can route through SPORE while local file
-// tools route through the CLI.
+// delegate_task, web_search, web_fetch, ask_user, sleep, skill_*, plus
+// plugin-contributed project tools — those can route through SPORE while local
+// file tools route through the CLI.
 const TOOLS_EXCLUDED_FROM_CLI = new Set([
   'web_serve',
+  'webapp_request',
   'message_send', 'message_react', 'message_edit', 'message_read',
-  'env_manage',
+  'env_manage', 'settings_read',
+  'analyze_media', 'analyze_image', 'analyze_video', 'analyze_audio',
+  'save_tool', 'notify_user',
+  'session_status', 'sessions_list',
+  'schedule_wakeup', 'list_wakeups', 'cancel_wakeup',
+  'log_watch', 'log_watch_list', 'log_watch_stop',
   'remote_exec', 'remote_tail', 'remote_tmux_kill',
   'remote_read_file', 'remote_write_file', 'ssh_tunnel',
   'startup_tasks', 'data_poller',
   'spore_list', 'spore_message', 'spore_graph', 'spore_manage',
   'list_custom_tools',
+]);
+
+const CLI_GENERAL_KB_ALLOWED_TYPES = new Set([
+  'skill', 'library', 'framework', 'tool', 'product', 'concept',
+  'pattern', 'technique', 'lesson',
+]);
+
+const CLI_GENERAL_KB_BLOCKED_TYPES = new Set([
+  'reference', 'system', 'self', 'person', 'user', 'channel',
+  'session', 'project', 'plugin', 'secret', 'credential',
+]);
+
+const CLI_GENERAL_KB_BLOCKED_IDS = new Set([
+  'spore',
+  'knowledge-graph',
+  'general-kb-distillation',
+  'general-kb-people',
+  'general-kb-skills',
 ]);
 
 class ToolSystem {
@@ -153,6 +177,64 @@ class ToolSystem {
       /while\s+true.*do.*&.*done/, // while true; do cmd & done
       /for\s+.*;\s*do.*&.*done/, // for loop backgrounding
     ];
+  }
+
+  isCliLocalTool(name) {
+    const normalizedName = name === 'graph'
+      ? 'graph_update'
+      : name === 'analyze'
+        ? 'analyze_media'
+        : name;
+    return CLI_LOCAL_TOOL_NAMES.has(normalizedName);
+  }
+
+  _sanitizeCliToolDefinition(tool) {
+    if (!tool || typeof tool !== 'object') return tool;
+    if (tool.name === 'graph_query' && typeof tool.description === 'string') {
+      return {
+        ...tool,
+        description: 'Query project memory or reusable shared engineering memory. Omit `graph` to use the current project/session scope. Use `graph:"spore-knowledge-base"` only when searching reusable shared lessons, libraries, or skills. In Spore Code CLI sessions, graph discovery and shared-memory results are scoped to project/reusable engineering memory.',
+        input_schema: tool.input_schema ? {
+          ...tool.input_schema,
+          properties: {
+            ...tool.input_schema.properties,
+            graph: tool.input_schema.properties?.graph ? {
+              ...tool.input_schema.properties.graph,
+              description: 'Optional graph slug. Use "spore-knowledge-base" for reusable shared engineering memory.',
+            } : undefined,
+            project: tool.input_schema.properties?.project ? {
+              ...tool.input_schema.properties.project,
+              description: 'Legacy alias for `graph`.',
+            } : undefined,
+          },
+        } : tool.input_schema,
+      };
+    }
+    if ((tool.name === 'write_file' || tool.name === 'edit_file') && typeof tool.description === 'string') {
+      return {
+        ...tool,
+        description: tool.description
+          .replace(/\s*Source editing is enabled: \/app\/ files are writable and changes persist to the host src\/ directory across restarts\./g, '')
+          .replace(/\s*Source editing is enabled: \/app\/ edits persist to the host\./g, '')
+          .replace(/\s*Cannot (?:write to|edit) \/app\/ framework files\./g, ''),
+      };
+    }
+    if (tool.name === 'patch_file' && tool.input_schema?.properties?.path?.description) {
+      return {
+        ...tool,
+        input_schema: {
+          ...tool.input_schema,
+          properties: {
+            ...tool.input_schema.properties,
+            path: {
+              ...tool.input_schema.properties.path,
+              description: tool.input_schema.properties.path.description.replace('Repository/workspace', 'Repository or project'),
+            },
+          },
+        },
+      };
+    }
+    return tool;
   }
 
   /**
@@ -750,13 +832,19 @@ class ToolSystem {
       },
       {
         name: 'ask_user',
-        description: 'Pause and ask the operator a structured multi-choice question. The chat shows a picker card with 2–5 options; the operator clicks one and the answer flows back to you as this tool\'s result. Use only when you genuinely need a decision you cannot infer from context (merge survivor, provider selection). Do NOT use for rhetorical questions or information-gathering.',
+        description: 'Pause and ask the operator one structured question. Supports `type:"single"` for one option, `type:"multi"` for multiple options, and `type:"open"` for short free-text input. Use only when you genuinely need a blocking answer you cannot infer from context. Prefer normal chat for broad interviews, non-blocking questions, or anything that does not need a modal.',
         input_schema: {
           type: 'object',
           properties: {
-            question: { type: 'string' },
+            question: { type: 'string', description: 'The concise question shown to the operator.' },
+            type: {
+              type: 'string',
+              enum: ['single', 'multi', 'open'],
+              description: 'single = choose one option; multi = choose one or more options; open = short free-text answer. If omitted, options imply single, otherwise open.',
+            },
             options: {
               type: 'array',
+              description: 'Required for single/multi questions. Omit for open questions.',
               items: {
                 type: 'object',
                 properties: {
@@ -770,7 +858,7 @@ class ToolSystem {
             },
             timeoutMs: { type: 'integer', description: 'Give up after this long (default 300000 / 5 min)' },
           },
-          required: ['question', 'options'],
+          required: ['question'],
         },
       },
       {
@@ -1154,7 +1242,7 @@ class ToolSystem {
       if (projectMode === 'plan') {
         filtered = filtered.filter(t => !CLI_PLAN_BLOCKED_TOOLS.has(t.name));
       }
-      return filtered;
+      return filtered.map(t => this._sanitizeCliToolDefinition(t));
     }
     return all;
   }
@@ -1504,6 +1592,23 @@ Set wait:false when you've submitted a long background job and just want to retu
       const platform = resolvedCtx?.platform;
       const cliPlanBlock = this.planModeBlockForTool(normalizedName, input, resolvedCtx);
       if (cliPlanBlock) return cliPlanBlock;
+      if (platform === 'cli' && TOOLS_EXCLUDED_FROM_CLI.has(normalizedName)) {
+        this.log?.warn?.(`[cli-tools] blocked ${normalizedName} in Spore Code session`);
+        return {
+          error: `BLOCKED: The ${normalizedName} tool is unavailable in Spore Code CLI sessions.`,
+          blocked: true,
+          tool: normalizedName,
+        };
+      }
+      if (platform === 'cli' && CLI_LOCAL_TOOL_NAMES.has(normalizedName)) {
+        this.log?.warn?.(`[cli-tools] blocked server fallback for local CLI tool ${normalizedName}`);
+        return {
+          error: `BLOCKED: The ${normalizedName} tool must be handled by the connected Spore Code CLI executor for this project session.`,
+          blocked: true,
+          tool: normalizedName,
+          cliLocalOnly: true,
+        };
+      }
       // Web plan mode queues proposals for approval. Spore Code plan mode
       // is handled above by hard-blocking local execution/write tools; it
       // should not use the web proposal queue because the CLI has its own
@@ -1565,6 +1670,76 @@ Set wait:false when you've submitted a long background job and just want to retu
   // Tools that previously read `this._ctxSessionKey()` now go through this.
   _ctx() { return _execContext.getStore() || {}; }
   _ctxSessionKey() { return _execContext.getStore()?.sessionKey || null; }
+
+  _isCliToolContext() {
+    const ctx = this._ctx();
+    return (ctx?.platform ?? this._currentPlatform) === 'cli';
+  }
+
+  _isGeneralKnowledgeSlug(slug) {
+    if (!slug) return false;
+    if (slug === 'spore-knowledge-base') return true;
+    const entry = this._graphRegistry?.get?.(slug);
+    return entry?.role === 'general_kb';
+  }
+
+  _restrictGeneralKnowledgeForCli(slug) {
+    return this._isCliToolContext() && this._isGeneralKnowledgeSlug(slug);
+  }
+
+  _cliGeneralKbVisibleNode(node) {
+    if (!node) return false;
+    const id = String(node.id || '').toLowerCase();
+    const type = String(node.type || '').toLowerCase();
+    if (!id || id.startsWith('ref-') || CLI_GENERAL_KB_BLOCKED_IDS.has(id)) return false;
+    if (CLI_GENERAL_KB_BLOCKED_TYPES.has(type)) return false;
+    if (CLI_GENERAL_KB_ALLOWED_TYPES.has(type)) return true;
+    return id.startsWith('skill-');
+  }
+
+  _redactCliGeneralKbText(value) {
+    if (value == null) return value;
+    return String(value)
+      .replace(/\/workspace\/web\/?/gi, 'a project-accessible static directory')
+      .replace(/\/workspace\/?/gi, 'the project workspace')
+      .replace(/\/data\/graphs\/?/gi, 'graph storage')
+      .replace(/\/app\/?/gi, 'the app runtime')
+      .replace(/\bSpore Core container\b/gi, 'the runtime')
+      .replace(/\s*\(source:\s*project-[^)]+\)/gi, '')
+      .replace(/\s*source:\s*project-[^\s,)]+/gi, '');
+  }
+
+  _formatCliGeneralKbNodeForTool(node) {
+    const out = {
+      id: node.id,
+      label: node.label,
+      type: node.type,
+      description: this._redactCliGeneralKbText(node.description)?.substring(0, 300),
+      importance: node.importance,
+      mentions: node.mentions,
+    };
+    if (node.aspects && node.aspects.length > 0) {
+      out.aspects = node.aspects.slice(0, 5).map(a => ({
+        name: a.name,
+        weight: a.weight,
+        attributes: (a.attributes || []).slice(0, 3).map(attr => ({
+          content: String(this._redactCliGeneralKbText(attr.content) || '').substring(0, 200),
+          importance: attr.importance,
+        })),
+      }));
+    }
+    return out;
+  }
+
+  _formatCliGeneralKbNodeBrief(node) {
+    return {
+      id: node.id,
+      label: node.label,
+      type: node.type,
+      description: this._redactCliGeneralKbText(node.description)?.substring(0, 200),
+      importance: node.importance,
+    };
+  }
 
   _resolveGraphSlugForTool(project, opts = {}) {
     const registry = this._graphRegistry;
@@ -2243,9 +2418,16 @@ Set wait:false when you've submitted a long background job and just want to retu
     const structuralModes = new Set(['neighbors', 'walk', 'path', 'community', 'hyperedges']);
 
     if (mode) {
+      const modeGraphSlug = scopedSlug || activeGraphMeta.graph;
+      if (this._restrictGeneralKnowledgeForCli(modeGraphSlug) && structuralModes.has(mode)) {
+        return {
+          error: `mode="${mode}" is unavailable for shared reusable memory in Spore Code CLI sessions.`,
+          graph: modeGraphSlug,
+        };
+      }
       const runMode = async () => {
         switch (mode) {
-          case 'overview':   return this._graphQueryOverview(normalizedInput, scopedSlug || activeGraphMeta.graph);
+          case 'overview':   return this._graphQueryOverview(normalizedInput, modeGraphSlug, { cliGeneralKb: this._restrictGeneralKnowledgeForCli(modeGraphSlug) });
           case 'neighbors':  return this._graphQueryNeighbors(normalizedInput);
           case 'walk':       return this._graphQueryWalk(normalizedInput);
           case 'path':       return this._graphQueryPath(normalizedInput);
@@ -2292,14 +2474,14 @@ Set wait:false when you've submitted a long background job and just want to retu
 
     if (scopedSlug) {
       try {
-        return await this._withScopedGraphForTool(scopedSlug, () => this._graphQueryDefault(normalizedInput, scopedSlug));
+        return await this._withScopedGraphForTool(scopedSlug, () => this._graphQueryDefault(normalizedInput, scopedSlug, { cliGeneralKb: this._restrictGeneralKnowledgeForCli(scopedSlug) }));
       } catch (e) {
         return { error: `Graph "${scopedSlug}" query failed: ${e.message}` };
       }
     }
 
     try {
-      const result = await this._graphQueryDefault(normalizedInput, activeGraphMeta.graph);
+      const result = await this._graphQueryDefault(normalizedInput, activeGraphMeta.graph, { cliGeneralKb: this._restrictGeneralKnowledgeForCli(activeGraphMeta.graph) });
       if (result && typeof result === 'object' && !result.error) Object.assign(result, activeGraphMeta);
       return result;
     } catch (e) {
@@ -2348,24 +2530,30 @@ Set wait:false when you've submitted a long background job and just want to retu
     }
   }
 
-  async _graphQueryDefault(input, eventGraph) {
+  async _graphQueryDefault(input, eventGraph, opts = {}) {
     const { query, nodeId, type } = input;
+    const cliGeneralKb = opts.cliGeneralKb === true;
 
     if (nodeId) {
       const node = this.graph.getNode(nodeId);
       if (!node) return { error: `Node '${nodeId}' not found` };
+      if (cliGeneralKb && !this._cliGeneralKbVisibleNode(node)) {
+        return { error: 'Node not found' };
+      }
       node.edges = this.graph.getEdges(nodeId);
       graphEvents.emit('change', { op: 'node:accessed', nodeIds: [nodeId], source: 'graph_query', graph: eventGraph });
-      return { node: this._formatNodeForTool(node) };
+      return { node: cliGeneralKb ? this._formatCliGeneralKbNodeForTool(node) : this._formatNodeForTool(node) };
     }
 
     if (type && !query) {
-      const nodes = this.graph.getNodesByType(type);
+      let nodes = this.graph.getNodesByType(type);
+      if (cliGeneralKb) nodes = nodes.filter(n => this._cliGeneralKbVisibleNode(n));
       const shown = nodes.slice(0, 20);
       if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: eventGraph });
       return {
-        nodes: shown.map(n => this._formatNodeBrief(n)),
+        nodes: shown.map(n => cliGeneralKb ? this._formatCliGeneralKbNodeBrief(n) : this._formatNodeBrief(n)),
         total: nodes.length,
+        ...(cliGeneralKb ? { visibility: 'reusable-shared-memory' } : {}),
       };
     }
 
@@ -2381,42 +2569,67 @@ Set wait:false when you've submitted a long background job and just want to retu
         LIMIT 5
       `).all(qLower, qLower, qLower);
       if (exactRows.length > 0) {
-        const exactNodes = exactRows
+        let exactNodes = exactRows
           .map(r => this.graph.getNode(r.id))
           .filter(Boolean);
+        if (cliGeneralKb) exactNodes = exactNodes.filter(n => this._cliGeneralKbVisibleNode(n));
         for (const n of exactNodes) n.edges = this.graph.getEdges(n.id);
         graphEvents.emit('change', { op: 'node:accessed', nodeIds: exactNodes.map(n => n.id), source: 'graph_query', graph: eventGraph });
         return {
-          nodes: exactNodes.map(n => this._formatNodeForTool(n)),
+          nodes: exactNodes.map(n => cliGeneralKb ? this._formatCliGeneralKbNodeForTool(n) : this._formatNodeForTool(n)),
           total: exactNodes.length,
           shown: exactNodes.length,
           search: 'exact',
+          ...(cliGeneralKb ? { visibility: 'reusable-shared-memory' } : {}),
         };
       }
 
       const results = await this.graph.hybridSearch(query);
       const cap = 10;
-      const shown = results.slice(0, cap);
+      const visibleResults = cliGeneralKb
+        ? results.filter(n => this._cliGeneralKbVisibleNode(n))
+        : results;
+      const shown = visibleResults.slice(0, cap);
       for (const node of shown) {
         node.edges = this.graph.getEdges(node.id);
       }
       if (shown.length) graphEvents.emit('change', { op: 'node:accessed', nodeIds: shown.map(n => n.id), source: 'graph_query', graph: eventGraph });
       return {
-        nodes: shown.map(n => this._formatNodeForTool(n)),
-        total: results.length,
+        nodes: shown.map(n => cliGeneralKb ? this._formatCliGeneralKbNodeForTool(n) : this._formatNodeForTool(n)),
+        total: visibleResults.length,
         shown: shown.length,
         search: 'hybrid',
+        ...(cliGeneralKb ? { visibility: 'reusable-shared-memory' } : {}),
       };
     }
 
-    return this._graphQueryOverview(input);
+    return this._graphQueryOverview(input, eventGraph, { cliGeneralKb });
   }
 
   _graphQueryGraphs() {
     const registry = this._graphRegistry;
-    const graphs = registry?.list
+    let graphs = registry?.list
       ? registry.list().map(g => this._formatGraphForTool(g))
       : [];
+    if (this._isCliToolContext()) {
+      const env = this._ctx()?.memoryEnvelope || {};
+      const allowed = new Set([
+        env.primarySlug,
+        env.writeScopes?.defaultSlug,
+        ...(Array.isArray(env.readScopes) ? env.readScopes.map(s => s?.slug) : []),
+        registry?.getGeneralKnowledgeSlug?.() || 'spore-knowledge-base',
+      ].filter(Boolean));
+      graphs = graphs
+        .filter(g => allowed.has(g.slug) || g.role === 'general_kb')
+        .map(g => ({
+          slug: g.slug,
+          name: g.name,
+          role: g.role,
+          active: g.active,
+          ...(g.role === 'general_kb' ? { description: 'Reusable shared engineering memory.' } : {}),
+          ...(g.nodeCount !== undefined ? { nodeCount: g.nodeCount } : {}),
+        }));
+    }
     const active = registry?.getActiveSlug?.() || this._activeGraphSlug();
     const generalKnowledgeGraph = registry?.getGeneralKnowledgeSlug?.() || 'spore-knowledge-base';
     return {
@@ -2425,7 +2638,9 @@ Set wait:false when you've submitted a long background job and just want to retu
       total: graphs.length,
       active,
       generalKnowledgeGraph,
-      hint: 'Use graph_query({ graph: "spore-knowledge-base", mode: "overview" }) to inspect the General Knowledge Base. Use graph_query({ graph: "<slug>", mode: "overview", limit, offset }) to page through any graph.',
+      hint: this._isCliToolContext()
+        ? 'Use graph_query({ query: "..." }) for project memory. Use graph_query({ graph: "spore-knowledge-base", query: "..." }) for reusable shared engineering memory.'
+        : 'Use graph_query({ graph: "spore-knowledge-base", mode: "overview" }) to inspect the General Knowledge Base. Use graph_query({ graph: "<slug>", mode: "overview", limit, offset }) to page through any graph.',
     };
   }
 
@@ -2445,13 +2660,52 @@ Set wait:false when you've submitted a long background job and just want to retu
     return out;
   }
 
-  _graphQueryOverview(input = {}, eventGraph = null) {
+  _graphQueryOverview(input = {}, eventGraph = null, opts = {}) {
     const db = this.graph?.db;
     if (!db) return { error: 'Graph context not available' };
 
     const limit = Math.max(1, Math.min(100, parseInt(input.limit, 10) || 20));
     const offset = Math.max(0, parseInt(input.offset, 10) || 0);
     const type = input.type ? String(input.type).trim() : null;
+    const cliGeneralKb = opts.cliGeneralKb === true;
+
+    if (cliGeneralKb) {
+      const rowsAll = db.prepare(`
+        SELECT id, label, type, description, importance, updated
+        FROM nodes
+        ORDER BY importance DESC, updated DESC, id ASC
+      `).all();
+      const visible = rowsAll.filter(n => (!type || n.type === type) && this._cliGeneralKbVisibleNode(n));
+      const typeCounts = new Map();
+      for (const node of rowsAll.filter(n => this._cliGeneralKbVisibleNode(n))) {
+        typeCounts.set(node.type, (typeCounts.get(node.type) || 0) + 1);
+      }
+      const nodeTypes = [...typeCounts.entries()]
+        .map(([nodeType, count]) => ({ type: nodeType, count }))
+        .sort((a, b) => b.count - a.count || String(a.type).localeCompare(String(b.type)))
+        .slice(0, 50);
+      const rows = visible.slice(offset, offset + limit);
+      const nextOffset = offset + rows.length < visible.length ? offset + rows.length : null;
+      if (rows.length) {
+        graphEvents.emit('change', { op: 'node:accessed', nodeIds: rows.map(n => n.id), source: 'graph_query:overview', graph: eventGraph || this._activeGraphSlug() });
+      }
+      return {
+        mode: 'overview',
+        total: rowsAll.filter(n => this._cliGeneralKbVisibleNode(n)).length,
+        filteredTotal: visible.length,
+        nodeTypes,
+        nodes: rows.map(n => this._formatCliGeneralKbNodeBrief(n)),
+        shown: rows.length,
+        limit,
+        offset,
+        nextOffset,
+        done: nextOffset === null,
+        visibility: 'reusable-shared-memory',
+        hint: nextOffset === null
+          ? 'Overview complete.'
+          : `More reusable memory is available. Call graph_query({ mode: "overview", limit: ${limit}, offset: ${nextOffset} }) for the next page.`,
+      };
+    }
 
     const total = db.prepare('SELECT COUNT(*) AS c FROM nodes').get()?.c || 0;
     const nodeTypes = db.prepare(`
@@ -7992,7 +8246,39 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   // ── Phase 4: ask_user ─────────────────────────────────────────────
-  async _askUserTool({ question, options, timeoutMs }) {
+  _normalizeAskUserMode(input = {}, options = []) {
+    const raw = String(input.type || input.mode || input.responseType || '').trim().toLowerCase();
+    if (['multi', 'multiple', 'multiple-choice', 'multi-select', 'checkbox'].includes(raw)) return 'multi';
+    if (['open', 'open-ended', 'text', 'free-text', 'freeform', 'free-form'].includes(raw)) return 'open';
+    if (['single', 'select', 'selection', 'choice', 'one', 'one-of', 'radio'].includes(raw)) return 'single';
+    return options.length > 0 ? 'single' : 'open';
+  }
+
+  _normalizeAskUserOptions(options = []) {
+    if (!Array.isArray(options)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const opt of options) {
+      const label = String(opt?.label || '').trim();
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+      const description = String(opt?.description || '').trim();
+      out.push(description ? { label, description } : { label });
+    }
+    return out;
+  }
+
+  _formatAskUserResult(entry, answer) {
+    const mode = entry.mode || 'single';
+    if (mode === 'multi') {
+      const answers = Array.isArray(answer) ? answer : [];
+      return { type: mode, answer: answers.join(', '), answers };
+    }
+    return { type: mode, answer: String(answer || '') };
+  }
+
+  async _askUserTool(input = {}) {
+    const { question, timeoutMs } = input;
     const sessionKey = this._ctxSessionKey();
     if (!sessionKey) return { error: 'No active session' };
     const ctx = this._ctx();
@@ -8011,14 +8297,27 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         platform: ctx.platform,
       };
     }
-    if (!question || !Array.isArray(options) || options.length < 2 || options.length > 5) {
-      return { error: 'question + 2-5 options required' };
+    const normalizedQuestion = String(question || '').trim();
+    const options = this._normalizeAskUserOptions(input.options);
+    const mode = this._normalizeAskUserMode(input, options);
+    if (!normalizedQuestion) {
+      return { error: 'question required' };
+    }
+    if (!['single', 'multi', 'open'].includes(mode)) {
+      return { error: 'ask_user type must be single, multi, or open' };
+    }
+    if ((mode === 'single' || mode === 'multi') && (options.length < 2 || options.length > 5)) {
+      return { error: `${mode} ask_user requires 2-5 options` };
+    }
+    if (mode === 'open' && input.options && options.length > 0) {
+      return { error: 'open ask_user should omit options' };
     }
     const broadcaster = this._getSessionBroadcaster();
     if (typeof broadcaster !== 'function') {
       return {
         error: 'ask_user could not be delivered: no web/Spore Code question broadcaster is available. Ask the question in normal reply text instead.',
-        question,
+        question: normalizedQuestion,
+        type: mode,
         options,
       };
     }
@@ -8029,19 +8328,37 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       const timer = setTimeout(() => {
         if (this._pendingQuestions?.has(qid)) {
           this._pendingQuestions.delete(qid);
-          resolve({ timedOut: true, question });
+          resolve({ timedOut: true, question: normalizedQuestion, type: mode });
         }
       }, timeout);
-      this._pendingQuestions.set(qid, { resolve, sessionKey, channelId: ctx.channelId, timer, options, question, createdAt: Date.now() });
+      this._pendingQuestions.set(qid, {
+        resolve,
+        sessionKey,
+        channelId: ctx.channelId,
+        timer,
+        mode,
+        options,
+        question: normalizedQuestion,
+        createdAt: Date.now(),
+      });
       try {
-        const delivered = broadcaster(sessionKey, { type: 'ask_user', qid, question, options, sessionKey });
+        const delivered = broadcaster(sessionKey, {
+          type: 'ask_user',
+          qid,
+          question: normalizedQuestion,
+          mode,
+          options,
+          multi: mode === 'multi',
+          sessionKey,
+        });
         const deliveredCount = Number(delivered);
         if (Number.isFinite(deliveredCount) && deliveredCount <= 0) {
           clearTimeout(timer);
           this._pendingQuestions.delete(qid);
           resolve({
             error: 'ask_user could not be delivered: no connected web/Spore Code client is registered for this session. Ask the question in normal reply text instead.',
-            question,
+            question: normalizedQuestion,
+            type: mode,
             options,
           });
         }
@@ -8051,7 +8368,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         this.log.warn(`[ask_user] broadcast failed: ${e.message}`);
         resolve({
           error: `ask_user could not be delivered: ${e.message}`,
-          question,
+          question: normalizedQuestion,
+          type: mode,
           options,
         });
       }
@@ -8108,15 +8426,58 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return null;
   }
 
-  answerAskUser(qid, answer) {
+  _matchAskUserOptions(options = [], answer) {
+    const raw = String(answer || '').trim();
+    const norm = this._normalizeAskUserAnswer(raw);
+    if (!norm) return null;
+    if (['all', 'everything', 'all options'].includes(norm)) {
+      return options.map(o => o.label);
+    }
+
+    const numericList = norm.match(/^(?:#?\d+\s*(?:,|;|\/|&|\+|\band\b)\s*)+#?\d+$/);
+    const tokens = numericList
+      ? norm.split(/(?:,|;|\/|&|\+|\band\b)/i)
+      : raw.split(/\s*(?:,|;|\n|\r|\band\b)\s*/i);
+    const labels = [];
+    const seen = new Set();
+    for (const token of tokens) {
+      const matched = this._matchAskUserOption(options, token);
+      if (matched && !seen.has(matched)) {
+        seen.add(matched);
+        labels.push(matched);
+      }
+    }
+    if (labels.length > 0) return labels;
+
+    const direct = this._matchAskUserOption(options, raw);
+    return direct ? [direct] : null;
+  }
+
+  _answerPendingAskUser(qid, answer) {
     const entry = this._pendingQuestions?.get(qid);
-    if (!entry) return false;
-    const matched = this._matchAskUserOption(entry.options, answer);
-    if (!matched) return false;
+    if (!entry) return null;
+    const mode = entry.mode || 'single';
+    let normalizedAnswer = null;
+    if (mode === 'open') {
+      const text = String(answer || '').trim();
+      if (!text) return null;
+      normalizedAnswer = text;
+    } else if (mode === 'multi') {
+      normalizedAnswer = this._matchAskUserOptions(entry.options, answer);
+      if (!normalizedAnswer || normalizedAnswer.length === 0) return null;
+    } else {
+      normalizedAnswer = this._matchAskUserOption(entry.options, answer);
+      if (!normalizedAnswer) return null;
+    }
     clearTimeout(entry.timer);
     this._pendingQuestions.delete(qid);
-    entry.resolve({ answer: matched });
-    return true;
+    const result = this._formatAskUserResult(entry, normalizedAnswer);
+    entry.resolve(result);
+    return result;
+  }
+
+  answerAskUser(qid, answer) {
+    return !!this._answerPendingAskUser(qid, answer);
   }
 
   answerAskUserForSession(sessionKey, answer) {
@@ -8126,18 +8487,26 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       .sort((a, b) => (a[1].createdAt || 0) - (b[1].createdAt || 0));
     if (!entries.length) return { ok: false, pending: false };
     const [qid, entry] = entries[0];
-    const matched = this._matchAskUserOption(entry.options, answer);
-    if (!matched) {
+    const result = this._answerPendingAskUser(qid, answer);
+    if (!result) {
       return {
         ok: false,
         pending: true,
         qid,
         question: entry.question,
+        mode: entry.mode || 'single',
         options: entry.options,
       };
     }
-    const ok = this.answerAskUser(qid, matched);
-    return { ok, pending: true, qid, answer: matched, question: entry.question };
+    return {
+      ok: true,
+      pending: true,
+      qid,
+      answer: result.answer,
+      answers: result.answers,
+      mode: result.type,
+      question: entry.question,
+    };
   }
 
   cancelSessionAskUser(sessionKey) {
@@ -8147,7 +8516,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       if (entry.sessionKey === sessionKey) {
         clearTimeout(entry.timer);
         this._pendingQuestions.delete(qid);
-        const info = { qid, question: entry.question, options: entry.options, createdAt: entry.createdAt };
+        const info = { qid, question: entry.question, mode: entry.mode || 'single', options: entry.options, createdAt: entry.createdAt };
         cancelled.push(info);
         try {
           const broadcaster = this._getSessionBroadcaster();
@@ -8166,7 +8535,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const out = [];
     for (const [qid, entry] of this._pendingQuestions) {
       if (entry.sessionKey === sessionKey) {
-        out.push({ qid, question: entry.question, options: entry.options, createdAt: entry.createdAt });
+        out.push({ qid, question: entry.question, mode: entry.mode || 'single', options: entry.options, createdAt: entry.createdAt });
       }
     }
     return out;

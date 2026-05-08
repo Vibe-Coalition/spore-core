@@ -430,7 +430,7 @@ class GraphContext {
     const B = this._sectionBudgets;
     const orderedKeys = GraphContext.PROMPT_MODES[mode] || GraphContext.PROMPT_MODES.full;
 
-    const cacheKey = mode;
+    const cacheKey = `${mode}:${opts.platform || ''}:${opts.projectContext ? 'project' : ''}`;
     if (this._staticPromptCache && this._staticPromptCache.mtime === this._graphMtime && this._staticPromptCache.mode === cacheKey) {
       const cachedText = this._staticPromptCache.text;
       // Plugin sections compute fresh per call (not cached) — opts-conditional
@@ -447,7 +447,7 @@ class GraphContext {
       rules: () => this._truncateToTokenBudget(this._getCachedSection('rules', () => this._buildRulesSection()), B.rules),
       selfknowledge: () => this._truncateToTokenBudget(this._getCachedSection('selfknowledge', () => this._buildSelfKnowledgeSection()), B.selfknowledge),
       anti: () => this._truncateToTokenBudget(this._getCachedSection('anti', () => this._buildAntiPatternsSection()), B.anti),
-      tooling: () => this._truncateToTokenBudget(this._buildToolingSection(), B.tooling),
+      tooling: () => this._truncateToTokenBudget(this._buildToolingSection(opts), B.tooling),
       reflections: () => this._truncateToTokenBudget(this._buildReflectionsSection({ userId: opts.userId, projectContext: opts.projectContext }), B.reflections),
       gaps: () => this._truncateToTokenBudget(this._buildGapsSection({ userId: opts.userId, projectContext: opts.projectContext }), B.gaps),
       plugin: () => this._truncateToTokenBudget(this._buildPluginSection(), B.plugin),
@@ -618,6 +618,9 @@ class GraphContext {
         if (scope.role === 'general_kb') {
           const skillBrief = this._buildScopedSkillBrief(results, opts.messageContent);
           if (skillBrief) prioritySections.push(skillBrief);
+          if (opts.platform === 'cli' && env.mode === 'codebase-session') {
+            continue;
+          }
         }
 
         let text = null;
@@ -664,8 +667,28 @@ class GraphContext {
   _buildScopedSkillBrief(results = [], query = '') {
     const actionableTypes = new Set([
       'skill', 'library', 'tool', 'framework', 'package', 'api', 'service',
-      'plugin', 'workflow', 'pattern', 'command', 'concept',
+      'workflow', 'pattern', 'command', 'concept',
     ]);
+    const blockedTypes = new Set(['reference', 'system', 'self', 'person', 'user', 'channel', 'session', 'project', 'plugin', 'secret', 'credential']);
+    const blockedIds = new Set(['spore', 'knowledge-graph', 'general-kb-distillation', 'general-kb-people', 'general-kb-skills']);
+    const visibleReusable = (node) => {
+      if (!node) return false;
+      const id = String(node.id || '').toLowerCase();
+      const type = String(node.type || '').toLowerCase();
+      if (!id || id.startsWith('ref-') || blockedIds.has(id) || blockedTypes.has(type)) return false;
+      return actionableTypes.has(type) || id.startsWith('skill-');
+    };
+    const redact = (value) => {
+      if (value == null) return '';
+      return String(value)
+        .replace(/\/workspace\/web\/?/gi, 'a project-accessible static directory')
+        .replace(/\/workspace\/?/gi, 'the project workspace')
+        .replace(/\/data\/graphs\/?/gi, 'graph storage')
+        .replace(/\/app\/?/gi, 'the app runtime')
+        .replace(/\bSpore Core container\b/gi, 'the runtime')
+        .replace(/\s*\(source:\s*project-[^)]+\)/gi, '')
+        .replace(/\s*source:\s*project-[^\s,)]+/gi, '');
+    };
     const aspectWeights = new Map([
       ['steps', 4],
       ['workflow', 4],
@@ -695,7 +718,7 @@ class GraphContext {
     ]);
     const scoreNode = (node) => {
       const type = String(node?.type || '').toLowerCase();
-      if (!node || !actionableTypes.has(type)) return 0;
+      if (!visibleReusable(node) || !actionableTypes.has(type)) return 0;
       let score = type === 'skill' ? 8 : 0;
       const seenAspects = new Set();
       for (const asp of node.aspects || []) {
@@ -737,6 +760,7 @@ class GraphContext {
       return Math.min(24, score);
     };
     const playbooks = (results || [])
+      .filter(visibleReusable)
       .map((node, idx) => ({ node, idx, score: scoreNode(node), request: requestScore(node) }))
       .filter(entry => String(entry.node?.type || '').toLowerCase() === 'skill' || entry.score >= 5)
       .sort((a, b) => (
@@ -757,7 +781,7 @@ class GraphContext {
       '- Do not rediscover steps already covered by the chosen item. Only inspect local project facts needed to fill placeholders, confirm preconditions, or verify results.',
       '- Prefer saved replay snippets, commands, usage notes, and procedures over writing a fresh helper. If a snippet needs adaptation, adapt the smallest part and keep the workflow intact.',
       '- If a command is documented as a fallback, do not run it first. Run fallback commands only after their stated precondition is observed or the user explicitly asks for that fallback.',
-      '- If the user asks for LAN/local output, avoid VPN/Tailscale/overlay addresses unless the user explicitly asks for a VPN or remote-network address.',
+      "- Use the network endpoint requested by the user; otherwise prefer the project's ordinary local development endpoint.",
       '- For a small one-shot operational request, avoid task bookkeeping until it is genuinely needed; execute the chosen reusable item directly and verify.',
       '- If you intentionally skip or deviate from a recalled reusable item, state the reason before acting or in the next progress note.',
       '- In the final response, say which shared reusable item you used and list any meaningful deviations.',
@@ -771,7 +795,7 @@ class GraphContext {
       for (const asp of node.aspects || []) {
         if (!wanted.has(String(asp.name || '').toLowerCase())) continue;
         for (const attr of asp.attributes || []) {
-          const content = String(attr.content || '').trim();
+          const content = redact(attr.content).trim();
           const key = content.toLowerCase();
           if (content && !seen.has(key)) {
             seen.add(key);
@@ -798,7 +822,7 @@ class GraphContext {
     };
     for (const item of playbooks) {
       const type = item.type ? ` ${item.type}` : '';
-      lines.push(`- **${item.label || item.id}** (${item.id}${type}): ${(item.description || '').trim()}`);
+      lines.push(`- **${item.label || item.id}** (${item.id}${type}): ${redact(item.description).trim()}`);
       const applicability = attrsFor(item, ['applicability'], 2);
       const usage = attrsFor(item, ['summary', 'usage', 'recommended_usage', 'implementation', 'source_notes'], 4);
       const lessons = attrsFor(item, ['reusable_lessons'], 4);
@@ -1153,7 +1177,7 @@ class GraphContext {
       feed: allowedKeys.has('feed') ? this._truncateToTokenBudget(
         this._buildCrossSessionSection(opts), B.feed) : null,
       tooling: allowedKeys.has('tooling') ? this._truncateToTokenBudget(
-        this._buildToolingSection(), B.tooling) : null,
+        this._buildToolingSection(opts), B.tooling) : null,
       behavior: allowedKeys.has('behavior') ? this._truncateToTokenBudget(
         this._buildConversationBehavior(opts), B.behavior) : null,
       runtime: allowedKeys.has('runtime') ? this._truncateToTokenBudget(

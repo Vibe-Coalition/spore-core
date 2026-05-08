@@ -63,9 +63,13 @@ WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'mode' AND a.content LIKE 'projectContext.mode is%');
 
+UPDATE attributes
+SET content = 'Plan mode requires asking clarifying questions when material ambiguity exists. Emit them in the QUESTIONS: protocol, not ask_user; JSON-fenced and prose forms are both accepted by the parser. If the user already gave free-form feedback, incorporate it directly.'
+WHERE content = 'Plan mode requires asking clarifying questions when material ambiguity exists. Emit them in the QUESTIONS: protocol — see the system prompt''s Plan Mode section for the exact format. JSON-fenced and prose forms are both accepted by the parser.';
+
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'mode'),
-       'Plan mode requires asking clarifying questions when material ambiguity exists. Emit them in the QUESTIONS: protocol — see the system prompt''s Plan Mode section for the exact format. JSON-fenced and prose forms are both accepted by the parser.', 9, 'seed', 'seed'
+       'Plan mode requires asking clarifying questions when material ambiguity exists. Emit them in the QUESTIONS: protocol, not ask_user; JSON-fenced and prose forms are both accepted by the parser. If the user already gave free-form feedback, incorporate it directly.', 9, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'mode' AND a.content LIKE 'Plan mode requires asking%');
@@ -91,7 +95,7 @@ WHERE NOT EXISTS (
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
-       'If the CLI disconnects mid-tool, the call falls back to the Spore Core container — which means it would run against /workspace, NOT the user''s project. Watch for tool errors that mention container paths instead of project paths and pause to reconnect.', 7, 'seed', 'seed'
+       'If the connected Spore Code CLI executor is unavailable, local project tool calls fail until the CLI reconnects.', 7, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'If the CLI disconnects%');

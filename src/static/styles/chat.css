@@ -339,6 +339,12 @@
   }
   .chat-ask-user .au-option:hover { border-color: var(--accent); }
   .chat-ask-user .au-desc { font-size: .72rem; color: var(--text-dim); margin-top: 2px; margin-left: 20px; }
+  .chat-ask-user .au-text {
+    width: 100%; min-height: 74px; resize: vertical; box-sizing: border-box;
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    background: var(--bg); color: var(--text-bright); font: inherit; font-size: .82rem;
+  }
+  .chat-ask-user .au-text:focus { outline: none; border-color: var(--accent); }
   .chat-ask-user .au-submit {
     margin-top: 10px; padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
     background: var(--text-bright); color: var(--bg); font-size: .78rem; font-weight: 600;

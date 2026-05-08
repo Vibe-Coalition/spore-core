@@ -115,6 +115,78 @@ test('oai compat forced tool-choice stream uses provider-owned non-stream reques
   }
 });
 
+test('oai compat streaming treats assembled tool calls as tool_use even when finish_reason is stop', async () => {
+  const oldFetch = global.fetch;
+  global.fetch = async () => {
+    const encoder = new TextEncoder();
+    const event = (obj) => encoder.encode(`data: ${JSON.stringify(obj)}\n\n`);
+    const chunks = [
+      event({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call_1',
+              type: 'function',
+              function: { name: 'browser', arguments: '' },
+            }],
+          },
+        }],
+      }),
+      event({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              function: { arguments: '{"action":"navigate"}' },
+            }],
+          },
+        }],
+      }),
+      event({
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 8, completion_tokens: 3 },
+      }),
+      encoder.encode('data: [DONE]\n\n'),
+    ];
+    return {
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+    };
+  };
+
+  try {
+    const client = new OAICompatClient({
+      baseURL: 'https://example.invalid/v1',
+      apiKey: 'test-key',
+      useMaxCompletionTokens: true,
+    });
+    const stream = client.messages.stream({
+      model: 'openai/gpt-5.5',
+      messages: [{ role: 'user', content: 'browse reddit.com' }],
+      tools: [browserTool],
+      max_tokens: 256,
+    });
+    const final = await stream.finalMessage();
+
+    assert.equal(final.stop_reason, 'tool_use');
+    assert.deepEqual(final.usage, { input_tokens: 8, output_tokens: 3 });
+    assert.deepEqual(final.content, [{
+      type: 'tool_use',
+      id: 'call_1',
+      name: 'browser',
+      input: { action: 'navigate' },
+    }]);
+  } finally {
+    global.fetch = oldFetch;
+  }
+});
+
 test('oai compat recovers tool calls serialized as named XML text', () => {
   const result = fromOAIResponse({
     choices: [{

@@ -783,12 +783,18 @@ function renderAskUserCard(msg) {
   const card = document.createElement('div');
   card.className = 'chat-msg agent chat-ask-user';
   card.dataset.qid = msg.qid;
-  const opts = (msg.options || []).map((o, i) =>
-    `<label class="au-option"><input type="radio" name="au-${msg.qid}" value="${(o.label || '').replace(/"/g, '&quot;')}" ${i === 0 ? 'checked' : ''}> <strong>${escapeHtml(o.label || '')}</strong>${o.description ? `<div class="au-desc">${escapeHtml(o.description)}</div>` : ''}</label>`
+  const options = Array.isArray(msg.options) ? msg.options : [];
+  const mode = String(msg.mode || msg.questionType || (options.length ? (msg.multi ? 'multi' : 'single') : 'open')).toLowerCase();
+  const inputType = mode === 'multi' ? 'checkbox' : 'radio';
+  const opts = options.map((o, i) =>
+    `<label class="au-option"><input type="${inputType}" name="au-${escapeHtml(msg.qid)}" value="${escapeHtml(o.label || '')}" ${mode === 'single' && i === 0 ? 'checked' : ''}> <strong>${escapeHtml(o.label || '')}</strong>${o.description ? `<div class="au-desc">${escapeHtml(o.description)}</div>` : ''}</label>`
   ).join('');
+  const body = mode === 'open'
+    ? '<textarea class="au-text" rows="3" placeholder="Type your answer"></textarea>'
+    : `<div class="au-options">${opts}</div>`;
   card.innerHTML = `
     <div class="au-question">${escapeHtml(msg.question || '')}</div>
-    <div class="au-options">${opts}</div>
+    ${body}
     <button class="au-submit">Submit</button>
     <div class="au-status"></div>
   `;
@@ -796,16 +802,27 @@ function renderAskUserCard(msg) {
   container.scrollTop = container.scrollHeight;
   const submitBtn = card.querySelector('.au-submit');
   submitBtn.addEventListener('click', () => {
-    const picked = card.querySelector(`input[name="au-${msg.qid}"]:checked`);
-    if (!picked) { card.querySelector('.au-status').textContent = 'Pick one first.'; return; }
+    let answer = '';
+    if (mode === 'open') {
+      answer = (card.querySelector('.au-text')?.value || '').trim();
+      if (!answer) { card.querySelector('.au-status').textContent = 'Type an answer first.'; return; }
+    } else if (mode === 'multi') {
+      const picked = [...card.querySelectorAll(`input[name="au-${msg.qid}"]:checked`)].map(i => i.value);
+      if (!picked.length) { card.querySelector('.au-status').textContent = 'Pick at least one.'; return; }
+      answer = picked.join(', ');
+    } else {
+      const picked = card.querySelector(`input[name="au-${msg.qid}"]:checked`);
+      if (!picked) { card.querySelector('.au-status').textContent = 'Pick one first.'; return; }
+      answer = picked.value;
+    }
     submitBtn.disabled = true;
-    card.querySelectorAll('input').forEach(i => i.disabled = true);
+    card.querySelectorAll('input, textarea').forEach(i => i.disabled = true);
     try {
-      ws.send(JSON.stringify({ type: 'ask_user_answer', qid: msg.qid, answer: picked.value }));
-      card.querySelector('.au-status').textContent = `Sent: ${picked.value}`;
+      ws.send(JSON.stringify({ type: 'ask_user_answer', qid: msg.qid, answer }));
+      card.querySelector('.au-status').textContent = `Sent: ${answer}`;
     } catch (e) {
       submitBtn.disabled = false;
-      card.querySelectorAll('input').forEach(i => i.disabled = false);
+      card.querySelectorAll('input, textarea').forEach(i => i.disabled = false);
       card.querySelector('.au-status').textContent = 'Failed to send — reconnect?';
     }
   });
@@ -816,7 +833,7 @@ function markAskUserCancelled(msg) {
   const card = [...document.querySelectorAll('.chat-ask-user')].find(el => el.dataset.qid === qid);
   if (!card) return;
   card.classList.add('is-cancelled');
-  card.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+  card.querySelectorAll('input, textarea, button').forEach(el => { el.disabled = true; });
   const status = card.querySelector('.au-status');
   if (status) status.textContent = 'Cancelled';
 }

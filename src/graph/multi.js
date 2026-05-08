@@ -29,8 +29,7 @@ const PROJECT_REF_NODES = [
       scope: [
         'This graph is scoped to one project workspace identity and can be shared by collaborators on the same project. Treat it as local project memory, not the user/global graph.',
         'Stay inside the projectContext.cwd unless the user explicitly expands scope.',
-        'Use client-side project paths from tool results and projectContext, not server/container paths.',
-        'Container paths such as /app, /data, /workspace, and /mnt are Spore Core paths, not the user project. Do not use them for project file work.',
+        'Use client-side project paths from tool results and projectContext.',
       ],
       workflow: [
         'Prefer project tools and code-index queries before broad filesystem scans.',
@@ -1228,6 +1227,13 @@ class GraphRegistry {
                 .run(asp.id, content, PROJECT_REF_SOURCE, PROJECT_REF_SOURCE);
               changed = true;
             }
+          }
+          const keep = new Set(attrs || []);
+          const stale = db.prepare('SELECT id, content FROM attributes WHERE aspect_id = ? AND extracted_with = ?').all(asp.id, PROJECT_REF_SOURCE);
+          for (const row of stale) {
+            if (keep.has(row.content)) continue;
+            db.prepare('DELETE FROM attributes WHERE id = ?').run(row.id);
+            changed = true;
           }
         }
         const edge = db.prepare("SELECT 1 FROM edges WHERE source = 'spore' AND target = ? AND type = 'documents'").get(ref.id);

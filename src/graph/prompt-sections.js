@@ -935,7 +935,9 @@ function applyPromptSectionsMixin(GraphContext) {
     return `## Self-Knowledge\nObservations you've accumulated about yourself, your patterns, and your world:\n${lines.join('\n')}`;
   };
 
-  proto._buildToolingSection = function _buildToolingSection() {
+  proto._buildToolingSection = function _buildToolingSection(opts = {}) {
+    if (opts.platform === 'cli') return null;
+
     const toolNodes = this.getNodesByTypeSelf('tool');
     if (toolNodes.length === 0) {
       return `## Tools\nTools are available but not yet documented in the graph.`;
@@ -979,7 +981,8 @@ function applyPromptSectionsMixin(GraphContext) {
 
     lines.push('');
     lines.push('### Asking, Waiting, Tracking');
-    lines.push('- Use `ask_user` in web and Spore Code CLI sessions when you need the operator to pick between concrete options. For non-modal channels, ask in normal reply text. Full protocol is in `ref-tool-workflows`.');
+    lines.push('- Use `ask_user` in web and Spore Code CLI sessions only when you need one blocking modal answer: `type:"single"` for one option, `type:"multi"` for multiple selections, or `type:"open"` for short free text. For non-modal channels, ask in normal reply text. Full protocol is in `ref-tool-workflows`.');
+    lines.push('- In Spore Code CLI plan mode, use the plan-mode `QUESTIONS:` protocol instead of calling `ask_user`. If the user already gave free-form revision/feedback, incorporate it directly; do not force it into a picker.');
     lines.push('- **Plan mode** behaves differently per session:');
     lines.push('  - **Web session plan mode**: if the operator flipped it ON, your mutating tools (`graph_delete`, `exec`, `write_file`, etc.) get queued for approval instead of executing. Propose the full sequence by CALLING those tools normally; each returns `{queued:true, summary}`. Summarize your plan in a natural-language reply. Operator clicks Approve or Reject in the chat.');
     lines.push('  - **CLI session plan mode**: the operator flips CLI-side. When on, respond with your plan as prose, end with a `PLAN_READY` marker on its own line. The CLI shows Execute/Revise/Cancel. On execute, it replays your plan as a new chat turn and you implement it for real.');
@@ -1452,8 +1455,10 @@ function applyPromptSectionsMixin(GraphContext) {
     parts.push('', ...this._buildTemporalAnchorSection(now));
 
     const workspace = this.config.workspacePath || process.cwd();
-    parts.push(`- Workspace: ${workspace}`);
-    parts.push(`- Active process graph DB: ${this.config.graphDbPath}`);
+    if (opts.platform !== 'cli') {
+      parts.push(`- Workspace: ${workspace}`);
+      parts.push(`- Active process graph DB: ${this.config.graphDbPath}`);
+    }
 
     const env = opts.memoryEnvelope || null;
     if (env?.primarySlug || env?.readScopes?.length) {
@@ -1540,7 +1545,7 @@ function applyPromptSectionsMixin(GraphContext) {
     // Static action-style guidance lives in ref-browser-automation, owned by
     // browser-core + backend plugins.
     const _availableBackends = this._pluginManager?.getBrowserBackends?.()?.filter(b => b.available) || [];
-    if (_availableBackends.length > 0) {
+    if (opts.platform !== 'cli' && _availableBackends.length > 0) {
       const cfgBackend = String(this.config.browserBackend || '').toLowerCase();
       const has = (name) => _availableBackends.some(b => b.name === name || (b.aliases || []).includes(name));
       const backend = (cfgBackend && has(cfgBackend)) ? cfgBackend : _availableBackends[0].name;
@@ -1569,7 +1574,7 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push('- Treat this like a casual team chat — personality is welcome, walls of text are not.');
     }
 
-    if (this._sharedGraphs && this._sharedGraphs.length > 0) {
+    if (opts.platform !== 'cli' && this._sharedGraphs && this._sharedGraphs.length > 0) {
       parts.push('');
       parts.push('### Shared Project Graphs');
       parts.push('You collaborate with other Spores on shared knowledge graph(s):');
@@ -1585,7 +1590,7 @@ function applyPromptSectionsMixin(GraphContext) {
       parts.push('- Other Spores in the same project see everything you write to the shared graph, and vice versa.');
     }
 
-    if (opts.webappStatus?.active) {
+    if (opts.platform !== 'cli' && opts.webappStatus?.active) {
       const ws = opts.webappStatus;
       parts.push('');
       parts.push('### Hosted Webapp');

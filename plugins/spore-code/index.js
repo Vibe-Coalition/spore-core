@@ -36,6 +36,7 @@ const path = require('path');
 const { coreRequire, modelForTier } = require('../core-require');
 const { projectIdentityFromContext } = coreRequire('graph/scopes');
 const graphEvents = coreRequire('graph/events');
+const routingPresets = coreRequire('settings/routing-presets');
 
 const SESSION_GRAPH_SLUGS = new Map();
 const SESSION_PROJECT_KEYS = new Map();
@@ -206,6 +207,95 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex');
 }
 
+function routingModelRef(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (typeof value !== 'object') return null;
+  const model = String(value.model || value.modelId || value.id || '').trim();
+  const provider = String(value.provider || '').trim();
+  if (!model) return null;
+  if (!provider || provider === 'anthropic') return model;
+  return `${provider}/${model}`;
+}
+
+function normalizeRoutingPresetConfig(config = {}) {
+  const models = {};
+  const srcModels = config?.models && typeof config.models === 'object' ? config.models : {};
+  for (const [tier, value] of Object.entries(srcModels)) {
+    const key = String(tier || '').replace(/^models\./, '').trim();
+    const ref = routingModelRef(value);
+    if (key && ref) models[key] = ref;
+  }
+  const modelLimits = config?.modelLimits && typeof config.modelLimits === 'object'
+    ? config.modelLimits
+    : {};
+  return { models, modelLimits };
+}
+
+function currentDeviceRouting(device) {
+  const override = device?.routingOverride;
+  if (override?.preset && override?.config) {
+    return {
+      scope: 'device',
+      preset: override.preset,
+      appliedAt: override.appliedAt || null,
+      config: override.config,
+    };
+  }
+  return {
+    scope: 'server',
+    preset: null,
+    appliedAt: null,
+    config: null,
+  };
+}
+
+function findDeviceByToken(api, token) {
+  if (!token) return { ok: false, error: 'Invalid or missing device token' };
+  const digest = hashToken(token);
+  const store = readDeviceStore(api);
+  const device = (Array.isArray(store.devices) ? store.devices : []).find(d => d?.tokenHash === digest);
+  if (!device || device.revokedAt) return { ok: false, error: 'Invalid or revoked device token' };
+  return { ok: true, store, device };
+}
+
+function getDeviceRoutingOverride(api, deviceId) {
+  if (!deviceId) return null;
+  const store = readDeviceStore(api);
+  const device = (Array.isArray(store.devices) ? store.devices : []).find(d => d?.id === deviceId && !d.revokedAt);
+  const routing = currentDeviceRouting(device);
+  return routing.scope === 'device' ? routing : null;
+}
+
+function setDeviceRoutingPreset(api, token, presetName, presetConfig) {
+  const found = findDeviceByToken(api, token);
+  if (!found.ok) return found;
+  const name = String(presetName || '').trim();
+  if (!name) return { ok: false, error: 'Preset name is required' };
+  const config = normalizeRoutingPresetConfig(presetConfig);
+  found.device.routingOverride = {
+    preset: name,
+    config,
+    appliedAt: new Date().toISOString(),
+  };
+  found.device.lastUsedAt = Date.now();
+  writeDeviceStore(api, found.store);
+  return { ok: true, deviceId: found.device.id, routing: currentDeviceRouting(found.device) };
+}
+
+function clearDeviceRoutingPreset(api, token) {
+  const found = findDeviceByToken(api, token);
+  if (!found.ok) return found;
+  const hadOverride = !!found.device.routingOverride;
+  delete found.device.routingOverride;
+  found.device.lastUsedAt = Date.now();
+  writeDeviceStore(api, found.store);
+  return { ok: true, cleared: hadOverride, deviceId: found.device.id, routing: currentDeviceRouting(found.device) };
+}
+
 function mintDeviceToken(api, username, authKind) {
   const now = Date.now();
   const token = `spc_${crypto.randomBytes(32).toString('base64url')}`;
@@ -242,7 +332,13 @@ function validateDeviceToken(api, token) {
   device.lastUsedAt = now;
   changed = true;
   if (changed) writeDeviceStore(api, store);
-  return { ok: true, username: device.user, auth: device.auth || 'device', deviceId: device.id };
+  return {
+    ok: true,
+    username: device.user,
+    auth: device.auth || 'device',
+    deviceId: device.id,
+    routing: currentDeviceRouting(device),
+  };
 }
 
 function revokeDeviceToken(api, token) {
@@ -258,6 +354,20 @@ function revokeDeviceToken(api, token) {
 function bearerToken(req) {
   const authHeader = req.headers?.authorization || req.headers?.Authorization || '';
   return String(authHeader).startsWith('Bearer ') ? String(authHeader).slice(7).trim() : null;
+}
+
+async function readJsonBody(req, limit = 4096) {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > limit) throw new Error('Request body too large');
+  }
+  if (!body.trim()) return {};
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error('Invalid request body');
+  }
 }
 
 function resolveDataDir(api) {
@@ -421,7 +531,10 @@ async function handleDeviceSession(api, req, res) {
     res.end(JSON.stringify({ error: auth.error || 'Invalid device token' }));
     return;
   }
-  issueCliToken(api, res, auth.username, 'device', { deviceId: auth.deviceId });
+  issueCliToken(api, res, auth.username, 'device', {
+    deviceId: auth.deviceId,
+    extra: { routing: auth.routing || { scope: 'server', preset: null, config: null } },
+  });
 }
 
 async function handleLogout(api, req, res) {
@@ -508,6 +621,105 @@ async function handleSessions(api, req, res) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Failed to list sessions' }));
   }
+}
+
+async function handleRoutingPresets(api, req, res, parsedUrl = {}) {
+  if (!insecureAuthAllowed(api, req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    return;
+  }
+
+  const token = bearerToken(req);
+  const auth = validateDeviceToken(api, token);
+  if (!auth.ok) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: auth.error || 'Invalid device token' }));
+    return;
+  }
+
+  if (req.method === 'GET') {
+    try {
+      const presets = routingPresets.list();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        presets,
+        current: auth.routing || { scope: 'server', preset: null, config: null },
+      }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+  res.writeHead(405, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'method not allowed' }));
+}
+
+async function handleRoutingPresetApply(api, req, res) {
+  if (!insecureAuthAllowed(api, req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    return;
+  }
+  const token = bearerToken(req);
+  const auth = validateDeviceToken(api, token);
+  if (!auth.ok) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: auth.error || 'Invalid device token' }));
+    return;
+  }
+  let parsed = {};
+  try { parsed = await readJsonBody(req, 4096); } catch (e) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: e.message }));
+    return;
+  }
+  const name = String(parsed.name || '').trim();
+  if (!name) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'name is required' }));
+    return;
+  }
+  try {
+    const preset = routingPresets.get(name);
+    if (!preset) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'preset not found', name }));
+      return;
+    }
+    const out = setDeviceRoutingPreset(api, token, name, preset.config);
+    if (!out.ok) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, applied: name, scope: 'device', current: out.routing }));
+  } catch (e) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: e.message }));
+  }
+}
+
+async function handleRoutingPresetClear(api, req, res) {
+  if (!insecureAuthAllowed(api, req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'HTTPS is required for Spore Code authentication. Use localhost/private LAN or set SPORE_ALLOW_INSECURE_AUTH=true for development.' }));
+    return;
+  }
+  const token = bearerToken(req);
+  const auth = validateDeviceToken(api, token);
+  if (!auth.ok) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: auth.error || 'Invalid device token' }));
+    return;
+  }
+  const out = clearDeviceRoutingPreset(api, token);
+  res.writeHead(out.ok ? 200 : 401, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ...out, current: out.routing }));
 }
 
 // ── Generic primitives moved to session-graph plugin ────────────────
@@ -1199,6 +1411,7 @@ function buildPlanRouterSection(api, opts) {
   parts.push('  3. BUILDING (final turn) — produce the plan from stages 1+2 outputs, end with PLAN_READY.');
   parts.push('');
   parts.push('Your only job THIS turn is the interview-or-skip decision. Do NOT write the plan. Do NOT run research tools (no architecture/search_symbols/web_search/delegate_task). Just decide.');
+  parts.push('Do NOT call `ask_user` in CLI plan mode. If you need clarification here, emit the `QUESTIONS:` block below. If the user already gave free-form plan feedback, incorporate it directly instead of forcing a choice.');
   parts.push('');
   parts.push('--- DECIDE ---');
   parts.push('Ask yourself: would I take a materially different path through the plan based on the user\'s answer to a question? Specifically:');
@@ -1253,6 +1466,7 @@ function buildPlanRouter2Section(api, opts) {
   const parts = [];
   parts.push('## Plan Mode — ROUTER 2 / post-research review (Spore Code)');
   parts.push('[MODE: Plan only — POST-RESEARCH ROUTER turn. The previous assistant turn in this conversation contains a RESEARCH_DONE: yaml block. Read it carefully — your only job this turn is to decide whether the research SURFACED any new questions worth asking the user before the plan is built.');
+  parts.push('Do NOT call `ask_user` in CLI plan mode. Use the `QUESTIONS:` block below only for genuinely blocking follow-ups; if the user already clarified the requirement, continue from that clarification.');
   parts.push('');
   parts.push('Stage status: ROUTER1 ✓ → RESEARCH+CODE ✓ → ROUTER2 (this turn) → BUILDING (next).');
   parts.push('');
@@ -1535,6 +1749,7 @@ function buildPlanModeSection_LEGACY(api, opts) {
   parts.push('');
   parts.push('PHASE 4 — CLARIFY:');
   parts.push("If the request leaves ANY material ambiguity — framework choice, scope, audience, design direction, target language, file layout, naming, technical approach — you MUST ask before proceeding to PHASE 5. A request like \"build me a website about bridges\" is ambiguous: framework? styling? data source? routing? deployment target? Ask. Default to asking when uncertain — the user can always say \"you choose\" if they don't care, but they cannot un-do an unwanted scaffolded project.");
+  parts.push('Use the `QUESTIONS:` protocol in this CLI plan-mode section. Do NOT call `ask_user` from plan mode, and do NOT turn free-form user feedback into a forced-choice modal.');
   parts.push('');
   parts.push('**TOOLING QUESTIONS (ask whenever applicable):** When the project involves any chosen-tool decision the user might have a preference about, ASK rather than picking silently. Tooling categories worth surfacing as explicit questions when they apply to the project:');
   parts.push('  - Language / runtime (Node vs Bun vs Deno; Python vs Go vs Rust; etc.)');
@@ -1670,6 +1885,9 @@ module.exports = function register(api) {
   api.registerWebRoute('POST', '/session',  { public: true, handler: (req, res) => handleDeviceSession(api, req, res) });
   api.registerWebRoute('POST', '/logout',   { public: true, handler: (req, res) => handleLogout(api, req, res) });
   api.registerWebRoute('GET',  '/sessions', { public: true, handler: (req, res) => handleSessions(api, req, res) });
+  api.registerWebRoute('GET',  '/routing-presets', { public: true, handler: (req, res, parsed) => handleRoutingPresets(api, req, res, parsed) });
+  api.registerWebRoute('POST', '/routing-presets/apply', { public: true, handler: (req, res) => handleRoutingPresetApply(api, req, res) });
+  api.registerWebRoute('DELETE', '/routing-presets/current', { public: true, handler: (req, res) => handleRoutingPresetClear(api, req, res) });
 
   // Public-URL alias: /api/spore-code/* → /api/plugins/spore-code/*.
   // Core's request handler walks plugin aliases at request time,
@@ -2247,19 +2465,31 @@ module.exports = function register(api) {
     }
   });
 
-  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + /api/spore-code alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
+  api.getLogger().info('Plugin ready (depends on session-graph) — ref nodes + /auth + /sessions + device routing presets + /api/spore-code alias + WS session:* + afterTurn + afterLearn + beforeMessage + shouldSkipRecall + isNodeManaged + afterToolExec(graph_update) + prompt sections registered.');
 };
 
 module.exports._test = {
   handleAuth,
   handleDeviceSession,
   handleLogout,
+  handleRoutingPresets,
+  handleRoutingPresetApply,
+  handleRoutingPresetClear,
   inviteKeyMatches,
+  mintDeviceToken,
   validateDeviceToken,
   revokeDeviceToken,
+  setDeviceRoutingPreset,
+  clearDeviceRoutingPreset,
+  getDeviceRoutingOverride,
+  normalizeRoutingPresetConfig,
   shouldSkipRecallForSporeCode,
   verifyWebappPassword,
   wantsPasswordAuth,
   authenticateAccountPassword,
   buildProjectContextSection,
 };
+module.exports.validateDeviceToken = validateDeviceToken;
+module.exports.setDeviceRoutingPreset = setDeviceRoutingPreset;
+module.exports.clearDeviceRoutingPreset = clearDeviceRoutingPreset;
+module.exports.getDeviceRoutingOverride = getDeviceRoutingOverride;

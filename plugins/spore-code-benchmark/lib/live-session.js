@@ -203,7 +203,11 @@ class LiveSporeCodeSession {
     const qid = msg.qid;
     if (!qid || this._answeredAskUser.has(qid)) return;
     this._answeredAskUser.add(qid);
-    const fallback = 'Make the most conservative reasonable assumption and continue.';
+    const options = Array.isArray(msg.options) ? msg.options.map(o => String(o?.label || '').trim()).filter(Boolean) : [];
+    const mode = String(msg.mode || (options.length ? (msg.multi ? 'multi' : 'single') : 'open')).toLowerCase();
+    const fallback = mode === 'open'
+      ? 'Make the most conservative reasonable assumption and continue.'
+      : (mode === 'multi' ? options.slice(0, 2).join(', ') : options[0]) || 'Make the most conservative reasonable assumption and continue.';
     Promise.resolve()
       .then(() => this.askUserResponder ? this.askUserResponder(msg) : fallback)
       .then(answer => {
@@ -247,7 +251,11 @@ class LiveSporeCodeSession {
         break;
       case 'chat:status':
         this.record('status', { status: msg.status || 'chat:status', text: truncate(msg, 1000) });
-        if (msg.status === 'ask_user_waiting' || msg.qid) this._maybeAnswerAskUser(msg);
+        if (msg.status === 'ask_user_waiting') this._maybeAnswerAskUser(msg);
+        break;
+      case 'ask_user':
+        this.record('status', { status: 'ask_user:prompt', qid: msg.qid, text: truncate(msg, 1000) });
+        this._maybeAnswerAskUser(msg);
         break;
       case 'tool:pending':
         this.record('status', { status: 'tool:pending', tool: msg.name, text: msg.summary || '' });

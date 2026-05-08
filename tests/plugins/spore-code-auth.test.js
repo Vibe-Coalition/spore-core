@@ -259,6 +259,43 @@ test('spore-code auth can mint a device token and exchange it for a ws ticket', 
   }
 });
 
+test('spore-code stores routing preset overrides on one device only', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-routing-'));
+  try {
+    const { api } = makeApi(dataDir, { inviteKey: 'invite-key' });
+    const first = sporeCode._test.mintDeviceToken(api, 'yam', 'invite');
+    const second = sporeCode._test.mintDeviceToken(api, 'zelda', 'invite');
+
+    const out = sporeCode._test.setDeviceRoutingPreset(api, first.deviceToken, 'fast', {
+      models: {
+        casual: { provider: 'openai', model: 'gpt-4.1-mini' },
+        normal: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      },
+      modelLimits: {
+        'openai/gpt-4.1-mini': { contextWindow: 128000, maxTokens: 8192 },
+      },
+    });
+
+    assert.equal(out.ok, true);
+    assert.equal(out.routing.scope, 'device');
+    assert.equal(out.routing.preset, 'fast');
+    assert.equal(out.routing.config.models.casual, 'openai/gpt-4.1-mini');
+    assert.equal(out.routing.config.models.normal, 'claude-sonnet-4-6');
+
+    const routed = sporeCode._test.getDeviceRoutingOverride(api, first.deviceId);
+    const unrouted = sporeCode._test.getDeviceRoutingOverride(api, second.deviceId);
+    assert.equal(routed.preset, 'fast');
+    assert.equal(unrouted, null);
+
+    const cleared = sporeCode._test.clearDeviceRoutingPreset(api, first.deviceToken);
+    assert.equal(cleared.ok, true);
+    assert.equal(cleared.routing.scope, 'server');
+    assert.equal(sporeCode._test.getDeviceRoutingOverride(api, first.deviceId), null);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('spore-code logout revokes device tokens', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
   try {

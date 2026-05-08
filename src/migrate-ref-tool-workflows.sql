@@ -137,16 +137,22 @@ SELECT 'ref-tool-workflows', 'asking_waiting_tracking', 9, 'seed'
 WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'asking_waiting_tracking');
 
 UPDATE attributes
-SET content = 'ask_user is available in web and Spore Code CLI sessions when the operator must pick between 2-5 concrete options; it opens a picker/modal and returns the selected label. In non-modal channels, ask the question in normal reply text instead.'
-WHERE content = 'ask_user is for web sessions when the operator must pick between concrete options. CLI sessions do not support ask_user; put a QUESTIONS: block in the reply instead.';
+SET content = 'ask_user is available in web and Spore Code CLI sessions for one blocking modal question: type="single" returns one selected label, type="multi" returns selected labels, and type="open" returns short free text. Use normal reply text for broad interviews or non-modal channels.'
+WHERE content IN (
+  'ask_user is for web sessions when the operator must pick between concrete options. CLI sessions do not support ask_user; put a QUESTIONS: block in the reply instead.',
+  'ask_user is available in web and Spore Code CLI sessions when the operator must pick between 2-5 concrete options; it opens a picker/modal and returns the selected label. In non-modal channels, ask the question in normal reply text instead.'
+);
 
 UPDATE attributes
-SET content = 'CLI QUESTIONS protocol is for plan-mode prose interviews, not the ask_user tool: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message.'
-WHERE content = 'CLI QUESTIONS protocol: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message.';
+SET content = 'CLI QUESTIONS protocol is for Spore Code plan-mode interviews, not the ask_user tool: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message. Free-form plan feedback should be incorporated directly, not forced into a picker.'
+WHERE content IN (
+  'CLI QUESTIONS protocol: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message.',
+  'CLI QUESTIONS protocol is for plan-mode prose interviews, not the ask_user tool: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message.'
+);
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'asking_waiting_tracking' ORDER BY id LIMIT 1),
-       'ask_user is available in web and Spore Code CLI sessions when the operator must pick between 2-5 concrete options; it opens a picker/modal and returns the selected label. In non-modal channels, ask the question in normal reply text instead.', 9, 'seed', 'seed'
+       'ask_user is available in web and Spore Code CLI sessions for one blocking modal question: type="single" returns one selected label, type="multi" returns selected labels, and type="open" returns short free text. Use normal reply text for broad interviews or non-modal channels.', 9, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-tool-workflows' AND asp.name = 'asking_waiting_tracking' AND a.content LIKE 'ask_user is available in web and Spore Code CLI sessions%'
@@ -154,10 +160,10 @@ WHERE NOT EXISTS (
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-tool-workflows' AND name = 'asking_waiting_tracking' ORDER BY id LIMIT 1),
-       'CLI QUESTIONS protocol is for plan-mode prose interviews, not the ask_user tool: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message.', 8, 'seed', 'seed'
+       'CLI QUESTIONS protocol is for Spore Code plan-mode interviews, not the ask_user tool: single-select uses `[opt1 / opt2]`, multi-select uses `{opt1 / opt2}`, and open-ended questions omit brackets. The user answer arrives as a follow-up message. Free-form plan feedback should be incorporated directly, not forced into a picker.', 8, 'seed', 'seed'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
-  WHERE asp.node_id = 'ref-tool-workflows' AND asp.name = 'asking_waiting_tracking' AND a.content LIKE 'CLI QUESTIONS protocol is for plan-mode prose interviews%'
+  WHERE asp.node_id = 'ref-tool-workflows' AND asp.name = 'asking_waiting_tracking' AND a.content LIKE 'CLI QUESTIONS protocol is for Spore Code plan-mode interviews%'
 );
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)

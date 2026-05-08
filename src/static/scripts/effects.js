@@ -1700,12 +1700,23 @@ function showGraphContextMenu(clientX, clientY) {
 
   const deleteBtn = menu.querySelector('[data-action="delete-selected-nodes"]');
   const researchBtn = menu.querySelector('[data-action="research-selected-nodes"]');
+  const sessionDistillBtn = menu.querySelector('[data-action="summarize-distill-session"]');
   const count = selectedNodeIds.size;
+  const selectedNodes = Array.from(selectedNodeIds)
+    .map(id => graphData?.nodes?.find(n => n.id === id))
+    .filter(Boolean);
+  const singleSessionNode = selectedNodes.length === 1 && String(selectedNodes[0]?.type || '').toLowerCase() === 'session'
+    ? selectedNodes[0]
+    : null;
   if (deleteBtn) {
     deleteBtn.textContent = count === 1 ? 'delete selected node' : `delete ${count} selected nodes`;
   }
   if (researchBtn) {
     researchBtn.textContent = count === 1 ? 'research selected node' : `research ${count} selected nodes`;
+  }
+  if (sessionDistillBtn) {
+    sessionDistillBtn.style.display = singleSessionNode ? '' : 'none';
+    sessionDistillBtn.textContent = singleSessionNode ? 'summarize + distill session' : '';
   }
 
   menu.style.visibility = 'hidden';
@@ -1862,12 +1873,40 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('graph-context-menu')?.addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
+  e.preventDefault();
   e.stopPropagation();
   const action = btn.dataset.action;
   if (action === 'delete-selected-nodes') await doDeleteSelectedNodes();
   else if (action === 'clear-selection') clearGraphSelection();
   else if (action === 'research-selected-nodes') await doResearchSelectedNodes();
+  else if (action === 'summarize-distill-session') await doSummarizeDistillSelectedSession();
 });
+
+async function doSummarizeDistillSelectedSession() {
+  const ids = Array.from(selectedNodeIds || []);
+  if (ids.length !== 1) { toast('Pick one session node', true); return; }
+  const node = graphData?.nodes?.find(n => n.id === ids[0]);
+  if (!node || String(node.type || '').toLowerCase() !== 'session') {
+    toast('Selected node is not a session', true);
+    return;
+  }
+  hideGraphContextMenu();
+  toast('Starting session summary + distill…');
+  try {
+    const r = await fetch(graphApiUrl('/api/graph/session-distill'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ nodeId: node.id, force: true }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    if (d.skipped === 'already-distilled') toast('Session was already distilled');
+    else if (d.alreadyRunning) toast('Session distill is already running');
+    else toast('Session summary + distill queued');
+  } catch (e) {
+    toast('Session distill failed: ' + (e.message || e), true);
+  }
+}
+window.doSummarizeDistillSelectedSession = doSummarizeDistillSelectedSession;
 
 async function doResearchSelectedNodes() {
   const ids = Array.from(selectedNodeIds || []);

@@ -786,6 +786,7 @@
 
 <div class="toast" id="toast"></div>
 <div class="graph-context-menu" id="graph-context-menu">
+  <button type="button" data-action="summarize-distill-session" onclick="event.preventDefault();event.stopPropagation();window.doSummarizeDistillSelectedSession && window.doSummarizeDistillSelectedSession(event)">summarize + distill session</button>
   <button type="button" data-action="research-selected-nodes">research selected nodes</button>
   <button type="button" class="danger" data-action="delete-selected-nodes">delete selected nodes</button>
   <button type="button" data-action="clear-selection">clear selection</button>
@@ -845,7 +846,7 @@
 <script defer src="scripts/tutorial.js?v=260506-first-tour3"></script>
 
 <!-- Effects + helpers (getColor, toast, F01 mark, type system runtime) -->
-<script defer src="scripts/effects.js?v=260507-label-perf"></script>
+<script defer src="scripts/effects.js?v=260507-session-distill"></script>
 
 <!-- Alternate views: list + type map -->
 <script defer src="scripts/extras.js?v=260507-lean-graph"></script>
@@ -1517,6 +1518,6 @@ build/
   <div id="browser-preview-resize"></div>
 </div>
 
-    <script src="scripts/routing-presets.js"></script>
+    <script src="scripts/routing-presets.js?v=20260508-routing-preset-apply"></script>
   </body>
 </html>

@@ -84,8 +84,61 @@ test('ask_user can be answered by option number for a pending session', async ()
   const routed = tools.answerAskUserForSession('channel:cli:abc', '1');
   assert.equal(routed.ok, true);
   assert.equal(routed.answer, 'LAN: 192.168.1.10');
-  assert.deepEqual(await pending, { answer: 'LAN: 192.168.1.10' });
+  assert.deepEqual(await pending, { type: 'single', answer: 'LAN: 192.168.1.10' });
   assert.deepEqual(tools.listPendingQuestions('channel:cli:abc'), []);
+});
+
+test('ask_user supports multi-select answers', async () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const payloads = [];
+  tools._wsBroadcast = (sessionKey, payload) => {
+    payloads.push({ sessionKey, payload });
+    return 1;
+  };
+
+  const pending = tools.executeTool('ask_user', {
+    question: 'Which features?',
+    type: 'multi',
+    options: [{ label: 'Auth' }, { label: 'DB' }, { label: 'API' }],
+  }, {
+    sessionKey: 'channel:cli:abc',
+    channelId: 'cli:abc',
+    platform: 'cli',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(payloads[0].payload.mode, 'multi');
+  assert.equal(payloads[0].payload.multi, true);
+  const routed = tools.answerAskUserForSession('channel:cli:abc', '1, 3');
+  assert.equal(routed.ok, true);
+  assert.deepEqual(routed.answers, ['Auth', 'API']);
+  assert.deepEqual(await pending, { type: 'multi', answer: 'Auth, API', answers: ['Auth', 'API'] });
+});
+
+test('ask_user supports open text answers', async () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const payloads = [];
+  tools._wsBroadcast = (sessionKey, payload) => {
+    payloads.push({ sessionKey, payload });
+    return 1;
+  };
+
+  const pending = tools.executeTool('ask_user', {
+    question: 'What should I repeat?',
+    type: 'open',
+  }, {
+    sessionKey: 'channel:cli:abc',
+    channelId: 'cli:abc',
+    platform: 'cli',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(payloads[0].payload.mode, 'open');
+  assert.deepEqual(payloads[0].payload.options, []);
+  const routed = tools.answerAskUserForSession('channel:cli:abc', 'free form text');
+  assert.equal(routed.ok, true);
+  assert.equal(routed.answer, 'free form text');
+  assert.deepEqual(await pending, { type: 'open', answer: 'free form text' });
 });
 
 test('WebGateway broadcasts channel:cli session keys to cli-prefixed session clients', () => {

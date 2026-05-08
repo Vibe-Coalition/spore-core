@@ -832,6 +832,11 @@ class OAICompatClient {
               input: _parseToolInput(tc.args || '{}', tc.name),
             });
           }
+          // Some local OpenAI-compatible servers stream delta.tool_calls but
+          // still finish with finish_reason="stop". The agent loop must treat
+          // any assembled tool call as actionable so it can execute it or feed
+          // a parse error back to the model for correction.
+          stopReason = stopReason === 'max_tokens' ? 'max_tokens' : 'tool_use';
         } else {
           const extracted = _extractInlineToolCalls(fullText);
           if (extracted) {

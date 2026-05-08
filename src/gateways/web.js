@@ -1814,6 +1814,7 @@ class WebGateway {
     // Session client registry: sessionId -> Set<{ws, role:'origin'|'observer'}>
     this._sessionClients = new Map();
     this._settingsService = new WebSettingsService(this);
+    this._manualSessionDistills = new Set();
 
     // Subscribe to settings changes so caches and downstream consumers
     // pick up new values without a restart. This replaces the manual
@@ -1837,6 +1838,60 @@ class WebGateway {
     const queue = this.tools?._jobQueue;
     if (queue?.submitAgentTurn) return queue.submitAgentTurn(opts, meta);
     return this.tools?._agent?.processMessage(opts);
+  }
+
+  _sporeCodeApiShim() {
+    return {
+      _appContext: { config: this.config, tools: this.tools },
+      getHostConfig: () => this.config || {},
+      getConfig: () => this.config?.plugins?.['spore-code'] || {},
+      getLogger: () => this.log,
+    };
+  }
+
+  _sporeCodeModule() {
+    const candidates = [
+      // Source checkout: src/gateways/web.js -> ../../plugins/spore-code
+      path.join(__dirname, '..', '..', 'plugins', 'spore-code'),
+      // Docker image: /app/gateways/web.js -> ../plugins/spore-code
+      path.join(__dirname, '..', 'plugins', 'spore-code'),
+      path.join(process.cwd(), 'plugins', 'spore-code'),
+    ];
+    for (const candidate of candidates) {
+      try { return require(candidate); } catch (e) {
+        if (e?.code !== 'MODULE_NOT_FOUND') throw e;
+      }
+    }
+    throw new Error('Unable to resolve spore-code plugin module');
+  }
+
+  _sporeCodeBearerToken(req) {
+    const authHeader = req.headers?.authorization || req.headers?.Authorization || '';
+    return String(authHeader).startsWith('Bearer ') ? String(authHeader).slice(7).trim() : null;
+  }
+
+  _sporeCodeDeviceAuthFromReq(req) {
+    const token = this._sporeCodeBearerToken(req);
+    if (!token) return null;
+    try {
+      const plugin = this._sporeCodeModule();
+      const auth = plugin.validateDeviceToken?.(this._sporeCodeApiShim(), token);
+      return auth?.ok ? { ...auth, token } : null;
+    } catch (e) {
+      this.log.warn(`[spore-code] device auth lookup failed: ${e.message}`);
+      return null;
+    }
+  }
+
+  _sporeCodeRoutingOverride(deviceId) {
+    if (!deviceId) return null;
+    try {
+      const plugin = this._sporeCodeModule();
+      return plugin.getDeviceRoutingOverride?.(this._sporeCodeApiShim(), deviceId) || null;
+    } catch (e) {
+      this.log.warn(`[spore-code] device routing lookup failed: ${e.message}`);
+      return null;
+    }
   }
 
   _loadSessionGraphSessionsLib() {
@@ -1937,6 +1992,92 @@ class WebGateway {
       }
     }
     return { flushed, pending: pending.length, errors };
+  }
+
+  _sessionIdFromSessionNode(row) {
+    if (!row?.id) return null;
+    try {
+      const extra = row.extra ? JSON.parse(row.extra) : {};
+      if (extra?.sessionId) return String(extra.sessionId);
+    } catch {}
+    return String(row.id).replace(/^session-/, '');
+  }
+
+  _clearManualSessionDistillLock(db, row) {
+    if (!db || !row?.id) return false;
+    let extra = {};
+    try { extra = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+    if (!extra.distilling || extra.distilled_at) return false;
+    delete extra.distilling;
+    extra.manual_distill_resume_at = new Date().toISOString();
+    db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(JSON.stringify(extra), row.id);
+    return true;
+  }
+
+  _queueManualSessionSummaryDistill({ db, graphSlug, nodeId, force = true }) {
+    const sessions = this._loadSessionGraphSessionsLib();
+    const baseLearner = this.tools?.learner || this.tools?._agent?.learner || null;
+    const llmClient = this.tools?.llmClient;
+    if (!sessions) return { ok: false, error: 'session-graph session library unavailable', status: 503 };
+    if (!baseLearner || !llmClient) return { ok: false, error: 'learner or LLM client unavailable', status: 503 };
+    if (!db) return { ok: false, error: 'graph database unavailable', status: 503 };
+
+    const row = db.prepare('SELECT id, label, type, extra FROM nodes WHERE id = ?').get(nodeId);
+    if (!row) return { ok: false, error: 'session node not found', status: 404 };
+    if (String(row.type || '').toLowerCase() !== 'session') {
+      return { ok: false, error: 'selected node is not a session node', status: 400 };
+    }
+    let extra = {};
+    try { extra = row.extra ? JSON.parse(row.extra) : {}; } catch {}
+    if (extra.distilled_at) {
+      return { ok: true, queued: false, skipped: 'already-distilled', nodeId: row.id, distilledAt: extra.distilled_at };
+    }
+
+    const sessionId = this._sessionIdFromSessionNode(row);
+    if (!sessionId) return { ok: false, error: 'could not resolve session id from node', status: 400 };
+
+    const key = `${graphSlug || 'active'}:${row.id}`;
+    if (this._manualSessionDistills.has(key)) {
+      return { ok: true, queued: false, alreadyRunning: true, nodeId: row.id, sessionId };
+    }
+
+    const learner = Object.create(baseLearner);
+    learner.db = db;
+    if (graphSlug) learner._graphSlug = graphSlug;
+    learner._graphRegistry = baseLearner._graphRegistry || this.tools?._graphRegistry || learner._graphRegistry;
+
+    this._manualSessionDistills.add(key);
+    const run = (async () => {
+      let lockCleared = false;
+      try {
+        graphEvents.emit('change', { op: 'session:manual-distill-start', nodeId: row.id, graph: graphSlug || undefined, source: 'manual-session-distill' });
+        await this._waitForLearnerDrain(baseLearner);
+        graphEvents.withGraph(graphSlug ? { graph: graphSlug } : null, () => sessions.finalizeSessionNode(learner, sessionId, { endedAt: new Date().toISOString() }));
+        await graphEvents.withGraph(graphSlug ? { graph: graphSlug } : null, () => sessions.summarizeSessionNode(learner, llmClient, this.config, sessionId, this.log));
+
+        const latest = db.prepare('SELECT id, extra FROM nodes WHERE id = ?').get(row.id);
+        if (force && latest) lockCleared = this._clearManualSessionDistillLock(db, latest);
+
+        const result = await graphEvents.withGraph(graphSlug ? { graph: graphSlug } : null, () => sessions.distillSession(learner, llmClient, this.config, sessionId, this.log));
+        graphEvents.emit('change', {
+          op: 'session:manual-distill-done',
+          nodeId: row.id,
+          graph: graphSlug || undefined,
+          lockCleared,
+          result,
+          source: 'manual-session-distill',
+        });
+      } catch (e) {
+        this.log.warn(`[manual-session-distill] ${row.id} failed: ${e.message}`);
+        graphEvents.emit('change', { op: 'session:manual-distill-done', nodeId: row.id, graph: graphSlug || undefined, error: e.message, source: 'manual-session-distill' });
+      } finally {
+        this._manualSessionDistills.delete(key);
+      }
+    })();
+    run.catch(e => this.log.warn(`[manual-session-distill] ${row.id} unhandled failure: ${e.message}`));
+
+    return { ok: true, queued: true, nodeId: row.id, sessionId, graph: graphSlug || null };
   }
 
   _decorateGraphEventForClient(evt = {}) {
@@ -5349,6 +5490,13 @@ class WebGateway {
             if (noUsers && _isOnboardingNeeded(this.config.dataDir, this.config)) allow = true;
           } catch { /* fall through to checkAuth */ }
         }
+        if (!allow && urlPath.startsWith('/api/models/routing-presets')) {
+          const cliDeviceAuth = this._sporeCodeDeviceAuthFromReq(req);
+          if (cliDeviceAuth) {
+            req._sporeCodeDeviceAuth = cliDeviceAuth;
+            allow = true;
+          }
+        }
         if (!allow && !(await checkAuth(req, res))) return;
         const currentDb = this.graph?.db || graphDb;
         this._handleGraphApiOnWeb(req, res, urlPath, currentDb);
@@ -6171,6 +6319,7 @@ class WebGateway {
 	        ws._role = wsRole;
 	        ws._user = wsUser;
 	        ws._sessionToken = token || null;
+	        ws._deviceId = tokenSession?.deviceId || null;
 	        if (token && tokenSession?.singleUse) webSessions.delete(token);
 	        wss.emit('connection', ws, req);
 	      });
@@ -6701,19 +6850,19 @@ class WebGateway {
               this.log.info(`[ask_user] Answered pending question for ${activeSessionKey}: ${pendingAsk.answer}`);
               return;
             }
-            if (pendingAsk?.pending && this.tools._agent?.activeRuns?.has(activeSessionKey)) {
+            if (pendingAsk?.pending) {
               const labels = (pendingAsk.options || []).map((o, i) => `${i + 1}. ${o.label}`).join(' | ');
               const status = {
                 type: 'chat:status',
-                status: 'ask_user_waiting',
+                status: 'ask_user_superseded',
                 qid: pendingAsk.qid,
                 question: pendingAsk.question,
-                message: `Pending question: ${pendingAsk.question}${labels ? ` Options: ${labels}` : ''}`,
+                message: `Superseded pending question: ${pendingAsk.question}${labels ? ` Options: ${labels}` : ''}`,
               };
+              try { this.tools.cancelSessionAskUser(activeSessionKey); } catch (e) { this.log.warn('[ask_user] supersede cancel failed: ' + e.message); }
               if (isCli) this._sendToSession(sessionId, status);
               else { try { ws.send(JSON.stringify(status)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
-              this.log.info(`[ask_user] Ignored non-matching chat text while ${activeSessionKey} is waiting for option pick`);
-              return;
+              this.log.info(`[ask_user] Superseded pending question for ${activeSessionKey}; routing unmatched chat as a new message`);
             }
           }
 
@@ -6811,6 +6960,7 @@ class WebGateway {
             // For Acorn: find the origin CLI client for tool execution.
             // If an observer (mobile app) sends a message, tools still go to the CLI.
             const originWs = isCli ? (this._getOriginClient(sessionId) || ws) : null;
+            const modelRoutingOverride = isCli ? this._sporeCodeRoutingOverride(ws._deviceId) : null;
 
             // Debug: log the projectContext.mode acorn sent so we can
             // tell whether "plan mode didn't behave as plan mode" is a
@@ -6867,6 +7017,8 @@ class WebGateway {
               // non-creator users.
               userRole: ws._role || (isCli ? 'cli' : 'creator'),
               sessionToken: ws._sessionToken || null,
+              deviceId: isCli ? (ws._deviceId || null) : null,
+              modelRoutingOverride,
               trigger: 'dm',
               platform: isCli ? 'cli' : 'web',
               isDm: !isCli,
@@ -6920,17 +7072,35 @@ class WebGateway {
                   type: 'tool:pending', id: toolId, name: toolName, summary,
                 });
 
+                const requiresCliExecutor = !!this.tools?.isCliLocalTool?.(toolName);
+
                 // Check if CLI is actually reachable before waiting
                 if (!originWs || originWs.readyState !== 1) {
-                  this.log.warn(`[ws] CLI disconnected, falling back to server for ${toolName}`);
-                  return null; // server fallback
+                  if (requiresCliExecutor) {
+                    this.log.warn(`[ws] CLI disconnected for local tool ${toolName}`);
+                    return {
+                      error: `The ${toolName} tool must be handled by the connected Spore Code CLI executor for this project session.`,
+                      blocked: true,
+                      tool: toolName,
+                      cliLocalOnly: true,
+                    };
+                  }
+                  return null; // server-side tool fallback
                 }
 
                 try {
                   originWs.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
                 } catch (e) {
                   this.log.warn(`[ws] Failed to send tool:request to CLI: ${e.message}`);
-                  return null; // server fallback
+                  if (requiresCliExecutor) {
+                    return {
+                      error: `The ${toolName} tool must be handled by the connected Spore Code CLI executor for this project session.`,
+                      blocked: true,
+                      tool: toolName,
+                      cliLocalOnly: true,
+                    };
+                  }
+                  return null; // server-side tool fallback
                 }
 
                 return new Promise((resolve, reject) => {
@@ -8885,12 +9055,17 @@ class WebGateway {
     // POST   /api/models/routing-presets/:name/apply → apply preset to live settings
     if (urlPath.startsWith('/api/models/routing-presets')) {
       const rp = require('../settings/routing-presets');
+      const cliDeviceAuth = req._sporeCodeDeviceAuth || null;
 
       if (urlPath === '/api/models/routing-presets' && req.method === 'GET') {
         try {
           const presets = rp.list();
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, presets }));
+          res.end(JSON.stringify({
+            ok: true,
+            presets,
+            ...(cliDeviceAuth ? { current: cliDeviceAuth.routing || { scope: 'server', preset: null, config: null } } : {}),
+          }));
         } catch (e) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -8916,6 +9091,11 @@ class WebGateway {
         }
 
         if (req.method === 'PUT') {
+          if (cliDeviceAuth) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Device tokens can apply presets to this device only; creator auth is required to save presets.' }));
+            return;
+          }
           try {
             const body = await _readJsonBody(req);
             if (!body.config) throw new Error('config is required');
@@ -8930,6 +9110,11 @@ class WebGateway {
         }
 
         if (req.method === 'DELETE') {
+          if (cliDeviceAuth) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Device tokens can apply presets to this device only; creator auth is required to delete presets.' }));
+            return;
+          }
           try {
             const removed = rp.remove(name);
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -8959,14 +9144,29 @@ class WebGateway {
               return;
             }
             const cfg = preset.config;
+            if (cliDeviceAuth) {
+              const plugin = this._sporeCodeModule();
+              const out = plugin.setDeviceRoutingPreset?.(this._sporeCodeApiShim(), cliDeviceAuth.token, applyName, cfg);
+              if (!out?.ok) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(out || { ok: false, error: 'Invalid device token' }));
+                return;
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, applied: applyName, scope: 'device', current: out.routing }));
+              return;
+            }
             const patch = {};
             if (cfg.models) {
-              patch.models = {};
               for (const [tier, val] of Object.entries(cfg.models)) {
+                const key = String(tier || '').replace(/^models\./, '').trim();
+                if (!key) continue;
                 if (val && val.provider && val.model) {
-                  patch.models[tier] = val.provider + '/' + val.model;
+                  patch[`models.${key}`] = val.provider === 'anthropic'
+                    ? String(val.model)
+                    : `${val.provider}/${val.model}`;
                 } else if (val) {
-                  patch.models[tier] = String(val);
+                  patch[`models.${key}`] = String(val);
                 }
               }
             }
@@ -9197,6 +9397,42 @@ class WebGateway {
 
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionKey, nodeCount: ids.length }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // ── Manually resume session summarize + distill ──
+    if (urlPath === '/api/graph/session-distill' && req.method === 'POST') {
+      try {
+        const authContext = req._graphApiAuthContext || { type: 'creator', role: 'creator', creator: true };
+        if (!_graphAuthIsCreator(authContext)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Creator access required' }));
+          return;
+        }
+        const body = await _readJsonBody(req);
+        const nodeId = String(body.nodeId || '').trim();
+        if (!nodeId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'nodeId required' }));
+          return;
+        }
+        const result = this._queueManualSessionSummaryDistill({
+          db,
+          graphSlug: req._graphApiSlug || null,
+          nodeId,
+          force: body.force !== false,
+        });
+        if (!result.ok) {
+          res.writeHead(result.status || 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: result.error || 'manual session distill failed' }));
+          return;
+        }
+        res.writeHead(result.queued ? 202 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));

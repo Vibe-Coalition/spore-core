@@ -226,9 +226,13 @@ class AgentLoop {
     }
     if (has('graph_query')) {
       lines.push('- When the user asks about your graph, memory, nodes, edges, or stored context, use `graph_query` instead of answering from the prompt projection alone.');
-      lines.push('- For graph discovery, call `graph_query({ mode: "graphs" })` once. For the General Knowledge Base, use `graph_query({ graph: "spore-knowledge-base", mode: "overview", limit, offset })`; do not inspect `/data/graphs` or registry files through shell commands.');
+      if (opts.platform === 'cli') {
+        lines.push('- For graph discovery, call `graph_query({ mode: "graphs" })` once. In Spore Code sessions this only exposes the current project scope and reusable shared engineering memory.');
+      } else {
+        lines.push('- For graph discovery, call `graph_query({ mode: "graphs" })` once. For the General Knowledge Base, use `graph_query({ graph: "spore-knowledge-base", mode: "overview", limit, offset })`; do not inspect `/data/graphs` or registry files through shell commands.');
+      }
       lines.push('- When the user asks about shared/stored graph knowledge, reusable lessons, distilled skills, or what the shared graph knows, query the General Knowledge Base directly. For stored skills use `graph_query({ graph: "spore-knowledge-base", type: "skill" })` or `graph_query({ graph: "spore-knowledge-base", query: "skill" })`, then answer from those results. Do not call it empty or "fresh" if the General KB overview/list returned nodes.');
-      lines.push('- Keep local graph and General Knowledge Base separate in replies: local graph = this conversation/user/project context; General Knowledge Base = protected reusable shared knowledge across instances.');
+      lines.push('- Keep local graph and General Knowledge Base separate in replies: local graph = this conversation/user/project context; General Knowledge Base = reusable shared knowledge.');
     }
     if (has('settings_read')) {
       lines.push('- For current Spore settings/configuration (public URL, web port, model routing, providers, plugins, hot reload, browser backend), use `settings_read`. Do not infer these from `.env`, `spore.json`, shell env, or old prompt memory.');
@@ -439,6 +443,7 @@ class AgentLoop {
       platform: opts.platform,
       messageTarget: opts.messageTarget || null,
       platformMeta: opts.platformMeta || null,
+      modelRoutingOverride: opts.modelRoutingOverride || null,
       isDm: opts.isDm !== false,
       sessionKey,
     });
@@ -482,7 +487,22 @@ class AgentLoop {
       ac.abort();
       return true;
     }
+    if (this._cleanupStaleInterruptedSession(sessionKey, 'stop-no-active')) return true;
     return false;
+  }
+
+  _cleanupStaleInterruptedSession(sessionKey, reason = 'stale-tool-tail') {
+    try {
+      if (!this.sessions?.hasDanglingAssistantToolUse?.(sessionKey)) return false;
+      const stale = this.sessions.hasDanglingAssistantToolUse(sessionKey);
+      if (!stale) return false;
+      this.log.info(`[interrupt] Cleaning stale interrupted session ${sessionKey} (${reason})`);
+      this._cleanSessionAfterAbort(sessionKey, { reason });
+      return true;
+    } catch (e) {
+      this.log.warn(`[interrupt] Stale interrupted-session cleanup failed for ${sessionKey}: ${e.message}`);
+      return false;
+    }
   }
 
   /**
@@ -581,6 +601,8 @@ class AgentLoop {
     // project context (cwd, tools, tree) the agent saw at delegation.
     this.tools._currentProjectContext = opts.projectContext || null;
     this.tools._abortSignal = opts._abortSignal || null;
+
+    const staleInterrupted = this._cleanupStaleInterruptedSession(sessionKey, 'new-turn-after-reconnect');
 
     // Plugin middleware: beforeIngest — observers see the incoming message
     // and session metadata before the agent starts processing.
@@ -762,7 +784,7 @@ class AgentLoop {
     // 2. Add the user message to session history (text only — images are ephemeral)
     // Task completion messages are internal system prompts — don't pollute chat history
     // If this message follows an interruption, the new instruction takes priority
-    const wasInterrupted = this._recentAborts?.delete(sessionKey) || false;
+    const wasInterrupted = staleInterrupted || this._recentAborts?.delete(sessionKey) || false;
 
     if (opts.trigger !== 'task_complete') {
       this.sessions.addMessage(sessionKey, 'user', opts.content);
@@ -831,13 +853,12 @@ class AgentLoop {
       && /^\s*\[BUILD_PLAN\]/.test(typeof opts.content === 'string' ? opts.content : '');
     // `let` because _maybeEscalateModel below reassigns it when a tool call
     // forces a tier bump (e.g. casual → planner mid-loop).
-    const settings = require('../settings');
     let activeModel = isBuildingTurn
-      ? settings.modelForTier('planner')
+      ? this._modelForTier('planner', opts)
       : isCasualChat
-        ? settings.modelForTier('casual')
-        : settings.modelForTier('normal');
-    const _modelLimit = this._lookupModelLimit(activeModel);
+        ? this._modelForTier('casual', opts)
+        : this._modelForTier('normal', opts);
+    const _modelLimit = this._lookupModelLimit(activeModel, opts.modelRoutingOverride);
     const contextWindow = (_modelLimit?.contextWindow && Number(_modelLimit.contextWindow) > 0)
       ? Number(_modelLimit.contextWindow)
       : DEFAULT_CONTEXT_WINDOW;
@@ -1062,6 +1083,7 @@ class AgentLoop {
           tools: chatTools,
           model: activeModel,
           platform: opts.platform,
+          modelRoutingOverride: opts.modelRoutingOverride || null,
           channelName: opts.channelName,
           channelId: opts.channelId,
           trigger: opts.trigger,
@@ -1110,8 +1132,11 @@ class AgentLoop {
         // Collect text — only keep text from the final turn.
         const responseText = textBlocks.map(b => b.text).join('');
 
-        // If no tool calls, we're done — this text IS the final response
-        if (toolBlocks.length === 0 || response.stop_reason === 'end_turn') {
+        // If no tool calls, we're done — this text IS the final response.
+        // Do not trust stop_reason alone here: some OpenAI-compatible local
+        // servers stream tool_calls and still report finish_reason="stop".
+        // A visible tool_use block must be executed, not finalized as text.
+        if (toolBlocks.length === 0) {
           const r = this._handleEndTurn({ response, responseText, finalText, lastSentIntermediate, sessionKey, opts, messages });
           finalText = r.finalText;
           lastSentIntermediate = r.lastSentIntermediate;
@@ -1142,8 +1167,11 @@ class AgentLoop {
         }
 
         // 2-tier escalation (extracted)
-        activeModel = this._maybeEscalateModel(toolBlocks, activeModel);
-        if (toolBlocks.length > 0 && response.stop_reason === 'tool_use') {
+        activeModel = this._maybeEscalateModel(toolBlocks, activeModel, opts);
+        if (toolBlocks.length > 0) {
+          if (response.stop_reason !== 'tool_use') {
+            this.log.warn(`[agent] executing ${toolBlocks.length} tool block(s) despite stop=${response.stop_reason}`);
+          }
           const assistantContent = this._stripUnsignedThinkingBlocks(response.content);
           // Store compact version in session — trim large tool inputs for history
           const compactContent = assistantContent.map(block => {
@@ -1239,7 +1267,12 @@ class AgentLoop {
     const wasUserAbort = abortSignal?.aborted && opts._abortController?._userAbort;
 
     if (wasUserAbort) {
-      this.log.info(`[abort] User-initiated stop for ${sessionKey} — interrupted current generation/tool execution without rewriting session`);
+      this.log.info(`[abort] User-initiated stop for ${sessionKey} — interrupted current generation/tool execution; trimming stale tool context`);
+      try {
+        this._cleanSessionAfterAbort(sessionKey, { reason: 'user-abort' });
+      } catch (e) {
+        this.log.warn(`[abort] Session cleanup failed for ${sessionKey}: ${e.message}`);
+      }
       finalText = null;
     } else if (loopBroken && (!finalText || !finalText.trim())) {
       try {
@@ -2101,16 +2134,24 @@ class AgentLoop {
    * delegate_task, not on routine tool use. Returns the (possibly updated)
    * activeModel; caller assigns the result back.
    */
-  _maybeEscalateModel(toolBlocks, activeModel) {
-    if (!(toolBlocks.length > 0 && activeModel)) return activeModel;
+  _modelForTier(tier, opts = {}) {
+    const key = String(tier || '').replace(/^models\./, '');
+    const overrideModels = opts?.modelRoutingOverride?.config?.models || opts?.modelRoutingOverride?.models || null;
+    const override = overrideModels?.[key] || overrideModels?.[`models.${key}`] || null;
+    if (override) return override;
     const settings = require('../settings');
-    const casualM = settings.modelForTier('casual');
-    const normalM = settings.modelForTier('normal');
+    return settings.modelForTier(key, opts);
+  }
+
+  _maybeEscalateModel(toolBlocks, activeModel, opts = {}) {
+    if (!(toolBlocks.length > 0 && activeModel)) return activeModel;
+    const casualM = this._modelForTier('casual', opts);
+    const normalM = this._modelForTier('normal', opts);
     if (activeModel === casualM && casualM !== normalM) {
       activeModel = normalM;
       this.log.info(`[escalation] casual → normal (${activeModel})`);
     }
-    const plannerM = settings.modelForTier('planner', { strict: true });
+    const plannerM = this._modelForTier('planner', { ...opts, strict: true });
     if (activeModel === normalM && normalM !== plannerM && plannerM) {
       const hasDelegation = toolBlocks.some(b => b.name === 'delegate_task');
       if (hasDelegation) {
@@ -2412,7 +2453,7 @@ class AgentLoop {
 
   // ── Model-aware output token limits ─────────────────────────────────
 
-  _modelMaxOutputTokens(model) {
+  _modelMaxOutputTokens(model, routingOverride = null) {
     if (!model) return MODEL_OUTPUT_TOKEN_FALLBACK;
     // Plugin-populated source of truth: each provider plugin's listModels
     // returns maxOutput per-model and the wizard / settings save persists
@@ -2421,7 +2462,7 @@ class AgentLoop {
     // agent gets the actual vendor-published cap (claude-opus-4-7 → 32K,
     // sonnet-4-x → 64K, haiku-4-5 → 8K, gpt-4.1 → 32K, etc.) without
     // hardcoded vendor patterns here.
-    const lim = this._lookupModelLimit(model);
+    const lim = this._lookupModelLimit(model, routingOverride);
     if (lim?.maxTokens > 0) return Math.min(lim.maxTokens, MODEL_OUTPUT_TOKEN_CEILING);
     return MODEL_OUTPUT_TOKEN_FALLBACK; // generic fallback for models not yet probed
   }
@@ -2436,8 +2477,17 @@ class AgentLoop {
   //   2. model_library row by trailing modelId ("/<model>" suffix)
   //   3. legacy config.modelLimits (same fallback shape — kept so any
   //      stale modelLimits not yet migrated still resolves)
-  _lookupModelLimit(model) {
+  _lookupModelLimit(model, routingOverride = null) {
     if (!model) return null;
+    const overrideLimits = routingOverride?.config?.modelLimits || routingOverride?.modelLimits || null;
+    if (overrideLimits) {
+      if (overrideLimits[model]) return overrideLimits[model];
+      for (const k of Object.keys(overrideLimits)) {
+        if (k.endsWith('/' + model)) return overrideLimits[k];
+        const slash = k.indexOf('/');
+        if (slash > 0 && k.slice(slash + 1) === model) return overrideLimits[k];
+      }
+    }
     try {
       const lib = require('../settings/model-library');
       const direct = lib.get(model);
@@ -2914,11 +2964,11 @@ class AgentLoop {
     // Precedence: per-model override (modelLimits[<ref>].maxTokens) → global
     // config.maxTokens (if operator changed it from the MODEL_OUTPUT_TOKEN_FALLBACK
     // default) → model family heuristic.
-    const _modelLim = this._lookupModelLimit(model);
+    const _modelLim = this._lookupModelLimit(model, opts.modelRoutingOverride);
     const _perModelMax = Number(_modelLim?.maxTokens) || 0;
     const maxTokens = _perModelMax > 0
       ? _perModelMax
-      : (this.config.maxTokens !== MODEL_OUTPUT_TOKEN_FALLBACK ? this.config.maxTokens : this._modelMaxOutputTokens(model));
+      : (this.config.maxTokens !== MODEL_OUTPUT_TOKEN_FALLBACK ? this.config.maxTokens : this._modelMaxOutputTokens(model, opts.modelRoutingOverride));
     const forceToolName = opts.forceToolName && tools.some(t => t?.name === opts.forceToolName)
       ? opts.forceToolName
       : null;
