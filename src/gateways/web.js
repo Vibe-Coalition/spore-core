@@ -2991,6 +2991,7 @@ class WebGateway {
           trigger: 'proactive',
           platform: 'web',
           isDm: true,
+          suppressLearning: true,
           onTextDelta: (delta) => {
             this._sendToSession(sessionId, { type: 'chat:delta', text: delta });
           },
