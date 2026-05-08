@@ -3352,6 +3352,21 @@ class WebGateway {
       return retryAfter > 0 ? { 'Retry-After': String(retryAfter) } : {};
     };
 
+    const _writeLoginRateLimited = (req, res) => {
+      res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
+      res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
+    };
+
+    const _writeFailedLoginOrRateLimit = (req, res, status = 401, error = 'Invalid credentials') => {
+      if (!_checkLoginRate(req)) {
+        _writeLoginRateLimited(req, res);
+        return;
+      }
+      _recordFailedLoginAttempt(req);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error }));
+    };
+
     const _closeSocketsForAuthSession = (sid, reason = 'session-ended') => {
       if (!sid || !this._wss) return 0;
       let closed = 0;
@@ -3634,11 +3649,6 @@ class WebGateway {
 
       // ── Creator auth endpoints (graph viewer SSO via manager) ──
       if (urlPath === '/api/auth/login' && req.method === 'POST') {
-        if (!_checkLoginRate(req)) {
-          res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
-          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
-          return;
-        }
         let body = '';
         req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
         req.on('end', async () => {
@@ -3671,9 +3681,7 @@ class WebGateway {
                   verifiedUser = result.body.username || username;
                   req._mgrRole = result.body.role;
                 } else {
-                  _recordFailedLoginAttempt(req);
-                  res.writeHead(result.status || 401, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ error: result.body?.error || 'Invalid credentials' })); return;
+                  _writeFailedLoginOrRateLimit(req, res, result.status || 401, result.body?.error || 'Invalid credentials'); return;
                 }
               } catch (e) {
                 this.log.warn('[web] Manager SSO unreachable, falling back to local auth:', e.message);
@@ -3687,9 +3695,7 @@ class WebGateway {
                 } else if (authUser && authPass && username === authUser && password === authPass) {
                   verified = true;
                 } else {
-                  _recordFailedLoginAttempt(req);
-                  res.writeHead(401, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+                  _writeFailedLoginOrRateLimit(req, res); return;
                 }
               }
             } else if (authUser && authPass && username === authUser && password === authPass) {
@@ -3709,16 +3715,12 @@ class WebGateway {
                 // Honor stored role: creator → loginRole 'creator', webapp → 'webapp'.
                 if (wu.role === 'webapp') req._loginRoleHint = 'webapp';
               } else if (authUser && authPass) {
-                _recordFailedLoginAttempt(req);
-                res.writeHead(401, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+                _writeFailedLoginOrRateLimit(req, res); return;
               } else if (webappUsers.length === 0) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Auth not configured' })); return;
               } else {
-                _recordFailedLoginAttempt(req);
-                res.writeHead(401, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+                _writeFailedLoginOrRateLimit(req, res); return;
               }
             }
 
@@ -3820,11 +3822,6 @@ class WebGateway {
 
       // ── Webapp user auth endpoints ──
       if (urlPath === '/api/webapp/login' && req.method === 'POST') {
-        if (!_checkLoginRate(req)) {
-          res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
-          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
-          return;
-        }
         let body = '';
         req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
         req.on('end', () => {
@@ -3841,9 +3838,7 @@ class WebGateway {
               res.end(JSON.stringify({ error: 'Your account has been blocked. Contact the operator.' })); return;
             }
             if (!user || !verifyWebappPassword(password, user.salt, user.hash)) {
-              _recordFailedLoginAttempt(req);
-              res.writeHead(401, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
+              _writeFailedLoginOrRateLimit(req, res); return;
             }
             _clearLoginAttempts(req);
             const sid = crypto.randomBytes(32).toString('hex');
@@ -4077,11 +4072,6 @@ class WebGateway {
       // 'webapp' role session (never creator). When config.inviteKey
       // is empty, self-register is disabled (503).
       if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
-        if (!_checkLoginRate(req)) {
-          res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
-          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
-          return;
-        }
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
         let parsed;
@@ -4095,9 +4085,7 @@ class WebGateway {
         // Accept inviteKey (direct field name) or teamKey (older login UI).
         const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
         if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
-          _recordFailedLoginAttempt(req);
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid invite key' })); return;
+          _writeFailedLoginOrRateLimit(req, res, 401, 'Invalid invite key'); return;
         }
         if (!username || username.length > 64 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -4118,9 +4106,7 @@ class WebGateway {
           // where the user is retrying with the same password) just hand them
           // a fresh session + wizard. If the password is wrong, 409.
           if (!verifyWebappPassword(password, dup.salt, dup.hash)) {
-            _recordFailedLoginAttempt(req);
-            res.writeHead(409, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Username already taken' })); return;
+            _writeFailedLoginOrRateLimit(req, res, 409, 'Username already taken'); return;
           }
           _clearLoginAttempts(req);
           const sid = crypto.randomBytes(32).toString('hex');
@@ -6316,11 +6302,12 @@ class WebGateway {
         try { msg = JSON.parse(raw); } catch { return; }
         const msgType = typeof msg.type === 'string' ? msg.type : '';
         if (msgType !== 'ping' && ws._role !== 'cli' && ws._sourceSession && authConfigured()) {
-          const sess = _sessions.get(ws._sourceSession);
+          const webSessions = this._webSessions || new Map();
+          const sess = webSessions.get(ws._sourceSession);
           const expired = sess && Date.now() - sess.created >= SESSION_TTL;
           const mismatch = sess && (sess.user !== ws._user || sess.type !== ws._role);
           if (!sess || expired || mismatch) {
-            if (expired) _deleteAuthSession(ws._sourceSession, 'session-expired');
+            if (expired) webSessions.delete(ws._sourceSession);
             this.log.warn(`[ws] closing stale web auth socket for user=${ws._user || '(unknown)'} reason=${!sess ? 'missing-session' : expired ? 'expired-session' : 'session-mismatch'}`);
             ws._user = null;
             ws._role = null;

@@ -88,6 +88,90 @@ test('spore-code auth accepts local account password without invite key', async 
   }
 });
 
+test('spore-code auth does not rate-limit repeated successful password logins', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
+  try {
+    const username = 'repeat-password-user';
+    writeUser(dataDir, username, 'secret-password');
+    const { api, webSessions } = makeApi(dataDir, { inviteKey: '' });
+
+    for (let i = 0; i < 6; i += 1) {
+      const res = makeRes();
+      await sporeCode._test.handleAuth(api, makeReq({
+        username,
+        authMethod: 'password',
+        password: 'secret-password',
+      }), res);
+
+      assert.equal(res.statusCode, 200);
+      const payload = JSON.parse(res.body);
+      assert.equal(payload.ok, true);
+      assert.equal(webSessions.get(payload.token).user, username);
+      assert.equal(webSessions.get(payload.token).auth, 'password');
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('spore-code auth still rate-limits repeated failed password logins', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
+  try {
+    const username = 'failed-password-user';
+    writeUser(dataDir, username, 'secret-password');
+    const { api } = makeApi(dataDir, { inviteKey: '' });
+
+    for (let i = 0; i < 5; i += 1) {
+      const res = makeRes();
+      await sporeCode._test.handleAuth(api, makeReq({
+        username,
+        authMethod: 'password',
+        password: 'wrong-password',
+      }), res);
+
+      assert.equal(res.statusCode, 401);
+      assert.equal(JSON.parse(res.body).error, 'Invalid credentials');
+    }
+
+    const res = makeRes();
+    await sporeCode._test.handleAuth(api, makeReq({
+      username,
+      authMethod: 'password',
+      password: 'wrong-password',
+    }), res);
+
+    assert.equal(res.statusCode, 429);
+    assert.equal(JSON.parse(res.body).error, 'Too many authentication attempts. Try again later.');
+    assert.ok(Number(res.headers['Retry-After']) >= 1);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('spore-code auth does not rate-limit repeated successful invite logins', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
+  try {
+    const { api, webSessions } = makeApi(dataDir, { inviteKey: 'invite-key' });
+    const username = 'repeat-invite-user';
+
+    for (let i = 0; i < 6; i += 1) {
+      const res = makeRes();
+      await sporeCode._test.handleAuth(api, makeReq({
+        username,
+        key: 'invite-key',
+      }), res);
+
+      assert.equal(res.statusCode, 200);
+      const payload = JSON.parse(res.body);
+      assert.equal(payload.ok, true);
+      assert.equal(webSessions.get(payload.token).user, username);
+      assert.equal(webSessions.get(payload.token).auth, 'invite');
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('spore-code recall skip keeps scoped project and shared KB recall enabled', () => {
   const scopedOpts = {
     platform: 'cli',

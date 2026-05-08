@@ -176,9 +176,33 @@ function checkAuthRate(req, username, method) {
     AUTH_ATTEMPTS.set(key, fresh);
     return false;
   }
-  fresh.push(now);
   AUTH_ATTEMPTS.set(key, fresh);
   return true;
+}
+
+function recordAuthFailure(req, username, method) {
+  const now = Date.now();
+  const key = `${requestIp(req)}:${String(username || '').toLowerCase()}:${String(method || 'auth')}`;
+  const entry = AUTH_ATTEMPTS.get(key) || [];
+  const fresh = entry.filter(t => now - t < AUTH_RATE_LIMIT.windowMs);
+  fresh.push(now);
+  AUTH_ATTEMPTS.set(key, fresh);
+  return fresh.length;
+}
+
+function clearAuthRate(req, username, method) {
+  const key = `${requestIp(req)}:${String(username || '').toLowerCase()}:${String(method || 'auth')}`;
+  AUTH_ATTEMPTS.delete(key);
+}
+
+function authRateHeaders(req, username, method) {
+  const now = Date.now();
+  const key = `${requestIp(req)}:${String(username || '').toLowerCase()}:${String(method || 'auth')}`;
+  const fresh = (AUTH_ATTEMPTS.get(key) || []).filter(t => now - t < AUTH_RATE_LIMIT.windowMs);
+  AUTH_ATTEMPTS.set(key, fresh);
+  if (fresh.length < AUTH_RATE_LIMIT.max) return { 'Content-Type': 'application/json' };
+  const retryAfter = Math.max(1, Math.ceil((AUTH_RATE_LIMIT.windowMs - (now - Math.min(...fresh))) / 1000));
+  return { 'Content-Type': 'application/json', 'Retry-After': String(retryAfter) };
 }
 
 function deviceStorePath(api) {
@@ -373,23 +397,25 @@ async function handleAuth(api, req, res) {
 
   if (wantsPasswordAuth(parsed)) {
     if (!checkAuthRate(req, username, 'password')) {
-      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.writeHead(429, authRateHeaders(req, username, 'password'));
       res.end(JSON.stringify({ error: 'Too many authentication attempts. Try again later.' }));
       return;
     }
     const auth = authenticateAccountPassword(api, username, String(parsed.password || ''));
     if (!auth.ok) {
+      recordAuthFailure(req, username, 'password');
       res.writeHead(auth.status || 401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: auth.error || 'Invalid credentials' }));
       return;
     }
+    clearAuthRate(req, username, 'password');
     const extra = issueDevice ? mintDeviceToken(api, auth.username, 'password') : {};
     issueCliToken(api, res, auth.username, 'password', { extra });
     return;
   }
 
   if (!checkAuthRate(req, username, 'invite')) {
-    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.writeHead(429, authRateHeaders(req, username, 'invite'));
     res.end(JSON.stringify({ error: 'Too many authentication attempts. Try again later.' }));
     return;
   }
@@ -400,10 +426,12 @@ async function handleAuth(api, req, res) {
     return;
   }
   if (!inviteKeyMatches(key, inviteKey)) {
+    recordAuthFailure(req, username, 'invite');
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid invite key' }));
     return;
   }
+  clearAuthRate(req, username, 'invite');
   const extra = issueDevice ? mintDeviceToken(api, username, 'invite') : {};
   issueCliToken(api, res, username, 'invite', { extra });
 }
