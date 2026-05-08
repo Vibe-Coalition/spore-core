@@ -47,7 +47,8 @@ function createLogger(level = 'info') {
       const line = `[${ts}] [${lvl}] ${args.map(formatArg).join(' ')}`;
       ring.push(line);
       if (ring.length > RING_MAX) ring.shift();
-      console.log(line);
+      const writer = lvl === 'error' ? console.error : (lvl === 'warn' ? console.warn : console.log);
+      writer.call(console, line);
     }
   };
 

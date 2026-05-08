@@ -1141,8 +1141,17 @@ class ToolSystem {
     const projectMode = projectContext?.mode
       || _execContext.getStore()?.projectContext?.mode
       || this._currentProjectContext?.mode;
+    const trigger = opts.trigger
+      || _execContext.getStore()?.trigger
+      || this._currentTrigger
+      || null;
+    const modalAskUserCapable = platform === 'web' || platform === 'cli';
+    const backgroundTrigger = ['worker', 'maintenance', 'background', 'task_complete', 'model-test'].includes(String(trigger || '').toLowerCase());
+    const available = (!modalAskUserCapable || backgroundTrigger)
+      ? all.filter(t => t.name !== 'ask_user')
+      : all;
     if (platform === 'cli') {
-      let filtered = all.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
+      let filtered = available.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
       const advertised = Array.isArray(toolCtx.clientTools) && toolCtx.clientTools.length > 0
         ? new Set(toolCtx.clientTools)
         : null;
@@ -1156,7 +1165,7 @@ class ToolSystem {
       }
       return filtered;
     }
-    return all;
+    return available;
   }
 
   _remoteHostAliases(host = {}) {
@@ -8034,7 +8043,14 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }, timeout);
       this._pendingQuestions.set(qid, { resolve, sessionKey, channelId: ctx.channelId, timer, options, question, createdAt: Date.now() });
       try {
-        const delivered = broadcaster(sessionKey, { type: 'ask_user', qid, question, options, sessionKey });
+        const delivered = broadcaster(sessionKey, {
+          type: 'ask_user',
+          qid,
+          question,
+          options,
+          sessionKey,
+          channelId: ctx.channelId || null,
+        });
         const deliveredCount = Number(delivered);
         if (Number.isFinite(deliveredCount) && deliveredCount <= 0) {
           clearTimeout(timer);
@@ -8108,9 +8124,23 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return null;
   }
 
-  answerAskUser(qid, answer) {
+  getPendingAskUser(qid) {
+    const entry = this._pendingQuestions?.get(qid);
+    if (!entry) return null;
+    return {
+      qid,
+      sessionKey: entry.sessionKey,
+      channelId: entry.channelId,
+      question: entry.question,
+      options: entry.options,
+      createdAt: entry.createdAt,
+    };
+  }
+
+  answerAskUser(qid, answer, expectedSessionKey = null) {
     const entry = this._pendingQuestions?.get(qid);
     if (!entry) return false;
+    if (expectedSessionKey && entry.sessionKey !== expectedSessionKey) return false;
     const matched = this._matchAskUserOption(entry.options, answer);
     if (!matched) return false;
     clearTimeout(entry.timer);
@@ -8136,7 +8166,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         options: entry.options,
       };
     }
-    const ok = this.answerAskUser(qid, matched);
+    const ok = this.answerAskUser(qid, matched, sessionKey);
     return { ok, pending: true, qid, answer: matched, question: entry.question };
   }
 

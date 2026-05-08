@@ -15,12 +15,30 @@ function writeJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function readRequestBody(req) {
-  if (typeof req.body === 'string' || Buffer.isBuffer(req.body)) return Promise.resolve(req.body);
+function readRequestBody(req, maxBytes = 5_000_000) {
+  if (typeof req.body === 'string' || Buffer.isBuffer(req.body)) {
+    if (Buffer.byteLength(req.body) > maxBytes) return Promise.reject(new Error('Body too large'));
+    return Promise.resolve(req.body);
+  }
   if (!req.on) return Promise.resolve(undefined);
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))));
+    let total = 0;
+    let failed = false;
+    req.on('data', chunk => {
+      if (failed) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      total += buf.length;
+      if (total > maxBytes) {
+        failed = true;
+        if (typeof req.destroy === 'function') {
+          try { req.destroy(); } catch { /* ignore */ }
+        }
+        reject(new Error('Body too large'));
+        return;
+      }
+      chunks.push(buf);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
@@ -33,6 +51,89 @@ function defaultRedactSecrets(value) {
     .replace(/([A-Za-z0-9_]*token[A-Za-z0-9_]*\s*[=:]\s*)[^\s,"']+/gi, '$1[redacted]');
 }
 
+async function resolveHeaderValue(value, routeName, fetchVaultKey) {
+  if (typeof value !== 'string') return value;
+
+  if (value.includes('$VAULT:')) {
+    const vaultRefs = [...value.matchAll(/\$VAULT:([A-Z_][A-Z0-9_]*)/g)];
+    if (vaultRefs.length === 0) {
+      throw Object.assign(new Error(`Invalid $VAULT reference in proxy route "${routeName}"`), { status: 500 });
+    }
+    let resolved = value;
+    for (const match of vaultRefs) {
+      const keyName = match[1];
+      const vaultVal = await fetchVaultKey(keyName);
+      const replacement = vaultVal || process.env[keyName];
+      if (!replacement) {
+        throw Object.assign(new Error(`Required vault key not found for proxy route "${routeName}"`), { status: 500 });
+      }
+      resolved = resolved.replaceAll(match[0], replacement);
+    }
+    return resolved;
+  }
+
+  if (/^\$[A-Z_][A-Z0-9_]*$/.test(value)) {
+    const envKey = value.slice(1);
+    const envVal = process.env[envKey];
+    if (!envVal) {
+      throw Object.assign(new Error(`Required env credential not set for proxy route "${routeName}"`), { status: 500 });
+    }
+    return envVal;
+  }
+
+  return value;
+}
+
+async function buildProxyHeaders(req, route, routeName, fetchVaultKey) {
+  const headers = {};
+  const forwardHeaders = ['content-type', 'content-length', 'accept', 'accept-encoding'];
+  for (const header of forwardHeaders) {
+    if (req.headers?.[header]) headers[header] = req.headers[header];
+  }
+
+  for (const [key, value] of Object.entries(route.headers || {})) {
+    headers[key] = await resolveHeaderValue(value, routeName, fetchVaultKey);
+  }
+
+  return headers;
+}
+
+function responseHeaders(upstream) {
+  const headers = {};
+  const upstreamHeaders = upstream?.headers;
+  if (upstreamHeaders && typeof upstreamHeaders[Symbol.iterator] === 'function') {
+    for (const [key, value] of upstreamHeaders) {
+      if (String(key).toLowerCase() !== 'access-control-allow-origin') headers[key] = value;
+    }
+  } else {
+    const contentType = upstreamHeaders?.get?.('content-type');
+    if (contentType) headers['content-type'] = contentType;
+  }
+  headers['access-control-allow-origin'] = '*';
+  return headers;
+}
+
+async function writeUpstreamBody(upstream, res) {
+  if (upstream?.body?.getReader) {
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (typeof res.write === 'function') res.write(value);
+    }
+    res.end();
+    return;
+  }
+  if (upstream?.body && typeof upstream.body[Symbol.asyncIterator] === 'function') {
+    for await (const chunk of upstream.body) {
+      if (typeof res.write === 'function') res.write(chunk);
+    }
+    res.end();
+    return;
+  }
+  const body = Buffer.from(await upstream.arrayBuffer());
+  res.end(body);
+}
 
 function createApiProxyHandler(opts = {}) {
   const fetchImpl = opts.fetchImpl || opts.fetch || global.fetch;
@@ -54,28 +155,32 @@ function createApiProxyHandler(opts = {}) {
       const origUrl = new URL(req.url, 'http://localhost');
       for (const [k, v] of origUrl.searchParams) targetUrl.searchParams.append(k, v);
 
-      const headers = { ...(route.headers || {}) };
-      for (const [key, value] of Object.entries(headers)) {
-        if (typeof value === 'string' && value.startsWith('$VAULT:')) {
-          headers[key] = await fetchVaultKey(value.slice(7)) || '';
-        }
-      }
-      if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
-
+      const headers = await buildProxyHeaders(req, route, name, fetchVaultKey);
       const init = { method: req.method, headers };
-      if (!['GET', 'HEAD'].includes(req.method)) init.body = await readRequestBody(req);
+      if (!['GET', 'HEAD'].includes(req.method)) init.body = await readRequestBody(req, route.maxBodyBytes || 5_000_000);
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        init.signal = AbortSignal.timeout(route.timeout || 30_000);
+      }
 
       const upstream = await fetchImpl(targetUrl, init);
-      const contentType = upstream.headers?.get?.('content-type') || 'application/json';
-      const body = Buffer.from(await upstream.arrayBuffer());
-      res.writeHead(upstream.status, { 'Content-Type': contentType });
-      res.end(body);
+      res.writeHead(upstream.status, responseHeaders(upstream));
+      await writeUpstreamBody(upstream, res);
     } catch (err) {
       const safe = redactSecrets(err?.message || err);
       log.warn?.(`[web] API proxy failed for ${name || proxyRoute}: ${safe}`);
-      writeJson(res, 502, { error: 'Proxy request failed', detail: safe });
+      if (!res.headersSent) {
+        writeJson(res, err?.status || 502, { error: err?.status ? safe : 'Proxy request failed', detail: safe });
+      } else if (typeof res.end === 'function') {
+        res.end();
+      }
     }
   };
 }
 
-module.exports = { matchProxyRoute, createApiProxyHandler, defaultRedactSecrets };
+module.exports = {
+  matchProxyRoute,
+  createApiProxyHandler,
+  defaultRedactSecrets,
+  resolveHeaderValue,
+  buildProxyHeaders,
+};

@@ -78,6 +78,18 @@ test('tool intent detector does not force a tool for generic chat', () => {
   assert.equal(agent._detectForcedToolNameForIntent('hello there', { platform: 'web' }), null);
 });
 
+test('tool intent detector ignores background worker prompts', () => {
+  const agent = makeAgent(['ask_user', 'graph_query']);
+
+  assert.equal(
+    agent._detectForcedToolNameForIntent('Research ask_user Tool and record findings with graph_query.', {
+      platform: 'system',
+      trigger: 'worker',
+    }),
+    null,
+  );
+});
+
 test('retry intent inherits the previous explicit tool request', () => {
   const agent = makeAgent(['browser', 'graph_query']);
 

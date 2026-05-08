@@ -2757,6 +2757,46 @@ class WebGateway {
     return false;
   }
 
+  _askUserAnswerMatchesClient(ws, msg, pending) {
+    if (!ws || !pending?.sessionKey) return false;
+    const pendingKey = String(pending.sessionKey);
+    const candidates = new Set();
+    const add = (value) => {
+      if (value === undefined || value === null || value === '') return;
+      candidates.add(String(value));
+    };
+    add(msg?.sessionKey);
+    add(msg?.sessionId);
+    if (msg?.sessionId) add(`channel:${msg.sessionId}`);
+
+    try {
+      const userId = ws._user || 'operator';
+      const isCli = ws._role === 'cli';
+      if (msg?.sessionId && this.tools?._sessions?.constructor?.buildKey) {
+        add(this.tools._sessions.constructor.buildKey(
+          isCli ? msg.sessionId : 'web:control-panel',
+          !isCli,
+          userId
+        ));
+      }
+    } catch {}
+
+    if (candidates.has(pendingKey)) return true;
+    if (this._sessionKeyClientMatches(ws, pending.sessionKey, pending.channelId)) return true;
+
+    if (ws._role !== 'cli') {
+      const userId = ws._user || 'operator';
+      if (pendingKey === `dm:${userId}` || pendingKey === `shared:dm:web:${userId}` || pendingKey === `private:dm:web:${userId}`) {
+        return true;
+      }
+      if (/^(merge|link|child|wakeup)[-_]/.test(pendingKey) && userId === 'operator') {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   broadcastBinary(buffer) {
     if (!this._wss) return;
     const WebSocket = require('ws');
@@ -6298,7 +6338,22 @@ class WebGateway {
         // Answer to an ask_user tool call — resolves the pending promise on
         // the tools side so the agent's tool_result returns cleanly.
         if (msg.type === 'ask_user_answer' && msg.qid && typeof msg.answer === 'string') {
-          const ok = this.tools.answerAskUser(msg.qid, msg.answer);
+          const pending = typeof this.tools.getPendingAskUser === 'function'
+            ? this.tools.getPendingAskUser(msg.qid)
+            : null;
+          if (!pending || !this._askUserAnswerMatchesClient(ws, msg, pending)) {
+            this.log.warn(`[ask_user] Rejected answer for qid=${msg.qid}: session mismatch or no pending question`);
+            try {
+              ws.send(JSON.stringify({
+                type: 'ask_user_answer_ack',
+                qid: msg.qid,
+                ok: false,
+                error: pending ? 'session-mismatch' : 'not-found',
+              }));
+            } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
+            return;
+          }
+          const ok = this.tools.answerAskUser(msg.qid, msg.answer, pending.sessionKey);
           try { ws.send(JSON.stringify({ type: 'ask_user_answer_ack', qid: msg.qid, ok })); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); }
           return;
         }
@@ -6615,18 +6670,19 @@ class WebGateway {
               return;
             }
             if (pendingAsk?.pending && this.tools._agent?.activeRuns?.has(activeSessionKey)) {
-              const labels = (pendingAsk.options || []).map((o, i) => `${i + 1}. ${o.label}`).join(' | ');
+              const cancelled = typeof this.tools.cancelSessionAskUser === 'function'
+                ? this.tools.cancelSessionAskUser(activeSessionKey)
+                : [];
               const status = {
                 type: 'chat:status',
-                status: 'ask_user_waiting',
+                status: 'ask_user_cancelled',
                 qid: pendingAsk.qid,
                 question: pendingAsk.question,
-                message: `Pending question: ${pendingAsk.question}${labels ? ` Options: ${labels}` : ''}`,
+                message: 'Previous picker was cancelled; treating your message as the new instruction.',
               };
               if (isCli) this._sendToSession(sessionId, status);
               else { try { ws.send(JSON.stringify(status)); } catch (e) { this.log.warn('[web] ws.send failed: ' + e.message); } }
-              this.log.info(`[ask_user] Ignored non-matching chat text while ${activeSessionKey} is waiting for option pick`);
-              return;
+              this.log.info(`[ask_user] Cancelled ${cancelled.length || 0} pending question(s) for ${activeSessionKey} after non-matching chat text`);
             }
           }
 

@@ -801,7 +801,13 @@ function renderAskUserCard(msg) {
     submitBtn.disabled = true;
     card.querySelectorAll('input').forEach(i => i.disabled = true);
     try {
-      ws.send(JSON.stringify({ type: 'ask_user_answer', qid: msg.qid, answer: picked.value }));
+      ws.send(JSON.stringify({
+        type: 'ask_user_answer',
+        qid: msg.qid,
+        answer: picked.value,
+        sessionKey: msg.sessionKey || null,
+        channelId: msg.channelId || null,
+      }));
       card.querySelector('.au-status').textContent = `Sent: ${picked.value}`;
     } catch (e) {
       submitBtn.disabled = false;
