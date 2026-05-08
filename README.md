@@ -40,9 +40,9 @@ is evolving quickly, so expect rough edges and moving parts.
 
 Contributions are welcome. Small fixes, docs improvements, plugin experiments,
 benchmarks, design polish, and "vibe coded" prototypes are all fair game as long
-as they are useful, reviewable, and honest about what was tested. Discord is
-available for project chat and coordination; a public invite link will be added
-here once it is finalized.
+as they are useful, reviewable, and honest about what was tested. Join the
+[Spore Discord](https://discord.gg/mtsQ6GrdsN) for project chat and
+coordination.
 
 ## Quick Start
 
