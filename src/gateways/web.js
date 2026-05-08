@@ -12,6 +12,8 @@ const path = require('path');
 const crypto = require('crypto');
 const graphEvents = require('../graph/events');
 const { WebSettingsService } = require('./web/settings-service');
+const { createWebAuthPolicy } = require('./web/auth-policy');
+const { matchProxyRoute, createApiProxyHandler } = require('./web/api-proxy');
 
 function _redactSecrets(value) {
   let s = String(value ?? '');
@@ -3382,52 +3384,6 @@ class WebGateway {
       return false;
     };
 
-    const checkCreatorAuth = (req, res) => {
-      if (managerKey && req.headers['x-service-key'] === managerKey) return true;
-      const cookies = parseCookies(req);
-      const sid = cookies['spore_session'];
-      if (sid && _sessions.has(sid)) {
-        const sess = _sessions.get(sid);
-        if ((sess.type === 'creator' || sess.type === 'admin') && Date.now() - sess.created < SESSION_TTL) {
-          if (sess.viaSSO && !cookies['manager_session']) {
-            _sessions.delete(sid);
-            return false;
-          }
-          return true;
-        }
-        if (sess.type === 'creator' || sess.type === 'admin') _sessions.delete(sid);
-      }
-      // Also accept an spore_webapp session whose user record is role=creator
-      // (covers the case where a browser has the webapp-cookie naming scheme
-      // but the user was created as a creator during onboarding).
-      const wsid = cookies['spore_webapp'];
-      if (wsid && _sessions.has(wsid)) {
-        const sess = _sessions.get(wsid);
-        if (sess && Date.now() - sess.created < SESSION_TTL && sess.user) {
-          const wu = loadWebappUsers().find(u => u.username === sess.user);
-          if (wu && (wu.role === 'creator' || wu.role === 'admin')) return true;
-        }
-      }
-      if (authUser && authPass) {
-        const authHeader = req.headers.authorization || '';
-        if (authHeader.startsWith('Basic ')) {
-          const decoded = Buffer.from(authHeader.slice(6), 'base64').toString();
-          const [u, ...pParts] = decoded.split(':');
-          if (u === authUser && pParts.join(':') === authPass) return true;
-        }
-      }
-      return false;
-    };
-
-    const checkCreatorAuthAsync = async (req, res) => {
-      if (checkCreatorAuth(req, res)) return true;
-      if (await tryManagerSSO(req, res)) return true;
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Creator authentication required' }));
-      return false;
-    };
-    const checkAuth = (req, res) => checkCreatorAuthAsync(req, res);
-
     const WEBAPP_USERS_PATH = path.join(this.config.dataDir, 'webapp-users.json');
     const loadWebappUsers = () => {
       try { return JSON.parse(fs.readFileSync(WEBAPP_USERS_PATH, 'utf8')); } catch { return []; }
@@ -3522,70 +3478,27 @@ class WebGateway {
       return null;
     };
 
-    const getSessionFromReq = (req) => {
-      const cookies = parseCookies(req);
-      const sid = cookies['spore_session'];
-      const wsid = cookies['spore_webapp'];
-      const sidValid = sid && _sessions.has(sid);
-      const wsidValid = wsid && _sessions.has(wsid);
-      // When both cookies exist and both are valid, prefer whichever was created
-      // more recently. This prevents a stale creator cookie from shadowing a
-      // fresh webapp login (or vice versa) when both browsers/tabs share a
-      // cookie jar.
-      if (sidValid && wsidValid) {
-        const sCreated = _sessions.get(sid)?.created || 0;
-        const wCreated = _sessions.get(wsid)?.created || 0;
-        return wCreated >= sCreated ? wsid : sid;
-      }
-      if (sidValid) return sid;
-      if (wsidValid) return wsid;
-      return null;
-    };
 
-    const authContextFromReq = (req) => {
-      if (managerKey && req.headers['x-service-key'] === managerKey) {
-        return { type: 'admin', role: 'admin', user: 'service', username: 'service', creator: true, viaServiceKey: true };
-      }
-      const authHeader = req.headers.authorization || '';
-      if (authUser && authPass && authHeader.startsWith('Basic ')) {
-        const decoded = Buffer.from(authHeader.slice(6), 'base64').toString();
-        const [u, ...pParts] = decoded.split(':');
-        if (u === authUser && pParts.join(':') === authPass) {
-          return { type: 'creator', role: 'creator', user: authUser, username: authUser, creator: true, viaBasic: true };
-        }
-      }
-      const cookies = parseCookies(req);
-      const sessionId = getSessionFromReq(req);
-      const sess = sessionId && _sessions.get(sessionId);
-      if (!sess) return null;
-      if (Date.now() - sess.created >= SESSION_TTL) {
-        _sessions.delete(sessionId);
-        return null;
-      }
-      if (sess.viaSSO && !cookies['manager_session']) {
-        _sessions.delete(sessionId);
-        return null;
-      }
-      const userRecord = sess.user ? loadWebappUsers().find(u => u.username === sess.user) : null;
-      if (userRecord?.blocked) {
-        _sessions.delete(sessionId);
-        return null;
-      }
-      const storedRole = String(userRecord?.role || '').toLowerCase();
-      let role = sess.type || 'webapp';
-      if (storedRole === 'creator' || storedRole === 'admin') role = storedRole;
-      const creator = role === 'creator' || role === 'admin';
-      return {
-        type: role,
-        role,
-        user: sess.user || null,
-        username: sess.user || null,
-        sessionId,
-        cookieName: cookies['spore_webapp'] === sessionId ? 'spore_webapp' : 'spore_session',
-        userRecord,
-        creator,
-      };
+    const authPolicy = createWebAuthPolicy({
+      managerKey,
+      authUser,
+      authPass,
+      sessions: _sessions,
+      sessionTtl: SESSION_TTL,
+      loadWebappUsers,
+      deps: { now: () => Date.now() },
+    });
+    const checkCreatorAuth = (req, res) => authPolicy.checkCreatorAuth(req, res);
+    const checkCreatorAuthAsync = async (req, res) => {
+      if (checkCreatorAuth(req, res)) return true;
+      if (await tryManagerSSO(req, res)) return true;
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Creator authentication required' }));
+      return false;
     };
+    const checkAuth = (req, res) => checkCreatorAuthAsync(req, res);
+    const getSessionFromReq = req => authPolicy.getSessionFromReq(req);
+    const authContextFromReq = req => authPolicy.authContextFromReq(req);
 
     const requireGraphApiAuth = async (req, res) => {
       let authContext = authContextFromReq(req);
@@ -7481,13 +7394,7 @@ class WebGateway {
   }
 
   _matchProxyRoute(proxyRoute, config, req) {
-    for (const [name, route] of Object.entries(config.routes)) {
-      if (proxyRoute === name || proxyRoute.startsWith(name + '/')) {
-        if (route.methods && !route.methods.includes(req.method)) continue;
-        return { name, route, remainder: proxyRoute.slice(name.length) };
-      }
-    }
-    return null;
+    return matchProxyRoute(proxyRoute, config, req);
   }
 
   async _fetchVaultKey(keyName) {
@@ -7522,110 +7429,13 @@ class WebGateway {
   }
 
   async _handleApiProxy(req, res, matched, proxyRoute) {
-    const { name, route, remainder } = matched;
-    if (!route.target) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `Proxy route "${name}" has no target URL` }));
-      return;
-    }
-
-    try {
-      const targetUrl = new URL(remainder || '/', route.target);
-
-      // Forward query params from original request
-      const origUrl = new URL(req.url, 'http://localhost');
-      for (const [k, v] of origUrl.searchParams) targetUrl.searchParams.append(k, v);
-
-      // Build headers: start with allowed incoming headers, then inject key headers
-      const headers = {};
-      const forwardHeaders = ['content-type', 'content-length', 'accept', 'accept-encoding'];
-      for (const h of forwardHeaders) { if (req.headers[h]) headers[h] = req.headers[h]; }
-
-      // Inject API keys from vault or env vars — the core security feature
-      if (route.headers && typeof route.headers === 'object') {
-        for (const [headerName, headerVal] of Object.entries(route.headers)) {
-          if (typeof headerVal === 'string' && headerVal.includes('$VAULT:')) {
-            const vaultKeyName = headerVal.match(/\$VAULT:([A-Z_][A-Z0-9_]*)/)?.[1];
-            if (!vaultKeyName) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: `Invalid $VAULT reference in proxy route "${name}"` }));
-              return;
-            }
-            const vaultVal = await this._fetchVaultKey(vaultKeyName);
-            if (!vaultVal) {
-              const envFallback = process.env[vaultKeyName];
-              if (!envFallback) {
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-	                res.end(JSON.stringify({ error: `Required vault key not found for proxy route "${name}"` }));
-                return;
-              }
-              headers[headerName] = headerVal.replace(`$VAULT:${vaultKeyName}`, envFallback);
-            } else {
-              headers[headerName] = headerVal.replace(`$VAULT:${vaultKeyName}`, vaultVal);
-            }
-          } else if (typeof headerVal === 'string' && headerVal.startsWith('$')) {
-            const envKey = headerVal.slice(1);
-            const envVal = process.env[envKey];
-            if (!envVal) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-	              res.end(JSON.stringify({ error: `Required env credential not set for proxy route "${name}"` }));
-              return;
-            }
-            headers[headerName] = envVal;
-          } else {
-            headers[headerName] = headerVal;
-          }
-        }
-      }
-
-      // Collect request body for non-GET
-      let body = null;
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        body = await new Promise((resolve, reject) => {
-          const chunks = [];
-          req.on('data', c => { chunks.push(c); if (chunks.reduce((s, b) => s + b.length, 0) > 5_000_000) reject(new Error('Body too large')); });
-          req.on('end', () => resolve(Buffer.concat(chunks)));
-          req.on('error', reject);
-        });
-      }
-
-      const fetchOpts = { method: req.method, headers };
-      if (body) fetchOpts.body = body;
-      fetchOpts.signal = AbortSignal.timeout(route.timeout || 30000);
-
-      const upstream = await fetch(targetUrl.toString(), fetchOpts);
-
-      // Stream response back, stripping CORS (we control it)
-      const respHeaders = {};
-      for (const [k, v] of upstream.headers) {
-        if (k.toLowerCase() !== 'access-control-allow-origin') respHeaders[k] = v;
-      }
-      respHeaders['access-control-allow-origin'] = '*';
-      res.writeHead(upstream.status, respHeaders);
-
-      if (upstream.body) {
-        const reader = upstream.body.getReader();
-        const pump = async () => {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) { res.end(); break; }
-            res.write(value);
-          }
-        };
-        pump().catch(() => res.end());
-      } else {
-        const buf = await upstream.arrayBuffer();
-        res.end(Buffer.from(buf));
-      }
-
-      this.log.debug(`[api-proxy] ${req.method} ${name}${remainder} → ${upstream.status}`);
-    } catch (e) {
-      this.log.warn(`[api-proxy] Proxy error for "${name}": ${e.message}`);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `Proxy failed: ${e.message}` }));
-      }
-    }
+    const handler = createApiProxyHandler({
+      fetchVaultKey: keyName => this._fetchVaultKey(keyName),
+      log: this.log,
+      redactSecrets: _redactSecrets,
+      fetchImpl: fetch,
+    });
+    return handler(req, res, matched, proxyRoute);
   }
 
   // ── Graph API Handlers ──────────────────────────────────────────────
