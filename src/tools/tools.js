@@ -74,16 +74,18 @@ const CLI_NEW_LOCAL_TOOL_NAMES = new Set([
 // catalog reclaims ~1800 tokens per prompt and prevents the agent from
 // reaching for tools it can't usefully invoke (web_serve is refused locally
 // by the Go binary; spore_*/spore_message target the multi-agent mesh;
-// remote_*/ssh_tunnel are server-side SSH flows; message_* are
+// remote_*/ssh_tunnel are server-side SSH flows; browser is a web/channel
+// preview surface, not a Spore Code capability; message_* are
 // Discord/Telegram surfaces distinct from the cli TUI; env_manage /
 // startup_tasks / data_poller / list_custom_tools are SPORE-server admin).
-// Keep useful server-side capabilities such as browser, graph_*, query_about,
+// Keep useful server-side capabilities such as graph_*, query_about,
 // delegate_task, task_*, schedule_*, web_search, web_fetch, ask_user,
 // notify_user, save_tool, sleep, skill_*, session_*, log_watch_*, plus
 // plugin-contributed tools — those can route through SPORE while local file
 // tools route through the CLI.
 const TOOLS_EXCLUDED_FROM_CLI = new Set([
   'web_serve',
+  'browser',
   'message_send', 'message_react', 'message_edit', 'message_read',
   'env_manage',
   'remote_exec', 'remote_tail', 'remote_tmux_kill',
@@ -1822,17 +1824,17 @@ Set wait:false when you've submitted a long background job and just want to retu
             const sessionCtx = (sessionKey && this._sessionContexts?.get(sessionKey)) || {};
             const pluginResult = await this._pluginManager.executePluginTool(normalizedName, input, {
               sessionKey,
-              trigger:        sessionCtx.trigger        ?? this._currentTrigger ?? null,
-              channelId:      sessionCtx.channelId      ?? this._currentChannelId ?? null,
-              platform:       sessionCtx.platform       ?? this._currentPlatform ?? null,
-              userId:         sessionCtx.userId         ?? this._currentUserId ?? null,
-              userName:       sessionCtx.userName       ?? this._currentUserName ?? null,
-              userRole:       sessionCtx.userRole       ?? this._currentUserRole ?? null,
-              userMessage:    sessionCtx.userMessage    ?? this._currentUserMessage ?? null,
-              sessionToken:   sessionCtx.sessionToken   ?? this._currentSessionToken ?? null,
-              projectContext: sessionCtx.projectContext ?? this._currentProjectContext ?? null,
-              memoryEnvelope: sessionCtx.memoryEnvelope ?? this._currentMemoryEnvelope ?? null,
-              abortSignal:    sessionCtx.abortSignal    ?? this._abortSignal ?? null,
+              trigger:        ctx0.trigger        ?? sessionCtx.trigger        ?? this._currentTrigger ?? null,
+              channelId:      ctx0.channelId      ?? sessionCtx.channelId      ?? this._currentChannelId ?? null,
+              platform:       ctx0.platform       ?? sessionCtx.platform       ?? this._currentPlatform ?? null,
+              userId:         ctx0.userId         ?? sessionCtx.userId         ?? this._currentUserId ?? null,
+              userName:       ctx0.userName       ?? sessionCtx.userName       ?? this._currentUserName ?? null,
+              userRole:       ctx0.userRole       ?? sessionCtx.userRole       ?? this._currentUserRole ?? null,
+              userMessage:    ctx0.userMessage    ?? sessionCtx.userMessage    ?? this._currentUserMessage ?? null,
+              sessionToken:   ctx0.sessionToken   ?? sessionCtx.sessionToken   ?? this._currentSessionToken ?? null,
+              projectContext: ctx0.projectContext ?? sessionCtx.projectContext ?? this._currentProjectContext ?? null,
+              memoryEnvelope: ctx0.memoryEnvelope ?? sessionCtx.memoryEnvelope ?? this._currentMemoryEnvelope ?? null,
+              abortSignal:    ctx0.abortSignal    ?? sessionCtx.abortSignal    ?? this._abortSignal ?? null,
             });
             if (pluginResult !== null) return pluginResult;
           }
@@ -3777,6 +3779,21 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (opts.fallbackGlobal !== false && this._isWebRoute(route) && !this._isCliRoute(route)) {
       this.broadcast(msg);
       return -1;
+    }
+    return 0;
+  }
+
+  _broadcastSessionBinary(route, buffer, opts = {}) {
+    const broadcaster = this._getSessionBinaryBroadcaster();
+    if (typeof broadcaster === 'function') {
+      for (const key of this._sessionRouteKeys(route)) {
+        try {
+          const delivered = broadcaster(key, buffer);
+          if (delivered > 0) return delivered;
+        } catch (e) {
+          this.log.warn(`[${opts.logPrefix || 'session-binary'}] session binary broadcast failed for ${key}: ${e.message}`);
+        }
+      }
     }
     return 0;
   }
@@ -6621,6 +6638,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       || null;
     if (gw && typeof gw._broadcastToSessionKey === 'function') {
       this._wsBroadcast = (sessionKey, payload) => gw._broadcastToSessionKey(sessionKey, payload);
+      if (typeof gw._broadcastBinaryToSessionKey === 'function') {
+        this._wsBinaryBroadcast = (sessionKey, buffer) => gw._broadcastBinaryToSessionKey(sessionKey, buffer);
+      }
       return true;
     }
     return false;
@@ -6630,6 +6650,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (typeof this._wsBroadcast === 'function') return this._wsBroadcast;
     return this._wireWebGatewayBroadcaster() && typeof this._wsBroadcast === 'function'
       ? this._wsBroadcast
+      : null;
+  }
+
+  _getSessionBinaryBroadcaster() {
+    if (typeof this._wsBinaryBroadcast === 'function') return this._wsBinaryBroadcast;
+    return this._wireWebGatewayBroadcaster() && typeof this._wsBinaryBroadcast === 'function'
+      ? this._wsBinaryBroadcast
       : null;
   }
 

@@ -2710,6 +2710,55 @@ class WebGateway {
     return count;
   }
 
+  _broadcastBinaryToSessionKey(sessionKey, buffer) {
+    if (!sessionKey || !buffer) return 0;
+
+    const rawKey = String(sessionKey);
+    const tryKeys = new Set([rawKey]);
+    const channelMatch = rawKey.match(/^(?:(?:shared|private):)?channel:(.+)$/);
+    if (channelMatch) {
+      tryKeys.add(channelMatch[1]);
+      const platformMatch = channelMatch[1].match(/^([a-z][a-z0-9_-]*):(.+)$/i);
+      if (platformMatch && ['cli', 'web'].includes(platformMatch[1].toLowerCase())) {
+        tryKeys.add(platformMatch[2]);
+      }
+    }
+    for (const tryKey of tryKeys) {
+      const set = this._sessionClients?.get(tryKey);
+      if (!set) continue;
+      let count = 0;
+      for (const entry of set) {
+        if (entry.ws.readyState === 1) {
+          try { entry.ws.send(buffer); count++; } catch (e) { this.log.warn('[web] entry.ws.send failed: ' + e.message); }
+        }
+      }
+      if (count) return count;
+    }
+
+    let targetUser = null;
+    const dmMatch = rawKey.match(/^(?:(?:shared|private):)?dm:(.+)$/);
+    if (dmMatch) {
+      const rest = dmMatch[1];
+      const platformMatch = rest.match(/^([a-z][a-z0-9_-]*):(.+)$/i);
+      if (platformMatch) {
+        if (platformMatch[1].toLowerCase() !== 'web') return 0;
+        targetUser = platformMatch[2];
+      } else {
+        targetUser = rest;
+      }
+    } else if (/^(merge|link|child|wakeup)[-_]/.test(rawKey)) targetUser = 'operator';
+    if (!targetUser) return 0;
+    let count = 0;
+    for (const wsClient of this._wss?.clients || []) {
+      if (wsClient.readyState !== 1) continue;
+      if (wsClient._role === 'cli') continue;
+      if (wsClient._user === targetUser) {
+        try { wsClient.send(buffer); count++; } catch (e) { this.log.warn('[web] wsClient.send failed: ' + e.message); }
+      }
+    }
+    return count;
+  }
+
   _removeClientFromAllSessions(ws) {
     for (const [sessionId, set] of this._sessionClients) {
       for (const entry of set) {

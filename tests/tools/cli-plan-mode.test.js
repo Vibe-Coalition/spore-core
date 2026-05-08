@@ -17,6 +17,14 @@ function makeTools() {
 
 test('cli plan mode hides local execution and write tools from the catalog', () => {
   const tools = makeTools();
+  tools._pluginManager = {
+    getToolDefinitions() {
+      return [
+        { name: 'browser', description: 'browser', input_schema: { type: 'object' } },
+        { name: 'plugin_allowed', description: 'allowed', input_schema: { type: 'object' } },
+      ];
+    },
+  };
   const names = tools.getToolDefinitions({
     platform: 'cli',
     projectContext: { mode: 'plan' },
@@ -28,7 +36,24 @@ test('cli plan mode hides local execution and write tools from the catalog', () 
   assert.ok(!names.includes('write_file'));
   assert.ok(!names.includes('edit_file'));
   assert.ok(!names.includes('web_serve'));
+  assert.ok(!names.includes('browser'));
   assert.ok(!names.includes('env_manage'));
+  assert.ok(names.includes('plugin_allowed'));
+});
+
+test('cli execute mode still hides the web browser tool from the catalog', () => {
+  const tools = makeTools();
+  tools._pluginManager = {
+    getToolDefinitions() {
+      return [{ name: 'browser', description: 'browser', input_schema: { type: 'object' } }];
+    },
+  };
+  const names = tools.getToolDefinitions({
+    platform: 'cli',
+    projectContext: { mode: 'execute' },
+  }).map(t => t.name);
+
+  assert.ok(!names.includes('browser'));
 });
 
 test('cli plan mode blocks execution/write tools before dispatch', () => {

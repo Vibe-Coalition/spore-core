@@ -1540,7 +1540,7 @@ function applyPromptSectionsMixin(GraphContext) {
     // Static action-style guidance lives in ref-browser-automation, owned by
     // browser-core + backend plugins.
     const _availableBackends = this._pluginManager?.getBrowserBackends?.()?.filter(b => b.available) || [];
-    if (_availableBackends.length > 0) {
+    if (opts.platform !== 'cli' && _availableBackends.length > 0) {
       const cfgBackend = String(this.config.browserBackend || '').toLowerCase();
       const has = (name) => _availableBackends.some(b => b.name === name || (b.aliases || []).includes(name));
       const backend = (cfgBackend && has(cfgBackend)) ? cfgBackend : _availableBackends[0].name;

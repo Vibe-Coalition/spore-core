@@ -36,20 +36,60 @@ module.exports = function register(api) {
   // Lazy: build the BrowserTool the first time the agent calls us, so
   // we read the live backend list (post-init) and don't pin a config
   // snapshot from before other plugins finished registering.
-  let tool = null;
-  function getTool() {
-    if (tool) return tool;
-    tool = new BrowserTool({
+  const toolsByScope = new Map();
+  function browserScopeKey(toolCtx = {}) {
+    const platform = String(toolCtx.platform || 'unknown').toLowerCase();
+    const channel = String(toolCtx.channelId || toolCtx.sessionKey || 'no-channel');
+    const user = String(toolCtx.userId || toolCtx.userName || 'anonymous');
+    return `${platform}\u0000${channel}\u0000${user}`;
+  }
+  function routeFromCtx(toolCtx = {}) {
+    return {
+      sessionKey: toolCtx.sessionKey || null,
+      channelId: toolCtx.channelId || null,
+      platform: toolCtx.platform || null,
+      userId: toolCtx.userId || null,
+    };
+  }
+  function makeScopedBroadcast(toolCtx = {}) {
+    const route = routeFromCtx(toolCtx);
+    return (data, isBinary) => {
+      try {
+        if (isBinary) {
+          const delivered = ctx.tools?._broadcastSessionBinary?.(route, data, {
+            fallbackGlobal: false,
+            logPrefix: 'browser-core',
+          });
+          return delivered || 0;
+        }
+        const payload = data && typeof data === 'object' && !Array.isArray(data)
+          ? {
+              ...data,
+              sessionKey: route.sessionKey,
+              channelId: route.channelId,
+              platform: route.platform,
+              userId: route.userId,
+            }
+          : data;
+        const delivered = ctx.tools?._broadcastSessionEvent?.(route, payload, {
+          fallbackGlobal: false,
+          logPrefix: 'browser-core',
+        });
+        return delivered || 0;
+      } catch (e) { log.warn('[browser-core] scoped broadcast failed: ' + e.message); }
+      return 0;
+    };
+  }
+  function getTool(toolCtx = {}) {
+    const scopeKey = browserScopeKey(toolCtx);
+    if (toolsByScope.has(scopeKey)) return toolsByScope.get(scopeKey);
+    const tool = new BrowserTool({
       log,
-      broadcast: (data, isBinary) => {
-        try {
-          if (isBinary) ctx.tools?.broadcastBinary?.(data);
-          else ctx.tools?.broadcast?.(data);
-        } catch (e) { log.warn('[browser-core] broadcast failed: ' + e.message); }
-      },
+      broadcast: makeScopedBroadcast(toolCtx),
       config: ctx.config,
       pluginManager: ctx.tools?._pluginManager || null,
     });
+    toolsByScope.set(scopeKey, tool);
     return tool;
   }
 
@@ -106,14 +146,15 @@ Common mistake: probing the DOM with 5+ evaluate calls instead of just snapshott
       },
       required: ['action'],
     },
-    execute: async (input) => getTool().execute(input || {}),
+    available: (toolCtx = {}) => toolCtx.platform !== 'cli',
+    execute: async (input, toolCtx = {}) => getTool(toolCtx).execute(input || {}),
   });
 
   api.onShutdown(async () => {
-    if (tool) {
-      try { await tool.destroy(); } catch (e) { log.warn('[browser-core] destroy failed: ' + e.message); }
-      tool = null;
+    for (const [scopeKey, tool] of toolsByScope) {
+      try { await tool.destroy(); } catch (e) { log.warn(`[browser-core] destroy failed for ${scopeKey}: ${e.message}`); }
     }
+    toolsByScope.clear();
   });
 
   log.info('[plugin:browser-core] Plugin ready — `browser` tool registered, routes to backend plugins.');

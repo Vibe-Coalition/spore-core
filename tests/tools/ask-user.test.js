@@ -165,6 +165,40 @@ test('WebGateway does not treat non-web shared dm/channel keys as web sessions',
   assert.deepEqual(sent, [{ type: 'ok' }]);
 });
 
+test('WebGateway scopes binary browser frames to web users and registered session clients', () => {
+  const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
+  const gateway = new WebGateway(tools);
+  const sent = [];
+  const webWs = {
+    readyState: 1,
+    _user: 'yam',
+    send(data) { sent.push(data); },
+  };
+  const otherWs = {
+    readyState: 1,
+    _user: 'other',
+    send(data) { sent.push(data); },
+  };
+  const cliWs = {
+    readyState: 1,
+    _role: 'cli',
+    _user: 'yam',
+    send(data) { sent.push(data); },
+  };
+  const frame = Buffer.from('browser-frame');
+  gateway._wss = { clients: new Set([webWs, otherWs, cliWs]) };
+
+  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:telegram:yam', frame), 0);
+  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:web:yam', frame), 1);
+  assert.deepEqual(sent, [frame]);
+
+  const cliSent = [];
+  const originWs = { readyState: 1, send(data) { cliSent.push(data); } };
+  gateway._sessionClients.set('cli:project-a', new Set([{ ws: originWs, role: 'origin' }]));
+  assert.equal(gateway._broadcastBinaryToSessionKey('channel:cli:project-a', frame), 1);
+  assert.deepEqual(cliSent, [frame]);
+});
+
 test('WebGateway matches CLI graph events only to their registered session', () => {
   const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
   const gateway = new WebGateway(tools);
