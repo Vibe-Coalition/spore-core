@@ -14,6 +14,7 @@ const graphEvents = require('../graph/events');
 const { WebSettingsService } = require('./web/settings-service');
 const { createWebAuthPolicy } = require('./web/auth-policy');
 const { matchProxyRoute, createApiProxyHandler } = require('./web/api-proxy');
+const { createLoginRateLimiter } = require('./web/login-rate-limit');
 
 function _redactSecrets(value) {
   let s = String(value ?? '');
@@ -3317,44 +3318,76 @@ class WebGateway {
 
     const _sessions = this._webSessions;
 
-    const _loginAttempts = new Map();
     const LOGIN_MAX_ATTEMPTS = 5;
     const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+    const loginRateLimiter = createLoginRateLimiter({
+      maxAttempts: LOGIN_MAX_ATTEMPTS,
+      windowMs: LOGIN_WINDOW_MS,
+    });
 
-	    const _clientIpForRateLimit = (req) => {
-	      const remote = req.socket.remoteAddress || 'unknown';
-	      const trustedProxy = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1' || process.env.SPORE_TRUST_PROXY === 'true';
-	      return trustedProxy
-	        ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || remote)
-	        : remote;
-	    };
-
-	    const _checkLoginRate = (req) => {
-	      const ip = _clientIpForRateLimit(req);
-      const now = Date.now();
-      const entry = _loginAttempts.get(ip);
-      if (entry) {
-        entry.attempts = entry.attempts.filter(t => now - t < LOGIN_WINDOW_MS);
-        if (entry.attempts.length >= LOGIN_MAX_ATTEMPTS) return false;
-      }
-      return true;
+    const _clientIpForRateLimit = (req) => {
+      const remote = req.socket.remoteAddress || 'unknown';
+      const trustedProxy = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1' || process.env.SPORE_TRUST_PROXY === 'true';
+      return trustedProxy
+        ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || remote)
+        : remote;
     };
 
-	    const _recordLoginAttempt = (req) => {
-	      const ip = _clientIpForRateLimit(req);
-      if (!_loginAttempts.has(ip)) _loginAttempts.set(ip, { attempts: [] });
-      _loginAttempts.get(ip).attempts.push(Date.now());
+    const _checkLoginRate = (req) => {
+      const ip = _clientIpForRateLimit(req);
+      return !loginRateLimiter.isLimited(ip);
+    };
+
+    const _recordFailedLoginAttempt = (req) => {
+      const ip = _clientIpForRateLimit(req);
+      return loginRateLimiter.recordFailure(ip);
+    };
+
+    const _clearLoginAttempts = (req) => {
+      loginRateLimiter.clear(_clientIpForRateLimit(req));
+    };
+
+    const _loginRateLimitHeaders = (req) => {
+      const retryAfter = Math.ceil(loginRateLimiter.retryAfterMs(_clientIpForRateLimit(req)) / 1000);
+      return retryAfter > 0 ? { 'Retry-After': String(retryAfter) } : {};
+    };
+
+    const _closeSocketsForAuthSession = (sid, reason = 'session-ended') => {
+      if (!sid || !this._wss) return 0;
+      let closed = 0;
+      for (const client of this._wss.clients || []) {
+        if (client._role === 'cli') continue;
+        if (client._sourceSession !== sid) continue;
+        try {
+          if (client.readyState === 1) {
+            client.send(JSON.stringify({
+              type: 'auth:error',
+              error: 'Session ended. Please log in again.',
+              code: reason,
+            }));
+          }
+          client.close(4001, 'session ended');
+          closed++;
+        } catch (e) {
+          this.log.warn('[web] Failed to close stale auth websocket: ' + e.message);
+        }
+      }
+      return closed;
+    };
+
+    const _deleteAuthSession = (sid, reason = 'session-ended') => {
+      if (!sid || !_sessions.has(sid)) return false;
+      _sessions.delete(sid);
+      _closeSocketsForAuthSession(sid, reason);
+      return true;
     };
 
     const _sessionSweepInterval = setInterval(() => {
       const now = Date.now();
       for (const [sid, sess] of _sessions) {
-        if (now - sess.created >= SESSION_TTL) _sessions.delete(sid);
+        if (now - sess.created >= SESSION_TTL) _deleteAuthSession(sid, 'session-expired');
       }
-      for (const [ip, entry] of _loginAttempts) {
-        entry.attempts = entry.attempts.filter(t => now - t < LOGIN_WINDOW_MS);
-        if (entry.attempts.length === 0) _loginAttempts.delete(ip);
-      }
+      loginRateLimiter.sweep();
     }, 60 * 60 * 1000);
     _sessionSweepInterval.unref();
 
@@ -3486,7 +3519,7 @@ class WebGateway {
       if (wsid && _sessions.has(wsid)) {
         const sess = _sessions.get(wsid);
         if (sess.type === 'webapp' && Date.now() - sess.created < SESSION_TTL) return true;
-        if (sess.type === 'webapp') _sessions.delete(wsid);
+        if (sess.type === 'webapp') _deleteAuthSession(wsid, 'session-expired');
       }
       return false;
     };
@@ -3507,7 +3540,7 @@ class WebGateway {
       const csid = cookies['spore_session'];
       if (csid && _sessions.has(csid)) {
         const sess = _sessions.get(csid);
-        if (sess.viaSSO && !cookies['manager_session']) { _sessions.delete(csid); }
+        if (sess.viaSSO && !cookies['manager_session']) { _deleteAuthSession(csid, 'sso-session-ended'); }
         else if (Date.now() - sess.created < SESSION_TTL) return sess.type;
       }
       const wsid = cookies['spore_webapp'];
@@ -3602,7 +3635,7 @@ class WebGateway {
       // ── Creator auth endpoints (graph viewer SSO via manager) ──
       if (urlPath === '/api/auth/login' && req.method === 'POST') {
         if (!_checkLoginRate(req)) {
-          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
           res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
           return;
         }
@@ -3610,7 +3643,6 @@ class WebGateway {
         req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
         req.on('end', async () => {
           try {
-            _recordLoginAttempt(req);
             const { username, password } = JSON.parse(body);
             const serviceKey = managerKey;
             let verified = false;
@@ -3639,6 +3671,7 @@ class WebGateway {
                   verifiedUser = result.body.username || username;
                   req._mgrRole = result.body.role;
                 } else {
+                  _recordFailedLoginAttempt(req);
                   res.writeHead(result.status || 401, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: result.body?.error || 'Invalid credentials' })); return;
                 }
@@ -3654,6 +3687,7 @@ class WebGateway {
                 } else if (authUser && authPass && username === authUser && password === authPass) {
                   verified = true;
                 } else {
+                  _recordFailedLoginAttempt(req);
                   res.writeHead(401, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
                 }
@@ -3675,23 +3709,32 @@ class WebGateway {
                 // Honor stored role: creator → loginRole 'creator', webapp → 'webapp'.
                 if (wu.role === 'webapp') req._loginRoleHint = 'webapp';
               } else if (authUser && authPass) {
+                _recordFailedLoginAttempt(req);
                 res.writeHead(401, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
               } else if (webappUsers.length === 0) {
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Auth not configured' })); return;
               } else {
+                _recordFailedLoginAttempt(req);
                 res.writeHead(401, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
               }
             }
 
             if (verified) {
+              _clearLoginAttempts(req);
               const sid = crypto.randomBytes(32).toString('hex');
               let loginRole;
               if (req._loginRoleHint === 'webapp') loginRole = 'webapp';
               else loginRole = req._mgrRole === 'super' ? 'admin' : 'creator';
               const cookieName = loginRole === 'webapp' ? 'spore_webapp' : 'spore_session';
+              const otherCookieName = cookieName === 'spore_session' ? 'spore_webapp' : 'spore_session';
+              const priorCookies = parseCookies(req);
+              for (const staleCookieName of [cookieName, otherCookieName]) {
+                const staleSid = priorCookies[staleCookieName];
+                if (staleSid) _deleteAuthSession(staleSid, 'session-replaced');
+              }
               const userGraphSlug = loginRole === 'webapp'
                 ? ensureAndPersistWebUserGraph(verifiedUser, { reason: 'auth-login' })
                 : null;
@@ -3707,7 +3750,10 @@ class WebGateway {
               }
               res.writeHead(200, {
                 'Content-Type': 'application/json',
-                'Set-Cookie': `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+                'Set-Cookie': [
+                  `${cookieName}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+                  `${otherCookieName}=; Path=/; HttpOnly; Max-Age=0`,
+                ],
               });
               res.end(JSON.stringify({ ok: true, user: verifiedUser, role: loginRole, wizardNeeded, userGraphSlug }));
             }
@@ -3718,7 +3764,7 @@ class WebGateway {
 
       if (urlPath === '/api/auth/logout' && req.method === 'POST') {
         const sid = getSessionFromReq(req);
-        if (sid) _sessions.delete(sid);
+        if (sid) _deleteAuthSession(sid, 'logout');
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Set-Cookie': 'spore_session=; Path=/; HttpOnly; Max-Age=0',
@@ -3775,14 +3821,13 @@ class WebGateway {
       // ── Webapp user auth endpoints ──
       if (urlPath === '/api/webapp/login' && req.method === 'POST') {
         if (!_checkLoginRate(req)) {
-          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
           res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
           return;
         }
         let body = '';
         req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
         req.on('end', () => {
-          _recordLoginAttempt(req);
           try {
             const { username, password } = JSON.parse(body);
             const users = loadWebappUsers();
@@ -3796,9 +3841,11 @@ class WebGateway {
               res.end(JSON.stringify({ error: 'Your account has been blocked. Contact the operator.' })); return;
             }
             if (!user || !verifyWebappPassword(password, user.salt, user.hash)) {
+              _recordFailedLoginAttempt(req);
               res.writeHead(401, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Invalid credentials' })); return;
             }
+            _clearLoginAttempts(req);
             const sid = crypto.randomBytes(32).toString('hex');
             const role = user.role === 'creator' ? 'creator' : 'webapp';
             const cookieName = role === 'creator' ? 'spore_session' : 'spore_webapp';
@@ -3811,8 +3858,10 @@ class WebGateway {
             // (which would route chats into the wrong dm:<user> session and
             // show the other user's history).
             const otherCookies = parseCookies(req);
-            const otherSid = otherCookies[otherCookieName];
-            if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
+            for (const staleCookieName of [cookieName, otherCookieName]) {
+              const staleSid = otherCookies[staleCookieName];
+              if (staleSid) _deleteAuthSession(staleSid, 'session-replaced');
+            }
             _sessions.set(sid, { user: username, created: Date.now(), type: role });
             const secure = cookieSecureAttr(req);
             res.writeHead(200, {
@@ -3831,7 +3880,7 @@ class WebGateway {
       if (urlPath === '/api/webapp/logout' && req.method === 'POST') {
         const cookies = parseCookies(req);
         const wsid = cookies['spore_webapp'];
-        if (wsid && _sessions.has(wsid)) _sessions.delete(wsid);
+        if (wsid) _deleteAuthSession(wsid, 'logout');
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Set-Cookie': 'spore_webapp=; Path=/; HttpOnly; Max-Age=0',
@@ -4009,7 +4058,7 @@ class WebGateway {
         const otherCookieName = cookieName === 'spore_session' ? 'spore_webapp' : 'spore_session';
         const otherCookies = parseCookies(req);
         const otherSid = otherCookies[otherCookieName];
-        if (otherSid && _sessions.has(otherSid)) _sessions.delete(otherSid);
+        if (otherSid) _deleteAuthSession(otherSid, 'session-replaced');
         _sessions.set(sid, { user: username, created: Date.now(), type: sessType });
         const secure = cookieSecureAttr(req);
         res.writeHead(200, {
@@ -4027,13 +4076,13 @@ class WebGateway {
       // webapp user without operator intervention. Always issues a
       // 'webapp' role session (never creator). When config.inviteKey
       // is empty, self-register is disabled (503).
-	      if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
-	        if (!_checkLoginRate(req)) {
-	          res.writeHead(429, { 'Content-Type': 'application/json' });
-	          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
-	          return;
-	        }
-	        let body = '';
+      if (urlPath === '/api/webapp/users/self-register' && req.method === 'POST') {
+        if (!_checkLoginRate(req)) {
+          res.writeHead(429, { 'Content-Type': 'application/json', ..._loginRateLimitHeaders(req) });
+          res.end(JSON.stringify({ error: 'Too many login attempts. Try again later.' }));
+          return;
+        }
+        let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 4096) { req.destroy(); return; } }
         let parsed;
         try { parsed = JSON.parse(body); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":"Bad body"}'); return; }
@@ -4043,10 +4092,10 @@ class WebGateway {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Self-registration is not enabled on this instance.' })); return;
         }
-	        // Accept inviteKey (direct field name) or teamKey (older login UI).
-	        const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
-	        _recordLoginAttempt(req);
-	        if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
+        // Accept inviteKey (direct field name) or teamKey (older login UI).
+        const typedKey = String(parsed.inviteKey || parsed.teamKey || '').trim();
+        if (!_inviteKeyMatches(typedKey, this.config.inviteKey)) {
+          _recordFailedLoginAttempt(req);
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid invite key' })); return;
         }
@@ -4069,12 +4118,14 @@ class WebGateway {
           // where the user is retrying with the same password) just hand them
           // a fresh session + wizard. If the password is wrong, 409.
           if (!verifyWebappPassword(password, dup.salt, dup.hash)) {
+            _recordFailedLoginAttempt(req);
             res.writeHead(409, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Username already taken' })); return;
           }
+          _clearLoginAttempts(req);
           const sid = crypto.randomBytes(32).toString('hex');
           const otherCookies = parseCookies(req);
-          if (otherCookies['spore_session'] && _sessions.has(otherCookies['spore_session'])) _sessions.delete(otherCookies['spore_session']);
+          if (otherCookies['spore_session']) _deleteAuthSession(otherCookies['spore_session'], 'session-replaced');
           const userGraphSlug = ensureAndPersistWebUserGraph(username, { reason: 'self-register-resume', selfRegistered: !!dup.selfRegistered });
           _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
           const secure = cookieSecureAttr(req);
@@ -4101,9 +4152,10 @@ class WebGateway {
         if (userGraphSlug) record.userGraphSlug = userGraphSlug;
         existing.push(record);
         _writeJsonAtomic(WEBAPP_USERS_PATH, existing);
+        _clearLoginAttempts(req);
         const sid = crypto.randomBytes(32).toString('hex');
         const otherCookies = parseCookies(req);
-        if (otherCookies['spore_session'] && _sessions.has(otherCookies['spore_session'])) _sessions.delete(otherCookies['spore_session']);
+        if (otherCookies['spore_session']) _deleteAuthSession(otherCookies['spore_session'], 'session-replaced');
         _sessions.set(sid, { user: username, created: Date.now(), type: 'webapp' });
         const secure = cookieSecureAttr(req);
         res.writeHead(200, {
@@ -4157,7 +4209,7 @@ class WebGateway {
           users.splice(idx, 1);
           _writeJsonAtomic(WEBAPP_USERS_PATH, users);
           // Drop any active session for the deleted user.
-          for (const [k, v] of _sessions) { if (v?.user === target) _sessions.delete(k); }
+          for (const [k, v] of _sessions) { if (v?.user === target) _deleteAuthSession(k, 'user-deleted'); }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
           return;
@@ -4181,7 +4233,7 @@ class WebGateway {
         if (Object.prototype.hasOwnProperty.call(parsed, 'blocked')) {
           users[idx].blocked = !!parsed.blocked;
           if (users[idx].blocked) {
-            for (const [k, v] of _sessions) { if (v?.user === target) _sessions.delete(k); }
+            for (const [k, v] of _sessions) { if (v?.user === target) _deleteAuthSession(k, 'user-blocked'); }
           }
         }
         const userGraphSlug = (users[idx].role || 'webapp') === 'webapp'
@@ -6088,45 +6140,48 @@ class WebGateway {
         socket.destroy(); return;
       }
 
-	      if (url.pathname !== '/ws') { socket.destroy(); return; }
-	      if (!originAllowed(req)) { rejectUpgrade(socket, 403, 'Forbidden'); return; }
+      if (url.pathname !== '/ws') { socket.destroy(); return; }
+      if (!originAllowed(req)) { rejectUpgrade(socket, 403, 'Forbidden'); return; }
 
-	      const webSessions = this._webSessions || new Map();
-	      const token = url.searchParams.get('token');
-	      let wsRole = null;
-	      let wsUser = null;
-	      let tokenSession = null;
-	      if (token && webSessions.has(token)) {
-	        const sess = webSessions.get(token);
-	        const expiresAt = sess.expiresAt || (sess.created + SESSION_TTL);
-	        if (Date.now() < expiresAt) {
-	          wsRole = sess.type || null;
-	          wsUser = sess.user || null;
-	          tokenSession = sess;
-	        } else {
-	          webSessions.delete(token);
-	          socket.destroy(); return;
+      const webSessions = this._webSessions || new Map();
+      const token = url.searchParams.get('token');
+      let wsRole = null;
+      let wsUser = null;
+      let tokenSession = null;
+      let sourceSessionId = null;
+      if (token && webSessions.has(token)) {
+        const sess = webSessions.get(token);
+        const expiresAt = sess.expiresAt || (sess.created + SESSION_TTL);
+        if (Date.now() < expiresAt) {
+          wsRole = sess.type || null;
+          wsUser = sess.user || null;
+          tokenSession = sess;
+          sourceSessionId = sess.sourceSession || (!sess.wsTicket ? token : null);
+        } else {
+          webSessions.delete(token);
+          socket.destroy(); return;
         }
       } else if (authUser && authPass && token) {
         const decoded = Buffer.from(token, 'base64').toString();
         const [u, ...pParts] = decoded.split(':');
         if (u !== authUser || pParts.join(':') !== authPass) { socket.destroy(); return; }
         wsRole = 'creator';
-	      } else if (authUser && authPass) {
-	        socket.destroy(); return;
-	      } else if (token) {
-	        socket.destroy(); return;
-	      } else if (authConfigured()) {
-	        rejectUpgrade(socket, 401, 'Unauthorized'); return;
-	      }
+      } else if (authUser && authPass) {
+        socket.destroy(); return;
+      } else if (token) {
+        socket.destroy(); return;
+      } else if (authConfigured()) {
+        rejectUpgrade(socket, 401, 'Unauthorized'); return;
+      }
 
-	      wss.handleUpgrade(req, socket, head, (ws) => {
-	        ws._role = wsRole;
-	        ws._user = wsUser;
-	        ws._sessionToken = token || null;
-	        if (token && tokenSession?.singleUse) webSessions.delete(token);
-	        wss.emit('connection', ws, req);
-	      });
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws._role = wsRole;
+        ws._user = wsUser;
+        ws._sessionToken = token || null;
+        ws._sourceSession = sourceSessionId;
+        if (token && tokenSession?.singleUse) webSessions.delete(token);
+        wss.emit('connection', ws, req);
+      });
     });
 
     wss.on('connection', (ws) => {
@@ -6256,29 +6311,50 @@ class WebGateway {
       };
       graphEvents.on('change', onGraphEvent);
 
-	      ws.on('message', async (raw) => {
-	        let msg;
-	        try { msg = JSON.parse(raw); } catch { return; }
-	        const msgType = typeof msg.type === 'string' ? msg.type : '';
-	        const isAuthenticated = !!(ws._user || ws._role);
-	        const isCreatorWs = ws._role === 'creator' || ws._role === 'admin';
-	        const requireAuthenticated = () => {
-	          if (isAuthenticated || !authConfigured()) return true;
-	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Authentication required', code: 'auth-required' })); } catch {}
-	          return false;
-	        };
-	        const requireCreatorWs = () => {
-	          if (isCreatorWs) return true;
-	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Creator authentication required', code: 'creator-required' })); } catch {}
-	          return false;
-	        };
-	        if (msgType !== 'ping' && !requireAuthenticated()) return;
-	        if (msgType === 'code:save' && !requireCreatorWs()) return;
-	        if (msgType.startsWith('terminal:') && !requireCreatorWs()) return;
-	        if ((msgType === 'tool:ack' || msgType === 'tool:result' || msgType === 'tool:awaiting-approval' || msgType === 'perm:current-mode') && ws._role !== 'cli') {
-	          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
-	          return;
-	        }
+      ws.on('message', async (raw) => {
+        let msg;
+        try { msg = JSON.parse(raw); } catch { return; }
+        const msgType = typeof msg.type === 'string' ? msg.type : '';
+        if (msgType !== 'ping' && ws._role !== 'cli' && ws._sourceSession && authConfigured()) {
+          const sess = _sessions.get(ws._sourceSession);
+          const expired = sess && Date.now() - sess.created >= SESSION_TTL;
+          const mismatch = sess && (sess.user !== ws._user || sess.type !== ws._role);
+          if (!sess || expired || mismatch) {
+            if (expired) _deleteAuthSession(ws._sourceSession, 'session-expired');
+            this.log.warn(`[ws] closing stale web auth socket for user=${ws._user || '(unknown)'} reason=${!sess ? 'missing-session' : expired ? 'expired-session' : 'session-mismatch'}`);
+            ws._user = null;
+            ws._role = null;
+            ws._sourceSession = null;
+            try {
+              ws.send(JSON.stringify({
+                type: 'auth:error',
+                error: 'Session expired — reload the page and log in again.',
+                code: 'auth-required',
+              }));
+              ws.close(4001, 'session expired');
+            } catch (e) { this.log.warn('[web] ws auth-expire send failed: ' + e.message); }
+            return;
+          }
+        }
+        const isAuthenticated = !!(ws._user || ws._role);
+        const isCreatorWs = ws._role === 'creator' || ws._role === 'admin';
+        const requireAuthenticated = () => {
+          if (isAuthenticated || !authConfigured()) return true;
+          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Authentication required', code: 'auth-required' })); } catch {}
+          return false;
+        };
+        const requireCreatorWs = () => {
+          if (isCreatorWs) return true;
+          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'Creator authentication required', code: 'creator-required' })); } catch {}
+          return false;
+        };
+        if (msgType !== 'ping' && !requireAuthenticated()) return;
+        if (msgType === 'code:save' && !requireCreatorWs()) return;
+        if (msgType.startsWith('terminal:') && !requireCreatorWs()) return;
+        if ((msgType === 'tool:ack' || msgType === 'tool:result' || msgType === 'tool:awaiting-approval' || msgType === 'perm:current-mode') && ws._role !== 'cli') {
+          try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
+          return;
+        }
 
 	        // Plugin WS dispatch — message types of the form `plugin:<pluginId>:<msgType>`
         // route to handlers registered via api.registerWsHandler. The pluginId
