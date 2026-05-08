@@ -61,8 +61,8 @@ console.log('\nplugins/session-graph/lib/scripts.test.js\n');
 
 // ── projectNodeId / scriptNodeId shapes ──────────────────────────
 {
-  const pid = scripts.projectNodeId('yam', '/home/yam/proj');
-  ok('projectNodeId is project-<user>-<8hex>', /^project-yam-[0-9a-f]{8}$/.test(pid), pid);
+  const pid = scripts.projectNodeId('test-user', '/home/test-user/proj');
+  ok('projectNodeId is project-<user>-<8hex>', /^project-test-user-[0-9a-f]{8}$/.test(pid), pid);
   const sid = scripts.scriptNodeId(pid, 'My Helper Script!');
   ok('scriptNodeId slug strips punctuation + lowercases', sid && sid.endsWith(':my-helper-script'), sid);
   ok('scriptNodeId returns null for empty name', scripts.scriptNodeId(pid, '') === null);

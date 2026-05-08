@@ -224,7 +224,7 @@ test('WebGateway scopes binary browser frames to web users and registered sessio
   const sent = [];
   const webWs = {
     readyState: 1,
-    _user: 'yam',
+    _user: 'test-user',
     send(data) { sent.push(data); },
   };
   const otherWs = {
@@ -235,14 +235,14 @@ test('WebGateway scopes binary browser frames to web users and registered sessio
   const cliWs = {
     readyState: 1,
     _role: 'cli',
-    _user: 'yam',
+    _user: 'test-user',
     send(data) { sent.push(data); },
   };
   const frame = Buffer.from('browser-frame');
   gateway._wss = { clients: new Set([webWs, otherWs, cliWs]) };
 
-  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:telegram:yam', frame), 0);
-  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:web:yam', frame), 1);
+  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:telegram:test-user', frame), 0);
+  assert.equal(gateway._broadcastBinaryToSessionKey('shared:dm:web:test-user', frame), 1);
   assert.deepEqual(sent, [frame]);
 
   const cliSent = [];
@@ -255,21 +255,21 @@ test('WebGateway scopes binary browser frames to web users and registered sessio
 test('WebGateway matches CLI graph events only to their registered session', () => {
   const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
   const gateway = new WebGateway(tools);
-  const cliWs = { readyState: 1, _role: 'cli', _user: 'yam', send() {} };
-  gateway._sessionClients.set('cli:yam@project-a', new Set([{ ws: cliWs, role: 'origin' }]));
+  const cliWs = { readyState: 1, _role: 'cli', _user: 'test-user', send() {} };
+  gateway._sessionClients.set('cli:test-user@project-a', new Set([{ ws: cliWs, role: 'origin' }]));
 
-  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'channel:cli:yam@project-a'), true);
-  assert.equal(gateway._sessionKeyClientMatches(cliWs, null, 'cli:yam@project-a'), true);
-  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'channel:cli:yam@project-b'), false);
-  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'dm:yam'), false);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'channel:cli:test-user@project-a'), true);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, null, 'cli:test-user@project-a'), true);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'channel:cli:test-user@project-b'), false);
+  assert.equal(gateway._sessionKeyClientMatches(cliWs, 'dm:test-user'), false);
   assert.equal(gateway._sessionKeyClientMatches(cliWs, null, null), false);
 });
 
 test('WebGateway only accepts ask_user qid answers from the owning session client', () => {
   const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
   const gateway = new WebGateway(tools);
-  const cliA = { readyState: 1, _role: 'cli', _user: 'yam', send() {} };
-  const cliB = { readyState: 1, _role: 'cli', _user: 'yam', send() {} };
+  const cliA = { readyState: 1, _role: 'cli', _user: 'test-user', send() {} };
+  const cliB = { readyState: 1, _role: 'cli', _user: 'test-user', send() {} };
   gateway._sessionClients.set('cli:project-a', new Set([{ ws: cliA, role: 'origin' }]));
   gateway._sessionClients.set('cli:project-b', new Set([{ ws: cliB, role: 'origin' }]));
 
@@ -315,23 +315,23 @@ test('subagent events for cli route only to originating session', () => {
   let globalBroadcasts = 0;
   tools._wsBroadcast = (sessionKey, payload) => {
     calls.push({ sessionKey, payload });
-    return sessionKey === 'channel:cli:yam@project' ? 1 : 0;
+    return sessionKey === 'channel:cli:test-user@project' ? 1 : 0;
   };
   tools.broadcast = () => { globalBroadcasts++; };
 
   const delivered = tools._broadcastTaskEvent({
     taskId: 'task_test',
-    sessionKey: 'channel:cli:yam@project',
-    channelId: 'cli:yam@project',
+    sessionKey: 'channel:cli:test-user@project',
+    channelId: 'cli:test-user@project',
     platform: 'cli',
-    userId: 'yam',
+    userId: 'test-user',
   }, { type: 'subagent:start', taskId: 'task_test' });
 
   assert.equal(delivered, 1);
   assert.equal(globalBroadcasts, 0);
   assert.deepEqual(calls[0], {
-    sessionKey: 'channel:cli:yam@project',
-    payload: { type: 'subagent:start', taskId: 'task_test', sessionId: 'cli:yam@project' },
+    sessionKey: 'channel:cli:test-user@project',
+    payload: { type: 'subagent:start', taskId: 'task_test', sessionId: 'cli:test-user@project' },
   });
 });
 
@@ -347,16 +347,16 @@ test('subagent events for cli do not fall back to web dm routes', () => {
 
   const delivered = tools._broadcastTaskEvent({
     taskId: 'task_test',
-    sessionKey: 'channel:cli:yam@project',
-    channelId: 'cli:yam@project',
+    sessionKey: 'channel:cli:test-user@project',
+    channelId: 'cli:test-user@project',
     platform: 'cli',
-    userId: 'yam',
+    userId: 'test-user',
   }, { type: 'subagent:done', taskId: 'task_test' });
 
   assert.equal(delivered, 0);
   assert.equal(globalBroadcasts, 0);
-  assert.equal(calls.includes('dm:yam'), false);
-  assert.equal(calls.includes('shared:dm:cli:yam'), false);
+  assert.equal(calls.includes('dm:test-user'), false);
+  assert.equal(calls.includes('shared:dm:cli:test-user'), false);
 });
 
 test('subagent events for channel routes do not fall back to web dm or global broadcast', () => {
@@ -386,12 +386,12 @@ test('subagent events for channel routes do not fall back to web dm or global br
 test('subagent delivery for cli preserves project session key', () => {
   const tools = new ToolSystem(tmpConfig(), logger(), null, null, null);
   const taskEntry = {
-    sessionKey: 'channel:cli:yam@project',
-    channelId: 'cli:yam@project',
+    sessionKey: 'channel:cli:test-user@project',
+    channelId: 'cli:test-user@project',
     platform: 'cli',
   };
 
-  assert.equal(tools._deliverySessionKey(taskEntry, true, 'yam'), 'channel:cli:yam@project');
+  assert.equal(tools._deliverySessionKey(taskEntry, true, 'test-user'), 'channel:cli:test-user@project');
 });
 
 test('task list events for cli route only to originating session', async () => {
@@ -404,16 +404,16 @@ test('task list events for cli route only to originating session', async () => {
   let globalBroadcasts = 0;
   tools._wsBroadcast = (sessionKey, payload) => {
     calls.push({ sessionKey, payload });
-    return sessionKey === 'channel:cli:yam@project' ? 1 : 0;
+    return sessionKey === 'channel:cli:test-user@project' ? 1 : 0;
   };
   tools.broadcast = () => { globalBroadcasts++; };
 
   try {
     const ctx = {
-      sessionKey: 'channel:cli:yam@project',
-      channelId: 'cli:yam@project',
+      sessionKey: 'channel:cli:test-user@project',
+      channelId: 'cli:test-user@project',
       platform: 'cli',
-      userId: 'yam',
+      userId: 'test-user',
     };
     const created = await tools.executeTool('task_create', {
       id: 'route-test',
@@ -428,9 +428,9 @@ test('task list events for cli route only to originating session', async () => {
     assert.deepEqual(progressed, { ok: true });
     assert.equal(globalBroadcasts, 0);
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].sessionKey, 'channel:cli:yam@project');
+    assert.equal(calls[0].sessionKey, 'channel:cli:test-user@project');
     assert.equal(calls[0].payload.type, 'task:create');
-    assert.equal(calls[1].sessionKey, 'channel:cli:yam@project');
+    assert.equal(calls[1].sessionKey, 'channel:cli:test-user@project');
     assert.equal(calls[1].payload.type, 'task:update');
   } finally {
     try { sessions.db.close(); } catch {}

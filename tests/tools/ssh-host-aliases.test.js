@@ -23,8 +23,8 @@ function makeManager() {
   mgr.hosts = [{
     id: 'cluster-login',
     name: 'Cluster Login',
-    hostname: 'gb200-login-2.tailnet.example.ts.net',
-    username: 'yam',
+    hostname: 'gpu-login-1.tailnet.example.ts.net',
+    username: 'test-user',
     port: 22,
   }];
   return mgr;
@@ -34,10 +34,10 @@ test('ssh manager resolves saved hosts by id, hostname, short name, and user hos
   const mgr = makeManager();
   try {
     assert.equal(mgr._resolveHostRefSync('cluster-login'), 'cluster-login');
-    assert.equal(mgr._resolveHostRefSync('gb200-login-2.tailnet.example.ts.net'), 'cluster-login');
-    assert.equal(mgr._resolveHostRefSync('gb200-login-2'), 'cluster-login');
-    assert.equal(mgr._resolveHostRefSync('yam@gb200-login-2'), 'cluster-login');
-    assert.equal(mgr._resolveHostRefSync('ssh://yam@gb200-login-2.tailnet.example.ts.net'), 'cluster-login');
+    assert.equal(mgr._resolveHostRefSync('gpu-login-1.tailnet.example.ts.net'), 'cluster-login');
+    assert.equal(mgr._resolveHostRefSync('gpu-login-1'), 'cluster-login');
+    assert.equal(mgr._resolveHostRefSync('test-user@gpu-login-1'), 'cluster-login');
+    assert.equal(mgr._resolveHostRefSync('ssh://test-user@gpu-login-1.tailnet.example.ts.net'), 'cluster-login');
     assert.equal(mgr._resolveHostRefSync('missing-host'), null);
     assert.match(mgr._unknownHostMessage('missing-host'), /Available SSH host IDs\/aliases: cluster-login/);
     assert.match(mgr._unknownHostMessage('missing-host'), /do not shell out to ssh or tailscale ssh/);
@@ -62,8 +62,8 @@ test('remote tool catalog advertises saved host aliases', () => {
     const remoteExec = defs.find(d => d.name === 'remote_exec');
     assert.ok(remoteExec);
     assert.match(remoteExec.description, /cluster-login/);
-    assert.match(remoteExec.description, /gb200-login-2/);
-    assert.match(remoteExec.input_schema.properties.host.description, /yam@gb200-login-2/);
+    assert.match(remoteExec.description, /gpu-login-1/);
+    assert.match(remoteExec.input_schema.properties.host.description, /test-user@gpu-login-1/);
   } finally {
     mgr.closeAll();
   }

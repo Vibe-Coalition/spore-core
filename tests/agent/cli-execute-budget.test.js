@@ -32,8 +32,8 @@ test('cli execute turns are not stopped by the direct-message iteration cap', as
   });
 
   const turn = await harness.send('implement the protocol/auth changes', {
-    sessionKey: 'channel:cli:yam@repo',
-    channelId: 'cli:yam@repo',
+    sessionKey: 'channel:cli:test-user@repo',
+    channelId: 'cli:test-user@repo',
     platform: 'cli',
     trigger: 'dm',
     isDm: false,

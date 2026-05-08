@@ -10,7 +10,7 @@ the way a human user would, and tells you which tools the agent picked.
 Usage:
     python3 simulate-chat.py \\
         --base-url http://127.0.0.1:18801 \\
-        --username yam --password '...' \\
+        --username test-user --password '...' \\
         --prompt "Open https://example.com and click the 'More information' link" \\
         [--require-tool-arg browser:click] \\
         [--forbid-tool-arg browser:evaluate]

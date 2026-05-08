@@ -135,7 +135,7 @@ function applyRetrievalMixin(GraphContext) {
   //     current project (cross-project past sessions)
   //   - Concept/library/system nodes whose `discovered_in` edges ONLY
   //     point at sessions in OTHER projects (e.g. TheCatAPI was
-  //     discovered in a kimi_test session, never in any other project
+  //     discovered in a sample_project session, never in any other project
   //     → in an spore-go session, drop it)
   // Lets through nodes with NO discovered_in edges (seed/reference/
   // manual nodes) and nodes discovered in at least one current-project

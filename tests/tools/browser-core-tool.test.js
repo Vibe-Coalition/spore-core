@@ -141,9 +141,9 @@ test('browser-core routes preview events to the invoking session scope only', as
   const { registered, scopedEvents, scopedBinaries, globalEvents } = registerCoreForTest();
   const toolCtx = {
     platform: 'web',
-    sessionKey: 'dm:yam',
+    sessionKey: 'dm:test-user',
     channelId: 'web:control-panel',
-    userId: 'yam',
+    userId: 'test-user',
   };
 
   const result = await registered.definition.execute({ action: 'launch' }, toolCtx);
@@ -152,13 +152,13 @@ test('browser-core routes preview events to the invoking session scope only', as
   assert.equal(globalEvents.length, 0);
   assert.equal(scopedEvents.length, 1);
   assert.equal(scopedEvents[0].payload.type, 'browser:open');
-  assert.equal(scopedEvents[0].payload.sessionKey, 'dm:yam');
+  assert.equal(scopedEvents[0].payload.sessionKey, 'dm:test-user');
   assert.equal(scopedEvents[0].payload.channelId, 'web:control-panel');
-  assert.equal(scopedEvents[0].route.userId, 'yam');
+  assert.equal(scopedEvents[0].route.userId, 'test-user');
   assert.equal(scopedEvents[0].opts.fallbackGlobal, false);
   assert.equal(scopedBinaries.length, 1);
   assert.deepEqual(scopedBinaries[0].buffer, Buffer.from('frame'));
-  assert.equal(scopedBinaries[0].route.sessionKey, 'dm:yam');
+  assert.equal(scopedBinaries[0].route.sessionKey, 'dm:test-user');
   assert.equal(scopedBinaries[0].opts.fallbackGlobal, false);
 });
 
@@ -167,15 +167,15 @@ test('browser-core keeps browser backend instances separate per user and channel
 
   await registered.definition.execute({ action: 'launch' }, {
     platform: 'web',
-    sessionKey: 'dm:yam',
+    sessionKey: 'dm:test-user',
     channelId: 'web:control-panel',
-    userId: 'yam',
+    userId: 'test-user',
   });
   await registered.definition.execute({ action: 'status' }, {
     platform: 'web',
-    sessionKey: 'dm:yam',
+    sessionKey: 'dm:test-user',
     channelId: 'web:control-panel',
-    userId: 'yam',
+    userId: 'test-user',
   });
   await registered.definition.execute({ action: 'launch' }, {
     platform: 'telegram',

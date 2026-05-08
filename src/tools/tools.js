@@ -3383,7 +3383,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (raw == null) return '';
     // Exact-match passthrough — Spore Code session nodes, discovery nodes,
     // and some event/service nodes legitimately use `:`, `@`, `_`, `.`
-    // in their IDs (e.g. `session-cli:yam@spore-go-...`,
+    // in their IDs (e.g. `session-cli:test-user@spore-go-...`,
     // `qr_script_execution`, `expo.dev`). The legacy strict normalizer
     // stripped all of those away, making such IDs unreachable from
     // any tool that calls _normalizeNodeId. If the raw string already
@@ -7799,7 +7799,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   _wakeupTextTokens(text) {
     const stop = new Set([
       'the', 'and', 'for', 'with', 'from', 'that', 'this', 'when', 'then', 'than',
-      'you', 'yam', 'user', 'agent', 'check', 'wakeup', 'wakeups', 'schedule',
+      'you', 'test-user', 'user', 'agent', 'check', 'wakeup', 'wakeups', 'schedule',
       'set', 'another', 'more', 'one', 'only', 'report', 'notify', 'reply',
       'silent', 'silently', 'done', 'running', 'still', 'offline', 'online',
       'results', 'result', 'share', 'read', 'task', 'after', 'before',

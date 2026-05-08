@@ -62,10 +62,10 @@ test('Web proactive prompt suppresses learner writes', async () => {
     },
   });
   gateway._wss = {
-    clients: new Set([{ readyState: 1, _role: 'creator', _user: 'yam' }]),
+    clients: new Set([{ readyState: 1, _role: 'creator', _user: 'test-user' }]),
   };
   gateway.hasOperatorConnected = () => true;
-  gateway._getActiveWebUser = () => 'yam';
+  gateway._getActiveWebUser = () => 'test-user';
   gateway._sendToSession = () => {};
 
   gateway.injectProactivePrompt('web:control-panel', 'check in', 'topic');
@@ -108,7 +108,7 @@ test('Slack proactive prompt preserves active DM route', () => {
   gateway.app = { client: { chat: { postMessage: async () => ({}) } } };
 
   const ch = gateway._getChannel('D123');
-  ch.name = 'dm:yam';
+  ch.name = 'dm:test-user';
   ch.isDm = true;
   ch.userId = 'U123';
 

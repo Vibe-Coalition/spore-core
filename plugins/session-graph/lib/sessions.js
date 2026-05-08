@@ -415,7 +415,7 @@ async function summarizeSessionNode(learner, llmClient, config, sessionId, log) 
     episodesBlock,
     '',
     'Write a concise recap (≤200 words) covering: (1) what the user asked for, (2) specific tools/libraries/frameworks used + key commands + key files, (3) what worked, what failed + why, (4) any durable lessons or configurations worth remembering, (5) unfinished work or open threads.',
-    'Plain prose, no markdown headers. Speak as if writing notes to your future self. Concrete over abstract — prefer "used `qrcode-terminal` to render exp:// QR on LAN 192.168.1.191:8081" over "generated a QR code".',
+    'Plain prose, no markdown headers. Speak as if writing notes to your future self. Concrete over abstract — prefer "used `qrcode-terminal` to render exp:// QR on LAN 192.168.1.10:8081" over "generated a QR code".',
   ].filter(s => s !== '').join('\n');
 
   try {

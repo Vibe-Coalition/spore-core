@@ -30,7 +30,7 @@ function makeSessionManager() {
 
 test('new cli turn after reconnect trims dangling tool tail before prompting model', async () => {
   const { sessions } = makeSessionManager();
-  const sessionKey = 'channel:cli:yam@spore-test';
+  const sessionKey = 'channel:cli:test-user@spore-test';
 
   sessions.addMessage(sessionKey, 'user', 'debug the Go build until it passes');
   sessions.addMessage(sessionKey, 'assistant', [
@@ -39,7 +39,7 @@ test('new cli turn after reconnect trims dangling tool tail before prompting mod
       id: 'toolu_stale_fix',
       name: 'exec',
       input: {
-        command: 'C:\\Users\\yam\\repo\\.spore-code\\scratch\\fix-toolchain.cmd',
+        command: 'C:\\Users\\test-user\\repo\\.spore-code\\scratch\\fix-toolchain.cmd',
         timeout: 300000,
       },
     },
@@ -64,16 +64,16 @@ test('new cli turn after reconnect trims dangling tool tail before prompting mod
   try {
     const turn = await harness.send("just git push your changes and I'll compile it on another machine", {
       sessionKey,
-      channelId: 'cli:yam@spore-test',
+      channelId: 'cli:test-user@spore-test',
       channelName: 'spore-test',
       platform: 'cli',
       trigger: 'dm',
       isDm: false,
-      userId: 'yam',
-      userName: 'yam',
+      userId: 'test-user',
+      userName: 'test-user',
       userRole: 'cli',
       projectContext: {
-        cwd: 'C:\\Users\\yam\\repo',
+        cwd: 'C:\\Users\\test-user\\repo',
         project: 'spore-test',
         mode: 'execute',
         source: 'spore-code',

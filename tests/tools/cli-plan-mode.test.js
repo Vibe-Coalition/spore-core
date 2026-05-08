@@ -117,7 +117,7 @@ test('cli runtime prompt does not advertise hosted webapp_request', () => {
       active: true,
       port: 3000,
       hasBackend: true,
-      users: [{ user: 'yam' }],
+      users: [{ user: 'test-user' }],
     },
   });
 
@@ -185,7 +185,7 @@ test('cli graph discovery is scoped to project and reusable memory graphs', asyn
     list: () => [
       { slug: 'default', name: 'Default', role: 'main', active: false },
       { slug: 'project-demo', name: 'Demo Project', role: 'project', active: true },
-      { slug: 'user-yam', name: 'yam', role: 'user', active: false },
+      { slug: 'user-test-user', name: 'test-user', role: 'user', active: false },
       { slug: 'channel-telegram', name: 'Telegram', role: 'channel', active: false },
       { slug: 'spore-knowledge-base', name: 'General Knowledge', role: 'general_kb', active: false },
     ],

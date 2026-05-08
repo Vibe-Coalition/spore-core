@@ -322,7 +322,7 @@ test('wakeup jobs preserve cli route and project memory context', async () => {
     _getSessionBroadcaster() {
       return (sessionKey, payload) => {
         events.push({ sessionKey, payload });
-        return sessionKey === 'channel:cli:yam@project' ? 1 : 0;
+        return sessionKey === 'channel:cli:test-user@project' ? 1 : 0;
       };
     },
     _sessionRouteKeys(opts) {
@@ -347,29 +347,29 @@ test('wakeup jobs preserve cli route and project memory context', async () => {
       wakeupId,
       opts: {
         content: 'ping project',
-        channelId: 'cli:yam@project',
-        userId: 'yam',
+        channelId: 'cli:test-user@project',
+        userId: 'test-user',
         platform: 'cli',
         isDm: false,
-        sessionKey: 'channel:cli:yam@project',
+        sessionKey: 'channel:cli:test-user@project',
         projectContext: { cwd: '/work/project', mode: 'execute' },
-        memoryEnvelope: { primarySlug: 'project-yam', writeScopes: { defaultSlug: 'project-yam' } },
+        memoryEnvelope: { primarySlug: 'project-test-user', writeScopes: { defaultSlug: 'project-test-user' } },
       },
     }, {
       id: `wakeup-${wakeupId}`,
       persistent: true,
       awaitResult: true,
       lane: 'deferred',
-      sessionKey: 'channel:cli:yam@project',
-      graph: 'project-yam',
+      sessionKey: 'channel:cli:test-user@project',
+      graph: 'project-test-user',
     });
 
     assert.equal(result.text, 'wake done');
     assert.equal(observedOpts.projectContext.cwd, '/work/project');
-    assert.equal(observedOpts.memoryEnvelope.primarySlug, 'project-yam');
+    assert.equal(observedOpts.memoryEnvelope.primarySlug, 'project-test-user');
     assert.deepEqual(events.map(e => e.payload.type), ['chat:start', 'chat:delta', 'chat:tool', 'chat:done']);
-    assert.equal(events.every(e => e.sessionKey === 'channel:cli:yam@project'), true);
-    assert.equal(events[0].payload.sessionId, 'cli:yam@project');
+    assert.equal(events.every(e => e.sessionKey === 'channel:cli:test-user@project'), true);
+    assert.equal(events[0].payload.sessionId, 'cli:test-user@project');
   } finally {
     queue.stop();
     fixture.cleanup();

@@ -123,16 +123,16 @@ function fakeSequentialDistillClient(responses) {
 }
 
 test('project identity prefers normalized git remote over local cwd', () => {
-  const ssh = projectIdentityFromContext('yam', {
-    cwd: '/home/yam/a',
-    gitRemote: 'git@github.com:Yam/spore-core.git',
+  const ssh = projectIdentityFromContext('test-user', {
+    cwd: '/home/test-user/a',
+    gitRemote: 'git@github.com:test-user/spore-core.git',
   });
-  const https = projectIdentityFromContext('yam', {
+  const https = projectIdentityFromContext('test-user', {
     cwd: '/tmp/clone',
-    gitRemote: 'https://github.com/yam/spore-core',
+    gitRemote: 'https://github.com/test-user/spore-core',
   });
 
-  assert.equal(normalizeGitRemote('git@github.com:Yam/spore-core.git'), 'https://github.com/yam/spore-core');
+  assert.equal(normalizeGitRemote('git@github.com:test-user/spore-core.git'), 'https://github.com/test-user/spore-core');
   assert.equal(ssh.key, https.key);
   assert.equal(ssh.basis, 'git-remote');
 });
@@ -147,13 +147,13 @@ test('distilled project memory is shared across users on the same git remote', a
   const aliceProject = {
     cwd: '/Users/alice/dev/acorn-companion',
     project: 'acorn-companion',
-    gitRemote: 'git@github.com:Yam/acorn-companion.git',
+    gitRemote: 'git@github.com:test-user/acorn-companion.git',
     source: 'spore-code',
   };
   const bobProject = {
     cwd: '/home/bob/src/acorn-companion',
     project: 'acorn-companion',
-    gitRemote: 'https://github.com/yam/acorn-companion',
+    gitRemote: 'https://github.com/test-user/acorn-companion',
     source: 'spore-code',
   };
 
@@ -409,7 +409,7 @@ test('project collaboration does not cross unrelated project identities', async 
       projectContext: {
         cwd: '/Users/alice/dev/acorn-companion',
         project: 'acorn-companion',
-        gitRemote: 'https://github.com/yam/acorn-companion',
+        gitRemote: 'https://github.com/test-user/acorn-companion',
         source: 'spore-code',
       },
     },
@@ -435,7 +435,7 @@ test('project collaboration does not cross unrelated project identities', async 
   const otherProject = {
     cwd: '/home/carol/src/other-app',
     project: 'other-app',
-    gitRemote: 'https://github.com/yam/other-app',
+    gitRemote: 'https://github.com/test-user/other-app',
     source: 'spore-code',
   };
   const otherEnv = resolveDefaultMemoryEnvelope({
@@ -565,7 +565,7 @@ test('codebase-session scoped recall excludes main graph free-text memory', () =
     registry,
     opts: {
       platform: 'cli',
-      userId: 'yam',
+      userId: 'test-user',
       messageContent: 'read this codebase',
       projectContext: { cwd: '/repo/app', project: 'app' },
     },
@@ -582,10 +582,10 @@ test('graph event scope carries originating session metadata', async () => {
   graphEvents.on('change', handler);
   try {
     await graphEvents.withGraph({
-      sessionKey: 'channel:cli:yam@project',
-      channelId: 'cli:yam@project',
+      sessionKey: 'channel:cli:test-user@project',
+      channelId: 'cli:test-user@project',
       platform: 'cli',
-      userId: 'yam',
+      userId: 'test-user',
       graphs: ['project-test', 'spore-knowledge-base'],
     }, async () => {
       graphEvents.emit('change', { op: 'recall:start', source: 'test', detail: 'project recall' });
@@ -595,8 +595,8 @@ test('graph event scope carries originating session metadata', async () => {
   }
 
   assert.equal(events.length, 1);
-  assert.equal(events[0].sessionKey, 'channel:cli:yam@project');
-  assert.equal(events[0].channelId, 'cli:yam@project');
+  assert.equal(events[0].sessionKey, 'channel:cli:test-user@project');
+  assert.equal(events[0].channelId, 'cli:test-user@project');
   assert.equal(events[0].platform, 'cli');
   assert.deepEqual(events[0].graphs, ['project-test', 'spore-knowledge-base']);
 });
@@ -611,7 +611,7 @@ test('codebase-session prompt excludes default person graph context', () => {
   `).run();
   db.prepare(`
     INSERT INTO nodes (id, label, type, description, importance)
-    VALUES ('yam', 'yam', 'person', 'User requesting du scan monitoring', 5)
+    VALUES ('test-user', 'test-user', 'person', 'User requesting du scan monitoring', 5)
   `).run();
   db.prepare(`
     INSERT INTO nodes (id, label, type, description, importance)
@@ -619,7 +619,7 @@ test('codebase-session prompt excludes default person graph context', () => {
   `).run();
   db.prepare(`
     INSERT INTO edges (source, target, type, weight)
-    VALUES ('yam', 'du_scan_process', 'requested', 1.0)
+    VALUES ('test-user', 'du_scan_process', 'requested', 1.0)
   `).run();
   const asp = db.prepare(`
     INSERT INTO aspects (node_id, name, weight)
@@ -642,8 +642,8 @@ test('codebase-session prompt excludes default person graph context', () => {
     const prompt = graph.buildSystemPrompt({
       promptMode: 'full',
       platform: 'cli',
-      userId: 'yam',
-      userName: 'yam',
+      userId: 'test-user',
+      userName: 'test-user',
       messageContent: 'hello',
       projectContext: { cwd: '/repo/app', project: 'app' },
       memoryEnvelope: {
@@ -960,7 +960,7 @@ test('scoped reusable contract ranks query-matched QR knowledge above generic fa
 
   assert.match(bundle, /If the user asks for multiple deliverables/);
   assert.match(bundle, /fallback commands only after their stated precondition/);
-  assert.match(bundle, /avoid VPN\/Tailscale\/overlay addresses/);
+  assert.match(bundle, /prefer the project's ordinary local development endpoint/);
   assert.ok(bundle.indexOf('qrcode-npm library') < bundle.indexOf('skill-start-expo-dev-server-with-tunnel-fallback skill'));
   assert.match(bundle, /QRCode\.create\(\)/);
 });
@@ -981,19 +981,19 @@ test('cli codebase prompts hide saved SSH and cluster access', async () => {
   `);
   db.prepare(`
     INSERT INTO nodes (id, label, type, description, importance)
-    VALUES ('gb200-cluster', 'GB200 Cluster', 'system', 'Remote compute cluster accessible via SSH', 5)
+    VALUES ('remote-gpu-cluster', 'Remote GPU Cluster', 'system', 'Remote compute cluster accessible via SSH', 5)
   `).run();
   db.prepare(`
     INSERT INTO gaps (node_id, content, status)
-    VALUES ('gb200-cluster', 'Are SSH keys configured for gb200-login-2?', 'open')
+    VALUES ('remote-gpu-cluster', 'Are SSH keys configured for gpu-login-1?', 'open')
   `).run();
   db.close();
   fs.writeFileSync(store, JSON.stringify({
     hosts: [{
-      id: 'host_gb200',
-      name: 'gb200-login-2',
-      hostname: 'gb200-login-2',
-      username: 'yam',
+      id: 'host_remote-gpu',
+      name: 'gpu-login-1',
+      hostname: 'gpu-login-1',
+      username: 'test-user',
     }],
   }));
   const graph = new GraphContext({
@@ -1007,7 +1007,7 @@ test('cli codebase prompts hide saved SSH and cluster access', async () => {
   assert.equal(graph.init(), true);
 
   const webSection = graph._buildClusterAccessSection({ platform: 'web' });
-  assert.match(webSection, /gb200-login-2/);
+  assert.match(webSection, /gpu-login-1/);
 
   const cliSection = graph._buildClusterAccessSection({
     platform: 'cli',
@@ -1023,18 +1023,18 @@ test('cli codebase prompts hide saved SSH and cluster access', async () => {
     memoryEnvelope: { mode: 'codebase-session', source: 'spore-code' },
   });
   assert.doesNotMatch(dynamic, /Cluster access/);
-  assert.doesNotMatch(dynamic, /gb200-login-2/);
+  assert.doesNotMatch(dynamic, /gpu-login-1/);
 
   const prompt = graph.buildSystemPrompt({
     promptMode: 'full',
     platform: 'cli',
-    userId: 'yam',
+    userId: 'test-user',
     messageContent: 'what can you do?',
     projectContext: { cwd: '/repo/app' },
     memoryEnvelope: { mode: 'codebase-session', source: 'spore-code', readScopes: [{ slug: 'project-test' }] },
     _skipDefaultRecallSections: true,
   });
-  assert.doesNotMatch(prompt, /gb200/i);
+  assert.doesNotMatch(prompt, /remote-gpu/i);
 
   graph._pluginManager = {
     getLifecycleHooks(name) {
@@ -1046,12 +1046,12 @@ test('cli codebase prompts hide saved SSH and cluster access', async () => {
   const skippedPrompt = await graph.buildSystemPromptAsync({
     promptMode: 'full',
     platform: 'cli',
-    userId: 'yam',
+    userId: 'test-user',
     messageContent: 'what can you do?',
     projectContext: { cwd: '/repo/app' },
     memoryEnvelope: { mode: 'codebase-session', source: 'spore-code', readScopes: [{ slug: 'project-test' }] },
   });
-  assert.doesNotMatch(skippedPrompt, /gb200/i);
+  assert.doesNotMatch(skippedPrompt, /remote-gpu/i);
   graph.close();
 });
 
@@ -1075,14 +1075,14 @@ test('codebase sessions do not receive global recent activity feed', () => {
 test('project helpers use project identity key for stable graph node id', () => {
   const db = newDb();
   const learner = { db };
-  const projectIdentityKey = 'git:https://github.com/yam/spore-core';
+  const projectIdentityKey = 'git:https://github.com/test-user/spore-core';
 
-  const first = projects.upsertProject(learner, 'yam', {
-    cwd: '/home/yam/spore-core',
+  const first = projects.upsertProject(learner, 'test-user', {
+    cwd: '/home/test-user/spore-core',
     project: 'spore-core',
     projectIdentityKey,
   });
-  const second = projects.upsertProject(learner, 'yam', {
+  const second = projects.upsertProject(learner, 'test-user', {
     cwd: '/tmp/other-clone',
     project: 'spore-core',
     projectIdentityKey,
@@ -1093,7 +1093,7 @@ test('project helpers use project identity key for stable graph node id', () => 
   const projectExtra = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(first.id)?.extra || '{}';
   assert.equal(JSON.parse(projectExtra).ttl, undefined);
 
-  const r = projects.upsertProjectCodeGraph(learner, 'yam', '/tmp/other-clone', {
+  const r = projects.upsertProjectCodeGraph(learner, 'test-user', '/tmp/other-clone', {
     stats: { files: 3, symbols: 12, functions: 4, methods: 2, classes: 1, calls: 8 },
     tech_stack: [{ language: 'JavaScript', files: 3, symbols: 12 }],
   }, { projectIdentityKey });
@@ -1128,12 +1128,12 @@ test('session-graph project tools write through scoped project graph', () => {
   const tools = {};
   const mainDb = newDb();
   const scopedDb = newDb();
-  const projectIdentityKey = 'git:https://github.com/yam/scoped-project';
-  const projectId = projects.projectNodeIdFromContext('yam', {
+  const projectIdentityKey = 'git:https://github.com/test-user/scoped-project';
+  const projectId = projects.projectNodeIdFromContext('test-user', {
     cwd: '/repo/a',
     projectIdentityKey,
   });
-  projects.upsertProject({ db: scopedDb }, 'yam', {
+  projects.upsertProject({ db: scopedDb }, 'test-user', {
     cwd: '/repo/a',
     project: 'scoped-project',
     projectIdentityKey,
@@ -1160,7 +1160,7 @@ test('session-graph project tools write through scoped project graph', () => {
   }, {
     platform: 'cli',
     channelId: 'session-1',
-    userId: 'yam',
+    userId: 'test-user',
     projectContext: { cwd: '/repo/a' },
     memoryEnvelope: {
       projectKey: projectIdentityKey,
@@ -1184,7 +1184,7 @@ test('project graphs are managed inspect-only and use project refs', () => {
   });
   registry.init();
 
-  const slug = registry.ensureProjectGraph('git:https://github.com/yam/acorn-companion', {
+  const slug = registry.ensureProjectGraph('git:https://github.com/test-user/acorn-companion', {
     name: 'acorn-companion',
     description: 'project graph',
   });
@@ -1210,7 +1210,7 @@ test('codebase-session scoped recall always includes project operating refs', as
   });
   registry.init();
 
-  const slug = registry.ensureProjectGraph('git:https://github.com/yam/acorn-companion', {
+  const slug = registry.ensureProjectGraph('git:https://github.com/test-user/acorn-companion', {
     name: 'acorn-companion',
     description: 'project graph',
   });
@@ -1248,7 +1248,7 @@ test('learner refreshes cached graph db handle after delete and recreate', () =>
     info() {}, warn() {}, error() {}, debug() {},
   });
   registry.init();
-  const key = 'git:https://github.com/yam/recreated-project';
+  const key = 'git:https://github.com/test-user/recreated-project';
   const slug = registry.ensureProjectGraph(key, { name: 'recreated-project' });
 
   const learner = new Learner({}, { info() {}, warn() {}, error() {}, debug() {} }, null);
@@ -1356,8 +1356,8 @@ test('learner drops stale scoped writes when the project graph was deleted', () 
     opts: {
       platform: 'cli',
       userRole: 'cli',
-      userId: 'yam',
-      userName: 'yam',
+      userId: 'test-user',
+      userName: 'test-user',
       projectContext,
     },
   });
@@ -1371,7 +1371,7 @@ test('learner drops stale scoped writes when the project graph was deleted', () 
 
     const wrote = learner._writeToGraph({
       entities: [
-        { id: 'yam', label: 'yam', type: 'person', description: 'Project user', target: 'local' },
+        { id: 'test-user', label: 'test-user', type: 'person', description: 'Project user', target: 'local' },
         { id: 'expo-dev-server', label: 'Expo Dev Server', type: 'system', description: 'Project-only server state', target: 'local' },
       ],
       aspects: [{
@@ -1382,21 +1382,21 @@ test('learner drops stale scoped writes when the project graph was deleted', () 
         target: 'local',
       }],
       updates: [],
-      edges: [{ source: 'yam', target: 'expo-dev-server', type: 'used', confidence: 'extracted' }],
+      edges: [{ source: 'test-user', target: 'expo-dev-server', type: 'used', confidence: 'extracted' }],
       gaps: [],
       hyperedges: [],
     }, {
       platform: 'cli',
       userRole: 'cli',
-      userId: 'yam',
-      userName: 'yam',
+      userId: 'test-user',
+      userName: 'test-user',
       projectContext,
       memoryEnvelope: env,
     });
 
     assert.equal(wrote.total, 0);
     assert.ok(wrote.writeTargets.some(t => t.slug === env.primarySlug && t.skipped && t.reason === 'missing_graph'));
-    assert.equal(learner.db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id IN ('yam', 'expo-dev-server')").get().c, 0);
+    assert.equal(learner.db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id IN ('test-user', 'expo-dev-server')").get().c, 0);
     assert.equal(learner.db.prepare("SELECT COUNT(*) AS c FROM attributes WHERE content LIKE '%Expo Metro was running%'").get().c, 0);
     assert.equal(learner.getGraphDb(env.primarySlug), null);
   } finally {
@@ -1492,7 +1492,7 @@ test('general kb promotion keeps reusable lessons and filters project artifacts'
     },
   };
 
-  const result = sessions.promoteReusableKnowledge(learner, 'cli:yam@project', {
+  const result = sessions.promoteReusableKnowledge(learner, 'cli:test-user@project', {
     appendNotes: [
       {
         targetNodeId: 'inline-qr-chat-rendering',
@@ -1537,17 +1537,17 @@ test('general kb promotion updates people and avoids orphan nodes', () => {
 
   kb.prepare(`
     INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
-    VALUES ('yam', 'Yam', 'person', 'Person represented by sanitized shared knowledge.', 6, 'general-kb', 'test')
+    VALUES ('test-user', 'Test User', 'person', 'Person represented by sanitized shared knowledge.', 6, 'general-kb', 'test')
   `).run();
 
-  const result = sessions.promoteReusableKnowledge(learner, 'cli:yam@project', {
+  const result = sessions.promoteReusableKnowledge(learner, 'cli:test-user@project', {
     people: [{
-      nodeId: 'yam',
-      label: 'Yam',
+      nodeId: 'test-user',
+      label: 'Test User',
       description: 'Maintainer of Spore Core',
       aspects: [{
         name: 'public_context',
-        attributes: ['Yam maintains Spore Core integration work.'],
+        attributes: ['Test User maintains Spore Core integration work.'],
       }],
     }],
     createNodes: [{
@@ -1570,10 +1570,10 @@ test('general kb promotion updates people and avoids orphan nodes', () => {
   }, { projectId: 'project-spore-core' });
 
   assert.equal(result.promoted, 2);
-  assert.equal(kb.prepare("SELECT description FROM nodes WHERE id = 'yam'").get().description, 'Maintainer of Spore Core');
+  assert.equal(kb.prepare("SELECT description FROM nodes WHERE id = 'test-user'").get().description, 'Maintainer of Spore Core');
   assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'person-ada-lovelace'").get().type, 'person');
   assert.equal(kb.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id = 'person-private'").get().c, 0);
-  for (const id of ['yam', 'person-ada-lovelace']) {
+  for (const id of ['test-user', 'person-ada-lovelace']) {
     assert.ok(kb.prepare(`
       SELECT 1 FROM edges
       WHERE source = ? AND target = 'general-kb-distillation' AND type = 'distilled_into'
@@ -1603,7 +1603,7 @@ test('general kb repair links legacy promoted nodes from session and channel dis
   `).run();
   kb.prepare(`
     INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
-    VALUES ('person-yam', 'Yam', 'person', 'Maintainer of Spore Core', 6, 'general-kb', 'channel-distill')
+    VALUES ('person-test-user', 'Test User', 'person', 'Maintainer of Spore Core', 6, 'general-kb', 'channel-distill')
   `).run();
 
   const result = sessions.repairGeneralKnowledgeBase(learner, quietLog());
@@ -1618,7 +1618,7 @@ test('general kb repair links legacy promoted nodes from session and channel dis
   `).get());
   assert.ok(kb.prepare(`
     SELECT 1 FROM edges
-    WHERE source = 'person-yam'
+    WHERE source = 'person-test-user'
       AND target = 'general-kb-people'
       AND type = 'member_of'
   `).get());
@@ -1636,7 +1636,7 @@ test('project distillation yields reusable skills into linked general kb skill n
     },
   };
 
-  const result = sessions.promoteReusableKnowledge(learner, 'cli:yam@project', {
+  const result = sessions.promoteReusableKnowledge(learner, 'cli:test-user@project', {
     skills: [{
       slug: 'start-expo-dev-server',
       title: 'Start Expo Dev Server',
@@ -1707,7 +1707,7 @@ test('project distillation rejects thin task-shaped skills without replay artifa
     },
   };
 
-  const result = sessions.promoteReusableKnowledge(learner, 'cli:yam@project', {
+  const result = sessions.promoteReusableKnowledge(learner, 'cli:test-user@project', {
     skills: [{
       slug: 'add-cli-typo-suggestions',
       title: 'Add CLI Typo Suggestions',
@@ -1798,7 +1798,7 @@ test('channel distiller promotes safe people into general kb and links yielded n
   const registry = {
     getGeneralKnowledgeSlug: () => 'spore-knowledge-base',
     get(slug) {
-      return slug === 'user-yam' ? { slug, role: 'user' } : null;
+      return slug === 'user-test-user' ? { slug, role: 'user' } : null;
     },
     refreshStats() {},
   };
@@ -1821,12 +1821,12 @@ test('channel distiller promotes safe people into general kb and links yielded n
       }],
     }],
     people: [{
-      nodeId: 'person-yam',
-      label: 'Yam',
+      nodeId: 'person-test-user',
+      label: 'Test User',
       description: 'Maintainer of Spore Core',
       aspects: [{
         name: 'public_context',
-        attributes: ['Yam maintains Spore Core integration work.'],
+        attributes: ['Test User maintains Spore Core integration work.'],
       }],
     }],
     skills: [{
@@ -1851,14 +1851,14 @@ test('channel distiller promotes safe people into general kb and links yielded n
       aspect: 'private_context',
       content: 'private@example.com should not be promoted.',
     }],
-  }, 'user-yam');
+  }, 'user-test-user');
 
   assert.equal(promoted, 3);
   assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'spore-code'").get().type, 'tool');
-  assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'person-yam'").get().type, 'person');
+  assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'person-test-user'").get().type, 'person');
   assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'skill-debug-webhook-delivery'").get().type, 'skill');
   assert.equal(kb.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id = 'person-secret'").get().c, 0);
-  for (const id of ['spore-code', 'person-yam', 'skill-debug-webhook-delivery']) {
+  for (const id of ['spore-code', 'person-test-user', 'skill-debug-webhook-delivery']) {
     assert.ok(kb.prepare(`
       SELECT 1 FROM edges
       WHERE source = ? AND target = 'general-kb-distillation' AND type = 'distilled_into'
@@ -1866,7 +1866,7 @@ test('channel distiller promotes safe people into general kb and links yielded n
   }
   assert.ok(kb.prepare(`
     SELECT 1 FROM edges
-    WHERE source = 'person-yam' AND target = 'general-kb-people' AND type = 'member_of'
+    WHERE source = 'person-test-user' AND target = 'general-kb-people' AND type = 'member_of'
   `).get());
   assert.ok(kb.prepare(`
     SELECT 1 FROM edges
@@ -1878,27 +1878,27 @@ test('channel distiller digest includes safe people facts for general kb promoti
   const db = newDb();
   db.prepare(`
     INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
-    VALUES ('person-yam', 'Yam', 'person', 'Maintainer of Spore Core', 7, 'test', 'test')
+    VALUES ('person-test-user', 'Test User', 'person', 'Maintainer of Spore Core', 7, 'test', 'test')
   `).run();
   const asp = db.prepare(`
     INSERT INTO aspects (node_id, name, weight, extracted_with)
-    VALUES ('person-yam', 'public_context', 7, 'test')
+    VALUES ('person-test-user', 'public_context', 7, 'test')
   `).run().lastInsertRowid;
   db.prepare(`
     INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
-    VALUES (?, 'Yam maintains Spore Core integration work.', 7, 'test', 'test')
+    VALUES (?, 'Test User maintains Spore Core integration work.', 7, 'test', 'test')
   `).run(asp);
   db.prepare(`
     INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
-    VALUES (?, 'Contact Yam at private@example.com for private DM policy.', 7, 'test', 'test')
+    VALUES (?, 'Contact Test User at private@example.com for private DM policy.', 7, 'test', 'test')
   `).run(asp);
 
   const distiller = new ChannelDistiller({}, quietLog(), null, {}, {});
   const digest = distiller._collectDigest(db, {});
-  const person = digest.find(n => n.id === 'person-yam');
+  const person = digest.find(n => n.id === 'person-test-user');
 
   assert.ok(person);
   assert.equal(person.type, 'person');
-  assert.deepEqual(person.aspects.public_context, ['Yam maintains Spore Core integration work.']);
+  assert.deepEqual(person.aspects.public_context, ['Test User maintains Spore Core integration work.']);
   assert.doesNotMatch(JSON.stringify(person), /private@example/);
 });

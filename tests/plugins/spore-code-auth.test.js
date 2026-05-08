@@ -68,12 +68,12 @@ function makeRes() {
 test('spore-code auth accepts local account password without invite key', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
   try {
-    writeUser(dataDir, 'yam', 'secret-password');
+    writeUser(dataDir, 'test-user', 'secret-password');
     const { api, webSessions } = makeApi(dataDir, { inviteKey: '' });
     const res = makeRes();
 
     await sporeCode._test.handleAuth(api, makeReq({
-      username: 'yam',
+      username: 'test-user',
       authMethod: 'password',
       password: 'secret-password',
     }), res);
@@ -81,7 +81,7 @@ test('spore-code auth accepts local account password without invite key', async 
     assert.equal(res.statusCode, 200);
     const payload = JSON.parse(res.body);
     assert.equal(payload.ok, true);
-    assert.equal(webSessions.get(payload.token).user, 'yam');
+    assert.equal(webSessions.get(payload.token).user, 'test-user');
     assert.equal(webSessions.get(payload.token).auth, 'password');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -176,7 +176,7 @@ test('spore-code recall skip keeps scoped project and shared KB recall enabled',
   const scopedOpts = {
     platform: 'cli',
     messageContent: 'start the expo server and print me the qr code here',
-    projectContext: { cwd: 'C:\\Users\\esfle\\kimi_test2', source: 'spore-code' },
+    projectContext: { cwd: 'C:\\Users\\esfle\\sample_project', source: 'spore-code' },
     memoryEnvelope: {
       mode: 'codebase-session',
       readScopes: [
@@ -212,7 +212,7 @@ test('spore-code project context tells cli agents to execute recalled skills as 
     platform: 'cli',
     projectContext: {
       project: 'acorn-companion',
-      cwd: 'C:\\Users\\esfle\\kimi_test2',
+      cwd: 'C:\\Users\\esfle\\sample_project',
       scope: 'strict',
       os: 'windows',
       arch: 'x64',
@@ -247,12 +247,12 @@ test('spore-code auth keeps invite key login working', async () => {
 test('spore-code password auth reports credentials errors, not invite key errors', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
   try {
-    writeUser(dataDir, 'yam', 'secret-password');
+    writeUser(dataDir, 'test-user', 'secret-password');
     const { api } = makeApi(dataDir, { inviteKey: 'invite-key' });
     const res = makeRes();
 
     await sporeCode._test.handleAuth(api, makeReq({
-      username: 'yam',
+      username: 'test-user',
       authMethod: 'password',
       password: 'wrong-password',
     }), res);
@@ -311,12 +311,12 @@ test('spore-code auth setting can allow public HTTP explicitly', async () => {
 test('spore-code auth can mint a device token and exchange it for a ws ticket', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-auth-'));
   try {
-    writeUser(dataDir, 'yam', 'secret-password');
+    writeUser(dataDir, 'test-user', 'secret-password');
     const { api, webSessions } = makeApi(dataDir, { inviteKey: '' });
     const authRes = makeRes();
 
     await sporeCode._test.handleAuth(api, makeReq({
-      username: 'yam',
+      username: 'test-user',
       authMethod: 'password',
       password: 'secret-password',
       issueDevice: true,
@@ -335,7 +335,7 @@ test('spore-code auth can mint a device token and exchange it for a ws ticket', 
     assert.equal(sessionRes.statusCode, 200);
     const sessionPayload = JSON.parse(sessionRes.body);
     assert.equal(sessionPayload.ok, true);
-    assert.equal(webSessions.get(sessionPayload.token).user, 'yam');
+    assert.equal(webSessions.get(sessionPayload.token).user, 'test-user');
     assert.equal(webSessions.get(sessionPayload.token).auth, 'device');
     assert.equal(webSessions.get(sessionPayload.token).singleUse, true);
   } finally {
@@ -347,7 +347,7 @@ test('spore-code stores routing preset overrides on one device only', async () =
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-code-routing-'));
   try {
     const { api } = makeApi(dataDir, { inviteKey: 'invite-key' });
-    const first = sporeCode._test.mintDeviceToken(api, 'yam', 'invite');
+    const first = sporeCode._test.mintDeviceToken(api, 'test-user', 'invite');
     const second = sporeCode._test.mintDeviceToken(api, 'zelda', 'invite');
 
     const out = sporeCode._test.setDeviceRoutingPreset(api, first.deviceToken, 'fast', {

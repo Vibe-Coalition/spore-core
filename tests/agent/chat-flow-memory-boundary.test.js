@@ -24,7 +24,7 @@ function seedDefaultGraphLeak(dbPath) {
   const db = new DatabaseSync(dbPath);
   db.prepare(`
     INSERT OR REPLACE INTO nodes (id, label, type, description, importance)
-    VALUES ('yam', 'yam', 'person', 'User requesting du scan monitoring', 8)
+    VALUES ('test-user', 'test-user', 'person', 'User requesting du scan monitoring', 8)
   `).run();
   db.prepare(`
     INSERT OR REPLACE INTO nodes (id, label, type, description, importance)
@@ -32,11 +32,11 @@ function seedDefaultGraphLeak(dbPath) {
   `).run();
   db.prepare(`
     INSERT OR REPLACE INTO nodes (id, label, type, description, importance)
-    VALUES ('host_1778103972392', 'GB200 login host', 'system', 'Remote host used by an unrelated web task', 7)
+    VALUES ('host_1778103972392', 'remote GPU login host', 'system', 'Remote host used by an unrelated web task', 7)
   `).run();
   db.prepare(`
     INSERT INTO edges (source, target, type, weight)
-    VALUES ('yam', 'du_scan_process', 'requested', 1.0)
+    VALUES ('test-user', 'du_scan_process', 'requested', 1.0)
   `).run();
   db.prepare(`
     INSERT INTO edges (source, target, type, weight)
@@ -82,36 +82,36 @@ test('chat-flow harness catches default-graph leakage into fresh cli project ses
       script: [
         (req) => {
           const seen = requestText(req);
-          if (/DU Scan|du_scan|home-du-results|host_1778103972392|GB200/i.test(seen)) {
-            return toolResponse('graph_query', { query: 'yam du scan monitoring' }, {
+          if (/DU Scan|du_scan|home-du-results|host_1778103972392|remote GPU/i.test(seen)) {
+            return toolResponse('graph_query', { query: 'test-user du scan monitoring' }, {
               id: 'toolu_leak_1',
               text: 'I see prior du scan context, checking it.',
             });
           }
-          return textResponse('hey yam. fresh code session ready.');
+          return textResponse('hey test-user. fresh code session ready.');
         },
         textResponse('I used leaked default-graph context.'),
       ],
     });
 
     const turn = await harness.send('hello', {
-      sessionKey: 'channel:cli:yam@kimi_test2-5a1d31f0-20260507T002138',
-      channelId: 'cli:yam@kimi_test2-5a1d31f0-20260507T002138',
-      channelName: 'kimi_test2',
+      sessionKey: 'channel:cli:test-user@sample_project-5a1d31f0-20260507T002138',
+      channelId: 'cli:test-user@sample_project-5a1d31f0-20260507T002138',
+      channelName: 'sample_project',
       platform: 'cli',
       trigger: 'mention',
-      userId: 'yam',
-      userName: 'yam',
+      userId: 'test-user',
+      userName: 'test-user',
       userRole: 'cli',
       isDm: false,
       projectContext: {
-        cwd: '/home/yam/kimi_test2',
-        project: 'kimi_test2',
+        cwd: '/home/test-user/sample_project',
+        project: 'sample_project',
         source: 'spore-code',
       },
     });
 
-    assert.equal(turn.text, 'hey yam. fresh code session ready.');
+    assert.equal(turn.text, 'hey test-user. fresh code session ready.');
     assert.deepEqual(turn.toolCalls.map(c => c.name), []);
     assert.equal(harness.model.requests.length, 1);
 
@@ -122,7 +122,7 @@ test('chat-flow harness catches default-graph leakage into fresh cli project ses
     assert.doesNotMatch(promptSeenByModel, /du_scan/i);
     assert.doesNotMatch(promptSeenByModel, /home-du-results/i);
     assert.doesNotMatch(promptSeenByModel, /host_1778103972392/i);
-    assert.doesNotMatch(promptSeenByModel, /GB200/i);
+    assert.doesNotMatch(promptSeenByModel, /remote GPU/i);
   } finally {
     graph.close();
   }

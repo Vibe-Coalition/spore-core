@@ -1,10 +1,10 @@
 services:
-  anima:
+  spore:
     build:
       context: ./src
       dockerfile: Dockerfile
-    image: anima-${AGENT_ID:-anima}:latest
-    container_name: ${AGENT_ID:-anima}
+    image: spore-${AGENT_ID:-spore}:latest
+    container_name: ${AGENT_ID:-spore}
     restart: unless-stopped
 
     extra_hosts:
@@ -19,26 +19,26 @@ services:
     environment:
       - GRAPH_DB_PATH=/data/graph.db
       - SESSION_DB_PATH=/data/sessions.db
-      - ANIMA_WORKSPACE_PATH=/workspace
-      - ANIMA_LOG_LEVEL=${ANIMA_LOG_LEVEL:-info}
-      - ANIMA_HEALTH_PORT=${ANIMA_HEALTH_PORT:-18790}
+      - SPORE_WORKSPACE_PATH=/workspace
+      - SPORE_LOG_LEVEL=${SPORE_LOG_LEVEL:-info}
+      - SPORE_HEALTH_PORT=${SPORE_HEALTH_PORT:-18790}
 
     volumes:
       - ./data:/data
       - ./.env:/data/.env:ro
-      - ./anima.json:/app/anima.json:ro
+      - ./spore.json:/app/spore.json:ro
       - ./workspace:/workspace
       - ssh-sidecar-sock:/run/ssh-sidecar:ro
-      # Host read access (uncomment and set ANIMA_HOST_READ_PATHS if using):
+      # Host read access (uncomment and set SPORE_HOST_READ_PATHS if using):
       # - /home/ubuntu:/host/home/ubuntu:ro
 
     ports:
-      - "127.0.0.1:${ANIMA_HEALTH_PORT:-18790}:${ANIMA_HEALTH_PORT:-18790}"
-      - "127.0.0.1:${ANIMA_WEB_PORT:-18800}:${ANIMA_WEB_PORT:-18800}"
+      - "127.0.0.1:${SPORE_HEALTH_PORT:-18790}:${SPORE_HEALTH_PORT:-18790}"
+      - "127.0.0.1:${SPORE_WEB_PORT:-18800}:${SPORE_WEB_PORT:-18800}"
 
     networks:
       - default
-      - anima-web
+      - spore-web
 
     deploy:
       resources:
@@ -60,8 +60,8 @@ services:
     profiles:
       - ssh-sidecar
     depends_on:
-      - anima
-    network_mode: "service:anima"
+      - spore
+    network_mode: "service:spore"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -88,5 +88,5 @@ volumes:
   ssh-sidecar-data:
 
 networks:
-  anima-web:
+  spore-web:
     external: true

@@ -25,7 +25,7 @@ test('service key returns admin context and creator auth', () => {
 });
 
 test('creator/admin sessions pass within ttl', () => {
-  const sessions = new Map([['sid1', { user: 'yam', type: 'creator', created: 1000 }]]);
+  const sessions = new Map([['sid1', { user: 'test-user', type: 'creator', created: 1000 }]]);
   const policy = createWebAuthPolicy({ sessions, sessionTtl: 5000, deps: { now: () => 2000, loadWebappUsers: () => [] } });
   assert.equal(policy.checkCreatorAuth(req({ cookie: 'spore_session=sid1' })), true);
   assert.equal(policy.checkAuth(req({ cookie: 'spore_session=sid1' })), true);
@@ -35,7 +35,7 @@ test('creator/admin sessions pass within ttl', () => {
 });
 
 test('SSO sessions without manager_session are rejected and removed', () => {
-  const sessions = new Map([['sid1', { user: 'yam', type: 'admin', viaSSO: true, created: 1000 }]]);
+  const sessions = new Map([['sid1', { user: 'test-user', type: 'admin', viaSSO: true, created: 1000 }]]);
   const policy = createWebAuthPolicy({ sessions, sessionTtl: 5000, deps: { now: () => 2000 } });
   assert.equal(policy.checkCreatorAuth(req({ cookie: 'spore_session=sid1' })), false);
   assert.equal(sessions.has('sid1'), false);

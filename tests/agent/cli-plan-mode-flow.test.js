@@ -28,14 +28,14 @@ test('cli plan research turns repair markerless stale greetings after tool work'
         id: 'toolu_read_1',
         text: 'reading the relevant source',
       }),
-      textResponse("hey yam. what's up?"),
+      textResponse("hey test-user. what's up?"),
       textResponse('RESEARCH_DONE:\nsummary: inspected source and found the improvement targets.'),
     ],
   });
 
   const turn = await harness.send('[RESEARCH] Interview answers - proceed to research+code phase.', {
-    sessionKey: 'channel:cli:yam@test-project',
-    channelId: 'cli:yam@test-project',
+    sessionKey: 'channel:cli:test-user@test-project',
+    channelId: 'cli:test-user@test-project',
     platform: 'cli',
     trigger: 'mention',
     isDm: false,
@@ -60,6 +60,6 @@ test('cli plan research turns repair markerless stale greetings after tool work'
     .filter(m => m.role === 'assistant')
     .map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content))
     .join('\n');
-  assert.doesNotMatch(persistedAssistantText, /hey yam/i);
+  assert.doesNotMatch(persistedAssistantText, /hey test-user/i);
   assert.match(persistedAssistantText, /RESEARCH_DONE:/);
 });
