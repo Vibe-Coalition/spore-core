@@ -13,7 +13,7 @@ networks:
 
 services:
   spore:
-    image: "${SPORE_IMAGE:-ghcr.io/yumlevi/spore}:${SPORE_IMAGE_TAG:-latest}"
+    image: "${SPORE_IMAGE:-ghcr.io/vibe-coalition/spore-core}:${SPORE_IMAGE_TAG:-latest}"
     container_name: "${SPORE_AGENT_ID:-spore}"
     restart: unless-stopped
     networks:

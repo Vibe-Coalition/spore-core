@@ -40,8 +40,8 @@ class ChatroomGateway {
     this._processing = false;
     this._lullTimer = null;
     this._directDebounceTimer = null;
-    this._recentAnimaResponses = 0;
-    this._recentAnimaResponseTimer = null;
+    this._recentSporeResponses = 0;
+    this._recentSporeResponseTimer = null;
     this._participants = new Map();
   }
 
@@ -243,7 +243,7 @@ class ChatroomGateway {
 
       if (result?.text && result.text.trim() && result.text.trim() !== 'NO_REPLY') {
         this._sendChat(result.text);
-        this._trackAnimaResponse();
+        this._trackSporeResponse();
       } else {
         this.log.debug(`[chatroom] ${trigger}: no visible response`);
       }
@@ -260,15 +260,15 @@ class ChatroomGateway {
 
   _calculateJitter(isDirect) {
     if (isDirect) return Math.random() * 1000;
-    const base = BASE_JITTER_MS + (this._recentAnimaResponses * 2000);
+    const base = BASE_JITTER_MS + (this._recentSporeResponses * 2000);
     return Math.min(base + Math.random() * 3000, MAX_JITTER_MS);
   }
 
-  _trackAnimaResponse() {
-    this._recentAnimaResponses++;
-    if (this._recentAnimaResponseTimer) clearTimeout(this._recentAnimaResponseTimer);
-    this._recentAnimaResponseTimer = setTimeout(() => {
-      this._recentAnimaResponses = 0;
+  _trackSporeResponse() {
+    this._recentSporeResponses++;
+    if (this._recentSporeResponseTimer) clearTimeout(this._recentSporeResponseTimer);
+    this._recentSporeResponseTimer = setTimeout(() => {
+      this._recentSporeResponses = 0;
     }, 30_000);
   }
 

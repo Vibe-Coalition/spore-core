@@ -442,7 +442,6 @@ function _seedFromLegacySporeJson(dataDir, _db) {
   const candidates = [
     path.join(dataDir, 'spore.json'),
     path.join(__dirname, '..', 'spore.json'),
-    path.join(__dirname, '..', 'anima.json'),
   ];
   let parsed = null;
   for (const p of candidates) {

@@ -13,23 +13,23 @@ kind: StatefulSet
 metadata:
   name: {{ $root.Release.Name }}-agent-{{ $agentId }}
   labels:
-    {{- include "anima.labels" $root | nindent 4 }}
+    {{- include "spore.labels" $root | nindent 4 }}
     app.kubernetes.io/component: agent
-    anima.io/agent-id: {{ $agentId }}
+    spore.io/agent-id: {{ $agentId }}
 spec:
   serviceName: {{ $root.Release.Name }}-agent-{{ $agentId }}
   replicas: 1
   selector:
     matchLabels:
-      {{- include "anima.selectorLabels" $root | nindent 6 }}
+      {{- include "spore.selectorLabels" $root | nindent 6 }}
       app.kubernetes.io/component: agent
-      anima.io/agent-id: {{ $agentId }}
+      spore.io/agent-id: {{ $agentId }}
   template:
     metadata:
       labels:
-        {{- include "anima.selectorLabels" $root | nindent 8 }}
+        {{- include "spore.selectorLabels" $root | nindent 8 }}
         app.kubernetes.io/component: agent
-        anima.io/agent-id: {{ $agentId }}
+        spore.io/agent-id: {{ $agentId }}
     spec:
       {{- with $root.Values.imagePullSecrets }}
       imagePullSecrets:
@@ -54,7 +54,7 @@ spec:
           env:
             - name: AGENT_ID
               value: {{ $agentId | quote }}
-            - name: ANIMA_DISPLAY_NAME
+            - name: SPORE_DISPLAY_NAME
               value: {{ $agent.displayName | default $defaultAgent.displayName | quote }}
             - name: ANTHROPIC_API_KEY
               valueFrom:
@@ -134,9 +134,9 @@ kind: Service
 metadata:
   name: {{ $root.Release.Name }}-agent-{{ $agentId }}
   labels:
-    {{- include "anima.labels" $root | nindent 4 }}
+    {{- include "spore.labels" $root | nindent 4 }}
     app.kubernetes.io/component: agent
-    anima.io/agent-id: {{ $agentId }}
+    spore.io/agent-id: {{ $agentId }}
 spec:
   type: ClusterIP
   ports:
@@ -151,7 +151,7 @@ spec:
       name: web
     {{- end }}
   selector:
-    {{- include "anima.selectorLabels" $root | nindent 4 }}
+    {{- include "spore.selectorLabels" $root | nindent 4 }}
     app.kubernetes.io/component: agent
-    anima.io/agent-id: {{ $agentId }}
+    spore.io/agent-id: {{ $agentId }}
 {{- end }}

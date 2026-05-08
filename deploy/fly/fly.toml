@@ -1,11 +1,11 @@
-# Fly.io deployment for Anima agent
+# Fly.io deployment for Spore agent
 # Copy this file, set your app name, and run: fly launch --copy-config
 #
 # Before deploying:
 #   fly secrets set ANTHROPIC_API_KEY=sk-ant-... DISCORD_TOKEN=... MANAGER_SERVICE_KEY=...
-#   fly volumes create anima_data --size 1 --region iad
+#   fly volumes create spore_data --size 1 --region iad
 
-app = "anima-agent"
+app = "spore-agent"
 primary_region = "iad"
 
 [build]
@@ -13,15 +13,15 @@ primary_region = "iad"
   [build.args]
 
 [env]
-  AGENT_ID = "anima"
-  ANIMA_DISPLAY_NAME = "Anima"
-  ANIMA_HEALTH_PORT = "18790"
+  AGENT_ID = "spore"
+  SPORE_DISPLAY_NAME = "Spore"
+  SPORE_HEALTH_PORT = "18790"
   HEALTH_BIND_ADDR = "0.0.0.0"
   GRAPH_DB_PATH = "/data/graph.db"
   SESSION_DB_PATH = "/data/sessions.db"
-  ANIMA_WORKSPACE_PATH = "/workspace"
-  ANIMA_MODEL = "claude-sonnet-4-6"
-  ANIMA_LEARNER_MODEL = "claude-haiku-4-5"
+  SPORE_WORKSPACE_PATH = "/workspace"
+  SPORE_MODEL = "claude-sonnet-4-6"
+  SPORE_LEARNER_MODEL = "claude-haiku-4-5"
 
 [http_service]
   internal_port = 18790
@@ -44,11 +44,11 @@ primary_region = "iad"
     grace_period = "30s"
 
 [[mounts]]
-  source = "anima_data"
+  source = "spore_data"
   destination = "/data"
 
 [[mounts]]
-  source = "anima_workspace"
+  source = "spore_workspace"
   destination = "/workspace"
 
 [checks]

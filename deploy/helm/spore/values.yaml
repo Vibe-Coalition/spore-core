@@ -1,12 +1,12 @@
-# Default values for Anima Helm chart
+# Default values for Spore Helm chart
 
 image:
-  repository: ghcr.io/Klace/anima
+  repository: ghcr.io/vibe-coalition/spore-core
   tag: "latest"
   pullPolicy: IfNotPresent
 
 managerImage:
-  repository: ghcr.io/Klace/anima-manager
+  repository: ghcr.io/vibe-coalition/spore-core-manager
   tag: "latest"
   pullPolicy: IfNotPresent
 
@@ -32,8 +32,8 @@ manager:
 # --- Agent ---
 agent:
   model: claude-sonnet-4-6
-  agentId: anima
-  displayName: Anima
+  agentId: spore
+  displayName: Spore
   healthPort: 18790
   healthBindAddr: "0.0.0.0"  # Must be 0.0.0.0 for K8s probes
   maxTokens: 8192
@@ -94,7 +94,7 @@ ingress:
   className: nginx
   annotations: {}
   hosts:
-    - host: anima.example.com
+    - host: spore.example.com
       paths:
         - path: /
           pathType: Prefix

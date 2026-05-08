@@ -10,20 +10,6 @@ sessions/
 .DS_Store
 benchmark-report.html
 
-# Per-agent instances (runtime data, secrets, DBs)
-animas/*/
-!animas/.template/
-animas/.auth-config.json
-animas/.anima-users.json
-animas/.vault-key
-animas/.vault.db
-animas/.ollama-status.json
-animas/.ollama-cmd
-animas/.ollama-result
-animas/.ingress.json
-animas/cleanup-graph.sh
-!animas/.gitkeep
-
 # Per-spore instances (runtime data, secrets, DBs)
 spores/*
 !spores/.template/

@@ -1,7 +1,7 @@
 {
   "name": "spore",
   "version": "0.3.0",
-  "description": "Visual agentic system — autonomous AI agents with persistent knowledge graph memory",
+  "description": "Spore Core agent runtime with persistent graph memory",
   "main": "app.js",
   "type": "commonjs",
   "scripts": {

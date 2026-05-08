@@ -326,12 +326,12 @@ class Learner {
       catch { return; }
     }
 
-    const animaId = this.config.agentId;
+    const sporeId = this.config.agentId;
     const currentSlugs = new Set(Object.keys(this._sharedDbs));
     const wantedSlugs = new Set();
 
     for (const [slug, proj] of Object.entries(projects)) {
-      if (proj.members && proj.members.includes(animaId)) wantedSlugs.add(slug);
+      if (proj.members && proj.members.includes(sporeId)) wantedSlugs.add(slug);
     }
 
     // Close removed projects

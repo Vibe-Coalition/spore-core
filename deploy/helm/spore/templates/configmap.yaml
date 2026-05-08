@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    {{- include "spore.labels" . | nindent 4 }}
+data:
+  SPORE_MODEL: {{ .Values.agent.model | quote }}
+  AGENT_ID: {{ .Values.agent.agentId | quote }}
+  SPORE_DISPLAY_NAME: {{ .Values.agent.displayName | quote }}
+  SPORE_HEALTH_PORT: {{ .Values.agent.healthPort | quote }}
+  HEALTH_BIND_ADDR: {{ .Values.agent.healthBindAddr | quote }}
+  SPORE_LEARNER_MODEL: {{ .Values.agent.learnerModel | quote }}
+  SPORE_LEARNING_MODE: {{ .Values.agent.learningMode | quote }}
+  SPORE_MAX_TOKENS: {{ .Values.agent.maxTokens | quote }}
+  SPORE_CONTEXT_WINDOW: {{ .Values.agent.contextWindow | quote }}
+  GRAPH_DB_PATH: /data/graph.db
+  SESSION_DB_PATH: /data/sessions.db
+  SPORE_WORKSPACE_PATH: /workspace
+  SPORE_PLUGINS_DIR: {{ .Values.agent.pluginsDir | quote }}
+  MANAGER_URL: "http://{{ include "spore.managerFullname" . }}:{{ .Values.manager.port }}"
+  {{- if .Values.agent.web.enabled }}
+  SPORE_WEB_PORT: {{ .Values.agent.web.port | quote }}
+  {{- if .Values.agent.web.authUser }}
+  SPORE_WEB_AUTH_USER: {{ .Values.agent.web.authUser | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.agent.voice.enabled }}
+  SPORE_VOICE_ENABLED: "true"
+  {{- end }}

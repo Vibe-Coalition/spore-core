@@ -1951,13 +1951,13 @@ Set wait:false when you've submitted a long background job and just want to retu
           return await this._askUserTool(input);
 
         case 'spore_list':
-          return await this._animaListTool(input);
+          return await this._sporeListTool(input);
         case 'spore_message':
-          return await this._animaMessageTool(input);
+          return await this._sporeMessageTool(input);
         case 'spore_graph':
-          return await this._animaGraphTool(input);
+          return await this._sporeGraphTool(input);
         case 'spore_manage':
-          return await this._animaManageTool(input);
+          return await this._sporeManageTool(input);
 
         case 'remote_exec':
           return await this._remoteExecTool(input);
@@ -7687,9 +7687,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return resp.json();
   }
 
-  async _animaListTool(input) {
-    const data = await this._managerFetch('/api/animas');
-    const list = data?.animas;
+  async _sporeListTool(input) {
+    const data = await this._managerFetch('/api/spores');
+    const list = data?.spores;
     if (!Array.isArray(list)) return { error: 'Failed to fetch spore list' };
 
     const results = [];
@@ -7703,17 +7703,17 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
       results.push(entry);
     }
-    return { animas: results, count: results.length };
+    return { spores: results, count: results.length };
   }
 
-  async _animaMessageTool(input) {
+  async _sporeMessageTool(input) {
     const { target, message, context, timeout } = input;
     if (!target || !message) return { error: 'target and message are required' };
 
-    const animaData = await this._managerFetch(`/api/spores/${target}`);
-    if (animaData?.error) return { error: `Could not find spore "${target}": ${animaData.error}` };
+    const sporeData = await this._managerFetch(`/api/spores/${target}`);
+    if (sporeData?.error) return { error: `Could not find spore "${target}": ${sporeData.error}` };
 
-    const healthPort = animaData.env?.SPORE_HEALTH_PORT || '18790';
+    const healthPort = sporeData.env?.SPORE_HEALTH_PORT || '18790';
     const invokeUrl = `http://${target}:${healthPort}/api/invoke`;
 
     const headers = { 'Content-Type': 'application/json' };
@@ -7742,7 +7742,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
   }
 
-  async _animaGraphTool(input) {
+  async _sporeGraphTool(input) {
     const { target, mode } = input;
     if (!target) return { error: 'target is required' };
 
@@ -7769,7 +7769,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return { error: 'mode must be "read" or "write"' };
   }
 
-  async _animaManageTool(input) {
+  async _sporeManageTool(input) {
     const { target, action } = input;
     if (!target || !action) return { error: 'target and action are required' };
 

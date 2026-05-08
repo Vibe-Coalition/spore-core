@@ -14,7 +14,7 @@ docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up 
 The compose file pulls:
 
 ```text
-ghcr.io/yumlevi/spore:latest
+ghcr.io/vibe-coalition/spore-core:latest
 ```
 
 Override with:

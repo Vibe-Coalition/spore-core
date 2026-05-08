@@ -2,20 +2,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "anima.managerFullname" . }}
+  name: {{ include "spore.managerFullname" . }}
   labels:
-    {{- include "anima.labels" . | nindent 4 }}
+    {{- include "spore.labels" . | nindent 4 }}
     app.kubernetes.io/component: manager
 spec:
   replicas: {{ .Values.manager.replicas }}
   selector:
     matchLabels:
-      {{- include "anima.selectorLabels" . | nindent 6 }}
+      {{- include "spore.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: manager
   template:
     metadata:
       labels:
-        {{- include "anima.selectorLabels" . | nindent 8 }}
+        {{- include "spore.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: manager
     spec:
       {{- with .Values.imagePullSecrets }}
@@ -65,9 +65,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "anima.managerFullname" . }}
+  name: {{ include "spore.managerFullname" . }}
   labels:
-    {{- include "anima.labels" . | nindent 4 }}
+    {{- include "spore.labels" . | nindent 4 }}
     app.kubernetes.io/component: manager
 spec:
   type: ClusterIP
@@ -77,6 +77,6 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "anima.selectorLabels" . | nindent 4 }}
+    {{- include "spore.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: manager
 {{- end }}

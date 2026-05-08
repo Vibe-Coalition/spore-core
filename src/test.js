@@ -35,7 +35,7 @@ function assertContains(text, needle, testName) {
 }
 
 async function runTests() {
-  console.log('\nAnima Test Suite\n');
+  console.log('\nSpore Core Test Suite\n');
   
   resetConfigCache();
   const pre = loadConfigFresh();
@@ -256,7 +256,7 @@ async function runTests() {
     process.exit(1);
   } else {
     console.log('\n✅ All tests passed!');
-    console.log('\nAnima is ready. Run `node gateway.js` to start.');
+    console.log('\nSpore Core is ready. Run `node gateway.js` to start.');
   }
 }
 

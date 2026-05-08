@@ -6,28 +6,28 @@
 #   chmod +x .githooks/pre-push
 #
 # Then either:
-#   git config anima.allowpush true    # allow push on this clone permanently
-#   ANIMA_ALLOW_PUSH=1 git push ...    # one-off push
+#   git config spore.allowpush true    # allow push on this clone permanently
+#   SPORE_ALLOW_PUSH=1 git push ...    # one-off push
 
-if git config --get anima.allowpush 2>/dev/null | grep -q '^true$'; then
+if git config --get spore.allowpush 2>/dev/null | grep -q '^true$'; then
   exit 0
 fi
 
-if [ -n "$ANIMA_ALLOW_PUSH" ]; then
+if [ -n "$SPORE_ALLOW_PUSH" ]; then
   exit 0
 fi
 
 echo ""
-echo "Anima: git push is blocked by default."
+echo "Spore: git push is blocked by default."
 echo ""
 echo "  This repo is meant to be published only when YOU add a remote on your"
 echo "  personal GitHub (private repo), not a work account."
 echo ""
 echo "  After \`git remote add origin <your-private-repo-url>\`:"
-echo "    git config anima.allowpush true"
+echo "    git config spore.allowpush true"
 echo "    git push -u origin main"
 echo ""
 echo "  Or one-off:"
-echo "    ANIMA_ALLOW_PUSH=1 git push -u origin main"
+echo "    SPORE_ALLOW_PUSH=1 git push -u origin main"
 echo ""
 exit 1

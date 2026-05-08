@@ -4,11 +4,11 @@ kind: NetworkPolicy
 metadata:
   name: {{ .Release.Name }}-agent-policy
   labels:
-    {{- include "anima.labels" . | nindent 4 }}
+    {{- include "spore.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "anima.selectorLabels" . | nindent 6 }}
+      {{- include "spore.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: agent
   policyTypes:
     - Ingress
@@ -22,7 +22,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              {{- include "anima.selectorLabels" . | nindent 14 }}
+              {{- include "spore.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: manager
   egress:
     # Allow DNS
@@ -37,7 +37,7 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-              {{- include "anima.selectorLabels" . | nindent 14 }}
+              {{- include "spore.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: manager
     # Allow external API calls (Anthropic, Discord, Telegram, etc.)
     - to:

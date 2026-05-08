@@ -1,7 +1,7 @@
-Anima has been deployed!
+Spore has been deployed!
 
 {{- if .Values.manager.enabled }}
-Manager: {{ include "anima.managerFullname" . }}:{{ .Values.manager.port }}
+Manager: {{ include "spore.managerFullname" . }}:{{ .Values.manager.port }}
 {{- end }}
 
 Agent: {{ .Release.Name }}-agent-{{ .Values.agent.agentId }}

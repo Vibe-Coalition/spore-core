@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deploy Anima to Fly.io
+# Deploy Spore to Fly.io
 # Usage: ./deploy.sh [agent-id]
 
-AGENT_ID="${1:-anima}"
-APP_NAME="anima-${AGENT_ID}"
+AGENT_ID="${1:-spore}"
+APP_NAME="spore-${AGENT_ID}"
 REGION="${FLY_REGION:-iad}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-echo "=== Deploying Anima agent '${AGENT_ID}' to Fly.io ==="
+echo "=== Deploying Spore agent '${AGENT_ID}' to Fly.io ==="
 
 if ! command -v fly &>/dev/null; then
   echo "Error: flyctl not installed. See https://fly.io/docs/hands-on/install-flyctl/"
@@ -47,7 +47,7 @@ fly deploy \
   --app "${APP_NAME}" \
   --region "${REGION}" \
   --env "AGENT_ID=${AGENT_ID}" \
-  --env "ANIMA_DISPLAY_NAME=${AGENT_ID}" \
+  --env "SPORE_DISPLAY_NAME=${AGENT_ID}" \
   --env "HEALTH_BIND_ADDR=0.0.0.0"
 
 echo "=== Deployed! Check: fly status -a ${APP_NAME} ==="

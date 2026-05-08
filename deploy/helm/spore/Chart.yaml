@@ -1,0 +1,15 @@
+apiVersion: v2
+name: spore
+description: Spore Core agent runtime with persistent graph memory
+type: application
+version: 0.3.0
+appVersion: "0.3.0"
+keywords:
+  - ai
+  - agent
+  - knowledge-graph
+  - discord
+  - telegram
+home: https://github.com/Vibe-Coalition/spore-core
+maintainers:
+  - name: spore-maintainers

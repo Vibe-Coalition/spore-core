@@ -1662,7 +1662,7 @@ function _cvRenderTab(tab) {
     contentEl.classList.remove('has-lines');
     _cvClearLineNumbers();
     const workspacePath = tab.path.startsWith('/workspace/') ? tab.path : `/workspace/${tab.path.replace(/^\/+/, '')}`;
-    const mediaUrl = resolveAnimaMediaUrl(workspacePath);
+    const mediaUrl = resolveSporeMediaUrl(workspacePath);
     const escUrl = esc(mediaUrl);
     if (mediaType === 'image') {
       codeEl.innerHTML = `<div class="cv-media"><img src="${escUrl}" alt="${esc(tab.path)}" loading="lazy" onclick="window.open(this.src,'_blank')"></div>`;
@@ -2167,7 +2167,7 @@ const MEDIA_EXTS = {
 // This makes media rendering robust across topologies (localhost, reverse proxy,
 // tunnels, subpath mounts): the agent can emit absolute or relative URLs and the
 // UI rewrites them to resolve against whichever origin served the chat.
-function resolveAnimaMediaUrl(url) {
+function resolveSporeMediaUrl(url) {
   if (!url || typeof url !== 'string') return url;
   if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('#')) return url;
 
@@ -2224,7 +2224,7 @@ function detectMediaInText(text) {
       else if (MEDIA_EXTS.video.includes(ext)) type = 'video';
       else if (MEDIA_EXTS.audio.includes(ext)) type = 'audio';
       if (!type) continue;
-      const resolved = resolveAnimaMediaUrl(raw);
+      const resolved = resolveSporeMediaUrl(raw);
       seen.add(raw);
       found.push({ url: resolved, type, raw });
     }
@@ -2232,7 +2232,7 @@ function detectMediaInText(text) {
   return found;
 }
 
-// Walk an HTML string and rewrite media src attributes through resolveAnimaMediaUrl.
+// Walk an HTML string and rewrite media src attributes through resolveSporeMediaUrl.
 // Heals markdown-rendered <img>/<video>/<audio> that contain baked-in absolute URLs.
 function rewriteMediaUrlsInHtml(html) {
   if (!html || typeof html !== 'string') return html;
@@ -2241,12 +2241,12 @@ function rewriteMediaUrlsInHtml(html) {
   tmpl.content.querySelectorAll('img, video, audio, source').forEach(el => {
     const src = el.getAttribute('src');
     if (src) {
-      const fixed = resolveAnimaMediaUrl(src);
+      const fixed = resolveSporeMediaUrl(src);
       if (fixed !== src) el.setAttribute('src', fixed);
     }
     const poster = el.getAttribute('poster');
     if (poster) {
-      const fixed = resolveAnimaMediaUrl(poster);
+      const fixed = resolveSporeMediaUrl(poster);
       if (fixed !== poster) el.setAttribute('poster', fixed);
     }
   });

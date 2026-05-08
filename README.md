@@ -17,11 +17,11 @@ Spore Core is a persistent AI agent runtime. It combines a web control panel,
 channel gateways, long-term graph memory, local and remote tools, model routing,
 and a plugin system into one containerized service.
 
-Spore Core is a fork and continuation of Kyle Lacey's Anima project, released
-under the Vibe Coalition organization. It is a passion project, still very much
-being built in public: practical, experimental, sometimes sharp-edged, and aimed
-at making an agent that can actually live alongside your work without turning
-every conversation into one giant polluted memory pile.
+Spore Core is released under the Vibe Coalition organization. It is a passion
+project, still very much being built in public: practical, experimental,
+sometimes sharp-edged, and aimed at making an agent that can actually live
+alongside your work without turning every conversation into one giant polluted
+memory pile.
 
 The runtime is designed for three main workflows:
 
@@ -196,6 +196,5 @@ See [LICENSE](LICENSE).
 
 ## Credits
 
-Spore Core builds on Kyle Lacey's Anima project and carries that lineage forward
-inside Vibe Coalition. Thank you to everyone experimenting, filing issues,
-opening PRs, and pushing the project into weirder and more useful territory.
+Thank you to everyone experimenting, filing issues, opening PRs, and pushing the
+project into weirder and more useful territory.

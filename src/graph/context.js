@@ -323,12 +323,12 @@ class GraphContext {
       catch { return; }
     }
 
-    const animaId = this.config.agentId;
+    const sporeId = this.config.agentId;
     const currentBySlug = new Map(this._sharedGraphs.map(s => [s.slug, s]));
     const wantedSlugs = new Set();
 
     for (const [slug, proj] of Object.entries(projects)) {
-      if (proj.members && proj.members.includes(animaId)) wantedSlugs.add(slug);
+      if (proj.members && proj.members.includes(sporeId)) wantedSlugs.add(slug);
     }
 
     // Detach removed projects

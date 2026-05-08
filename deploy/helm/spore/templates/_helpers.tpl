@@ -1,7 +1,7 @@
 {{/*
 Common labels
 */}}
-{{- define "anima.labels" -}}
+{{- define "spore.labels" -}}
 app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
@@ -12,7 +12,7 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{/*
 Selector labels
 */}}
-{{- define "anima.selectorLabels" -}}
+{{- define "spore.selectorLabels" -}}
 app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
@@ -20,13 +20,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/*
 Manager fullname
 */}}
-{{- define "anima.managerFullname" -}}
+{{- define "spore.managerFullname" -}}
 {{ .Release.Name }}-manager
 {{- end }}
 
 {{/*
 Agent fullname for a given agent ID
 */}}
-{{- define "anima.agentFullname" -}}
+{{- define "spore.agentFullname" -}}
 {{ .Release.Name }}-agent-{{ .agentId }}
 {{- end }}

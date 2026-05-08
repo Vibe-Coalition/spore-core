@@ -143,11 +143,11 @@ class PluginManager {
    * Read manifest from either spore.plugin.json or openclaw.plugin.json.
    */
   _readManifest(pluginPath) {
-    const animaManifest = path.join(pluginPath, 'spore.plugin.json');
+    const sporeManifest = path.join(pluginPath, 'spore.plugin.json');
     const openclawManifest = path.join(pluginPath, 'openclaw.plugin.json');
 
-    if (fs.existsSync(animaManifest)) {
-      const raw = JSON.parse(fs.readFileSync(animaManifest, 'utf8'));
+    if (fs.existsSync(sporeManifest)) {
+      const raw = JSON.parse(fs.readFileSync(sporeManifest, 'utf8'));
       return {
         id: raw.id,
         name: raw.name || raw.id,

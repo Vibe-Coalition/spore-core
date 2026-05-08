@@ -3612,7 +3612,7 @@ class WebGateway {
 
     const managerUrl = process.env.MANAGER_URL;
     const managerKey = process.env.MANAGER_SERVICE_KEY;
-    const animaId = this.config.agentId;
+    const sporeId = this.config.agentId;
     const cookieSecureAttr = (req) => {
       if (process.env.SPORE_INSECURE_COOKIES === 'true') return '';
       if (process.env.SPORE_SECURE_COOKIES === 'true') return '; Secure';
@@ -3629,7 +3629,7 @@ class WebGateway {
       const mgrToken = cookies['manager_session'];
       if (!mgrToken) return false;
       try {
-	        const payload = JSON.stringify({ token: mgrToken, animaId, webappOnly });
+	        const payload = JSON.stringify({ token: mgrToken, sporeId, webappOnly });
 	        const url = new URL(managerUrl + '/api/auth/verify-session');
 	        const http_ = url.protocol === 'https:' ? require('https') : require('http');
         const result = await new Promise((resolve, reject) => {
@@ -3852,7 +3852,7 @@ class WebGateway {
             if (managerUrl && serviceKey) {
               try {
                 const http_ = managerUrl.startsWith('https') ? require('https') : require('http');
-                const payload = JSON.stringify({ username, password, animaId });
+                const payload = JSON.stringify({ username, password, sporeId });
                 const result = await new Promise((resolve, reject) => {
                   const url = new URL(managerUrl + '/api/auth/verify-access');
                   const opts = {

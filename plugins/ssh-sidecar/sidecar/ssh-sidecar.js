@@ -27,7 +27,7 @@ const STORE_FILE = process.env.SIDECAR_STORE || '/data/ssh-hosts.json';
 const AUDIT_FILE = process.env.SIDECAR_AUDIT_LOG || '/data/terminal-audit.log';
 const PASSPHRASE = process.env.SIDECAR_PASSPHRASE;
 const PRIMARY_SALT = process.env.SIDECAR_KEY_SALT || 'spore-ssh-keystore-v1';
-const LEGACY_SALTS = ['anima-ssh-keystore-v1'];
+const LEGACY_SALTS = [];
 const ALLOWED_HOSTS = (process.env.SIDECAR_ALLOWED_HOSTS || '*')
   .split(',')
   .map(s => s.trim().toLowerCase())
