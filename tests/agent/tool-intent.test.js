@@ -241,6 +241,7 @@ test('runtime contract adds a non-droppable cli plan-mode guard', () => {
   assert.match(contract, /Do NOT call `exec`/);
   assert.match(contract, /Evidence discipline/);
   assert.match(contract, /stale context/);
+  assert.match(contract, /Ask the user when uncertainty is about intent/);
   assert.match(contract, /final verification claims must be command-derived/);
   assert.match(contract, /focused tests/);
 });
