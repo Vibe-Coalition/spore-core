@@ -8,6 +8,7 @@
   <a href="https://github.com/Vibe-Coalition"><img alt="Vibe Coalition" src="https://img.shields.io/badge/Vibe%20Coalition-Spore%20Core-ff7a1a?style=for-the-badge"></a>
   <img alt="Status" src="https://img.shields.io/badge/status-in%20active%20development-2f855a?style=for-the-badge">
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-2563eb?style=for-the-badge">
+  <a href="https://discord.gg/mtsQ6GrdsN"><img alt="Discord" src="https://img.shields.io/badge/Discord-join%20chat-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
   <img alt="Vibe code welcome" src="https://img.shields.io/badge/vibe%20code-welcome-7c3aed?style=for-the-badge">
 </p>
 
