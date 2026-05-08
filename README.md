@@ -1,4 +1,5 @@
 <p align="center">
+  <img src="assets/spore-logo.svg" alt="Spore logo" width="96" height="96"><br>
   <strong>Spore Core</strong><br>
   A personal agent runtime for people building tools with tools.
 </p>

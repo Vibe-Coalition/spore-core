@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">Spore logo</title>
+  <desc id="desc">Six amber nodes connected to a central node.</desc>
+  <style>
+    .spoke { stroke: #1f2933; stroke-width: 2.4; stroke-linecap: round; }
+    .center { fill: #1f2933; }
+    .petal { fill: #c8762c; }
+    @media (prefers-color-scheme: dark) {
+      .spoke { stroke: #f7f3ec; }
+      .center { fill: #f7f3ec; }
+    }
+  </style>
+  <g>
+    <line class="spoke" x1="50" y1="50" x2="50" y2="19" />
+    <line class="spoke" x1="50" y1="50" x2="76.85" y2="34.5" />
+    <line class="spoke" x1="50" y1="50" x2="76.85" y2="65.5" />
+    <line class="spoke" x1="50" y1="50" x2="50" y2="81" />
+    <line class="spoke" x1="50" y1="50" x2="23.15" y2="65.5" />
+    <line class="spoke" x1="50" y1="50" x2="23.15" y2="34.5" />
+  </g>
+  <g>
+    <circle class="petal" cx="50" cy="19" r="8" />
+    <circle class="petal" cx="76.85" cy="34.5" r="8" />
+    <circle class="petal" cx="76.85" cy="65.5" r="8" />
+    <circle class="petal" cx="50" cy="81" r="8" />
+    <circle class="petal" cx="23.15" cy="65.5" r="8" />
+    <circle class="petal" cx="23.15" cy="34.5" r="8" />
+  </g>
+  <circle class="center" cx="50" cy="50" r="9" />
+</svg>
