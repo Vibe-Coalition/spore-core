@@ -1,8 +1,26 @@
+<p align="center">
+  <strong>Spore Core</strong><br>
+  A personal agent runtime for people building tools with tools.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Vibe-Coalition"><img alt="Vibe Coalition" src="https://img.shields.io/badge/Vibe%20Coalition-Spore%20Core-ff7a1a?style=for-the-badge"></a>
+  <img alt="Status" src="https://img.shields.io/badge/status-in%20active%20development-2f855a?style=for-the-badge">
+  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-2563eb?style=for-the-badge">
+  <img alt="Vibe code welcome" src="https://img.shields.io/badge/vibe%20code-welcome-7c3aed?style=for-the-badge">
+</p>
+
 # Spore Core
 
 Spore Core is a persistent AI agent runtime. It combines a web control panel,
 channel gateways, long-term graph memory, local and remote tools, model routing,
 and a plugin system into one containerized service.
+
+Spore Core is a fork and continuation of Kyle Lacey's Anima project, released
+under the Vibe Coalition organization. It is a passion project, still very much
+being built in public: practical, experimental, sometimes sharp-edged, and aimed
+at making an agent that can actually live alongside your work without turning
+every conversation into one giant polluted memory pile.
 
 The runtime is designed for three main workflows:
 
@@ -12,6 +30,18 @@ The runtime is designed for three main workflows:
   project, person, or channel pollute every other conversation.
 - **Extend the agent** with providers, tools, gateways, reference nodes, and UI
   settings through plugins.
+
+## Project Spirit
+
+Spore is for people who want an agent that can do real work, remember the right
+things, forget the wrong things, and be shaped by the people using it. The code
+is evolving quickly, so expect rough edges and moving parts.
+
+Contributions are welcome. Small fixes, docs improvements, plugin experiments,
+benchmarks, design polish, and "vibe coded" prototypes are all fair game as long
+as they are useful, reviewable, and honest about what was tested. Discord is
+available for project chat and coordination; a public invite link will be added
+here once it is finalized.
 
 ## Quick Start
 
@@ -162,3 +192,9 @@ See [docs/security.md](docs/security.md).
 ## License
 
 See [LICENSE](LICENSE).
+
+## Credits
+
+Spore Core builds on Kyle Lacey's Anima project and carries that lineage forward
+inside Vibe Coalition. Thank you to everyone experimenting, filing issues,
+opening PRs, and pushing the project into weirder and more useful territory.
