@@ -1,163 +1,165 @@
 # User Guide
 
-The Anima web panel is a live window into your agent's mind. It lets you observe the knowledge graph evolving in real time, chat with the agent, browse its workspace, and connect to remote systems — all from a single visual interface.
+The Spore web app is the control surface for chat, graph memory, settings,
+plugins, channels, files, logs, benchmarks, and operator maintenance.
 
----
+## First Run
 
-## Web Panel Layout
+Open the web port, usually:
 
-The web panel has three panes:
+```text
+http://localhost:18803
+```
 
-| Pane | Position | Purpose |
-|---|---|---|
-| **Node/Files/Logs** | Left | Browse graph nodes, workspace files, and agent logs |
-| **Graph Canvas** | Center | Interactive knowledge graph visualization + terminal |
-| **Chat** | Right | Converse with the agent, attach files, use voice |
+The first-run wizard creates the first operator account, configures providers,
+chooses bundled plugins, sets model routing, and writes settings under `/data`.
+After onboarding, the app creates the base graph set and starts normal runtime
+workers.
 
-Panes are resizable by dragging the borders between them. The chat and node panels can be toggled via the **chat** and **nodes**/**files**/**logs** buttons in the top toolbar.
+Normal users who self-register receive their own user graph. Operators can still
+access the broader admin surfaces.
 
----
+## Main Areas
+
+The app contains:
+
+- chat and session controls,
+- knowledge graph view,
+- graph switcher in the bottom dock,
+- settings and plugin management,
+- logs and activity,
+- workspace files and uploads,
+- terminal/remote access when enabled,
+- channel pairing,
+- graph export/import/backups,
+- benchmark plugins.
+
+The UI supports dark and light themes. Light theme uses the orange accent; dark
+theme uses the darker Spore palette.
 
 ## Chat
 
-Type a message in the text box at the bottom-right and click **send** (or press Enter). The agent streams its response in real-time.
+Use chat to talk to the current session. The active graph/session matters: a web
+user graph, default graph, project graph, or channel graph can all produce
+different context.
 
-### Attachments
+Common controls:
 
-Click **attach** to upload images, audio, or video. Files are sent as base64 alongside the message. The agent can view images and process audio.
+- send a message,
+- stop/interrupt a running turn,
+- view activity and tool calls,
+- attach supported files,
+- answer `ask_user` prompts.
 
-### Voice
-
-- **mic** — record and send a voice message. Transcribed via Deepgram STT, processed by the agent, and returned as text.
-- **call** — start a live voice call. Audio streams continuously with interrupt detection and TTS responses.
-
-Voice requires Deepgram STT configured in the agent's `.env`. TTS falls back to free Edge TTS if no paid provider is set.
-
-### Session Management
-
-- **clear** — wipe the current chat session. Does not affect the knowledge graph.
-- **stop** — interrupt the agent mid-response.
-
----
+`ask_user` currently supports structured single-choice selections in web and
+Spore Code sessions. If you type a normal clarification while a question is
+pending, the app should not silently discard it.
 
 ## Knowledge Graph
 
-The center canvas shows a force-directed graph of all nodes and their relationships. Nodes are color-coded by type (person, tool, concept, project, etc.).
+The graph view shows nodes, relationships, aspects, and attributes for the
+selected graph.
 
-### Navigation
+Useful actions:
 
-- **Scroll** to zoom in/out
-- **Drag** the background to pan
-- **Click** a node to select it and view details in the left panel
-- **center** button resets zoom to fit all nodes
+- switch graphs from the dock,
+- search nodes,
+- filter by type,
+- select a node to view aspects and edges,
+- right-click supported session nodes for summary/distill actions,
+- export or import graph data,
+- reset an individual graph when appropriate.
 
-### Filtering
+The General Knowledge graph should stay pinned and easy to reach because many
+scoped sessions read from it.
 
-- Use the **type dropdown** to filter by node type
-- Use the **search bar** to find nodes by name
+## Graph Rendering
 
-### Creating Nodes
+Spore uses renderer switching so large graphs remain usable:
 
-Click **+ node** in the toolbar to create a new node manually. The agent also creates nodes automatically through conversation learning.
+- SVG mode for smaller visible sets and detailed interaction,
+- WebGL mode for larger visible sets,
+- focus/structure views for node neighborhoods,
+- optional performance metrics in Settings under Spore Core.
 
----
+When performance metrics are disabled, the graph should not show the renderer
+status line under the node/edge/type counts.
 
-## Node Details Panel
+## Settings
 
-When you select a node, the left panel shows:
+Settings are searchable. Search should be case-insensitive and forgiving: a
+query like `sear` should match `SearXNG`.
 
-- **Node header** — name, type, creation date
-- **Aspects** — grouped facets (identity, voice, constraints, etc.)
-- **Attributes** — individual facts within each aspect, with importance scores and timestamps
-- **Edges** — relationships to other nodes (click to navigate)
+Important sections:
 
-You can edit attributes and aspects directly in this panel.
+- Spore identity and paths,
+- model providers and routing presets,
+- web search,
+- graph and memory,
+- sessions and context,
+- channels and pairing,
+- plugins,
+- backups,
+- Tailscale, SSH, and remote access,
+- logs and appearance.
 
----
+Some plugin settings save immediately because they control runtime sidecars or
+external login flows. The central Save button applies standard settings changes.
 
-## File Browser
+## Plugins
 
-Click **files** in the toolbar to browse the agent's `/workspace` directory. You can:
+Plugins can add providers, tools, gateways, settings, UI panels, routes, prompt
+sections, workers, and reference nodes. Bundled plugins include model providers,
+Telegram/Slack/Discord, browser backends, voice providers, Tailscale, SSH
+sidecar, cron guidance, email, LongMemEval, and Spore Code Benchmark.
 
-- Navigate directories
-- View file contents
-- The agent can create and edit files here via tools
+Plugin reference nodes install into General Knowledge so they are visible to
+scoped sessions without being written into the default graph.
 
----
+## Channels
 
-## Logs
+Telegram, Slack, and Discord use channel plugins. Pairing requests can be
+approved from channel settings when supported. A channel session should write to
+its channel/person graph and send replies back to the same originating channel.
 
-Click **logs** to view real-time agent logs. Useful for debugging tool calls, learner extraction, and gateway events.
+Recurring wakeups created from a channel should also return to that channel, not
+to an unrelated web or CLI session.
 
----
+## Spore Code
 
-## Interactive Terminal
+Spore Code sessions are coding sessions tied to a project graph. The server
+should route the session back to the existing project graph when the same project
+identity reconnects, including when another authorized collaborator works on the
+same project later.
 
-Click the **terminal** button at the bottom-left of the graph canvas to open an interactive terminal.
+Spore Code executes local tools on the user's machine/client context, not as a
+generic webapp session. Tool catalogs are intentionally different from the web
+app.
 
-### Local Shell
+## Backups, Export, And Reset
 
-The default mode opens a bash shell inside the agent's container at `/workspace`. Useful for inspecting files, running scripts, or debugging.
+Back up `/data` before destructive operations. The backup/export UI is graph
+aware:
 
-### Remote SSH
+- individual graph reset affects the selected graph,
+- global reset removes all graphs except default and General Knowledge, then
+  resets those two,
+- export/import should make clear which graph is being handled.
 
-To connect to external servers:
+## Troubleshooting
 
-1. Click **hosts** in the terminal header
-2. Fill in hostname, port, username
-3. Paste an SSH private key (PEM format) or enter a password
-4. Click **Save**, then **Test** to verify connectivity
-5. Select the host from the dropdown and click **connect**
+If a channel reply appears in the web app instead of the channel, check the
+wakeup/session origin and channel graph binding.
 
-**Key security:**
-- SSH keys are encrypted with AES-256-GCM before storage
-- Keys are never sent back to the browser after saving
-- When the `ssh-sidecar` plugin and sidecar service are deployed, saved-host keys, interactive SSH sessions, remote exec, and SFTP are isolated in a separate process with no inbound ports
-- Compute Cluster uses a sidecar credential profile named `cluster-default`; generated cluster keys are created inside the sidecar and only the public key/fingerprint are shown in Settings.
+If graph switches do not affect chat, verify that the active session graph was
+updated and not only the graph view.
 
-### Terminal Controls
+If buttons become hard to click, inspect overlays, active dock backgrounds, and
+submenus. Invisible elements should not sit over the dock.
 
-- **Resize** — drag the top edge of the terminal pane up/down
-- **close** — disconnect and hide the terminal
-- **connect** — reconnect to the selected host
+If login reports too many attempts after a valid login or stale connection,
+check websocket auth cleanup and login rate-limit reset behavior.
 
----
-
-## Subagent Activity
-
-When the agent delegates a background task (via `delegate_task`), a subagent activity bar appears above the terminal showing:
-
-- Current subagent status (thinking, tool use, text output)
-- Real-time streaming of subagent reasoning
-
----
-
-## LongMemEval Benchmark
-
-From the gear menu (top-right of canvas), select **LongMemEval** to run the memory benchmark:
-
-1. Choose variant (Oracle, Small, Medium)
-2. Select question types to evaluate
-3. Choose learner and answering models
-4. Click **Start**
-
-Results show accuracy breakdown by question type with comparisons to published baselines.
-
----
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|---|---|
-| Enter | Send message |
-| Shift+Enter | New line in message |
-| Escape | Close modals |
-
----
-
-## Tips
-
-- The agent learns from every conversation. Ask it to remember facts and it will store them in the knowledge graph.
-- Use `graph_query` in conversation to ask the agent to search its own memory.
-- The agent can serve web pages from `/workspace/web/` — ask it to build you a dashboard.
-- Background tasks (`delegate_task`) are great for long research or code generation tasks that would otherwise block the conversation.
+If the agent appears to know unrelated project or server capabilities, inspect
+the prompt sections, scoped recall results, plugin reference nodes, and tool
+catalog exposed to that session.

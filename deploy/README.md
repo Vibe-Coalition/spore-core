@@ -1,118 +1,139 @@
-# Spore Core — Deployment
+# Spore Core Deployment
 
-Spore Core ships as a single Docker image. The official image is built by
-GitHub Actions on every push to `main` and on tagged releases (see
-`.github/workflows/docker-publish.yml`) and published to GitHub Container
-Registry.
+This directory contains production deployment helpers. The main supported path
+is a Docker image with persistent `/data` and `/workspace` volumes.
 
-```
-ghcr.io/yumlevi/spore:latest          # bleeding edge (main branch)
-ghcr.io/yumlevi/spore:v0.3.0          # specific version
-ghcr.io/yumlevi/spore:sha-<short>     # specific commit
-```
+## Production Compose
 
-Multi-arch builds: `linux/amd64` + `linux/arm64`.
-
----
-
-## Quickstart — Docker run
+Create `deploy/.env.prod` from your deployment values, then run:
 
 ```bash
-docker run -d --name spore --restart unless-stopped \
-  -p 18803:18803 -p 127.0.0.1:18790:18790 \
-  -v spore-data:/data \
-  -v spore-workspace:/workspace \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  ghcr.io/yumlevi/spore:latest
-```
-
-Open <http://localhost:18803> and you should land on the canvas.
-
----
-
-## Production — Docker Compose
-
-The recommended setup. Pulls the official image, mounts named volumes,
-sets resource limits + `no-new-privileges`.
-
-```bash
-cp deploy/.env.prod.example deploy/.env.prod
-# edit deploy/.env.prod — at minimum set ANTHROPIC_API_KEY (or another
-# model provider). Tweak ports / display name / image tag as needed.
-
 docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up -d
 ```
 
-Tail logs: `docker compose -f deploy/docker-compose.prod.yml logs -f`.
+The compose file pulls:
 
-To pin a specific release, set `SPORE_IMAGE_TAG=v0.3.0` in `.env.prod`.
-To use a private registry, set `SPORE_IMAGE=registry.example.com/spore-core`.
-
----
-
-## Multi-spore (Manager) deployments
-
-For running several agents on one box with a shared Manager UI, see the
-`spores/` agent-directory convention in the main README. Each agent gets
-its own `data/` + `workspace/` + `spore.json` and binds different ports.
-
----
-
-## Building locally
-
-If you're hacking on Spore Core itself:
-
-```bash
-# Build only
-./deploy/build-push.sh
-
-# Build and push to your own registry
-./deploy/build-push.sh ghcr.io/<your-user>/spore-core
+```text
+ghcr.io/yumlevi/spore:latest
 ```
 
-The script tags `spore-core:latest`, `spore-core:<version>`, and
-`spore-core:<git-sha>`. Build context is the repo root; the Dockerfile
-lives at `src/Dockerfile`.
+Override with:
 
----
+```text
+SPORE_IMAGE=your-registry/spore
+SPORE_IMAGE_TAG=your-tag
+```
 
-## Releasing a new official version
+## Required State
 
-1. Bump `version` in `src/package.json`.
-2. Tag the release: `git tag v0.3.1 && git push origin v0.3.1`.
-3. The GitHub Actions workflow builds + pushes
-   `ghcr.io/<owner>/<repo>:v0.3.1`, `:0.3`, `:0`, and `:latest` automatically.
+Back up these volumes:
 
-To trigger an ad-hoc rebuild without a tag, run the workflow from the
-Actions tab → *Build and publish official Docker image* → *Run workflow*.
+- `/data`: settings, users, graph DBs, sessions DB, runtime jobs, backups,
+  plugin state, Tailscale state, SSH sidecar state.
+- `/workspace`: webapp workspace, uploaded/generated files, user plugins if
+  configured there.
 
-**One-time setup (per repo):** Settings → Actions → General → *Workflow
-permissions* → enable **Read and write permissions**. This lets the
-workflow push to ghcr.io with the auto-issued `GITHUB_TOKEN` — no extra
-secrets needed.
+The first-run wizard persists settings into `/data`; you do not need to bind
+mount `/app/spore.json` or `/app/.env`.
 
----
+## Ports
 
-## Environment variables (the essentials)
+- `SPORE_WEB_PORT`, default `18803`: web UI, HTTP API, websocket sessions.
+- `SPORE_HEALTH_PORT`, default `18790`: health endpoint.
 
-| Variable | Description | Default |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | Or `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `GEMINI_API_KEY` — at least one provider. | (none) |
-| `AGENT_ID` | Unique id for this agent's graph + node label. | `spore` |
-| `SPORE_DISPLAY_NAME` | Human-readable name. | (from `AGENT_ID`) |
-| `SPORE_WEB_PORT` | HTTP port for the web canvas. | `18803` |
-| `SPORE_HEALTH_PORT` | HTTP port for `/health` + metrics. | `18790` |
-| `GRAPH_DB_PATH` | Knowledge graph SQLite location inside the container. | `/data/graph.db` |
-| `SESSION_DB_PATH` | Sessions SQLite location. | `/data/sessions.db` |
-| `SPORE_WORKSPACE_PATH` | Writable workspace mount. | `/workspace` |
-| `SPORE_WEB_AUTH_USER` / `SPORE_WEB_AUTH_PASS` | HTTP basic auth on the canvas. | (open) |
+The production compose binds health to `127.0.0.1` by default:
 
-Optional gateway tokens auto-enable when set:
-`DISCORD_TOKEN`, `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`.
+```yaml
+127.0.0.1:${SPORE_HEALTH_PORT:-18790}:${SPORE_HEALTH_PORT:-18790}
+```
 
-Plugin keys are owned by their respective plugins (read in their own
-`index.js`). Set them in the env and the corresponding plugin (if
-installed) will pick them up: `XI_API_KEY` (elevenlabs),
-`DEEPGRAM_API_KEY` (deepgram), `BFL_API_KEY` (flux).
+Expose the health port publicly only if your infrastructure requires it.
 
-See `deploy/.env.prod.example` for the full reference.
+## Environment Essentials
+
+Common env vars:
+
+```text
+SPORE_AGENT_ID=spore
+SPORE_DISPLAY_NAME=Spore
+SPORE_WEB_PORT=18803
+SPORE_HEALTH_PORT=18790
+SPORE_DATA_DIR=/data
+SPORE_WORKSPACE_PATH=/workspace
+GRAPH_DB_PATH=/data/graph.db
+SESSION_DB_PATH=/data/sessions.db
+SETTINGS_DB_PATH=/data/settings.db
+SPORE_PLUGINS_ENABLED=true
+```
+
+Provider and channel keys can be supplied by env or entered in the wizard:
+
+```text
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+OPENROUTER_API_KEY=
+GEMINI_API_KEY=
+TELEGRAM_BOT_TOKEN=
+SLACK_BOT_TOKEN=
+SLACK_APP_TOKEN=
+DISCORD_TOKEN=
+```
+
+## Building Locally
+
+```bash
+docker build -t spore:latest -f src/Dockerfile .
+```
+
+The root `docker-compose.yml` can also build the image:
+
+```bash
+docker compose --profile build build
+```
+
+## Running With Docker Run
+
+```bash
+docker run -d --name spore --restart unless-stopped \
+  -p 18803:18803 \
+  -p 127.0.0.1:18790:18790 \
+  -v spore-data:/data \
+  -v spore-workspace:/workspace \
+  -e SPORE_WEB_PORT=18803 \
+  -e SPORE_HEALTH_PORT=18790 \
+  -e SPORE_DATA_DIR=/data \
+  -e SPORE_WORKSPACE_PATH=/workspace \
+  -e GRAPH_DB_PATH=/data/graph.db \
+  -e SESSION_DB_PATH=/data/sessions.db \
+  -e SETTINGS_DB_PATH=/data/settings.db \
+  -e SPORE_PLUGINS_ENABLED=true \
+  spore:latest
+```
+
+## Health Check
+
+```bash
+curl -fsS http://127.0.0.1:18790/health
+```
+
+Healthy output includes connected graph/session state, learner state, model, and
+uptime.
+
+## Optional Services
+
+- **Tailscale:** installed in the image and managed by the Tailscale plugin when
+  enabled/configured.
+- **SSH sidecar:** optional credential isolation boundary; core falls back to
+  encrypted local storage if unavailable.
+- **Manager mesh:** set `MANAGER_URL` and `MANAGER_SERVICE_KEY` for manager
+  integration.
+
+## Updating
+
+1. Pull or build the desired image.
+2. Stop and rename the old container for rollback.
+3. Start the new container with the same `/data` and `/workspace` volumes.
+4. Wait for health to report `ok`.
+5. Remove the rollback container after verification.
+
+Do not delete `/data` unless you intentionally want to reset the instance.

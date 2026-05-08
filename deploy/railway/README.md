@@ -1,20 +1,51 @@
 # Railway Deployment
 
-Deploy an Anima agent to Railway for a quick cloud-hosted setup with persistent memory.
+Railway is a quick way to run a small Spore Core instance with persistent data.
+For production, prefer the Docker compose path in `deploy/README.md`.
 
-1. Fork the Anima repo to your GitHub.
-2. Create a new project on [Railway](https://railway.app).
-3. Connect your GitHub repo as the source.
-4. Set the root directory to the repo root.
-5. Add environment variables:
-   - `ANTHROPIC_API_KEY` (required)
-   - `DISCORD_TOKEN` (if using Discord)
-   - `AGENT_ID` (default: anima)
-   - `ANIMA_DISPLAY_NAME`
-   - `ANIMA_MODEL` (default: claude-sonnet-4-6)
-   - `HEALTH_BIND_ADDR=0.0.0.0`
-   - `MANAGER_SERVICE_KEY` (for inter-agent auth)
-6. Add a persistent volume mounted at `/data` for graph.db and sessions.db.
-7. Deploy.
+## Steps
 
-Railway will use `railway.json` to build from the Dockerfile and health-check on `/health`.
+1. Create a Railway project from this repository.
+2. Build from the repository root with `src/Dockerfile`.
+3. Add a persistent volume mounted at `/data`.
+4. Add a persistent volume mounted at `/workspace` if you want generated files
+   and workspace state to survive redeploys.
+5. Expose the web port you choose with `SPORE_WEB_PORT`.
+6. Set provider/channel secrets in Railway variables or finish first-run
+   onboarding in the web UI.
+
+## Common Variables
+
+```text
+AGENT_ID=spore
+SPORE_DISPLAY_NAME=Spore
+SPORE_WEB_PORT=18803
+SPORE_HEALTH_PORT=18790
+HEALTH_BIND_ADDR=0.0.0.0
+SPORE_DATA_DIR=/data
+SPORE_WORKSPACE_PATH=/workspace
+GRAPH_DB_PATH=/data/graph.db
+SESSION_DB_PATH=/data/sessions.db
+SPORE_PLUGINS_ENABLED=true
+```
+
+Optional provider/channel variables:
+
+```text
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+OPENROUTER_API_KEY=
+GEMINI_API_KEY=
+TELEGRAM_BOT_TOKEN=
+SLACK_BOT_TOKEN=
+SLACK_APP_TOKEN=
+DISCORD_TOKEN=
+```
+
+## Notes
+
+Railway should health-check `/health` on `SPORE_HEALTH_PORT`. The web UI and API
+run on `SPORE_WEB_PORT`.
+
+Back up the `/data` volume before resetting graphs, users, sessions, plugins, or
+settings.

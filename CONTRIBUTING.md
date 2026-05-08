@@ -1,133 +1,114 @@
-# Contributing to Anima
+# Contributing to Spore Core
 
-Anima is a visual agentic system — autonomous AI agents with observable knowledge graph memory. Contributions across the stack are welcome: the core agent runtime, visual graph interface, Manager UI, deployment tooling, and documentation.
+Spore Core is a Node.js runtime packaged as a Docker image. It uses SQLite for
+settings, sessions, runtime jobs, and knowledge graphs. Most extension points
+are plugins.
 
-## Development setup
+## Development Setup
 
-```bash
-git clone https://github.com/Klace/Anima-AI.git && cd Anima-AI
-chmod +x install.sh new-agent.sh setup-manager.sh setup-traefik.sh configure-anima.sh
-./install.sh        # sets up Traefik, Manager, and the base Docker image
-```
-
-You need Docker installed. `install.sh` handles Docker installation on Ubuntu/Debian if needed.
-
-### Running a development agent
+Install Node.js 22 or use the Docker image. From the repository root:
 
 ```bash
-cd animas/<agent-id>
-docker compose up -d --build -V   # build + start
-docker logs -f <agent-id>         # watch logs
+npm --prefix src install
+npm --prefix src test
 ```
 
-Source code lives in `src/`. Agents with `ANIMA_SRC_EDITABLE=false` (default) bind-mount from `../../src/` — editing `src/` and restarting the container picks up changes immediately. Agents with `ANIMA_SRC_EDITABLE=true` have their own `src/` copy under `animas/<agent-id>/src/`.
-
-### Running tests
+Build the image:
 
 ```bash
-cd src && node test.js
+docker build -t spore:latest -f src/Dockerfile .
 ```
 
-Tests validate the graph context engine, session manager, and prompt building without requiring API keys or Docker.
-
-## Repository layout
-
-```
-src/                  Core application (Docker build context)
-  app.js              Boot sequence — wires everything together
-  config.js           Env/file config loader with defaults
-  agent/
-    loop.js           Core agentic loop (message → context → LLM → tools → respond)
-    sessions.js       Session management, compaction, idle timeouts
-  graph/
-    context.js        Builds system prompt from SQLite knowledge graph
-    retrieval.js      Hybrid search: FTS5, vector, temporal, graph walk
-    embedder.js       Gemini embedding integration
-    feed.js           Activity feed for recent changes
-    multi.js          Multi-graph registry (multiple knowledge bases per agent)
-  workers/
-    learner.js        Extracts facts from conversations → graph
-    maintainer.js     Gap detection, reflections, stale checks, sparse connect
-    proactive.js      Heartbeat-triggered outreach to channels
-  tools/
-    tools.js          Tool definitions (exec, file I/O, web, graph, SSH, etc.)
-    ssh-manager.js    SSH connections, keystore, SFTP, tunneling
-  gateways/
-    manager.js        Multi-gateway orchestrator
-    discord.js        Discord adapter
-    telegram.js       Telegram adapter
-    slack.js          Slack Socket Mode adapter
-    web.js            Web panel (HTTP + WebSocket + terminal + voice)
-    privacy.js        Per-channel/platform privacy policies
-    pairing.js        Cross-platform identity pairing
-  voice/
-    pipeline.js       STT → LLM → TTS orchestration
-    stt.js            Deepgram / OpenAI Whisper
-    tts.js            ElevenLabs / OpenAI / Edge TTS
-  plugins/
-    manager.js        Plugin lifecycle, loading, shutdown
-    openclaw-adapter.js  OpenClaw compatibility layer
-  providers/
-    index.js          MultiProvider — routes to Anthropic, Gemini, OpenRouter, local
-  static/
-    graph-viewer.html Web panel UI (graph viz, chat, terminal, file browser)
-
-plugins/ssh-sidecar/  SSH credential isolation plugin + sidecar Docker runtime
-manager/              Multi-user admin dashboard
-animas/               Per-agent instances (gitignored except .template/)
-docs/                 Extended documentation
-deploy/               Cloud deployment configs (Fly, Railway, prod compose)
-```
-
-## How it works (message flow)
-
-See [docs/architecture.md](docs/architecture.md) for the full trace.
-
-Short version:
-
-1. **Gateway** receives a message (Discord, Telegram, Slack, or WebSocket)
-2. **GatewayManager** normalizes it into a common format and calls `AgentLoop.processMessage()`
-3. **AgentLoop** builds context from the **GraphContext** engine (identity, rules, relevant knowledge, episodes)
-4. **MultiProvider** sends the prompt + conversation history to the LLM
-5. LLM responds with text and/or **tool calls** — the loop iterates until no more tool calls
-6. **Learner** asynchronously extracts new knowledge from the exchange into the graph
-7. Response is sent back through the originating gateway
-
-## Code style
-
-- **No framework** — the codebase is vanilla Node.js with CommonJS modules. No TypeScript, no Babel, no bundler.
-- **SQLite everywhere** — `node:sqlite` (built-in since Node 22) for the graph and session databases.
-- **Comments**: only where the code can't speak for itself. No narration ("// import module"), no changelogs in comments. Explain *why*, not *what*.
-- **Error handling**: catch and log at boundaries; let errors propagate within modules.
-- **Naming**: `camelCase` for variables/functions, `PascalCase` for classes, `UPPER_SNAKE` for constants.
-
-## Making changes
-
-1. Edit files in `src/`
-2. Restart the agent: `cd animas/<agent-id> && docker compose restart`
-3. For dependency changes: `docker compose up -d --build -V` (the `-V` flag recreates volumes)
-
-### If you change the Dockerfile
+The root `docker-compose.yml` is a build helper for the shared image:
 
 ```bash
-docker build -t anima:latest src/
-# Then restart agents
-for d in animas/*/; do (cd "$d" && docker compose up -d --build -V); done
+docker compose --profile build build
 ```
 
-### If you change the sidecar
+Run a local container with `/data` and `/workspace` volumes as shown in the
+README.
+
+## Repository Layout
+
+- `src/app.js`: bootstraps config, graphs, sessions, tools, agent, workers,
+  plugins, gateways, and health.
+- `src/gateways/`: web, channel, pairing, privacy, and gateway manager code.
+- `src/agent/`: session manager and agent loop.
+- `src/tools/`: built-in tool registry, tool implementations, package vetting,
+  SSH manager, skills, and benchmark graph seeding.
+- `src/graph/`: graph context, multi-graph registry, scopes, export/import,
+  retrieval, events, and General Knowledge helpers.
+- `src/settings/`: canonical settings registry, loader, store, validators, and
+  model routing presets.
+- `src/workers/`: learner, maintainer, janitor, backup, channel distiller,
+  graph maintenance, overview, and General Knowledge research workers.
+- `src/runtime/`: persistent runtime job queue.
+- `plugins/`: bundled plugin packages.
+- `tests/`: focused Node test suite.
+
+## Making Changes
+
+- Keep changes scoped to the behavior requested.
+- Prefer existing local patterns over new abstractions.
+- Add tests when changing auth, routing, graph scope, tool exposure, plugin
+  lifecycle, queue semantics, settings, backups, or public APIs.
+- Update docs when changing operator-visible behavior.
+- Avoid editing runtime instance data under `spores/`.
+
+## Plugins
+
+Plugins are loaded from bundled and user plugin directories when enabled. A
+plugin can register tools, gateways, provider prefixes, settings, prompt
+sections, HTTP routes, static assets, lifecycle hooks, middleware, and reference
+nodes.
+
+Plugin reference-node install SQL must tag rows with `extracted_with =
+'{{plugin_id}}'`. The plugin manager installs those nodes into General
+Knowledge and cleans stale copies from other graphs.
+
+## Tests
+
+Run focused tests while developing:
 
 ```bash
-docker build -t spore-ssh-sidecar:latest plugins/ssh-sidecar/sidecar/
-for d in animas/*/; do (cd "$d" && docker compose --profile ssh-sidecar up -d ssh-sidecar); done
+node --test tests/settings/registry.test.js
+node --test tests/tools/plugin-execution-boundary.test.js
+node --test tests/graph/scoped-memory.test.js
+node --test tests/runtime/job-queue.test.js
 ```
 
-## Security considerations
+Before handing off a change:
 
-- Never commit `.env` files, API keys, or credentials
-- The `exec` tool has a `dangerousPatterns` blocklist in `tools.js` — extend it if you add new risky commands
-- Sub-agents get a restricted tool set (no `env_manage`, `remote_exec`, or `remote_write_file`)
-- Containers run as unprivileged user (UID 2000) with `no-new-privileges`
-- SSH keys are encrypted at rest; the optional `ssh-sidecar` plugin isolates saved-host and interactive SSH flows in a separate process
+```bash
+node --check path/to/changed.js
+node --test path/to/relevant.test.js
+git diff --check
+```
 
-See [docs/security.md](docs/security.md) for the full threat model.
+For docs-only changes, run a stale-language sweep and link/path sanity check.
+
+## Docker Changes
+
+If `src/Dockerfile`, entrypoint scripts, cron wrappers, system packages, or
+bundled plugin layers change, rebuild the image:
+
+```bash
+docker build -t spore:latest -f src/Dockerfile .
+```
+
+Do not restart live containers unless the user asks for deployment or hotpatch.
+
+## Security Considerations
+
+Spore can execute tools, load unsandboxed plugins, store secrets, proxy webapp
+requests, and connect to private networks. Security-sensitive changes need
+tests and docs. Pay special attention to:
+
+- web auth and websocket auth,
+- webapp user isolation,
+- CLI session and local tool boundaries,
+- browser preview routing,
+- graph scope reads/writes,
+- plugin install/uninstall and reference-node routing,
+- SSH key storage and sidecar fallback,
+- settings secret redaction.

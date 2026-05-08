@@ -1,142 +1,84 @@
-# Voice Pipeline
+# Voice
 
-Anima supports **voice notes** on Discord and Telegram. When a voice message arrives it is transcribed (STT), processed through the agent loop exactly like a text message, then sent back as a synthesised voice note (TTS).
+Spore supports voice through the web app and channel plugins when the relevant
+STT/TTS providers are configured. Voice input is transcribed to text, processed
+by the normal agent loop, and optionally returned as synthesized speech.
 
-The pipeline is completely transparent to the agent — it sees transcribed text in, and sends text out. The gateway layers handle audio encoding/decoding.
+## Pipeline
 
----
-
-## How It Works
-
-```
-User voice note
-     ↓
-Gateway (Discord / Telegram) downloads audio
-     ↓
-STT provider transcribes to text
-     ↓
-AgentLoop processes (same path as text messages)
-     ↓
-TTS provider synthesises audio
-     ↓
-Gateway sends voice note reply
+```text
+audio input
+  -> gateway or web client
+  -> STT provider
+  -> agent loop with the active session and graph scope
+  -> text response
+  -> optional TTS provider
+  -> channel or web playback
 ```
 
----
+Voice does not bypass graph scoping. A Telegram voice message should use the
+Telegram channel graph. A web voice message should use the active web session
+graph.
 
-## Enabling Voice
+## Settings
 
-Voice auto-enables when an STT key is available. TTS always has a free fallback (Edge TTS), so you only need one key:
+Core voice preferences live under the voice settings group:
 
-```bash
-# Minimum — free TTS, paid STT
-DEEPGRAM_API_KEY=your-key-here
+| Setting | Purpose |
+|---|---|
+| enabled | enable/disable voice features |
+| STT provider | preferred speech-to-text provider |
+| TTS provider | preferred text-to-speech provider |
+| TTS voice/model/speed | synthesis choices |
+| Edge voice | local/free fallback voice |
+| silence threshold | live utterance cutoff |
+| max utterance seconds | maximum captured speech segment |
 
-# Best quality — paid TTS
-DEEPGRAM_API_KEY=your-deepgram-key
-XI_API_KEY=your-elevenlabs-key
-```
+Provider credentials live in their plugins.
 
-Set these in the agent's `.env` or via the Anima Manager.
+## Bundled Voice Plugins
 
----
+| Plugin | Role |
+|---|---|
+| Deepgram | speech-to-text |
+| Whisper | speech-to-text |
+| ElevenLabs | text-to-speech |
 
-## STT Providers
+The image also includes the runtime dependencies used by available voice/media
+paths, such as ffmpeg.
 
-| Provider | Key | Notes |
-|---|---|---|
-| **Deepgram** | `DEEPGRAM_API_KEY` | Default. Free tier: 45 hrs/month at [console.deepgram.com](https://console.deepgram.com) |
-| **OpenAI Whisper** | `OPENAI_API_KEY` + `ANIMA_STT_PROVIDER=openai` | Used if no Deepgram key is set |
+## Web Voice
 
----
+When enabled, the web app can record audio and send it through the same websocket
+session as text chat. The response should appear in the current chat and use the
+currently selected graph/session.
 
-## TTS Providers
+## Channel Voice
 
-Providers are chosen in this order when `ANIMA_TTS_PROVIDER` is not set:
+Channel plugins decide which voice features they expose:
 
-1. **ElevenLabs** — highest quality, paid, requires `XI_API_KEY`
-2. **OpenAI TTS** — good quality, paid, requires `OPENAI_API_KEY`
-3. **Edge TTS** — free, no key, always available as fallback
+- Telegram can receive voice notes when the bot and plugin support it.
+- Discord voice features depend on bot permissions and channel setup.
+- Slack voice depends on available file/event support from the plugin.
 
-### ElevenLabs
-
-```bash
-ANIMA_TTS_PROVIDER=elevenlabs   # (or leave blank for auto)
-XI_API_KEY=your-elevenlabs-key
-ANIMA_TTS_VOICE=JBFqnCBsd6RMkjVDRZzb   # Voice ID (George)
-```
-
-Popular voice IDs: `JBFqnCBsd6RMkjVDRZzb` (George), `21m00Tcm4TlvDq8ikWAM` (Rachel), `ErXwobaYiN019PkySvjV` (Antoni).
-
-### OpenAI TTS
-
-```bash
-ANIMA_TTS_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-ANIMA_TTS_VOICE=alloy     # alloy, echo, fable, onyx, nova, shimmer
-```
-
-### Edge TTS (free)
-
-```bash
-ANIMA_TTS_PROVIDER=edge
-ANIMA_TTS_EDGE_VOICE=en-US-AriaNeural
-```
-
-Popular Edge voices: `en-US-AriaNeural`, `en-US-GuyNeural`, `en-GB-SoniaNeural`, `en-AU-NatashaNeural`, `en-IE-ConnorNeural`.
-
-To list all available Edge voices:
-
-```bash
-docker exec <agent-id> node -e "
-const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
-const tts = new MsEdgeTTS();
-tts.getVoices().then(v => v.forEach(x => console.log(x.ShortName, x.Locale)));
-"
-```
-
----
-
-## Platform-Specific Notes
-
-### Telegram
-
-Voice notes work out of the box. The gateway converts between OGG Opus (Telegram's format) and MP3/PCM as needed.
-
-### Discord
-
-Discord voice requires the agent to join a voice channel. The bot must have `Connect` and `Speak` permissions. When a user speaks in a voice channel the bot is in, it will listen, transcribe, and respond via voice.
-
-To trigger Discord voice, mention the bot or use `/voice` while in a voice channel (configuration may vary by setup).
-
----
-
-## Configuration Reference
-
-| Variable | Description | Default |
-|---|---|---|
-| `ANIMA_VOICE_ENABLED` | `true` / `false` / auto | auto |
-| `DEEPGRAM_API_KEY` | Deepgram streaming STT key | — |
-| `ANIMA_STT_PROVIDER` | `deepgram` or `openai` | `deepgram` |
-| `ANIMA_TTS_PROVIDER` | `elevenlabs`, `openai`, `edge`, or auto | auto |
-| `XI_API_KEY` | ElevenLabs API key | — |
-| `ANIMA_TTS_VOICE` | ElevenLabs voice ID or OpenAI voice name | — |
-| `ANIMA_TTS_MODEL` | ElevenLabs model override | — |
-| `ANIMA_TTS_SPEED` | TTS speed multiplier (1.0 = normal) | `1.0` |
-| `ANIMA_TTS_EDGE_VOICE` | Edge TTS voice name | `en-US-AriaNeural` |
-
----
+Always verify that the channel bot has permission to read the audio event and
+send the response format.
 
 ## Troubleshooting
 
-**Voice not responding:**
-- Check `docker logs <agent-id>` for `[voice] Pipeline disabled` — this means no STT key is set.
-- Confirm `DEEPGRAM_API_KEY` or `OPENAI_API_KEY` is present in `.env`.
+If transcription fails:
 
-**Audio is synthesised but sounds robotic:**
-- Switch to ElevenLabs for much better quality.
-- Try different Edge voices — quality varies significantly between them.
+- check that the STT plugin is installed and configured,
+- confirm the provider key is saved in plugin settings,
+- inspect logs for media conversion errors,
+- verify the uploaded audio format is supported.
 
-**Telegram voice notes not received:**
-- Ensure the bot has permission to send voice messages in the chat.
-- Voice notes must be sent as `.ogg` files — check the gateway logs for conversion errors.
+If TTS fails:
+
+- check the selected provider and voice name,
+- fall back to another provider or text-only replies,
+- inspect plugin logs for provider-specific errors.
+
+If voice replies land in the wrong place, debug it like a channel routing issue:
+the originating session, user, channel, and graph should travel together through
+the pipeline.
