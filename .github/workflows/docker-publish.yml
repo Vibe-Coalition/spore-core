@@ -22,7 +22,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  DOCKERHUB_IMAGE: get-spore/core
+  DOCKERHUB_IMAGE: vibecoalition/spore-core
 
 jobs:
   build:
