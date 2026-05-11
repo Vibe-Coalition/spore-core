@@ -117,7 +117,9 @@ ACTION GUIDE — pick the most realistic action for what you're doing. Anti-bot 
   • status — inspect current backend / executable / session / active tab / tab count.
   • launch / close — lifecycle. Browser persists across tool calls; launch once.
 
-Common mistake: probing the DOM with 5+ evaluate calls instead of just snapshotting + clicking/typing what you see.`;
+Common mistake: probing the DOM with 5+ evaluate calls instead of just snapshotting + clicking/typing what you see.
+
+For apps served by web_serve, prefer webapp_request for HTTP checks. Do not invent localhost URLs from /serve/<name>/ mounted paths when publicUrl is unset.`;
 
   api.registerTool('browser', {
     namespaced: false,
@@ -147,7 +149,7 @@ Common mistake: probing the DOM with 5+ evaluate calls instead of just snapshott
       required: ['action'],
     },
     available: (toolCtx = {}) => toolCtx.platform !== 'cli',
-    execute: async (input, toolCtx = {}) => getTool(toolCtx).execute(input || {}),
+    execute: async (input, toolCtx = {}) => getTool(toolCtx).execute(input || {}, toolCtx),
   });
 
   api.onShutdown(async () => {

@@ -117,7 +117,45 @@ class BrowserTool {
     return { backend: name, ...result };
   }
 
-  async execute(input) {
+  _normalizeSporeServedInput(input, toolCtx = {}) {
+    if (!input?.url || !['launch', 'navigate', 'tab_open'].includes(String(input.action || '').toLowerCase())) {
+      return input;
+    }
+    const webPort = String(this.config?.webPort || process.env.SPORE_WEB_PORT || '').trim();
+    if (!webPort) return input;
+
+    let parsed;
+    try {
+      const raw = String(input.url || '');
+      parsed = raw.startsWith('/serve/')
+        ? new URL(`http://127.0.0.1:${webPort}${raw}`)
+        : new URL(raw);
+    } catch {
+      return input;
+    }
+
+    const host = String(parsed.hostname || '').toLowerCase();
+    const localHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    const isSporeServe = localHost && String(parsed.port || '') === webPort && parsed.pathname.startsWith('/serve/');
+    if (!isSporeServe) return input;
+
+    const cookieName = toolCtx.sessionCookieName || null;
+    const cookieValue = toolCtx.sessionToken || null;
+    const cookies = cookieName && cookieValue
+      ? [{ name: cookieName, value: cookieValue, url: `http://127.0.0.1:${webPort}/`, path: '/' }]
+      : [];
+    const hasPlaywright = this._allRegisteredBackends().some(b => b.name === 'playwright');
+    return {
+      ...input,
+      url: `http://127.0.0.1:${webPort}${parsed.pathname}${parsed.search}${parsed.hash}`,
+      allowLocalSpore: true,
+      sporeServedApp: true,
+      ...(cookies.length ? { cookies } : {}),
+      ...(!input.backend && hasPlaywright ? { backend: 'playwright' } : {}),
+    };
+  }
+
+  async execute(input, toolCtx = {}) {
     this._pruneStaleBackends();
     const actionAliases = {
       open: 'navigate',
@@ -131,6 +169,7 @@ class BrowserTool {
       action = actionAliases[action];
       input = { ...input, action };
     }
+    input = this._normalizeSporeServedInput(input, toolCtx);
     const requested = input.backend || this._activeBackend || this._defaultBackendName();
     const entry = this._resolveSelector(requested);
     if (!entry) {

@@ -687,7 +687,7 @@ class AgentLoop {
       } catch { /* settings summary is best-effort prompt context */ }
     }
     if (has('web_serve')) {
-      lines.push('- Use `web_serve` action:"status" to check the hosted app URL/status, action:"start" for static apps, or action:"backend" for apps with an API backend.');
+      lines.push('- Use `web_serve` action:"status" to check hosted app URLs, action:"start" for static apps, or action:"backend" for apps with an API backend. For a new app, choose a short unique mount name, write files under `/workspace/web/<name>/`, call `web_serve` with `name:"<name>"`, and share the mounted endpoint returned by the tool (`url`/`serveUrl`, e.g. `/serve/website_1/`), not the bare Spore root/server IP. If publicUrl is unset, do not expand `/serve/<name>/` into localhost; use `webapp_request` on the mounted path for HTTP checks and share the mounted path with the user.');
     }
     if (opts.platform === 'cli' && opts.projectContext) {
       lines.push('- In coding/project sessions, prefer repository/file/shell tools for repo inspection and verification. Use browser/web tools only when the user explicitly asks for live web research or external docs.');
@@ -1041,6 +1041,7 @@ class AgentLoop {
       userId: opts.userId || null,
       userRole: opts.userRole || null,
       sessionToken: opts.sessionToken || null,
+      sessionCookieName: opts.sessionCookieName || null,
       projectContext: opts.projectContext || null,
       abortSignal: opts._abortSignal || null,
     });
@@ -1055,6 +1056,7 @@ class AgentLoop {
     this.tools._currentUserId = opts.userId || null;
     this.tools._currentUserRole = opts.userRole || null;
     this.tools._currentSessionToken = opts.sessionToken || null;
+    this.tools._currentSessionCookieName = opts.sessionCookieName || null;
     // Capture so delegate_task can stash it onto the _delegatedTasks
     // entry; when the subagent finishes, _deliverTaskResult re-feeds
     // it into processMessage so the wake-up turn has the same Spore Code
@@ -2359,6 +2361,7 @@ class AgentLoop {
       userRole:       sessionCtx.userRole       ?? opts?.userRole       ?? null,
       userMessage:    sessionCtx.userMessage    ?? opts?.content        ?? null,
       sessionToken:   sessionCtx.sessionToken   ?? opts?.sessionToken   ?? null,
+      sessionCookieName: sessionCtx.sessionCookieName ?? opts?.sessionCookieName ?? null,
       projectContext: sessionCtx.projectContext ?? opts?.projectContext ?? null,
       memoryEnvelope: sessionCtx.memoryEnvelope ?? opts?.memoryEnvelope ?? null,
       abortSignal:    sessionCtx.abortSignal    ?? opts?._abortSignal   ?? null,

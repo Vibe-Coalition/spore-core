@@ -1867,6 +1867,9 @@ class WebGateway {
 
     this._server = null;
     this._serverDir = null;
+    this._serveMounts = new Map();
+    this._serveMountsLoaded = false;
+    this._lastServeMount = null;
     this._wss = null;
     this._sshManager = null;
     this._voicePipeline = null;
@@ -2714,6 +2717,117 @@ class WebGateway {
     return `${proto}://${ingressDomain}${ingressPath}`;
   }
 
+  _currentWebRootUrl() {
+    const publicUrl = this._currentPublicBaseUrl();
+    if (publicUrl) return publicUrl;
+    return '';
+  }
+
+  _currentServeUrl() {
+    const root = this._currentWebRootUrl();
+    return root ? `${root}/serve` : '/serve';
+  }
+
+  _serveMountsPath() {
+    return path.join(this.config.dataDir || process.cwd(), '.web-serve-mounts.json');
+  }
+
+  _safeServeMountName(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    const safe = raw
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60);
+    if (!safe || ['api', 'files', 'graph', 'login', 'serve', 'settings', 'static'].includes(safe)) return null;
+    return safe;
+  }
+
+  _loadServeMounts() {
+    if (this._serveMountsLoaded) return;
+    this._serveMountsLoaded = true;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this._serveMountsPath(), 'utf8'));
+      const mounts = parsed && typeof parsed.mounts === 'object' ? parsed.mounts : {};
+      for (const [name, record] of Object.entries(mounts)) {
+        const safe = this._safeServeMountName(name);
+        const dir = record?.dir ? this._normalizeServeDir(record.dir) : null;
+        if (safe && dir) this._serveMounts.set(safe, { ...record, dir });
+      }
+      if (parsed?.lastMount && this._serveMounts.has(parsed.lastMount)) this._lastServeMount = parsed.lastMount;
+    } catch { /* no persisted mounts yet */ }
+  }
+
+  _saveServeMounts() {
+    try {
+      const mounts = {};
+      for (const [name, record] of this._serveMounts.entries()) mounts[name] = record;
+      fs.writeFileSync(this._serveMountsPath(), JSON.stringify({
+        lastMount: this._lastServeMount,
+        mounts,
+      }, null, 2) + '\n');
+    } catch (e) {
+      this.log.warn(`[web_serve] Could not persist serve mounts: ${e.message}`);
+    }
+  }
+
+  _nextServeMountName(base = 'website') {
+    this._loadServeMounts();
+    const safeBase = this._safeServeMountName(base) || 'website';
+    let i = 1;
+    let candidate = `${safeBase}_${i}`;
+    while (this._serveMounts.has(candidate)) {
+      i += 1;
+      candidate = `${safeBase}_${i}`;
+    }
+    return candidate;
+  }
+
+  _resolveServeMountName(input = {}, serveDir = '') {
+    const requested = input.name || input.mount || input.slug || input.app || input.appName;
+    const explicit = this._safeServeMountName(requested);
+    if (explicit) return explicit;
+    this._loadServeMounts();
+    const resolvedDir = this._normalizeServeDir(serveDir);
+    for (const [name, record] of this._serveMounts.entries()) {
+      if (path.resolve(record.dir) === path.resolve(resolvedDir)) return name;
+    }
+    const baseName = this._safeServeMountName(path.basename(serveDir || ''));
+    const base = baseName && baseName !== 'web' ? baseName : 'website';
+    return this._nextServeMountName(base);
+  }
+
+  _registerServeMount(name, dir) {
+    this._loadServeMounts();
+    const safe = this._safeServeMountName(name);
+    if (!safe) return null;
+    const resolved = this._normalizeServeDir(dir);
+    const now = new Date().toISOString();
+    const prior = this._serveMounts.get(safe) || {};
+    this._serveMounts.set(safe, {
+      name: safe,
+      dir: resolved,
+      createdAt: prior.createdAt || now,
+      updatedAt: now,
+    });
+    this._lastServeMount = safe;
+    this._saveServeMounts();
+    return safe;
+  }
+
+  _serveUrlForMount(name) {
+    const safe = this._safeServeMountName(name);
+    if (!safe) return null;
+    const root = this._currentServeUrl();
+    return `${root}/${safe}`;
+  }
+
+  _defaultServeMountName() {
+    this._loadServeMounts();
+    if (this._lastServeMount && this._serveMounts.has(this._lastServeMount)) return this._lastServeMount;
+    const first = this._serveMounts.keys().next();
+    return first.done ? null : first.value;
+  }
+
   _defaultServeDir() {
     return path.join(this.config.workspacePath || process.cwd(), 'web');
   }
@@ -2736,9 +2850,9 @@ class WebGateway {
   get wss() { return this._wss; }
 
   handleAction(action, dir, opts = {}) {
-    if (action === 'status') return this._status();
-    if (action === 'stop') return this._stop();
-    if (action === 'start') return this._start(dir);
+    if (action === 'status') return this._status(opts);
+    if (action === 'stop') return this._stop(opts);
+    if (action === 'start') return this._start(dir, opts);
     if (action === 'backend') return this._startWithBackend(dir, opts);
     return { error: `Unknown action: ${action}` };
   }
@@ -3143,13 +3257,21 @@ class WebGateway {
   /** Returns info about the hosted webapp (if any) for prompt context. */
   getWebappStatus() {
     if (!this._server) return null;
+    this._loadServeMounts();
     const port = this._currentWebPort();
     const publicUrl = this._currentPublicBaseUrl();
+    const rootUrl = this._currentWebRootUrl();
+    const mountName = this._defaultServeMountName();
+    const serveUrl = this._serveUrlForMount(mountName);
     const hasBackend = !!this._backendChild;
     return {
       active: true,
       port,
-      url: publicUrl ? `${publicUrl}/` : (port ? `http://localhost:${port}/` : null),
+      mount: mountName,
+      url: serveUrl ? `${serveUrl}/` : null,
+      serveUrl: serveUrl ? `${serveUrl}/` : null,
+      rootUrl: rootUrl ? `${rootUrl}/` : '/',
+      mounts: [...this._serveMounts.values()].map(m => ({ name: m.name, dir: m.dir, url: `${this._serveUrlForMount(m.name)}/` })),
       publicUrl,
       hasBackend,
       users: this.getActiveUserSessions().map(s => ({ user: s.user, type: s.type })),
@@ -3294,11 +3416,27 @@ class WebGateway {
 
   // ── Status / Stop ──────────────────────────────────────────────────
 
-  _status() {
+  _status(opts = {}) {
+    this._loadServeMounts();
     const webPort = this._currentWebPort();
     const pub = this._currentPublicBaseUrl();
+    const rootUrl = this._currentWebRootUrl();
+    const mountName = this._safeServeMountName(opts.name || opts.mount || opts.slug) || this._defaultServeMountName();
+    const serveUrl = this._serveUrlForMount(mountName);
     if (this._server) {
-      const result = { running: true, port: webPort, dir: this._serverDir, url: pub ? `${pub}/` : `http://localhost:${webPort}/`, graphEditor: pub ? `${pub}/graph` : `http://localhost:${webPort}/graph`, publicUrl: pub || null };
+      const result = {
+        running: true,
+        port: webPort,
+        dir: this._serverDir,
+        mount: mountName,
+        url: serveUrl ? `${serveUrl}/` : null,
+        serveUrl: serveUrl ? `${serveUrl}/` : null,
+        rootUrl: rootUrl ? `${rootUrl}/` : '/',
+        graphEditor: rootUrl ? `${rootUrl}/graph` : '/graph',
+        publicUrl: pub || null,
+        mounts: [...this._serveMounts.values()].map(m => ({ name: m.name, dir: m.dir, url: `${this._serveUrlForMount(m.name)}/` })),
+        note: serveUrl ? `Served app URL: ${serveUrl}/` : undefined,
+      };
       if (this._backendChild) {
         result.backend = { running: true, port: this._backendPort, pid: this._backendChild.pid };
       }
@@ -3387,12 +3525,12 @@ class WebGateway {
     return env;
   }
 
-  _startWithBackend(dir, { command, commandDir } = {}) {
+  _startWithBackend(dir, { command, commandDir, name, mount, slug, app, appName } = {}) {
     if (!command) return { error: 'command is required for action:"backend". Provide the command to start your backend (e.g. "node server.js").' };
 
     // Start the web server for static files
     const serveDir = this._normalizeServeDir(dir);
-    const startResult = this._start(serveDir);
+    const startResult = this._start(serveDir, { name, mount, slug, app, appName });
     if (startResult.error) return startResult;
 
     const backendPort = this._allocateBackendPort();
@@ -3468,7 +3606,7 @@ class WebGateway {
 
     const webPort = this._currentWebPort();
     const pubUrl = this._currentPublicBaseUrl();
-    const displayUrl = pubUrl || `http://localhost:${webPort}`;
+    const displayUrl = startResult.serveUrl || startResult.url || (pubUrl ? `${pubUrl}/serve/${startResult.mount}/` : `/serve/${startResult.mount}/`);
 
 	    this.log.info(`[backend] Started (pid=${childPid}, port=${backendPort}), ${vaultKeyNames.length} vault key(s) injected`);
 
@@ -3478,18 +3616,23 @@ class WebGateway {
       backendPort,
       pid: childPid,
       dir: serveDir,
+      mount: startResult.mount || null,
       commandDir: workDir,
       command,
-      url: `${displayUrl}/`,
+      url: displayUrl,
+      serveUrl: displayUrl,
+      rootUrl: startResult.rootUrl || (pubUrl ? `${pubUrl}/` : '/'),
+      graphEditor: startResult.graphEditor || (pubUrl ? `${pubUrl}/graph` : '/graph'),
       publicUrl: pubUrl || null,
+      mounts: startResult.mounts || [],
 	      vaultKeysInjected: vaultKeyNames.map(() => '[redacted]'),
 	      vaultKeysInjectedCount: vaultKeyNames.length,
       routing: {
         note: 'Traefik strips the path prefix before requests reach your server. Your backend sees paths relative to root.',
-        externalBase: pubUrl || displayUrl,
+        externalBase: displayUrl,
         internalBackendPort: backendPort,
-        frontendFetchPattern: `Your frontend HTML is served under ${displayUrl}/. Use RELATIVE fetch paths: fetch('api/generate') or fetch('./api/generate'). The web server proxies /api/* to your backend. For non-/api/ routes, any path that doesn't match a static file is also proxied to the backend.`,
-        backendRoutes: `Your backend receives requests with the prefix ALREADY STRIPPED. If your HTML is at ${displayUrl}/myapp/, the backend sees /myapp/endpoint. Match routes like: /myapp/endpoint or /api/endpoint.`,
+        frontendFetchPattern: `Your frontend HTML is served under ${displayUrl}. Use RELATIVE fetch paths: fetch('api/generate') or fetch('./api/generate'). The web server proxies /api/* to your backend. For non-/api/ routes, any path that doesn't match a static file is also proxied to the backend.`,
+        backendRoutes: `Your backend receives requests with the prefix ALREADY STRIPPED. If your HTML is at ${displayUrl}, the backend sees app-relative paths. Match routes like: /api/endpoint or app-specific endpoints you link with relative URLs.`,
         vaultKeys: vaultKeyNames.length ? `These vault keys were auto-injected as env vars in your backend process: ${vaultKeyNames.join(', ')}. Access them with process.env.KEY_NAME — no need to use vault_get.` : 'No vault keys found. Add keys via the manager vault UI.',
       },
     };
@@ -3497,18 +3640,21 @@ class WebGateway {
 
   // ── Start (HTTP server + all routes) ───────────────────────────────
 
-  _start(dir) {
+  _start(dir, opts = {}) {
     const webPort = this._currentWebPort();
     if (!webPort) return { error: 'No web port configured. Set SPORE_WEB_PORT in .env and re-deploy the container.' };
     const serveDir_ = this._normalizeServeDir(dir);
+    const mountName = this._resolveServeMountName(opts, serveDir_);
     if (this._server) {
-      if (this._serverDir === serveDir_) {
-        this.log.info('[web_serve] Server already running for same dir, keeping connections alive');
-        return { ...this._status(), started: false, note: 'Server already active — kept existing connections.' };
-      }
-      if (this._wss) { this._wss.close(); this._wss = null; }
-      this._server.close();
-      this._server = null;
+      const mounted = this._registerServeMount(mountName, serveDir_);
+      this.log.info(`[web_serve] Server already running; mounted ${serveDir_} at /serve/${mounted}/`);
+      return {
+        ...this._status({ name: mounted }),
+        started: false,
+        dir: serveDir_,
+        mount: mounted,
+        note: `Server already active — mounted app at ${this._serveUrlForMount(mounted)}/.`,
+      };
     }
 
     const serveDir = serveDir_;
@@ -6217,9 +6363,54 @@ class WebGateway {
         }
       }
 
-      let filePath = path.join(serveDir, urlPath);
+      const serveReqPath = (() => {
+        if (urlPath === '/serve') {
+          const basePath = String(this._currentSettingValue('ingressPath') ?? this.config.ingressPath ?? '').replace(/\/$/, '');
+          res.writeHead(302, { Location: `${basePath}/serve/` });
+          res.end();
+          return null;
+        }
+        if (urlPath.startsWith('/serve/')) {
+          this._loadServeMounts();
+          const rest = urlPath.slice('/serve/'.length);
+          const parts = rest.split('/').filter(Boolean);
+          const mount = this._safeServeMountName(parts.shift() || '');
+          if (!mount) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: 'Served app mount required',
+              mounts: [...this._serveMounts.keys()],
+            }));
+            return null;
+          }
+          const mounted = this._serveMounts.get(mount);
+          if (!mounted) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: `Served app mount not found: ${mount}`,
+              mounts: [...this._serveMounts.keys()],
+            }));
+            return null;
+          }
+          if (parts.length === 0 && !urlPath.endsWith('/')) {
+            const basePath = String(this._currentSettingValue('ingressPath') ?? this.config.ingressPath ?? '').replace(/\/$/, '');
+            res.writeHead(302, { Location: `${basePath}/serve/${mount}/` });
+            res.end();
+            return null;
+          }
+          return {
+            dir: mounted.dir,
+            path: `/${parts.join('/')}`,
+          };
+        }
+        return { dir: serveDir, path: urlPath };
+      })();
+      if (serveReqPath == null) return;
 
-      if (!filePath.startsWith(serveDir)) {
+      const activeServeDir = serveReqPath.dir || serveDir;
+      let filePath = path.join(activeServeDir, serveReqPath.path || '/');
+
+      if (!filePath.startsWith(activeServeDir)) {
         res.writeHead(403); res.end('Forbidden'); return;
       }
 
@@ -6263,13 +6454,15 @@ class WebGateway {
       }
     });
 
+    const mounted = this._registerServeMount(mountName, serveDir);
+
     server.listen(webPort, '0.0.0.0', () => {
       const isWSL = (() => { try { return require('fs').readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft'); } catch { return false; } })();
       const hostAddr = isWSL
         ? (require('child_process').execSync('hostname -I', { encoding: 'utf8' }).trim().split(/\s+/)[0] || 'localhost')
         : 'localhost';
       this.log.info(`[web_serve] Serving ${serveDir} on port ${webPort}`);
-      this.log.info(`[web_serve] URL: http://${hostAddr}:${webPort}`);
+      this.log.info(`[web_serve] Mounted URL: http://${hostAddr}:${webPort}/serve/${mounted}/`);
     });
 
     server.on('error', (e) => {
@@ -6285,8 +6478,23 @@ class WebGateway {
     this._setupWebSocket(server, authUser, authPass);
 
     const pubUrl = this._currentPublicBaseUrl();
-    const displayUrl = pubUrl || `http://localhost:${webPort}`;
-    return { started: true, port: webPort, dir: serveDir, url: `${displayUrl}/`, graphEditor: `${displayUrl}/graph`, publicUrl: pubUrl || null, note: pubUrl ? `Public URL: ${pubUrl}/ — files written here are served immediately.` : 'Files written to this directory are served immediately — no restart needed. Graph editor at /graph (auth required).' };
+    const rootUrl = this._currentWebRootUrl();
+    const serveUrl = this._serveUrlForMount(mounted);
+    return {
+      started: true,
+      port: webPort,
+      dir: serveDir,
+      mount: mounted,
+      url: serveUrl ? `${serveUrl}/` : null,
+      serveUrl: serveUrl ? `${serveUrl}/` : null,
+      rootUrl: rootUrl ? `${rootUrl}/` : '/',
+      graphEditor: rootUrl ? `${rootUrl}/graph` : '/graph',
+      publicUrl: pubUrl || null,
+      mounts: [...this._serveMounts.values()].map(m => ({ name: m.name, dir: m.dir, url: `${this._serveUrlForMount(m.name)}/` })),
+      note: serveUrl
+        ? `Served app URL: ${serveUrl}/ — files written here are served immediately. Use this mounted URL when sharing the app.`
+        : 'Files written to this directory are served immediately — no restart needed. Graph editor at /graph (auth required).',
+    };
   }
 
   // ── Voice Pipeline ──────────────────────────────────────────────────
@@ -6437,6 +6645,8 @@ class WebGateway {
         ws._role = wsRole;
         ws._user = wsUser;
         ws._sessionToken = token || null;
+        ws._authSessionToken = sourceSessionId || token || null;
+        ws._sessionCookieName = wsRole === 'webapp' ? 'spore_webapp' : (wsRole ? 'spore_session' : null);
         ws._deviceId = tokenSession?.deviceId || null;
         ws._sourceSession = sourceSessionId;
         if (token && tokenSession?.singleUse) webSessions.delete(token);
@@ -7228,7 +7438,8 @@ class WebGateway {
               // uses this to decide what it will / won't agree to do for
               // non-creator users.
               userRole: ws._role || (isCli ? 'cli' : 'creator'),
-              sessionToken: ws._sessionToken || null,
+              sessionToken: ws._authSessionToken || null,
+              sessionCookieName: ws._sessionCookieName || null,
               deviceId: isCli ? (ws._deviceId || null) : null,
               modelRoutingOverride,
               trigger: 'dm',

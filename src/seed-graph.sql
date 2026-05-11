@@ -431,7 +431,7 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
 INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-api-keys', 'filesystem_paths', 8, 'seed');
 INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
   ((SELECT MAX(id) FROM aspects), '/workspace/ — persistent writable workspace (scripts, files, projects)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), '/workspace/web/ — publicly served at your web URL', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '/workspace/web/<app-name>/ — served at the mounted app URL /serve/<app-name>/', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/data/ — config and databases (.env lives here)', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/app/ — Spore Core runtime (mostly read-only)', 7, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Never log or print full API key values', 9, 'seed', 'seed');
@@ -453,8 +453,8 @@ VALUES ('ref-web-architecture', 'Web Server & Routing', 'reference',
 INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-architecture', 'routing', 9, 'seed');
 INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extracted_with) VALUES
   ((SELECT MAX(id) FROM aspects), 'Request flow: Browser -> Traefik (strips /spores/{id} prefix) -> container port (SPORE_WEB_PORT)', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'Route priority: /graph -> /api/* system routes -> user app proxy -> static files from /workspace/web/', 9, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), 'web_serve tool serves static files from /workspace/web/ — files written there are live immediately', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'Route priority: /graph -> /api/* system routes -> user app proxy -> mounted served-app static files from /workspace/web/<app-name>/', 9, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), 'web_serve tool serves static files from /workspace/web/<app-name>/ at the mounted endpoint returned as url/serveUrl (/serve/<app-name>/) — files written there are live immediately', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), '/graph is the control panel — served automatically by the built-in server', 8, 'seed', 'seed');
 
 INSERT OR IGNORE INTO aspects (node_id, name, weight, extracted_with) VALUES ('ref-web-architecture', 'user_app_proxy', 9, 'seed');
@@ -481,7 +481,7 @@ INSERT OR IGNORE INTO attributes (aspect_id, content, importance, source, extrac
   ((SELECT MAX(id) FROM aspects), 'In web chat, reply with `/workspace/<file>` paths for images, video, audio, or files; the UI rewrites them to the current origin and renders/links them inline.', 9, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Prefer `/workspace/<filename>` in web chat. Use absolute URLs only when sharing a link meant to be opened outside the current chat.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'User uploads are saved under `/workspace/uploads`; analyze_media can auto-detect image/audio/video when the user means an uploaded attachment.', 8, 'seed', 'seed'),
-  ((SELECT MAX(id) FROM aspects), '/workspace/web/ is for standalone hosted files/pages; outside web chat, use the public URL for those files.', 8, 'seed', 'seed'),
+  ((SELECT MAX(id) FROM aspects), '/workspace/web/<app-name>/ is for standalone hosted files/pages; outside web chat, use the mounted served-app URL returned by web_serve (/serve/<app-name>/), not the bare Spore root/server IP.', 8, 'seed', 'seed'),
   ((SELECT MAX(id) FROM aspects), 'Do NOT use message_send with filePath for web UI — that only works on Discord/Telegram', 8, 'seed', 'seed');
 
 -- ref-browser-automation moved to plugins/browser-core/sql/install.sql.

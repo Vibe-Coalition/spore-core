@@ -76,7 +76,7 @@ class ZendriverBrowserBackend {
     if (!this._running) return { error: 'Browser not launched.' };
     const url = input.url || 'about:blank';
     if (url !== 'about:blank') {
-      const blocked = getBlockedUrlError(url);
+      const blocked = getBlockedUrlError(url, { allowLocalSpore: input.allowLocalSpore, webPort: this._config?.webPort });
       if (blocked) return { error: blocked };
     }
     return await this._send('tab_open', { url });
@@ -166,7 +166,7 @@ class ZendriverBrowserBackend {
 
     const url = input.url || 'about:blank';
     if (url !== 'about:blank') {
-      const blocked = getBlockedUrlError(url);
+      const blocked = getBlockedUrlError(url, { allowLocalSpore: input.allowLocalSpore, webPort: this._config?.webPort });
       if (blocked) return { error: blocked };
     }
 
@@ -199,7 +199,7 @@ class ZendriverBrowserBackend {
     if (!this._running) return { error: 'Browser not launched. Call browser with action:"launch" first.' };
     const url = input.url;
     if (!url) return { error: 'Missing required parameter: url' };
-    const blocked = getBlockedUrlError(url);
+    const blocked = getBlockedUrlError(url, { allowLocalSpore: input.allowLocalSpore, webPort: this._config?.webPort });
     if (blocked) return { error: blocked };
     return await this._send('navigate', { url });
   }

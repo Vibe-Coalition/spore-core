@@ -1215,13 +1215,14 @@ class ToolSystem {
         description: (() => {
           const pub = this._currentPublicBaseUrl();
           const webPort = this._currentWebPort() || this.config.webPort || '<SPORE_WEB_PORT>';
-          return `Start, stop, or check your web server. ${pub ? `Public URL: ${pub}/` : `Internal port: ${webPort}.`} Use action:"backend" for API apps; it launches the backend with APP_PORT, injects vault keys, proxies routes, and persists across restarts. Frontends should use relative fetch paths. Detailed routing rules live in ref-web-architecture.`;
+          return `Start, stop, or check your web server. Served apps are exposed at unique mounted endpoints like ${pub ? `${pub}/serve/website_1/` : '/serve/website_1/'}; do not give users the bare Spore root/server IP. If publicUrl is unset, keep and share the relative mounted path; do not expand it to localhost. For a new app, choose a short unique name, write files under /workspace/web/<name>/, then call web_serve with action:"start", dir:"/workspace/web/<name>", and name:"<name>". ${pub ? `Public root: ${pub}/` : `Internal port: ${webPort}.`} Use action:"backend" for API apps; it launches the backend with APP_PORT, injects vault keys, proxies routes, and persists across restarts. Frontends should use relative fetch paths. Detailed routing rules live in ref-web-architecture.`;
         })(),
         input_schema: {
           type: 'object',
           properties: {
             action: { type: 'string', enum: ['start', 'stop', 'status', 'backend'], description: 'start = serve static files, stop = stop server, status = check, backend = start server + launch backend (managed, vault keys auto-injected)' },
             dir: { type: 'string', description: 'Directory to serve (default: /workspace/web). Created automatically if missing.' },
+            name: { type: 'string', description: 'Unique mount name for this app, e.g. "website_1". The app is served at /serve/<name>/.' },
             command: { type: 'string', description: 'Backend command (e.g. "node server.js"). Only for action:"backend". Gets APP_PORT + all vault keys as env vars.' },
             command_dir: { type: 'string', description: 'Working directory for backend command (default: same as dir).' },
           },
@@ -2144,6 +2145,7 @@ Set wait:false when you've submitted a long background job and just want to retu
               userRole:       ctx0.userRole       ?? sessionCtx.userRole       ?? this._currentUserRole ?? null,
               userMessage:    ctx0.userMessage    ?? sessionCtx.userMessage    ?? this._currentUserMessage ?? null,
               sessionToken:   ctx0.sessionToken   ?? sessionCtx.sessionToken   ?? this._currentSessionToken ?? null,
+              sessionCookieName: ctx0.sessionCookieName ?? sessionCtx.sessionCookieName ?? this._currentSessionCookieName ?? null,
               projectContext: ctx0.projectContext ?? sessionCtx.projectContext ?? this._currentProjectContext ?? null,
               memoryEnvelope: ctx0.memoryEnvelope ?? sessionCtx.memoryEnvelope ?? this._currentMemoryEnvelope ?? null,
               abortSignal:    ctx0.abortSignal    ?? sessionCtx.abortSignal    ?? this._abortSignal ?? null,
@@ -7343,13 +7345,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     this.log?.debug?.(`[tools] reloadPluginTools (${reason}) — tool list will rebuild on next prompt`);
   }
 
-  _webServeTool({ action, dir, command, command_dir }) {
+  _webServeTool({ action, dir, name, mount, slug, app, appName, command, command_dir }) {
     if (!this.gateway) {
       const { WebGateway } = require('../gateways/web');
       this.gateway = new WebGateway(this);
     }
     this._wireWebGatewayBroadcaster(this.gateway);
-    return this.gateway.handleAction(action, dir, { command, commandDir: command_dir });
+    return this.gateway.handleAction(action, dir, { name, mount, slug, app, appName, command, commandDir: command_dir });
   }
 
   get _webServer() { return this.gateway?._server || null; }
@@ -8017,12 +8019,19 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const _wctx = this._ctx?.() || {};
     const targetUser = as_user || _wctx.userName || this._currentUserName || 'operator';
     const sessionToken = _wctx.sessionToken ?? this._currentSessionToken;
+    const sessionCookieName = _wctx.sessionCookieName ?? this._currentSessionCookieName ?? null;
     let cookieHeader = '';
     let authenticated = false;
     if (!as_user && sessionToken) {
-      cookieHeader = `spore_session=${sessionToken}`;
-      authenticated = true;
-    } else {
+      const knownSession = this.gateway?._webSessions?.get?.(sessionToken) || null;
+      const inferredCookie = knownSession?.type === 'webapp' ? 'spore_webapp' : 'spore_session';
+      const cookieName = sessionCookieName || inferredCookie;
+      if (knownSession || sessionCookieName) {
+        cookieHeader = `${cookieName}=${sessionToken}`;
+        authenticated = true;
+      }
+    }
+    if (!cookieHeader) {
       const sess = this.gateway.getSessionForUser(targetUser);
       if (sess) { cookieHeader = `${sess.cookieName}=${sess.sessionId}`; authenticated = true; }
     }

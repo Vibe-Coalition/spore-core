@@ -11,13 +11,22 @@ const _blockedHostPatterns = [
   /^spore-manager$/i, /^docker-proxy$/i, /^traefik$/i,
 ];
 
-function getBlockedUrlError(urlStr) {
+function _isAllowedLocalSporeUrl(parsed, opts = {}) {
+  if (!opts.allowLocalSpore) return false;
+  const webPort = String(opts.webPort || '').trim();
+  if (!webPort || parsed.port !== webPort) return false;
+  const host = String(parsed.hostname || '').toLowerCase();
+  const localHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  return localHost && parsed.pathname.startsWith('/serve/');
+}
+
+function getBlockedUrlError(urlStr, opts = {}) {
   try {
     const parsed = new URL(urlStr);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return `Blocked: only http/https URLs allowed (got ${parsed.protocol})`;
     }
-    if (_blockedHostPatterns.some((pattern) => pattern.test(parsed.hostname))) {
+    if (_blockedHostPatterns.some((pattern) => pattern.test(parsed.hostname)) && !_isAllowedLocalSporeUrl(parsed, opts)) {
       return `Blocked: access to ${parsed.hostname} is not allowed (private/internal network)`;
     }
     return null;

@@ -14,6 +14,7 @@ class PlaywrightBrowserBackend {
     this._config = config || null;
     this._browser = null;
     this._page = null;
+    this._context = null;
     this._cdp = null;
     this._screencastActive = false;
   }
@@ -134,13 +135,14 @@ class PlaywrightBrowserBackend {
     if (!this._page) return { error: 'Browser not launched.' };
     const url = input.url || 'about:blank';
     if (url !== 'about:blank') {
-      const blocked = getBlockedUrlError(url);
+      const blocked = getBlockedUrlError(url, { allowLocalSpore: input.allowLocalSpore, webPort: this._config?.webPort });
       if (blocked) return { error: blocked };
     }
     try {
       const ctx = this._page.context();
       const newPage = await ctx.newPage();
       if (url !== 'about:blank') {
+        await this._applyCookies(input, url);
         await newPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       }
       this._page = newPage;
@@ -243,7 +245,7 @@ class PlaywrightBrowserBackend {
 
     const url = input.url || 'about:blank';
     if (url !== 'about:blank') {
-      const blocked = getBlockedUrlError(url);
+      const blocked = getBlockedUrlError(url, { allowLocalSpore: input.allowLocalSpore, webPort: this._config?.webPort });
       if (blocked) return { error: blocked };
     }
     const width = input.width || 1280;
@@ -265,6 +267,8 @@ class PlaywrightBrowserBackend {
         viewport: { width, height },
         userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       });
+      this._context = context;
+      if (url !== 'about:blank') await this._applyCookies(input, url);
 
       this._page = await context.newPage();
 
@@ -334,10 +338,11 @@ class PlaywrightBrowserBackend {
     if (!this._page) return { error: 'Browser not launched. Call browser with action:"launch" first.' };
     const url = input.url;
     if (!url) return { error: 'Missing required parameter: url' };
-    const blocked = getBlockedUrlError(url);
+    const blocked = getBlockedUrlError(url, { allowLocalSpore: input.allowLocalSpore, webPort: this._config?.webPort });
     if (blocked) return { error: blocked };
 
     try {
+      await this._applyCookies(input, url);
       await this._page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       const title = await this._page.title();
       this.log.info(`[browser:${this.name}] Navigate — ${url} (${title})`);
@@ -477,6 +482,21 @@ class PlaywrightBrowserBackend {
     };
   }
 
+  async _applyCookies(input, url) {
+    if (!this._context || !Array.isArray(input.cookies) || !input.cookies.length) return;
+    const cookies = [];
+    for (const cookie of input.cookies) {
+      if (!cookie || !cookie.name || cookie.value === undefined) continue;
+      cookies.push({
+        name: String(cookie.name),
+        value: String(cookie.value),
+        url: cookie.url || url,
+        path: cookie.path || '/',
+      });
+    }
+    if (cookies.length) await this._context.addCookies(cookies);
+  }
+
   async _cleanup() {
     this._screencastActive = false;
     if (this._cdp) {
@@ -489,6 +509,7 @@ class PlaywrightBrowserBackend {
       this._browser = null;
     }
     this._page = null;
+    this._context = null;
   }
 
   async destroy() {
