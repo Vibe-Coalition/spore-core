@@ -222,6 +222,47 @@ test('spore-code project context tells cli agents to execute recalled skills as 
   assert.match(section, /Reusable Skill Execution Contract/);
   assert.match(section, /default playbook/);
   assert.match(section, /avoid rediscovering or rewriting helpers/);
+  assert.match(section, /prefer inline commands/);
+  assert.match(section, /Executor shell: cmd\.exe \/C/);
+  assert.match(section, /exec` input is parsed by cmd\.exe by default/);
+  assert.match(section, /PowerShell invocation/);
+  assert.match(section, /powershell_exec/);
+  assert.match(section, /exec` is stable for cmd\.exe syntax, including quoted arguments/);
+  assert.match(section, /only when the command itself is PowerShell code/);
+  assert.match(section, /powershell -NoProfile -ExecutionPolicy Bypass -Command/);
+  assert.match(section, /\.spore-code\\scratch\\task\.ps1/);
+  assert.match(section, /File tools are shell-free on Windows/);
+  assert.match(section, /Scratch helpers written through `write_file`\/`edit_file` are auto-saved/);
+  assert.match(section, /do not call `save_project_script` again/);
+  assert.doesNotMatch(section, /PowerShell\/cmd snippets/);
+});
+
+test('spore-code workflow state exposes captured background task results', () => {
+  const section = sporeCode._test.buildWorkflowStateSection({}, {
+    platform: 'cli',
+    projectContext: { mode: 'plan', cwd: '/repo' },
+    workflowStatus: {
+      id: 'wf-test',
+      phase: 'research',
+      status: 'artifact_ready',
+      activeRules: ['read_only_research'],
+      artifacts: {
+        researchDone: true,
+        researchDonePreview: 'RESEARCH_DONE:\nExisting research summary.',
+        backgroundTaskResults: [{
+          taskId: 'task-1',
+          status: 'completed',
+          originalRequest: 'Research cat theme colors.',
+          resultPreview: 'Use warm cream, peach, lavender, and paw iconography.',
+        }],
+      },
+      evidenceCount: 0,
+    },
+  });
+
+  assert.match(section, /Captured background task results/);
+  assert.match(section, /Research cat theme colors/);
+  assert.match(section, /warm cream, peach, lavender/);
 });
 
 test('spore-code auth keeps invite key login working', async () => {

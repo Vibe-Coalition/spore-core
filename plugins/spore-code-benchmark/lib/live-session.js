@@ -44,6 +44,8 @@ class LiveSporeCodeSession {
     this.transcript = [];
     this.events = [];
     this.toolCalls = [];
+    this.workflowEvents = [];
+    this.latestWorkflow = null;
     this._answeredAskUser = new Set();
     this._pendingTurn = null;
     this._closed = false;
@@ -229,6 +231,22 @@ class LiveSporeCodeSession {
       });
   }
 
+  _recordWorkflow(msg = {}) {
+    const workflow = msg.workflow || null;
+    if (!workflow) return;
+    this.latestWorkflow = workflow;
+    this.workflowEvents.push({ ts: nowIso(), workflow });
+    this.record('status', {
+      status: 'workflow:update',
+      text: truncate({
+        phase: workflow.phase,
+        status: workflow.status,
+        tasks: workflow.tasks,
+        evidenceCount: workflow.evidenceCount,
+      }, 1000),
+    });
+  }
+
   _handleMessage(raw) {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
@@ -251,7 +269,11 @@ class LiveSporeCodeSession {
         break;
       case 'chat:status':
         this.record('status', { status: msg.status || 'chat:status', text: truncate(msg, 1000) });
+        if (msg.status === 'workflow:update') this._recordWorkflow(msg);
         if (msg.status === 'ask_user_waiting') this._maybeAnswerAskUser(msg);
+        break;
+      case 'workflow:update':
+        this._recordWorkflow(msg);
         break;
       case 'ask_user':
         this.record('status', { status: 'ask_user:prompt', qid: msg.qid, text: truncate(msg, 1000) });
@@ -274,6 +296,7 @@ class LiveSporeCodeSession {
 	          iterations: msg.iterations || 0,
 	          toolUsage: msg.toolUsage || {},
 	          responseRepair: msg.responseRepair || null,
+	          workflow: this.latestWorkflow,
 	        });
         break;
       case 'chat:error':

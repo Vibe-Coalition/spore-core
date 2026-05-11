@@ -24,6 +24,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { buildBuiltinToolHandlers } = require('./builtin-registry');
+const { PlannerAdvisor } = require('../agent/planner-advisor');
 
 // Per-tool-call async context. Replaces any notion of a "global current
 // session" — carries sessionKey + userId + channelId + platform through the
@@ -189,8 +190,21 @@ class ToolSystem {
     return CLI_LOCAL_TOOL_NAMES.has(normalizedName);
   }
 
-  _sanitizeCliToolDefinition(tool) {
+  isCliServerTool(name) {
+    const normalizedName = name === 'graph'
+      ? 'graph_update'
+      : name === 'analyze'
+        ? 'analyze_media'
+        : name;
+    return normalizedName === 'request_planner_advice';
+  }
+
+  _sanitizeCliToolDefinition(tool, projectContext = null) {
     if (!tool || typeof tool !== 'object') return tool;
+    const pc = projectContext || {};
+    const pcOs = String(pc.os || pc.platform || '').toLowerCase();
+    const cwd = String(pc.cwd || '');
+    const isWindowsCli = pcOs === 'windows' || /^[A-Za-z]:[\\/]/.test(cwd) || cwd.includes('\\');
     if (tool.name === 'graph_query' && typeof tool.description === 'string') {
       return {
         ...tool,
@@ -206,6 +220,81 @@ class ToolSystem {
             project: tool.input_schema.properties?.project ? {
               ...tool.input_schema.properties.project,
               description: 'Legacy alias for `graph`.',
+            } : undefined,
+          },
+        } : tool.input_schema,
+      };
+    }
+    if (tool.name === 'exec') {
+      const shell = pc.defaultShell || pc.shell || (isWindowsCli ? 'cmd.exe' : 'sh');
+      const flag = pc.shellFlag || (isWindowsCli ? '/C' : '-c');
+      const platformGuidance = isWindowsCli
+        ? 'Windows Spore Code runs exec through cmd.exe /C by default. Use cmd syntax for cmd commands; quoted arguments are supported. Use `powershell_exec` only when the command itself is PowerShell code, such as PowerShell pipelines, script blocks, object formatting, or multiline PowerShell. If using exec for PowerShell, explicitly invoke `powershell -NoProfile -ExecutionPolicy Bypass -Command "..."` or `pwsh -NoProfile -Command "..."`. Put PowerShell string literals and paths in single quotes inside the -Command string.'
+        : 'Spore Code runs exec through sh -c by default. Use POSIX shell syntax unless the project context says otherwise.';
+      return {
+        ...tool,
+        description: `Execute a command on the user's Spore Code machine in the current project. Executor shell: ${shell} ${flag}. ${platformGuidance} ONLY for running scripts, package commands, git, tests, or commands with no dedicated tool. Do NOT use exec for reading files, writing files, or searching file contents; use read_file, read_many_files, write_file, edit_file, grep, or glob instead. Use background=true for commands that may keep running, watch, serve, hang after a failure, or produce long output; then inspect with bg_tail and stop with bg_kill.`,
+        input_schema: tool.input_schema ? {
+          ...tool.input_schema,
+          properties: {
+            ...tool.input_schema.properties,
+            command: tool.input_schema.properties?.command ? {
+              ...tool.input_schema.properties.command,
+              description: isWindowsCli
+                ? 'Command text parsed by cmd.exe /C. Use cmd syntax for cmd commands; quoted arguments are supported. For PowerShell pipelines/script blocks, use powershell_exec when available or explicitly invoke powershell/pwsh with -NoProfile and -Command or -File.'
+                : 'Command text parsed by sh -c. Use POSIX shell syntax by default.',
+            } : undefined,
+            workdir: tool.input_schema.properties?.workdir ? {
+              ...tool.input_schema.properties.workdir,
+              description: 'Optional working directory on the user machine. Defaults to the current project CWD.',
+            } : undefined,
+          },
+        } : tool.input_schema,
+      };
+    }
+    if (tool.name === 'read_many_files') {
+      return {
+        ...tool,
+        description: 'Read several small text files from the current Spore Code project on the user machine in one call. Prefer this over many read_file calls for configs, package manifests, tests, or related source files. Use project-relative paths when possible; this is not shell input.',
+        input_schema: tool.input_schema ? {
+          ...tool.input_schema,
+          properties: {
+            ...tool.input_schema.properties,
+            paths: tool.input_schema.properties?.paths ? {
+              ...tool.input_schema.properties.paths,
+              description: 'Project-relative paths such as ["package.json", "src/App.tsx"], or absolute paths on the user machine when permitted by scope. These are not shell arguments; do not add shell quoting.',
+            } : undefined,
+            limit: tool.input_schema.properties?.limit ? {
+              ...tool.input_schema.properties.limit,
+              description: 'Per-file max line count. Default 400.',
+            } : undefined,
+            offset: tool.input_schema.properties?.offset ? {
+              ...tool.input_schema.properties.offset,
+              description: 'Per-file start line, 0-based. Default 0.',
+            } : undefined,
+          },
+        } : tool.input_schema,
+      };
+    }
+    if (tool.name === 'read_file') {
+      return {
+        ...tool,
+        description: 'Read a file from the current Spore Code project on the user machine. PREFERRED over exec+grep/cat/type/sed/head/tail for all file reading. Use project-relative paths when possible; absolute paths on the user machine also work when permitted by scope. Supports offset/limit for large files.',
+        input_schema: tool.input_schema ? {
+          ...tool.input_schema,
+          properties: {
+            ...tool.input_schema.properties,
+            path: tool.input_schema.properties?.path ? {
+              ...tool.input_schema.properties.path,
+              description: 'Project-relative path such as src/App.tsx, or an absolute path on the user machine. This is not shell input; do not add shell quoting.',
+            } : undefined,
+            offset: tool.input_schema.properties?.offset ? {
+              ...tool.input_schema.properties.offset,
+              description: 'Line number to start reading from (0-based).',
+            } : undefined,
+            limit: tool.input_schema.properties?.limit ? {
+              ...tool.input_schema.properties.limit,
+              description: 'Max number of lines to read. Use a narrow range before falling back to shell commands.',
             } : undefined,
           },
         } : tool.input_schema,
@@ -351,7 +440,7 @@ class ToolSystem {
     const all = [
       {
         name: 'exec',
-        description: 'Execute a shell command. ONLY for running scripts, installing packages, git, or commands with no dedicated tool. Do NOT use exec for reading files (use read_file), writing files (use write_file), or searching file contents (use read_file). Using grep/sed/cat via exec wastes iterations when read_file/write_file exist.',
+        description: 'Execute a shell command. ONLY for running scripts, installing packages, git, or commands with no dedicated tool. Do NOT use exec for reading files (use read_file), writing files (use write_file), or searching file contents (use read_file). Use background=true for commands that may keep running, watch, serve, hang after a failure, or produce long output; then inspect with bg_tail and stop with bg_kill.',
         input_schema: {
           type: 'object',
           properties: {
@@ -365,7 +454,15 @@ class ToolSystem {
             },
             timeout: {
               type: 'number',
-              description: 'Timeout in milliseconds (default 30000)',
+              description: 'Foreground timeout in milliseconds (default 30000). Long-running commands should use background=true instead of a huge timeout.',
+            },
+            background: {
+              type: 'boolean',
+              description: 'Run as a managed background process and return a process id plus early output. Use bg_tail to inspect and bg_kill to stop it.',
+            },
+            maxOutputBytes: {
+              type: 'number',
+              description: 'Maximum output bytes to return for foreground execution. Background output is tailed with bg_tail.',
             },
           },
           required: ['command'],
@@ -756,17 +853,17 @@ class ToolSystem {
           type: 'object',
           properties: {
             subject: { type: 'string', description: 'Short title (1 line)' },
+            title: { type: 'string', description: 'Alias for subject. Prefer subject when possible.' },
             description: { type: 'string', description: 'Full details of what needs doing' },
             blockedBy: { type: 'array', items: { type: 'string' }, description: 'Task ids that must be done first' },
             priority: { type: 'integer', description: '1 (urgent) to 5 (someday); default 3' },
             id: { type: 'string', description: 'Optional explicit id (slug). Auto-generated if omitted.' },
           },
-          required: ['subject'],
         },
       },
       {
         name: 'task_progress',
-        description: 'Update a task in the persistent list: change status, record result, add a progress note, adjust blocked_by or priority. Use as you finish each step.',
+        description: 'Update a task in the persistent list: change status, record result, add a progress note, adjust blocked_by or priority. Use as you finish each step. For blocked/error states, include reason and evidence when a failure is pre-existing or unrelated.',
         input_schema: {
           type: 'object',
           properties: {
@@ -774,6 +871,8 @@ class ToolSystem {
             status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'blocked', 'cancelled', 'error'] },
             result: { type: 'string', description: 'Final result / summary when marking done' },
             note: { type: 'string', description: 'Appends a comment to the task timeline' },
+            reason: { type: 'string', description: 'Short status reason, e.g. pre_existing_failure, unrelated_failure, external_blocker.' },
+            evidence: { type: 'string', description: 'Concrete command/output/file evidence supporting a blocked/error or pre-existing failure classification.' },
             blockedBy: { type: 'array', items: { type: 'string' } },
             priority: { type: 'integer' },
           },
@@ -1033,12 +1132,12 @@ class ToolSystem {
       },
       {
         name: 'bg_list',
-        description: 'List background processes spawned by prior exec/run commands in this session.',
+        description: 'List managed background processes spawned by prior exec/run commands in this session. Use this before assuming a long-running command is gone.',
         input_schema: { type: 'object', properties: {} },
       },
       {
         name: 'bg_tail',
-        description: 'Read recent output from a background process by id.',
+        description: 'Read recent output from a managed background process by id. Use repeatedly to watch progress without blocking the agent turn. The result includes running and final exitCode when known; treat running=true as pending, not failed.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1050,7 +1149,7 @@ class ToolSystem {
       },
       {
         name: 'bg_kill',
-        description: 'Terminate a background process by id.',
+        description: 'Terminate a managed background process by id, including child processes where the local executor supports process groups.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1062,6 +1161,14 @@ class ToolSystem {
       {
         name: 'session_status',
         description: 'Get current session information: message count, uptime, active sessions, learner stats, model info.',
+        input_schema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
+        name: 'workflow_status',
+        description: 'Read the current session workflow phase, active rules, task summary, and verification evidence. Use in Spore Code when you need to know whether you are in intake, research, plan, execute, debug, verify, or complete.',
         input_schema: {
           type: 'object',
           properties: {},
@@ -1205,6 +1312,26 @@ class ToolSystem {
         },
       },
       {
+        name: 'request_planner_advice',
+        description: 'Ask the planner model for compact guidance when you are stuck, corrected by the user, repeating attempts, uncertain about tool behavior, or about to hand work back to the user. Use before giving up or before repeating the same kind of attempt. Available only in Spore Code project/task sessions.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            goal: { type: 'string', description: 'What you are trying to accomplish for the user.' },
+            current_blocker: { type: 'string', description: 'The exact blocker, confusion, or failure mode.' },
+            what_i_tried: { type: 'string', description: 'Brief evidence-based summary of attempts already made.' },
+            evidence: { type: 'string', description: 'Relevant command output, tool result, file state, or observed behavior.' },
+            next_options: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Options you are considering next, if any.',
+            },
+            allow_escalation: { type: 'boolean', description: 'Whether the planner may recommend escalation to the planner model. Default true.' },
+          },
+          required: ['goal', 'current_blocker'],
+        },
+      },
+      {
         name: 'notify_user',
         description: 'Send a notification to YOUR user across the web panel and any installed channel plugins with active targets. Use this when another spore asks you to relay a message, when you have an important update to deliver proactively, or when a background process produces a result the user should see immediately. The message is delivered as-is — write it as you want the user to read it.',
         input_schema: {
@@ -1252,7 +1379,7 @@ class ToolSystem {
       if (projectMode === 'plan') {
         filtered = filtered.filter(t => !CLI_PLAN_BLOCKED_TOOLS.has(t.name));
       }
-      return filtered.map(t => this._sanitizeCliToolDefinition(t));
+      return filtered.map(t => this._sanitizeCliToolDefinition(t, projectContext));
     }
     return available;
   }
@@ -1602,6 +1729,8 @@ Set wait:false when you've submitted a long background job and just want to retu
       const platform = resolvedCtx?.platform;
       const cliPlanBlock = this.planModeBlockForTool(normalizedName, input, resolvedCtx);
       if (cliPlanBlock) return cliPlanBlock;
+      const workflowBlock = this.workflowBlockForTool(normalizedName, input, resolvedCtx);
+      if (workflowBlock) return workflowBlock;
       if (platform === 'cli' && TOOLS_EXCLUDED_FROM_CLI.has(normalizedName)) {
         this.log?.warn?.(`[cli-tools] blocked ${normalizedName} in Spore Code session`);
         return {
@@ -1633,6 +1762,13 @@ Set wait:false when you've submitted a long background job and just want to retu
       }
       return await this._executeToolDirect(normalizedName, input);
     });
+  }
+
+  workflowBlockForTool(name, input, ctx = null) {
+    const resolvedCtx = ctx || _execContext.getStore() || this._resolveFallbackCtx() || {};
+    const sessionKey = resolvedCtx.sessionKey || null;
+    if (!sessionKey || !this._workflow?.toolBlockForTool) return null;
+    return this._workflow.toolBlockForTool(sessionKey, name, input);
   }
 
   planModeBlockForTool(name, input, ctx = null) {
@@ -1887,6 +2023,8 @@ Set wait:false when you've submitted a long background job and just want to retu
           return this._bgKillTool(input);
         case 'session_status':
           return this._sessionStatusTool();
+        case 'workflow_status':
+          return this._workflowStatusTool();
         case 'sessions_list':
           return this._sessionsListTool();
         case 'settings_read':
@@ -2025,8 +2163,13 @@ Set wait:false when you've submitted a long background job and just want to retu
    * Execute a shell command
    */
   async _execTool(input) {
-    const { command, workdir, timeout = 30000 } = input;
+    const command = String(this._toolFirstDefined(input, ['command', 'cmd', 'shell_command', 'shellCommand']) || '');
+    const { workdir, timeout = 30000 } = input;
+    if (!command) return { error: 'command is required' };
     const effectiveTimeout = Math.min(timeout, 600000);
+
+    const processKillBlock = this._broadProcessKillBlock(command);
+    if (processKillBlock) return processKillBlock;
 
     // Check for dangerous patterns
     for (const pattern of this.dangerousPatterns) {
@@ -2182,6 +2325,34 @@ Set wait:false when you've submitted a long background job and just want to retu
         stdout: stdout.substring(0, 2000),
       };
     }
+  }
+
+  _broadProcessKillBlock(command) {
+    const c = String(command || '');
+    const normalized = c.replace(/\s+/g, ' ').replace(/\/{2,}/g, '/').trim();
+    const lower = normalized.toLowerCase();
+    const broadNodeKill = [
+      /\btaskkill\b[^|;&]*\/(?:f|force)\b[^|;&]*\/im\s+node(?:\.exe)?\b/i,
+      /\btaskkill\b[^|;&]*\/im\s+node(?:\.exe)?\b[^|;&]*\/(?:f|force)\b/i,
+      /\bget-process\b[^|;&]*(?:^|\s)-name\s+node\b[^|;&]*\|\s*stop-process\b[^|;&]*(?:^|\s)-force\b/i,
+      /\bstop-process\b[^|;&]*(?:^|\s)-name\s+node\b[^|;&]*(?:^|\s)-force\b/i,
+      /\bpkill\b[^|;&]*\bnode\b/i,
+      /\bkillall\b[^|;&]*\bnode\b/i,
+      /\bwmic\b[^|;&]*\bnode\.exe\b[^|;&]*\bdelete\b/i,
+    ];
+    if (!broadNodeKill.some(re => re.test(normalized))) return null;
+    return {
+      error: 'Blocked: broad Node process kill is not allowed.',
+      command: c,
+      guidance: [
+        'Do not kill every node process on the machine.',
+        'Use `bg_list`/`bg_kill` for managed Spore Code processes, or identify the specific process bound to the target port and ask before killing it.',
+        'If the user explicitly wants all Node processes terminated, ask for confirmation and explain the blast radius first.',
+      ].join(' '),
+      blocked: true,
+      reason: 'broad_node_process_kill',
+      matched: lower.includes('node') ? 'node' : null,
+    };
   }
 
   /**
@@ -4896,13 +5067,31 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
           // Queue delivery to prevent concurrent deliveries from interleaving
           if (!this._deliveryQueue) this._deliveryQueue = Promise.resolve();
-          this._deliveryQueue = this._deliveryQueue.then(async () => {
-            const sessionKey = this._deliverySessionKey(taskEntry, isCli, deliveryUserId);
+	          this._deliveryQueue = this._deliveryQueue.then(async () => {
+	            const sessionKey = this._deliverySessionKey(taskEntry, isCli, deliveryUserId);
 
-            let chatStartSent = false;
-            try {
-              this._broadcastTaskEvent(taskEntry, { type: 'chat:start', sessionId: channelId });
-              chatStartSent = true;
+	            let chatStartSent = false;
+	            try {
+	              const planModeCli = isCli && taskEntry.projectContext?.mode === 'plan';
+	              const workflowStatus = planModeCli ? this._agent?.workflows?.getStatus?.(sessionKey) : null;
+	              if (planModeCli && workflowStatus?.artifacts?.researchDone) {
+	                this._agent?.workflows?.recordBackgroundTaskResult?.(sessionKey, {
+	                  taskId,
+	                  status,
+	                  originalRequest: originalQ,
+	                  result: resultSummary,
+	                });
+	                this._broadcastTaskEvent(taskEntry, {
+	                  type: 'subagent:info',
+	                  taskId,
+	                  message: 'Background task result captured in plan workflow state; no extra agent turn started.',
+	                });
+	                this.log.info(`[subagent:${taskId}] Captured plan-mode result without task_complete turn because RESEARCH_DONE already exists`);
+	                return;
+	              }
+
+	              this._broadcastTaskEvent(taskEntry, { type: 'chat:start', sessionId: channelId });
+	              chatStartSent = true;
               const agentOpts = {
                 content,
                 channelId,
@@ -5684,8 +5873,64 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   // ── File I/O ─────────────────────────────────────────────────────────
 
+  _toolFirstDefined(input, keys) {
+    if (!input || typeof input !== 'object') return undefined;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(input, key) && input[key] != null) return input[key];
+    }
+    return undefined;
+  }
+
+  _toolString(input, keys, fallback = '') {
+    const value = this._toolFirstDefined(input, keys);
+    return typeof value === 'string' ? value : fallback;
+  }
+
+  _toolPathInput(input) {
+    return this._toolString(input, ['path', 'file', 'file_path', 'filePath', 'filename']);
+  }
+
+  _toolLineWindow(input) {
+    let offset = this._toolFirstDefined(input, ['offset']);
+    let limit = this._toolFirstDefined(input, ['limit']);
+    if (offset != null || limit != null) {
+      return {
+        offset: offset == null ? undefined : Number(offset),
+        limit: limit == null ? undefined : Number(limit),
+      };
+    }
+
+    let start = this._toolFirstDefined(input, ['start_line', 'startLine', 'line_start', 'lineStart', 'from_line', 'fromLine', 'line']);
+    let end = this._toolFirstDefined(input, ['end_line', 'endLine', 'line_end', 'lineEnd', 'to_line', 'toLine']);
+    const range = this._toolFirstDefined(input, ['line_range', 'lineRange', 'range']);
+    if ((start == null || end == null) && range != null) {
+      if (Array.isArray(range) && range.length > 0) {
+        start = start ?? range[0];
+        end = end ?? range[1];
+      } else if (typeof range === 'string') {
+        const cleaned = range.toLowerCase()
+          .replace(/\blines?\b/g, '')
+          .replace(/\bl\b/g, '')
+          .replace(/\s+/g, '')
+          .replace(/\.\./g, '-')
+          .replace(/[:,]/g, '-');
+        const parts = cleaned.split('-').filter(Boolean);
+        start = start ?? parts[0];
+        end = end ?? parts[1];
+      }
+    }
+    if (start == null && end == null) return { offset: undefined, limit: undefined };
+    const startNum = Math.max(1, Number(start ?? end));
+    const endNum = Number(end ?? 0);
+    if (!Number.isFinite(startNum)) return { offset: undefined, limit: undefined };
+    const out = { offset: startNum - 1, limit: undefined };
+    if (Number.isFinite(endNum) && endNum >= startNum) out.limit = endNum - startNum + 1;
+    return out;
+  }
+
   _readFileTool(input) {
-    const { path: filePath, offset, limit } = input;
+    const filePath = this._toolPathInput(input);
+    const { offset, limit } = this._toolLineWindow(input);
     const safe = this._safePath(filePath);
     if (safe.error) return safe;
 
@@ -5721,7 +5966,13 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _writeFileTool(input) {
-    const { path: filePath, content, append = false } = input;
+    const filePath = this._toolPathInput(input);
+    const contentValue = this._toolFirstDefined(input, ['content', 'text', 'contents', 'body', 'data']);
+    if (contentValue === undefined) {
+      return { error: 'content is required for write_file. Aliases text, contents, body, and data are accepted; use content:"" only when intentionally writing an empty file.' };
+    }
+    const content = String(contentValue);
+    const append = input.append === true;
     const safe = this._safePath(filePath, true);
     if (safe.error) return safe;
 
@@ -5809,9 +6060,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _editFileTool(input) {
-    const { path: filePath, old_text, new_text, all = false } = input;
+    const filePath = this._toolPathInput(input);
+    const old_text = this._toolFirstDefined(input, ['old_text', 'old_string', 'oldString', 'old_blob', 'oldBlob', 'old_str', 'oldStr', 'old', 'find', 'search']);
+    const new_text = this._toolFirstDefined(input, ['new_text', 'new_string', 'newString', 'new_blob', 'newBlob', 'new_str', 'newStr', 'new', 'replace', 'replacement']);
+    const all = input?.all ?? input?.replace_all ?? input?.replaceAll ?? false;
     const safe = this._safePath(filePath, true);
     if (safe.error) return safe;
+    if (typeof old_text !== 'string' || old_text.length === 0) {
+      return { error: 'old_text is required for edit_file. Use exact current file text; aliases old_string, old_blob, and old_str are accepted.' };
+    }
+    if (typeof new_text !== 'string') {
+      return { error: 'new_text is required for edit_file. Use an empty string when deleting text; aliases new_string, new_blob, and new_str are accepted.' };
+    }
 
     try {
       if (!fs.existsSync(safe.path)) return { error: `File not found: ${safe.path}` };
@@ -5851,12 +6111,12 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _grepTool(input) {
-    const pattern = (input.pattern || '').toString();
+    const pattern = String(this._toolFirstDefined(input, ['pattern', 'query', 'q', 'regex', 'search', 'term']) || '');
     if (!pattern) return { error: 'pattern is required' };
-    const safe = this._safePath(input.path || (this.config.workspacePath || process.cwd()));
+    const safe = this._safePath(this._toolPathInput(input) || this._toolString(input, ['dir', 'directory', 'folder', 'cwd']) || (this.config.workspacePath || process.cwd()));
     if (safe.error) return safe;
     const root = safe.path;
-    const fileGlob = (input.glob || input.type || '').toString();
+    const fileGlob = String(this._toolFirstDefined(input, ['glob', 'file_glob', 'fileGlob', 'filename_glob', 'filenameGlob', 'type']) || '');
     let re;
     try {
       const flags = input['-i'] ? 'i' : '';
@@ -5919,8 +6179,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _globTool(input) {
-    const pattern = (input.pattern || '*').toString();
-    const safe = this._safePath(input.path || (this.config.workspacePath || process.cwd()));
+    const pattern = String(this._toolFirstDefined(input, ['pattern', 'glob', 'file_glob', 'fileGlob', 'match']) || '*');
+    const safe = this._safePath(this._toolPathInput(input) || this._toolString(input, ['dir', 'directory', 'folder', 'cwd']) || (this.config.workspacePath || process.cwd()));
     if (safe.error) return safe;
     const root = safe.path;
     const noise = this._searchNoiseDirs();
@@ -5974,7 +6234,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _listDirTool(input) {
-    const safe = this._toolWorkdir(input.path);
+    const safe = this._toolWorkdir(this._toolPathInput(input) || this._toolString(input, ['dir', 'directory', 'folder', 'cwd']));
     if (safe.error) return safe;
     const includeHidden = input.include_hidden === true;
     const maxEntries = Math.min(Math.max(Number(input.max_entries || 200), 1), 1000);
@@ -6004,16 +6264,18 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   _readManyFilesTool(input) {
-    const paths = Array.isArray(input.paths) ? input.paths.slice(0, 20) : [];
+    const rawPaths = this._toolFirstDefined(input, ['paths', 'files', 'file_paths', 'filePaths']);
+    const paths = Array.isArray(rawPaths) ? rawPaths.slice(0, 20) : [];
     if (paths.length === 0) return { error: 'paths is required' };
-    const limit = input.limit === undefined ? 400 : Number(input.limit);
-    const offset = input.offset === undefined ? 0 : Number(input.offset);
+    const window = this._toolLineWindow(input);
+    const limit = window.limit === undefined ? 400 : Number(window.limit);
+    const offset = window.offset === undefined ? 0 : Number(window.offset);
     const files = paths.map(p => ({ path: p, result: this._readFileTool({ path: p, limit, offset }) }));
-    return { files, count: files.length, truncated: Array.isArray(input.paths) && input.paths.length > paths.length };
+    return { files, count: files.length, truncated: Array.isArray(rawPaths) && rawPaths.length > paths.length };
   }
 
   async _gitStatusTool(input) {
-    const wd = this._toolWorkdir(input.path);
+    const wd = this._toolWorkdir(this._toolPathInput(input) || this._toolString(input, ['dir', 'directory', 'folder', 'cwd']));
     if (wd.error) return wd;
     const result = await this._execTool({ command: 'git status --short --branch && git diff --stat', workdir: wd.path, timeout: 30000 });
     if (result.error) return result;
@@ -6021,17 +6283,31 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   async _gitDiffTool(input) {
-    const wd = this._toolWorkdir(input.path);
+    let inputPath = this._toolPathInput(input) || this._toolString(input, ['dir', 'directory', 'folder', 'cwd']);
+    let file = this._toolString(input, ['file', 'filepath', 'file_path', 'filePath']);
+    if (inputPath && !file) {
+      const safe = this._safePath(inputPath);
+      if (!safe.error) {
+        try {
+          const st = fs.statSync(safe.path);
+          if (st.isFile()) {
+            inputPath = path.dirname(safe.path);
+            file = path.basename(safe.path);
+          }
+        } catch { /* fall through to _toolWorkdir for the normal error */ }
+      }
+    }
+    const wd = this._toolWorkdir(inputPath);
     if (wd.error) return wd;
     const parts = ['git', 'diff'];
     if (input.staged) parts.push('--staged');
     if (input.stat) parts.push('--stat');
     if (input.ref) parts.push(this._shellQuote(input.ref));
-    if (input.file) parts.push('--', this._shellQuote(input.file));
+    if (file) parts.push('--', this._shellQuote(file));
     const result = await this._execTool({ command: parts.join(' '), workdir: wd.path, timeout: 60000 });
     if (result.error) return result;
     const limit = Math.min(Math.max(Number(input.limit || 20000), 1000), 100000);
-    return { ok: true, path: wd.path, output: this._truncateText(result.output, limit) };
+    return { ok: true, path: wd.path, file: file || null, output: this._truncateText(result.output, limit) };
   }
 
   _patchPaths(diff) {
@@ -6050,11 +6326,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   async _patchFileTool(input) {
-    const diff = String(input.patch || input.diff || '');
+    const diff = String(this._toolFirstDefined(input, ['patch', 'diff', 'unified_diff', 'unifiedDiff']) || '');
     if (!diff.trim()) return { error: 'patch is required' };
     const pathCheck = this._patchPaths(diff);
     if (pathCheck.error) return pathCheck;
-    const wd = this._toolWorkdir(input.path);
+    const wd = this._toolWorkdir(this._toolPathInput(input) || this._toolString(input, ['dir', 'directory', 'folder', 'cwd']));
     if (wd.error) return wd;
     const tmp = path.join('/tmp', `spore-patch-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.diff`);
     try {
@@ -6093,9 +6369,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   async _runTestsTool(input) {
-    const wd = this._toolWorkdir(input.path);
+    const wd = this._toolWorkdir(this._toolPathInput(input) || this._toolString(input, ['dir', 'directory', 'folder', 'cwd']));
     if (wd.error) return wd;
-    const command = String(input.command || this._detectTestCommand(wd.path) || '');
+    const command = String(this._toolFirstDefined(input, ['command', 'cmd', 'shell_command', 'shellCommand']) || this._detectTestCommand(wd.path) || '');
     if (!command) return { error: 'No test command supplied and no standard project test command detected.' };
     const result = await this._execTool({ command, workdir: wd.path, timeout: Math.min(Number(input.timeout || 120000), 600000) });
     return { ok: !result.error, command, path: wd.path, ...result };
@@ -6134,7 +6410,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   _safePath(p, isWrite = false) {
     if (!p) return { error: 'Path required' };
-    const resolved = path.resolve(p);
+    const workspace = this.config.workspacePath || process.cwd();
+    const resolved = path.isAbsolute(p) ? path.resolve(p) : path.resolve(workspace, p);
 
     // Resolve symlinks to prevent traversal via symlink chains
     let realResolved = resolved;
@@ -6149,7 +6426,6 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     }
 
     // Allowlist: only these directories are accessible
-    const workspace = this.config.workspacePath || process.cwd();
     const hostPaths = (this.config.hostReadPaths || []).map(hp => `/host${hp}`);
     const extraPaths = this.config.extraPaths || [];
     const allowedRead = [workspace, '/app', '/tmp', '/data', ...hostPaths, ...extraPaths];
@@ -6176,6 +6452,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   _sessionStatusTool() {
     const sessions = this._sessions;
     const learner = this.learner;
+    const workflow = this._workflowStatusTool();
     return {
       uptime: Math.floor(process.uptime()),
       model: this.config.model,
@@ -6184,7 +6461,16 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       graphNodes: this._countGraphNodes(),
       activeSessions: sessions?.listSessions?.()?.length || 0,
       memoryMb: Math.round(process.memoryUsage.rss?.() || process.memoryUsage().rss / 1024 / 1024),
+      workflow: workflow?.error ? null : workflow,
     };
+  }
+
+  _workflowStatusTool() {
+    const sessionKey = this._ctxSessionKey() || this._resolveFallbackCtx()?.sessionKey || null;
+    if (!sessionKey) return { error: 'No active session context' };
+    const status = this._workflow?.getStatus?.(sessionKey);
+    if (!status) return { active: false, sessionKey };
+    return { active: true, sessionKey, ...status };
   }
 
   _sessionsListTool() {
@@ -6273,6 +6559,139 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     try {
       return this.graph?.db?.prepare('SELECT COUNT(*) as c FROM nodes').get()?.c || 0;
     } catch { return 0; }
+  }
+
+  _modelForTier(tier, ctx = {}) {
+    const key = String(tier || '').replace(/^models\./, '');
+    const overrideModels = ctx?.modelRoutingOverride?.config?.models || ctx?.modelRoutingOverride?.models || null;
+    const override = overrideModels?.[key] || overrideModels?.[`models.${key}`] || null;
+    if (override) return override;
+    try {
+      const routed = this._settingsModule().modelForTier?.(key, ctx);
+      if (routed) return routed;
+    } catch { /* settings may be unavailable in narrow test harnesses */ }
+    const legacyKey = `${key}Model`;
+    return this.config?.[legacyKey] || null;
+  }
+
+  _broadcastPlannerAdvisorToolStatus(ctx = {}, payload = {}) {
+    const event = { type: payload.type || 'planner:advice', ...payload };
+    const statusPayload = {
+      type: 'chat:status',
+      status: event.type,
+      ...Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'type')),
+    };
+    try {
+      this._broadcastSessionEvent?.({
+        sessionKey: ctx.sessionKey || null,
+        channelId: ctx.channelId || null,
+        platform: ctx.platform || null,
+        userId: ctx.userId || null,
+      }, statusPayload, { logPrefix: event.type, fallbackGlobal: false });
+    } catch (e) {
+      this.log?.warn?.(`[planner-advisor] tool status broadcast failed: ${e.message}`);
+    }
+  }
+
+  async _requestPlannerAdviceTool(input = {}) {
+    const ctx = _execContext.getStore() || this._resolveFallbackCtx() || {};
+    if (ctx.platform !== 'cli' || !ctx.projectContext) {
+      return {
+        error: 'request_planner_advice is only available inside Spore Code project sessions.',
+        blocked: true,
+      };
+    }
+    if (!this.llmClient?.messages?.create) {
+      return { error: 'Planner model client is unavailable.', blocked: true };
+    }
+
+    const plannerModel = this._modelForTier('planner', { ...ctx, strict: true });
+    if (!plannerModel) {
+      return { error: 'Planner model is not configured.', blocked: true };
+    }
+
+    const advisorRequest = {
+      goal: String(input.goal || '').slice(0, 1200),
+      current_blocker: String(input.current_blocker || input.blocker || '').slice(0, 1200),
+      what_i_tried: String(input.what_i_tried || '').slice(0, 1800),
+      evidence: String(input.evidence || '').slice(0, 2400),
+      next_options: Array.isArray(input.next_options)
+        ? input.next_options.map(v => String(v || '').slice(0, 500)).slice(0, 6)
+        : [],
+      allow_escalation: input.allow_escalation !== false,
+    };
+    if (!advisorRequest.goal || !advisorRequest.current_blocker) {
+      return {
+        error: 'request_planner_advice requires goal and current_blocker.',
+        blocked: true,
+      };
+    }
+
+    const history = (() => {
+      try {
+        return this._sessions?.getHistory?.(ctx.sessionKey, 8) || [];
+      } catch {
+        return [];
+      }
+    })();
+    const advisor = new PlannerAdvisor(this.config, this.log);
+    this.log?.info?.(`[planner-advisor] agent requested advice for ${ctx.sessionKey || '(unknown session)'}: ${advisorRequest.current_blocker.slice(0, 120)}`);
+
+    const result = await advisor.advise({
+      force: true,
+      reasons: ['agent_requested'],
+      client: this.llmClient,
+      abortSignal: ctx.abortSignal || null,
+      messages: history,
+      activeModel: this._modelForTier('normal', ctx) || this.config?.model || null,
+      plannerModel,
+      opts: {
+        ...ctx,
+        trigger: ctx.trigger || 'agent_requested',
+        content: advisorRequest.goal,
+        messageContent: advisorRequest.goal,
+      },
+      advisorRequest,
+    });
+
+    if (result?.skipped || !result?.advice) {
+      this._broadcastPlannerAdvisorToolStatus(ctx, {
+        type: 'planner:skipped',
+        requestedBy: 'agent',
+        reason: result?.reason || 'unknown',
+        model: plannerModel,
+      });
+      return {
+        ok: false,
+        skipped: true,
+        reason: result?.reason || 'unknown',
+        note: 'Planner advice could not run. Continue from local evidence and avoid repeating identical attempts.',
+      };
+    }
+
+    this._broadcastPlannerAdvisorToolStatus(ctx, {
+      type: 'planner:advice',
+      requestedBy: 'agent',
+      reasons: ['agent_requested'],
+      model: result.plannerModel || plannerModel,
+      elapsedMs: result.elapsedMs || 0,
+      usage: result.usage || null,
+      preview: String(result.rendered || '').replace(/\s+/g, ' ').slice(0, 300),
+      escalate: !!result.escalate && advisorRequest.allow_escalation,
+    });
+
+    return {
+      ok: true,
+      type: 'planner_advice',
+      requestedBy: 'agent',
+      model: result.plannerModel || plannerModel,
+      reasons: ['agent_requested'],
+      elapsedMs: result.elapsedMs || 0,
+      escalate: !!result.escalate && advisorRequest.allow_escalation,
+      guidance: result.rendered,
+      advice: result.advice,
+      note: 'Use this guidance now. If it says to stop repeating attempts, change strategy before calling more tools.',
+    };
   }
 
   _settingsModule() {
@@ -7105,6 +7524,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     if (!host || !command) return { error: 'host and command are required' };
     const mgr = this._ensureSSHManager();
     if (!mgr) return { error: 'SSH manager not available' };
+
+    const processKillBlock = this._broadProcessKillBlock(command);
+    if (processKillBlock) return processKillBlock;
 
     for (const pattern of this.dangerousPatterns) {
       if (pattern.test(command)) {
@@ -8017,11 +8439,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   }
 
   // ── Phase 2: persistent task list ─────────────────────────────────
-  _tasklistCreateTool({ subject, description, blockedBy, priority, id }) {
+  _tasklistCreateTool({ subject, title, description, blockedBy, priority, id }) {
     const sessions = this._sessions;
     if (!sessions?.db) return { error: 'Session manager not available' };
-    const subj = String(subject || '').trim();
-    if (!subj) return { error: 'subject required' };
+    const subj = String(subject || title || '').trim();
+    if (!subj) return { error: 'subject or title required' };
     const ctx = this._ctx() || {};
     const slug = (id || crypto.randomUUID()).toString().slice(0, 64);
     const now = Date.now();
@@ -8062,7 +8484,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return { ok: true, id: slug };
   }
 
-  _tasklistProgressTool({ id, status, result, note, blockedBy, priority }) {
+  _tasklistProgressTool({ id, status, result, note, reason, evidence, blockedBy, priority }) {
     const sessions = this._sessions;
     if (!sessions?.db) return { error: 'Session manager not available' };
     if (!id) return { error: 'id required' };
@@ -8071,6 +8493,17 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     const fields = [];
     const values = [];
     const now = Date.now();
+    const reasonText = reason ? `reason=${String(reason).slice(0, 240)}` : '';
+    const evidenceText = evidence ? `evidence=${String(evidence).slice(0, 2000)}` : '';
+    const statusMeta = [reasonText, evidenceText].filter(Boolean).join('\n');
+    if (statusMeta) {
+      if (result == null && ['blocked', 'error'].includes(String(status || row.status))) {
+        result = statusMeta;
+      } else if (result != null && ['blocked', 'error'].includes(String(status || row.status))) {
+        result = `${String(result)}\n${statusMeta}`;
+      }
+      note = [note, statusMeta].filter(Boolean).join('\n');
+    }
     if (status) { fields.push('status=?'); values.push(status); if (['done', 'cancelled', 'error'].includes(status)) { fields.push('completed=?'); values.push(now); } }
     if (result != null) { fields.push('result=?'); values.push(String(result).slice(0, 8000)); }
     if (Array.isArray(blockedBy)) { fields.push('blocked_by=?'); values.push(JSON.stringify(blockedBy)); }
@@ -8099,6 +8532,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         status: status || row.status,
         note: note ? String(note).slice(0, 500) : undefined,
         result: (result != null) ? String(result).slice(0, 500) : undefined,
+        reason: reason ? String(reason).slice(0, 240) : undefined,
+        evidence: evidence ? String(evidence).slice(0, 500) : undefined,
         priority: Number.isFinite(priority) ? priority : row.priority,
         sessionKey: row.session_key || this._ctxSessionKey() || null,
         channelId: row.channel_id || null,

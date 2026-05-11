@@ -295,6 +295,24 @@ R({ key: 'maxToolResultChars',              type: 'integer', default: null, envV
 R({ key: 'loopDetection',                   type: 'json',
     default: { warn: 8, critical: 15, pingPong: 8, ceiling: 200, budgetPressure: 60 },
     scope: ['server', 'settings'], group: 'agent' });
+R({ key: 'plannerAdvisor.enabled',          type: 'boolean', default: true,
+    scope: ['server', 'settings', 'runtime'], group: 'agent',
+    label: 'Planner advisor' });
+R({ key: 'plannerAdvisor.mode',             type: 'enum', default: 'adaptive',
+    enum: ['adaptive', 'always', 'off'],
+    scope: ['server', 'settings', 'runtime'], group: 'agent',
+    label: 'Planner advisor mode' });
+R({ key: 'plannerAdvisor.maxInputTokens',   type: 'integer', default: 4000,
+    scope: ['server', 'settings', 'runtime'], group: 'agent',
+    validate: v => v > 0 ? null : 'must be > 0' });
+R({ key: 'plannerAdvisor.maxOutputTokens',  type: 'integer', default: 700,
+    scope: ['server', 'settings', 'runtime'], group: 'agent',
+    validate: v => v > 0 ? null : 'must be > 0' });
+R({ key: 'plannerAdvisor.cooldownIterations', type: 'integer', default: 2,
+    scope: ['server', 'settings', 'runtime'], group: 'agent',
+    validate: v => v >= 0 ? null : 'must be >= 0' });
+R({ key: 'plannerAdvisor.allowEscalation',  type: 'boolean', default: true,
+    scope: ['server', 'settings', 'runtime'], group: 'agent' });
 
 // ──────────────────────────────────────────────────────────────────────
 // Sessions + compaction

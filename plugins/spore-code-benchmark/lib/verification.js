@@ -32,13 +32,25 @@ function normalizeVerificationSpec(spec) {
 function inferCommandKind(command) {
   const s = String(command || '');
   if (commandLooksLikeTest(s)) return 'test';
-  if (/\bgit\s+diff\s+--check\b/.test(s)) return 'lint';
+  if (/\bgit\s+diff\s+--check\b/.test(s)
+    || /\buntracked\s+whitespace\s+check\b/i.test(s)
+    || /\bgofmt\b/i.test(s)
+    || /\bgo\s+fmt\b/i.test(s)) return 'lint';
   return 'command';
 }
 
 function commandLooksLikeTest(command) {
   const s = String(command || '');
-  return /\b(?:npm\s+(?:test|run\s+test)|pnpm\s+(?:test|run\s+test)|yarn\s+test|pytest|go\s+test|cargo\s+test|vitest|jest|mocha|node\s+--test|python3?\s+-m\s+pytest)\b/i.test(s);
+  if (/\b(?:npm\s+(?:test|run\s+test)|pnpm\s+(?:test|run\s+test)|yarn\s+test|go\s+test|cargo\s+test|node\s+--test|python3?\s+-m\s+pytest)\b/i.test(s)) {
+    return true;
+  }
+  return s
+    .split(/\s*(?:&&|\|\||;|\|)\s*/)
+    .some(part => {
+      const segment = String(part || '').trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]+\s+)*/, '');
+      return /^(?:python3?|python)\s+-m\s+pytest\b/i.test(segment)
+        || /^(?:npx\s+)?(?:pytest|vitest|jest|mocha)\b/i.test(segment);
+    });
 }
 
 function combinedOutput(result = {}) {
@@ -53,6 +65,21 @@ function detectZeroTests(text) {
     /\bcollected\s+0\s+items?\b/i,
     /\bno\s+tests?\s+(?:found|to\s+run|ran)\b/i,
     /\bRan\s+0\s+tests?\b/,
+  ];
+  return patterns.some(re => re.test(s));
+}
+
+function detectTestFailureOutput(text) {
+  const s = String(text || '');
+  const patterns = [
+    /(?:^|[^\d])([1-9]\d*)\s+(?:failed|failing|failures?)\b/i,
+    /^FAILED\b/m,
+    /\bFAILED\s+\[/,
+    /^=+\s+FAILURES\s+=+$/m,
+    /^--- FAIL:/m,
+    /^FAIL\b/m,
+    /\bno\s+tests?\s+ran\b/i,
+    /\bERROR:\s+not\s+found\b/i,
   ];
   return patterns.some(re => re.test(s));
 }
@@ -84,6 +111,15 @@ function evaluateCommandResult(commandOrSpec, result = {}) {
         kind: 'zero_tests',
         severity: 'semantic',
         detail: 'Test command exited without running any tests',
+      });
+    }
+  }
+  if ((spec.kind === 'test' || commandLooksLikeTest(spec.command)) && detectTestFailureOutput(output)) {
+    if (!problems.some(p => p.kind === 'test_failure_output' || p.kind === 'zero_tests')) {
+      problems.push({
+        kind: 'test_failure_output',
+        severity: 'semantic',
+        detail: 'Test command output contains failure markers',
       });
     }
   }
@@ -143,6 +179,7 @@ module.exports = {
   changedPathsFromStatus,
   commandLooksLikeTest,
   detectMissingToolchain,
+  detectTestFailureOutput,
   detectZeroTests,
   evaluateCommandResult,
   inferCommandKind,

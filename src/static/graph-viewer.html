@@ -842,6 +842,7 @@
 
 <!-- Settings — loaded BEFORE panels so the openSettingsPanel wrap in panels.js
      can find the original at top-level evaluation time. -->
+<script defer src="scripts/settings-widgets.js?v=260511-widgets"></script>
 <script defer src="scripts/settings.js?v=260507-graph-groups"></script>
 <script defer src="scripts/tutorial.js?v=260506-first-tour3"></script>
 
@@ -1147,11 +1148,7 @@ build/
       <div class="settings-section" data-target-tab="agent">
         <h4>Agent Effort</h4>
         <div class="settings-note">One dial that bundles message budgets, iteration caps, tool-result truncation, and sub-agent fan-out. Quick = cheap and chatty. Balanced = current defaults. Deep = long research/coding sessions; raises sub-agent count, iteration ceiling, and budgets — costs more per turn.</div>
-        <div id="settings-effort-buttons" class="settings-row">
-          <button class="settings-effort-btn" type="button" data-effort="quick">Quick</button>
-          <button class="settings-effort-btn" type="button" data-effort="balanced">Balanced</button>
-          <button class="settings-effort-btn" type="button" data-effort="deep">Deep</button>
-        </div>
+        <div id="settings-effort-buttons"></div>
         <div class="settings-note settings-muted" id="settings-effort-summary"></div>
       </div>
 

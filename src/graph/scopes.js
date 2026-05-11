@@ -38,6 +38,19 @@ function normalizeProjectRoot(root) {
 
 function projectIdentityFromContext(userId, pc = {}) {
   if (!pc || typeof pc !== 'object') return null;
+  const explicitKey = String(pc.projectIdentityKey || '').trim();
+  if (explicitKey) {
+    const root = pc.gitRoot || pc.repoRoot || pc.root || pc.workspaceRoot || pc.cwd || '';
+    return {
+      key: explicitKey,
+      label: pc.project || pc.projectName || pc.name || path.basename(root || explicitKey) || 'Project',
+      basis: 'explicit',
+      remote: normalizeGitRemote(
+        pc.gitRemote || pc.remoteUrl || pc.originUrl || pc.origin || pc.git?.remote || pc.git?.origin
+      ),
+      root,
+    };
+  }
   const remote = normalizeGitRemote(
     pc.gitRemote || pc.remoteUrl || pc.originUrl || pc.origin || pc.git?.remote || pc.git?.origin
   );
@@ -225,6 +238,7 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
         projectKey: identity.key,
         projectRoot: identity.root,
         projectRemote: identity.remote,
+        skipLocationMatch: identity.basis === 'explicit',
       });
       registry.markProjectGraphActivity?.(projectSlug, {
         reason: 'codebase-turn',

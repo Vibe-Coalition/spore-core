@@ -103,7 +103,9 @@ const PROJECT_REF_NODES = [
     aspects: {
       shell: [
         'Check the platform from Project Context before using shell syntax. Windows command lines, PowerShell, and POSIX shells do not share quoting, pipes, or built-ins.',
+        'In Spore Code on Windows, exec is parsed by cmd.exe /C by default and supports quoted arguments. Use powershell_exec when the command itself is PowerShell code, such as pipelines, script blocks, object formatting, or multiline PowerShell. If using exec for PowerShell, explicitly invoke powershell/pwsh with -NoProfile and -Command or -File.',
         'Prefer native tools such as read_file, write_file, grep, and glob over shell pipelines when they avoid quoting or platform issues.',
+        'Use project-relative paths in file tools. read_file, grep, glob, edit_file, and patch_file are not shell commands and do not need Windows quoting.',
         'If PowerShell command text is echoed back instead of executed, the quoting failed. Do not treat the echoed command as a successful result.',
       ],
       fallback: [
@@ -782,7 +784,17 @@ class GraphRegistry {
 
   ensureProjectGraph(identityKey, meta = {}) {
     if (!identityKey) throw new Error('identityKey is required');
-    const existing = this.findByIdentityKey(identityKey, 'project') || this.findProjectByLocation(identityKey, meta);
+    const expectedSlug = `project-${_hashKey(identityKey)}`;
+    let existing = this.findByIdentityKey(identityKey, 'project');
+    if (meta.skipLocationMatch && existing && existing.slug !== expectedSlug) {
+      const root = _normalizeProjectRoot(existing.projectRoot || existing.root || _projectRootFromIdentityKey(existing.identityKey));
+      const fallbackKey = root ? `cwd:unknown-machine:${root}` : null;
+      if (fallbackKey && existing.identityKey === identityKey) existing.identityKey = fallbackKey;
+      if (fallbackKey && existing.projectKey === identityKey) existing.projectKey = fallbackKey;
+      this._save();
+      existing = null;
+    }
+    if (!existing && !meta.skipLocationMatch) existing = this.findProjectByLocation(identityKey, meta);
     if (existing) {
       existing.managed = true;
       existing.activationLocked = true;
@@ -796,7 +808,7 @@ class GraphRegistry {
       this._save();
       return existing.slug;
     }
-    const slug = `project-${_hashKey(identityKey)}`;
+    const slug = expectedSlug;
     if (this._registry[slug]) {
       if (this._applyProjectAccessMeta(this._registry[slug], meta)) this._save();
       return slug;

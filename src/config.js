@@ -261,6 +261,14 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
     ceiling: 200,
     budgetPressure: 60,
   },
+  plannerAdvisor: {
+    enabled: true,
+    mode: 'adaptive',
+    maxInputTokens: 4000,
+    maxOutputTokens: 700,
+    cooldownIterations: 2,
+    allowEscalation: true,
+  },
 
   // Proactive outreach (heartbeat-triggered, personality-gated)
   proactive: {
@@ -888,6 +896,7 @@ function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
 
   if (snap.voice)     cfg.voice    = { ...(cfg.voice || {}),    ...snap.voice };
   if (snap.proactive) cfg.proactive = { ...(cfg.proactive || {}), ...snap.proactive };
+  if (snap.plannerAdvisor) cfg.plannerAdvisor = { ...(cfg.plannerAdvisor || {}), ...snap.plannerAdvisor };
   if (snap.channels)  cfg.channels  = { ...(cfg.channels || {}),  ...snap.channels };
 
   // Plugin slots: settings store has plugins.<id>.<key> as flat keys.

@@ -601,6 +601,7 @@ class GraphContext {
         if (operatingRefs) sections.push(`\n${operatingRefs}`);
 
         const found = new Map();
+        let malformed = 0;
         const perQueryLimit = Math.max(4, Math.min(12, Number(scope.budget) || 10));
         const search = scope.role === 'main'
           ? graph.hybridSearchSelf.bind(graph)
@@ -608,8 +609,15 @@ class GraphContext {
         for (const q of queries) {
           const rows = await search(q, perQueryLimit).catch(() => []);
           for (const n of rows || []) {
+            if (!n || !n.id) {
+              malformed++;
+              continue;
+            }
             if (!found.has(n.id)) found.set(n.id, n);
           }
+        }
+        if (malformed > 0) {
+          this.log.debug?.(`[graph] scoped recall ignored ${malformed} malformed candidate(s) from ${scope.slug}`);
         }
         const results = Array.from(found.values())
           .sort((a, b) => (b._hybridScore || 0) - (a._hybridScore || 0))
@@ -646,7 +654,7 @@ class GraphContext {
           sections.push(`\n### ${title} (${scope.slug})`);
           if (text) sections.push(text.replace(/^## Relevant Context \(from graph\)\n?/, '').trim());
           if (episodes) sections.push(episodes.trim());
-          accessed.push(...results.map(n => n.id));
+          accessed.push(...results.map(n => n.id).filter(Boolean));
         }
       } catch (e) {
         this.log.warn(`[graph] scoped recall failed for ${scope.slug}: ${e.message}`);
@@ -890,7 +898,9 @@ class GraphContext {
 
               const mainSearchLimit = queryType === 'aggregation' ? 25 : 15;
               const mainResults = await this.hybridSearchSelf(opts.messageContent, mainSearchLimit);
-              for (const n of mainResults) allResults.set(n.id, n);
+              for (const n of mainResults || []) {
+                if (n?.id) allResults.set(n.id, n);
+              }
 
               const subSearchLimit = queryType === 'aggregation' ? 15 : 10;
               const subSearches = decomposed.subQueries.map(sq =>
@@ -898,7 +908,8 @@ class GraphContext {
               );
               const subResults = await Promise.all(subSearches);
               for (const batch of subResults) {
-                for (const n of batch) {
+                for (const n of batch || []) {
+                  if (!n?.id) continue;
                   if (!allResults.has(n.id)) allResults.set(n.id, n);
                 }
               }
@@ -911,6 +922,7 @@ class GraphContext {
                   const hintIds = this._searchHints(sq, 5);
                   hintHits += hintIds.length;
                   for (const nid of hintIds) {
+                    if (!nid) continue;
                     if (!allResults.has(nid)) {
                       const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(nid);
                       if (row) allResults.set(nid, this._hydrateNode(row));
@@ -923,6 +935,7 @@ class GraphContext {
                   const attrNodeIds = this._searchAttributesFTS(sq, 5);
                   attrFtsHits += attrNodeIds.length;
                   for (const nid of attrNodeIds) {
+                    if (!nid) continue;
                     if (!allResults.has(nid)) {
                       const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(nid);
                       if (row) allResults.set(nid, this._hydrateNode(row));
@@ -938,6 +951,7 @@ class GraphContext {
                   const dateProxIds = this._searchByDateProximity(temporal.dates, 8);
                   temporalHits = dateProxIds.length;
                   for (const nid of dateProxIds) {
+                    if (!nid) continue;
                     if (!allResults.has(nid)) {
                       const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(nid);
                       if (row) allResults.set(nid, this._hydrateNode(row));
@@ -1056,9 +1070,8 @@ class GraphContext {
                   }
 
                   if (!allResults.has(agentId)) {
-                    const userNode = this._hydrateNode(
-                      this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(agentId)
-                    );
+                    const userRow = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(agentId);
+                    const userNode = userRow ? this._hydrateNode(userRow) : null;
                     if (userNode) {
                       userNode._hybridScore = 0.50;
                       userNode._isUserPersonNode = true;
@@ -1080,7 +1093,7 @@ class GraphContext {
 
               this.log.info(`[graph] Enhanced Recall: ${allResults.size} total nodes (main=${mainResults.length}, hints=${hintHits}, attrFts=${attrFtsHits}${temporalHits ? ', temporal=' + temporalHits : ''}${walkHits ? ', walk=' + walkHits : ''}${sqlSweepHits ? ', sqlSweep=' + sqlSweepHits : ''})`);
 
-              const allArr = Array.from(allResults.values());
+              const allArr = Array.from(allResults.values()).filter(n => n?.id);
               allArr.sort((a, b) => (b._hybridScore || 0) - (a._hybridScore || 0));
               const topScore = allArr[0]?._hybridScore || 0;
               const scoreCutoff = topScore * 0.35;
@@ -1106,8 +1119,10 @@ class GraphContext {
           }
         } else {
           const results = await this.hybridSearchSelf(opts.messageContent, 20);
-          opts._precomputedResults = results;
+          opts._precomputedResults = (results || []).filter(n => n?.id);
         }
+
+        opts._precomputedResults = (opts._precomputedResults || []).filter(n => n?.id);
 
         if (opts.promptMode === 'recall' && opts._llmClient && opts._precomputedResults.length > 5) {
           try {
@@ -1118,12 +1133,13 @@ class GraphContext {
             this.log.warn(`[graph] Re-ranker failed: ${e.message}`);
           }
         }
+        opts._precomputedResults = (opts._precomputedResults || []).filter(n => n?.id);
 
         if (opts._precomputedResults?.length) {
           try {
             graphEvents.emit('change', {
               op: 'node:accessed',
-              nodeIds: opts._precomputedResults.map(n => n.id),
+              nodeIds: opts._precomputedResults.map(n => n.id).filter(Boolean),
               source: 'retrieval',
             });
           } catch (e) { this.log.warn('[context] graphEvents.emit failed: ' + e.message); }

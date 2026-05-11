@@ -173,12 +173,12 @@ WHERE NOT EXISTS (SELECT 1 FROM aspects WHERE node_id = 'ref-spore-code-context'
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'project_context'),
-       'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, localTools, OS, Arch. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.', 9, 'seed', '{{plugin_id}}'
+       'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, localTools, OS, Arch, defaultShell, shellFlag, shellFamily, availableShells, pathSeparator, pathListSeparator. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.', 9, 'seed', '{{plugin_id}}'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'project_context' AND a.content LIKE 'Spore Code sends a structured projectContext%');
 UPDATE attributes
-   SET content = 'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, localTools, OS, Arch. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.',
+   SET content = 'Spore Code sends a structured projectContext object on every chat turn — fields: cwd, project, mode, scope, gitBranch, gitHash, projectType, sporeMd, tree, tools, localTools, OS, Arch, defaultShell, shellFlag, shellFamily, availableShells, pathSeparator, pathListSeparator. Routed into the system prompt''s Project Context section, NOT into messages[]. Don''t expect to find it in conversation history.',
        updated_at = CURRENT_TIMESTAMP
  WHERE id IN (
    SELECT a.id FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
@@ -247,6 +247,21 @@ WHERE NOT EXISTS (
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
+       'In Windows Spore Code sessions, exec is parsed by cmd.exe /C by default and supports quoted arguments. Use powershell_exec when the command itself is PowerShell code, such as pipelines, script blocks, object formatting, or multiline PowerShell. If using exec for PowerShell, explicitly invoke powershell/pwsh with -NoProfile and -Command or -File. Prefer read_file/read_many_files/grep/glob/edit_file/patch_file for file work because those tools are shell-free.', 9, 'seed', '{{plugin_id}}'
+WHERE NOT EXISTS (
+  SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+  WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'In Windows Spore Code sessions, exec is parsed by cmd.exe%');
+UPDATE attributes
+   SET content = 'In Windows Spore Code sessions, exec is parsed by cmd.exe /C by default and supports quoted arguments. Use powershell_exec when the command itself is PowerShell code, such as pipelines, script blocks, object formatting, or multiline PowerShell. If using exec for PowerShell, explicitly invoke powershell/pwsh with -NoProfile and -Command or -File. Prefer read_file/read_many_files/grep/glob/edit_file/patch_file for file work because those tools are shell-free.',
+       updated_at = CURRENT_TIMESTAMP
+ WHERE id IN (
+   SELECT a.id FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing'
+     AND a.content LIKE 'In Windows Spore Code sessions, exec is parsed by cmd.exe%'
+ );
+
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
        'If the connected Spore Code CLI executor is unavailable, local project tool calls fail until the CLI reconnects.', 7, 'seed', '{{plugin_id}}'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
@@ -257,12 +272,12 @@ UPDATE attributes
 
 INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
 SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
-       'Use structured tools before exec: list_dir/read_many_files for project inspection, grep/glob for search, git_status/git_diff for source control state, run_tests for verification, and bg_list/bg_tail/bg_kill for long-running processes. These avoid shell quoting issues and keep results compact.', 8, 'seed', '{{plugin_id}}'
+       'Use structured tools before exec: list_dir/read_many_files for project inspection, grep/glob for search, git_status/git_diff for source control state, run_tests for verification, and bg_list/bg_tail/bg_kill for long-running processes. Run exec with background=true for commands that may watch, serve, hang, or take a long time, then inspect with bg_tail and stop with bg_kill. These avoid shell quoting issues and keep results compact.', 8, 'seed', '{{plugin_id}}'
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'Use grep/glob%');
 UPDATE attributes
-   SET content = 'Use structured tools before exec: list_dir/read_many_files for project inspection, grep/glob for search, git_status/git_diff for source control state, run_tests for verification, and bg_list/bg_tail/bg_kill for long-running processes. These avoid shell quoting issues and keep results compact.',
+   SET content = 'Use structured tools before exec: list_dir/read_many_files for project inspection, grep/glob for search, git_status/git_diff for source control state, run_tests for verification, and bg_list/bg_tail/bg_kill for long-running processes. Run exec with background=true for commands that may watch, serve, hang, or take a long time, then inspect with bg_tail and stop with bg_kill. These avoid shell quoting issues and keep results compact.',
        updated_at = CURRENT_TIMESTAMP
  WHERE id IN (
    SELECT a.id FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id

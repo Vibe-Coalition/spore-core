@@ -248,3 +248,52 @@ test('oai compat recovers XML tool call accidentally placed in function argument
   assert.equal(tool.name, 'browser');
   assert.deepEqual(tool.input, { action: 'navigate', url: 'https://www.reddit.com' });
 });
+
+test('oai compat recovers bare Qwen function tags serialized as text', () => {
+  const result = fromOAIResponse({
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: 'Checking the project.\n<function=list_dir><parameter=path>C:\\Users\\yam\\repo</parameter></function>',
+      },
+      finish_reason: 'stop',
+    }],
+    usage: { prompt_tokens: 12, completion_tokens: 10 },
+  });
+
+  assert.equal(result.stop_reason, 'tool_use');
+  assert.equal(result.content.find(b => b.type === 'text')?.text, 'Checking the project.');
+  const tool = result.content.find(b => b.type === 'tool_use');
+  assert.equal(tool.name, 'list_dir');
+  assert.deepEqual(tool.input, { path: 'C:\\Users\\yam\\repo' });
+});
+
+test('oai compat recovers Qwen function tags placed in function arguments', () => {
+  const result = fromOAIResponse({
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_1',
+          type: 'function',
+          function: {
+            name: 'exec',
+            arguments: '<function=exec><parameter=command>npm start</parameter><parameter=workdir>C:\\Users\\yam\\repo</parameter><parameter=background>true</parameter></function>',
+          },
+        }],
+      },
+      finish_reason: 'tool_calls',
+    }],
+    usage: { prompt_tokens: 12, completion_tokens: 10 },
+  });
+
+  assert.equal(result.stop_reason, 'tool_use');
+  const tool = result.content.find(b => b.type === 'tool_use');
+  assert.equal(tool.name, 'exec');
+  assert.deepEqual(tool.input, {
+    command: 'npm start',
+    workdir: 'C:\\Users\\yam\\repo',
+    background: true,
+  });
+});

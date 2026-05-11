@@ -26,6 +26,63 @@ function _redactSecrets(value) {
   return s;
 }
 
+function _cliForwardedToolTimeoutMs(toolName, toolInput = {}) {
+  const name = String(toolName || '');
+  const requested = Number(toolInput?.timeout);
+  if (name === 'exec' || name === 'run_tests') {
+    if (toolInput?.background === true) return 180000;
+    const requestedMs = Number.isFinite(requested) && requested > 0 ? requested : 600000;
+    return Math.min(45 * 60 * 1000, Math.max(180000, requestedMs + 60000));
+  }
+  return 180000;
+}
+
+function _formatDurationMs(ms) {
+  const secs = Math.max(1, Math.round(Number(ms || 0) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return rem ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
+function _clearCliPendingToolTimers(entry) {
+  if (!entry) return;
+  if (entry.timeout) clearTimeout(entry.timeout);
+  if (entry.ackTimeout) clearTimeout(entry.ackTimeout);
+  if (entry.executionStartDelay) clearTimeout(entry.executionStartDelay);
+  entry.timeout = null;
+  entry.ackTimeout = null;
+  entry.executionStartDelay = null;
+}
+
+function _startCliPendingToolTimer(ws, toolId, entry, reason = 'execution') {
+  if (!ws || !toolId || !entry || entry.timeout) return false;
+  const timeoutMs = Number(entry.timeoutMs) > 0 ? Number(entry.timeoutMs) : 180000;
+  entry.startedAt = Date.now();
+  entry.timeoutStartedReason = reason;
+  entry.timeout = setTimeout(() => {
+    ws._pendingTools?.delete(toolId);
+    entry.reject?.(new Error(`Tool ${entry.name || toolId} timed out (${_formatDurationMs(timeoutMs)})`));
+  }, timeoutMs);
+  return true;
+}
+
+function _findCliPendingTool(ws, toolId, toolName = '') {
+  if (!ws?._pendingTools) return { id: null, entry: null };
+  if (toolId && ws._pendingTools.has(toolId)) return { id: toolId, entry: ws._pendingTools.get(toolId) };
+  const wanted = String(toolName || '').trim();
+  let fallback = null;
+  for (const [id, entry] of ws._pendingTools) {
+    if (!fallback) fallback = { id, entry };
+    if (wanted && String(entry?.name || '') === wanted) return { id, entry };
+  }
+  return fallback || { id: null, entry: null };
+}
+
+function _isChatSubmitType(type) {
+  return type === 'chat' || type === 'chat:message';
+}
+
 /** Pick the newer of two file paths (by mtime). Skips null/missing paths. */
 function _newerFile(a, b) {
   const aOk = a && fs.existsSync(a);
@@ -2729,7 +2786,7 @@ class WebGateway {
           // The original tool:request data isn't saved (we only have the Promise),
           // so we can't re-send the exact request. Instead, reject the pending
           // promises with a retryable error — the agent loop will retry the tool.
-          clearTimeout(tool.timeout);
+          _clearCliPendingToolTimers(tool);
           tool.reject(new Error(`CLI reconnected — tool execution interrupted. Retry.`));
         }
       }
@@ -2796,7 +2853,6 @@ class WebGateway {
    */
   _broadcastToSessionKey(sessionKey, payload) {
     if (!sessionKey) return 0;
-    const data = JSON.stringify(payload);
 
     // Spore Code + shared-channel path: `_sessionClients` is keyed by the
     // client-provided sessionId (commonly "cli:user@project-..."). The agent
@@ -2812,6 +2868,10 @@ class WebGateway {
         tryKeys.add(platformMatch[2]);
       }
     }
+    const sessionPayload = payload && typeof payload === 'object' && !Buffer.isBuffer(payload) && !payload.sessionId && channelMatch
+      ? { ...payload, sessionId: channelMatch[1] }
+      : payload;
+    const data = JSON.stringify(sessionPayload);
     for (const tryKey of tryKeys) {
       const set = this._sessionClients?.get(tryKey);
       if (!set) continue;
@@ -2912,7 +2972,10 @@ class WebGateway {
   _sendToSession(sessionId, payload) {
     const clients = this._sessionClients.get(sessionId);
     if (!clients || clients.size === 0) return;
-    const data = JSON.stringify(payload);
+    const sessionPayload = payload && typeof payload === 'object' && !Buffer.isBuffer(payload) && !payload.sessionId
+      ? { ...payload, sessionId }
+      : payload;
+    const data = JSON.stringify(sessionPayload);
     for (const { ws: c } of clients) {
       try { if (c.readyState === 1) c.send(data); } catch (e) { this.log.warn('[web] c.send failed: ' + e.message); }
     }
@@ -4883,7 +4946,13 @@ class WebGateway {
             }
             try {
               const query = (() => { try { return new URL(req.url, 'http://x').searchParams; } catch { return new URLSearchParams(); } })();
-              await resolved.handler(req, res, { urlPath: alias.aliasPath, query, user: req._user || null });
+              const authCtx = authContextFromReq(req);
+              await resolved.handler(req, res, {
+                urlPath: alias.aliasPath,
+                query,
+                user: authCtx?.username || authCtx?.user || req._user || null,
+                auth: authCtx || null,
+              });
             } catch (e) {
               this.log.error(`[plugins] route ${resolved.pluginId}${alias.aliasPath} failed: ${e?.message}`);
               if (!res.headersSent) {
@@ -5431,7 +5500,13 @@ class WebGateway {
           }
           try {
             const query = (() => { try { return new URL(req.url, 'http://x').searchParams; } catch { return new URLSearchParams(); } })();
-            await resolved.handler(req, res, { urlPath, query, user: req._user || null });
+            const authCtx = authContextFromReq(req);
+            await resolved.handler(req, res, {
+              urlPath,
+              query,
+              user: authCtx?.username || authCtx?.user || req._user || null,
+              auth: authCtx || null,
+            });
           } catch (e) {
             this.log.error(`[plugins] route ${resolved.pluginId}${urlPath} failed: ${e?.message}`);
             if (!res.headersSent) {
@@ -6537,7 +6612,7 @@ class WebGateway {
         if (msgType !== 'ping' && !requireAuthenticated()) return;
         if (msgType === 'code:save' && !requireCreatorWs()) return;
         if (msgType.startsWith('terminal:') && !requireCreatorWs()) return;
-        if ((msgType === 'tool:ack' || msgType === 'tool:result' || msgType === 'tool:awaiting-approval' || msgType === 'perm:current-mode') && ws._role !== 'cli') {
+        if ((msgType === 'tool:ack' || msgType === 'tool:result' || msgType === 'tool:awaiting-approval' || msgType === 'tool:approval-resolved' || msgType === 'perm:current-mode') && ws._role !== 'cli') {
           try { ws.send(JSON.stringify({ type: 'auth:error', error: 'CLI role required', code: 'cli-required' })); } catch {}
           return;
         }
@@ -6723,17 +6798,31 @@ class WebGateway {
 
         // ── Acorn: CLI tells us it's waiting for user to approve a tool ──
         if (msg.type === 'tool:awaiting-approval') {
+          const toolName = msg.name || msg.toolName || msg.tool_name || msg.tool || msg.action || 'unknown';
+          const toolSummary = msg.summary || msg.description || msg.command || msg.input?.command || msg.input?.path || '';
+          let toolId = msg.id || msg.toolId || msg.tool_id || null;
+          const pendingTool = _findCliPendingTool(ws, toolId, toolName);
+          if (pendingTool.entry) {
+            toolId = pendingTool.id || toolId;
+            pendingTool.entry.awaitingApproval = true;
+            pendingTool.entry.approvalStartedAt = Date.now();
+            if (pendingTool.entry.timeout) clearTimeout(pendingTool.entry.timeout);
+            if (pendingTool.entry.executionStartDelay) clearTimeout(pendingTool.entry.executionStartDelay);
+            pendingTool.entry.timeout = null;
+            pendingTool.entry.executionStartDelay = null;
+          }
           // Forward to all session observers so they can show [allow]/[deny]
           for (const [sid, clients] of this._sessionClients) {
             for (const entry of clients) {
               if (entry.ws === ws && entry.role === 'origin') {
                 this._sendToSession(sid, {
                   type: 'tool:awaiting-approval',
-                  name: msg.name,
-                  summary: msg.summary,
+                  id: toolId,
+                  name: toolName,
+                  summary: toolSummary,
                   dangerous: !!msg.dangerous,
                 });
-                this.log.info(`[ws] Tool awaiting approval: ${msg.name} (${msg.summary})`);
+                this.log.info(`[ws] Tool awaiting approval: ${toolName} (${toolSummary || 'no summary'}), timer paused`);
                 break;
               }
             }
@@ -6755,7 +6844,7 @@ class WebGateway {
             if (isMember && cliWs) {
               try {
                 cliWs.send(JSON.stringify({
-                  type: 'tool:remote-approve',
+                  type: 'tool:approval-resolved',
                   id: msg.id,
                   allowed: !!msg.allowed,
                 }));
@@ -6820,6 +6909,46 @@ class WebGateway {
           if (pending) {
             pending.acked = true;
             if (pending.ackTimeout) clearTimeout(pending.ackTimeout);
+            pending.ackTimeout = null;
+            if (!pending.awaitingApproval && !pending.timeout && !pending.executionStartDelay) {
+              pending.executionStartDelay = setTimeout(() => {
+                pending.executionStartDelay = null;
+                if (!pending.awaitingApproval && ws._pendingTools?.get(msg.id) === pending) {
+                  _startCliPendingToolTimer(ws, msg.id, pending, 'ack');
+                }
+              }, 1000);
+            }
+          }
+          return;
+        }
+
+        if (msg.type === 'tool:approval-resolved') {
+          const toolName = msg.name || msg.toolName || msg.tool_name || msg.tool || msg.action || '';
+          let toolId = msg.id || msg.toolId || msg.tool_id || null;
+          const pendingTool = _findCliPendingTool(ws, toolId, toolName);
+          const pending = pendingTool.entry;
+          if (pending) {
+            toolId = pendingTool.id || toolId;
+            pending.awaitingApproval = false;
+            pending.approvedAt = Date.now();
+            if (pending.executionStartDelay) clearTimeout(pending.executionStartDelay);
+            pending.executionStartDelay = null;
+            if (msg.allowed !== false) {
+              _startCliPendingToolTimer(ws, toolId, pending, 'approval');
+            }
+          }
+          for (const [sid, clients] of this._sessionClients) {
+            for (const entry of clients) {
+              if (entry.ws === ws && entry.role === 'origin') {
+                this._sendToSession(sid, {
+                  type: 'tool:approval-resolved',
+                  id: toolId,
+                  name: toolName || pending?.name || 'unknown',
+                  allowed: msg.allowed !== false,
+                });
+                break;
+              }
+            }
           }
           return;
         }
@@ -6827,8 +6956,7 @@ class WebGateway {
         if (msg.type === 'tool:result') {
           const pending = ws._pendingTools?.get(msg.id);
           if (pending) {
-            if (pending.ackTimeout) clearTimeout(pending.ackTimeout);
-            clearTimeout(pending.timeout);
+            _clearCliPendingToolTimers(pending);
             ws._pendingTools.delete(msg.id);
             pending.resolve(msg.result);
             // Notify observers the tool was resolved
@@ -6862,7 +6990,7 @@ class WebGateway {
               const originWs = isCli ? this._getOriginClient(sessionId) : null;
               if (originWs && originWs._pendingTools?.size > 0) {
                 for (const [toolId, entry] of originWs._pendingTools) {
-                  clearTimeout(entry.timeout);
+                  _clearCliPendingToolTimers(entry);
                   entry.resolve({ error: 'Aborted by user.' });
                 }
                 originWs._pendingTools.clear();
@@ -6888,7 +7016,7 @@ class WebGateway {
           return;
         }
 
-        if (msg.type === 'chat') {
+        if (_isChatSubmitType(msg.type)) {
           if (!this.tools._agent) {
             ws.send(JSON.stringify({ type: 'chat:error', error: 'Agent not available' }));
             return;
@@ -7157,6 +7285,8 @@ class WebGateway {
                 });
 
                 const requiresCliExecutor = !!this.tools?.isCliLocalTool?.(toolName);
+                const forceServerExecutor = !!this.tools?.isCliServerTool?.(toolName);
+                if (forceServerExecutor) return null;
 
                 // Check if CLI is actually reachable before waiting
                 if (!originWs || originWs.readyState !== 1) {
@@ -7172,31 +7302,51 @@ class WebGateway {
                   return null; // server-side tool fallback
                 }
 
-                try {
-                  originWs.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
-                } catch (e) {
-                  this.log.warn(`[ws] Failed to send tool:request to CLI: ${e.message}`);
-                  if (requiresCliExecutor) {
-                    return {
-                      error: `The ${toolName} tool must be handled by the connected Spore Code CLI executor for this project session.`,
-                      blocked: true,
-                      tool: toolName,
-                      cliLocalOnly: true,
-                    };
-                  }
-                  return null; // server-side tool fallback
-                }
-
                 return new Promise((resolve, reject) => {
-                  // Hard timeout for the actual tool execution (3 min)
-                  // No ack-based server fallback — local tools MUST go through CLI.
-                  // The server doesn't have the user's files.
-                  const hardTimeout = setTimeout(() => {
+                  // Hard timeout is for actual execution, not time spent waiting
+                  // for the operator to approve the CLI permission prompt.
+                  // The timer starts after acks settle for no-approval tools, or
+                  // fresh after tool:approval-resolved for approval-gated tools.
+                  const timeoutMs = _cliForwardedToolTimeoutMs(toolName, toolInput);
+                  const entry = {
+                    resolve,
+                    reject,
+                    timeout: null,
+                    ackTimeout: null,
+                    executionStartDelay: null,
+                    timeoutMs,
+                    requestedAt: Date.now(),
+                    startedAt: null,
+                    name: toolName,
+                    input: toolInput,
+                    awaitingApproval: false,
+                    approvedAt: null,
+                    acked: false,
+                  };
+                  originWs._pendingTools.set(toolId, entry);
+                  entry.ackTimeout = setTimeout(() => {
+                    entry.ackTimeout = null;
+                    if (!entry.acked && !entry.awaitingApproval && originWs._pendingTools?.get(toolId) === entry) {
+                      _startCliPendingToolTimer(originWs, toolId, entry, 'ack-timeout');
+                    }
+                  }, 2000);
+                  try {
+                    originWs.send(JSON.stringify({ type: 'tool:request', id: toolId, name: toolName, input: toolInput }));
+                  } catch (e) {
+                    _clearCliPendingToolTimers(entry);
                     originWs._pendingTools.delete(toolId);
-                    reject(new Error(`Tool ${toolName} timed out (3min)`));
-                  }, 180000);
-
-                  originWs._pendingTools.set(toolId, { resolve, reject, timeout: hardTimeout });
+                    this.log.warn(`[ws] Failed to send tool:request to CLI: ${e.message}`);
+                    if (requiresCliExecutor) {
+                      resolve({
+                        error: `The ${toolName} tool must be handled by the connected Spore Code CLI executor for this project session.`,
+                        blocked: true,
+                        tool: toolName,
+                        cliLocalOnly: true,
+                      });
+                    } else {
+                      resolve(null); // server-side tool fallback
+                    }
+                  }
                 });
               } : undefined,
             };
@@ -7273,6 +7423,7 @@ class WebGateway {
               iterations: result.iterations,
               toolUsage: result.toolUsage,
               responseRepair: result.responseRepair || null,
+              hiddenWorkflowControl: result.hiddenWorkflowControl || null,
             };
             if (isCli) {
               this._sendToSession(sessionId, donePayload);
@@ -7285,7 +7436,7 @@ class WebGateway {
                 channelName: 'web:chat',
                 userName: msg.userName || 'Operator',
                 userMessage: msg.content,
-                myResponse: result.text,
+                myResponse: result.hiddenWorkflowControl ? `[workflow control: ${result.hiddenWorkflowControl}]` : result.text,
                 trigger: 'dm',
                 usage: result.usage,
                 iterations: result.iterations,
@@ -7511,7 +7662,7 @@ class WebGateway {
         if (ws._role === 'cli' && ws._pendingTools?.size > 0) {
           const pending = [];
           for (const [toolId, entry] of ws._pendingTools) {
-            pending.push({ toolId, resolve: entry.resolve, reject: entry.reject, timeout: entry.timeout });
+            pending.push({ toolId, resolve: entry.resolve, reject: entry.reject, timeout: entry.timeout, ackTimeout: entry.ackTimeout, executionStartDelay: entry.executionStartDelay });
           }
           // Find which session this ws belongs to
           for (const [sid, clients] of this._sessionClients) {
@@ -7536,13 +7687,26 @@ class WebGateway {
         // Other plugins can use this for any per-ws-close cleanup.
         if (this.tools?._pluginManager) {
           const sessionIds = new Set();
+          const originSessionIds = new Set();
+          const sessionRefs = [];
           for (const [sid, clients] of this._sessionClients) {
             for (const entry of clients) {
-              if (entry.ws === ws) sessionIds.add(sid);
+              if (entry.ws !== ws) continue;
+              sessionIds.add(sid);
+              sessionRefs.push({ sessionId: sid, role: entry.role || 'origin' });
+              if ((entry.role || 'origin') === 'origin') originSessionIds.add(sid);
             }
           }
           for (const handler of this.tools._pluginManager.getLifecycleHooks?.('wsClose') || []) {
-            try { handler({ ws, sessionIds: [...sessionIds], log: this.log }); } catch (e) { this.log.warn('[plugins] wsClose hook failed: ' + e.message); }
+            try {
+              handler({
+                ws,
+                sessionIds: [...sessionIds],
+                originSessionIds: [...originSessionIds],
+                sessionRefs,
+                log: this.log,
+              });
+            } catch (e) { this.log.warn('[plugins] wsClose hook failed: ' + e.message); }
           }
         }
 
@@ -9702,4 +9866,12 @@ class WebGateway {
   }
 }
 
-module.exports = { WebGateway };
+module.exports = {
+  WebGateway,
+  _test: {
+    _isChatSubmitType,
+    _clearCliPendingToolTimers,
+    _startCliPendingToolTimer,
+    _findCliPendingTool,
+  },
+};

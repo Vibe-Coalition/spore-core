@@ -100,6 +100,46 @@ test('LocalToolExecutor keeps file operations inside repo root', async () => {
   assert.match(dangerous.error, /blocked/);
 });
 
+test('LocalToolExecutor promotes hung exec commands to tail-able background processes', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scb-bg-'));
+  const tools = new LocalToolExecutor({ root, defaultTimeoutMs: 250 });
+
+  const result = await tools.execute('exec', {
+    command: 'node -e "console.log(\'ready\'); setInterval(() => {}, 1000)"',
+    workdir: root,
+    timeout: 250,
+  });
+
+  assert.equal(result.timedOut, true);
+  assert.equal(result.backgrounded, true);
+  const id = result.backgroundId || result.processId;
+  assert.ok(id > 0);
+
+  const tail = await tools.execute('bg_tail', { id, lines: 20 });
+  assert.equal(tail.ok, true);
+  assert.match(tail.output, /ready/);
+
+  const killed = await tools.execute('bg_kill', { id });
+  assert.equal(killed.ok, true);
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const after = await tools.execute('bg_tail', { id, lines: 20 });
+  assert.equal(after.running, false);
+  tools.killAllBackground();
+});
+
+test('LocalToolExecutor does not hide test failures behind shell pipelines', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scb-pipefail-'));
+  const tools = new LocalToolExecutor({ root });
+  const result = await tools.execute('exec', {
+    command: 'node -e "console.log(\'1 failed\'); process.exit(1)" 2>&1 | head -20',
+    timeout: 5000,
+  });
+  assert.equal(result.ok, false);
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stdout || result.output || '', /1 failed/);
+  tools.killAllBackground();
+});
+
 test('LocalToolExecutor summarizes untracked files for benchmark review metadata', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scb-untracked-'));
   const tools = new LocalToolExecutor({ root });
@@ -115,6 +155,22 @@ test('LocalToolExecutor summarizes untracked files for benchmark review metadata
   assert.deepEqual(summary.files.map(f => f.path).sort(), ['lib/feature.js', 'notes.md']);
   assert.equal(summary.totalLines, 5);
   assert.match(summary.statText, /2 untracked files/);
+});
+
+test('LocalToolExecutor checks whitespace in untracked source files', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scb-untracked-ws-'));
+  const tools = new LocalToolExecutor({ root });
+  await tools.exec({ command: 'git init', workdir: root });
+  fs.writeFileSync(path.join(root, 'clean.js'), 'const ok = true;\n');
+  fs.writeFileSync(path.join(root, 'dirty.js'), 'const bad = true;  \n');
+
+  const check = await tools.untrackedWhitespaceCheck({ path: root });
+
+  assert.equal(check.ok, false);
+  assert.equal(check.failureReason, 'trailing_whitespace');
+  assert.ok(check.checkedFiles.includes('clean.js'));
+  assert.ok(check.checkedFiles.includes('dirty.js'));
+  assert.ok(check.problems.some(p => p.kind === 'trailing_whitespace' && p.path === 'dirty.js'));
 });
 
 test('benchmark sandbox allows local setup but blocks global package mutation', () => {
@@ -134,6 +190,22 @@ test('benchmark sandbox allows local setup but blocks global package mutation', 
   assert.match(
     localToolTest.commandIsolationViolation('/data/spore-code-benchmark/runs/scb-old/.tool-env/gin/cache/go/bin/go test ./...', '/data/spore-code-benchmark/runs/scb-current'),
     /another benchmark run/
+  );
+  assert.match(
+    localToolTest.commandIsolationViolation(
+      'ls /data/spore-code-benchmark/runs/scb-current/.tool-env/',
+      '/data/spore-code-benchmark/runs/scb-current',
+      '/data/spore-code-benchmark/runs/scb-current/.tool-env/click-option-suggestions'
+    ),
+    /another benchmark scenario tool environment/
+  );
+  assert.equal(
+    localToolTest.commandIsolationViolation(
+      'ls /data/spore-code-benchmark/runs/scb-current/.tool-env/click-option-suggestions/cache',
+      '/data/spore-code-benchmark/runs/scb-current',
+      '/data/spore-code-benchmark/runs/scb-current/.tool-env/click-option-suggestions'
+    ),
+    null
   );
   assert.equal(localToolTest.commandIsolationViolation('$SPORE_BENCHMARK_CACHE/toolchains/go/bin/go test ./...', '/data/spore-code-benchmark/runs/scb-current'), null);
   assert.equal(localToolTest.commandLooksDangerous(GO_TEST_COMMAND), false);
@@ -251,6 +323,9 @@ test('changed file summary includes untracked files and filters artifacts', () =
 test('verification claim classifier downgrades full-suite claims without full-suite evidence', () => {
   assert.equal(commandScope('npm test -- --grep "[Rr]equest.?[Ii]d"'), 'focused-test');
   assert.equal(commandScope('python -m pytest tests/test_options.py -q'), 'focused-test');
+  assert.equal(commandScope('python3 -m pytest tests/ -x'), 'full-test');
+  assert.equal(commandScope('python -m pytest tests/ -x'), 'full-test');
+  assert.equal(commandScope('pip install --user pytest'), 'command');
   assert.equal(commandScope('go test ./...'), 'full-test');
 
   const focused = classifyVerificationClaim('All 1256 tests passing.', [
@@ -268,11 +343,48 @@ test('verification claim classifier downgrades full-suite claims without full-su
   assert.equal(full.classification, 'full');
   assert.equal(full.overclaimed, false);
 
+  const focusedCount = classifyVerificationClaim('All 7 focused request-id tests pass.', [
+    { command: 'npx mocha test/req.id.js', ok: true, stdout: '7 passing (28ms)' },
+  ]);
+  assert.equal(focusedCount.classification, 'focused');
+  assert.equal(focusedCount.overclaimed, false);
+
+  const unqualifiedCount = classifyVerificationClaim('All 7 tests pass.', [
+    { command: 'npx mocha test/req.id.js', ok: true, stdout: '7 passing (28ms)' },
+  ]);
+  assert.equal(unqualifiedCount.classification, 'overclaimed');
+  assert.equal(unqualifiedCount.overclaimed, true);
+
+  const sessionFullSuite = classifyVerificationClaim('All tests pass.', [
+    { command: 'npx mocha test/req.id.js', ok: true, stdout: '7 passing (28ms)' },
+  ], {
+    toolCalls: [{
+      name: 'exec',
+      inputText: '{"command":"npm test"}',
+      resultSummary: '{"ok":true,"exitCode":0,"stdout":"1256 passing (3s)"}',
+    }],
+  });
+  assert.equal(sessionFullSuite.classification, 'full');
+  assert.equal(sessionFullSuite.overclaimed, false);
+  assert.equal(sessionFullSuite.sourceBreakdown.toolCommands, 1);
+
   const honest = classifyVerificationClaim('Focused request-id tests passed.', [
     { command: 'npm test -- --grep request-id', ok: true },
   ]);
   assert.equal(honest.classification, 'focused');
   assert.equal(honest.overclaimed, false);
+
+  const matching = classifyVerificationClaim('All matching suggestion tests passed.', [
+    { command: 'python3 -m pytest tests/test_options.py -k "suggest" -v', ok: true, stdout: '8 passed' },
+  ]);
+  assert.equal(matching.classification, 'focused');
+  assert.equal(matching.overclaimed, false);
+
+  const fullPytestDir = classifyVerificationClaim('The full suite passed with no failures.', [
+    { command: 'python3 -m pytest tests/ -x', ok: true, stdout: '1495 passed, 4 skipped' },
+  ]);
+  assert.equal(fullPytestDir.classification, 'full');
+  assert.equal(fullPytestDir.overclaimed, false);
 
   const score = scoreScenario({
     finalText: 'All 1256 tests passing.',
@@ -343,6 +455,72 @@ test('handoff facts preserve changed files, exact verification, and open issues'
   assert.ok(facts.openIssues.includes('verification_claim_overstated'));
 });
 
+test('benchmark infers direct verification for changed test files', () => {
+  const js = _test.inferChangedTestVerificationCommands(
+    '/repo',
+    { paths: ['lib/request-id.js', 'test/request-id.test.js'] },
+    []
+  );
+  assert.deepEqual(js, []);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scb-infer-'));
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ devDependencies: { mocha: '^10.0.0' } }));
+  fs.mkdirSync(path.join(root, 'test'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'test/request-id.test.js'), '');
+  const mocha = _test.inferChangedTestVerificationCommands(
+    root,
+    { paths: ['lib/request-id.js', 'test/request-id.test.js'] },
+    []
+  );
+  assert.equal(mocha.length, 1);
+  assert.match(mocha[0].command, /^npx mocha /);
+  assert.match(mocha[0].command, /test\/request-id\.test\.js/);
+
+  const go = _test.inferChangedTestVerificationCommands(root, { paths: ['requestid_test.go'] }, []);
+  assert.deepEqual(go.map(c => c.command), ['go test ./...']);
+
+  const coveredPython = _test.inferChangedTestVerificationCommands(
+    root,
+    { paths: ['tests/test_options.py'] },
+    [{ command: 'python3 -m venv "$SPORE_BENCHMARK_CACHE/venv" && python -m pytest tests/test_options.py -q' }]
+  );
+  assert.deepEqual(coveredPython, []);
+
+  const untrackedDir = _test.inferChangedTestVerificationCommands(
+    root,
+    { paths: ['test/middleware'] },
+    [],
+    { untrackedSummary: { files: [{ path: 'test/middleware/request-id.js' }] } }
+  );
+  assert.equal(untrackedDir.length, 1);
+  assert.match(untrackedDir[0].command, /test\/middleware\/request-id\.js/);
+});
+
+test('benchmark changed-file summary includes committed task changes', () => {
+  const dirty = changedFileSummary('## main\n M lib/express.js\n');
+  const committed = _test.changedFileSummaryFromNameStatus('A\ttest/express.request-id.js\nM\tHistory.md\n');
+  const merged = _test.mergeChangedFileSummaries(dirty, committed);
+
+  assert.deepEqual(merged.paths, ['History.md', 'lib/express.js', 'test/express.request-id.js']);
+  assert.deepEqual(merged.tracked, ['History.md', 'lib/express.js', 'test/express.request-id.js']);
+});
+
+test('benchmark infers gofmt checks for changed Go files', () => {
+  const specs = _test.inferGoFormatCheckCommands(
+    { paths: ['requestid.go', 'requestid_test.go'] },
+    []
+  );
+  assert.equal(specs.length, 1);
+  assert.match(specs[0].command, /gofmt -l/);
+  assert.match(specs[0].command, /requestid\.go/);
+
+  const alreadyCovered = _test.inferGoFormatCheckCommands(
+    { paths: ['requestid.go'] },
+    [{ command: 'gofmt -w requestid.go' }]
+  );
+  assert.deepEqual(alreadyCovered, []);
+});
+
 test('verification classifier rejects zero-test and missing-toolchain success', () => {
   const zero = evaluateCommandResult('npm test -- --grep request-id', {
     ok: true,
@@ -363,6 +541,16 @@ test('verification classifier rejects zero-test and missing-toolchain success', 
   assert.equal(missing.ok, false);
   assert.equal(missing.failureReason, 'missing_toolchain');
   assert.equal(missing.infraOk, false);
+
+  const maskedFailure = evaluateCommandResult('python3 -m pytest tests/test_options.py -q', {
+    ok: true,
+    exitCode: 0,
+    stdout: '1 failed, 15 passed in 0.42s',
+    stderr: '',
+  });
+  assert.equal(maskedFailure.ok, false);
+  assert.equal(maskedFailure.failureReason, 'test_failure_output');
+  assert.equal(maskedFailure.semanticOk, false);
 });
 
 test('benchmark runner supports dry-run without websocket or git checkout', async () => {
@@ -432,15 +620,23 @@ test('benchmark memory settle reports degraded readiness after distill with pend
   setTimeout(() => {
     graphEvents.emit('change', {
       nodeId: 'session-scb:settle:test',
+      op: 'session:summarize-done',
+      graph: 'project-test',
+    });
+    graphEvents.emit('change', {
+      nodeId: 'session-scb:settle:test',
       op: 'session:distill-done',
       graph: 'project-test',
     });
   }, 10);
 
   const settled = await promise;
-  assert.equal(settled.status, 'settled_with_pending_learner');
+  assert.equal(settled.status, 'project_ready_shared_done_queue_pending');
   assert.equal(settled.pendingLearnerJobs, 1);
   assert.equal(settled.sawDistillDone, true);
+  assert.equal(settled.readiness.projectHandoff, 'ready');
+  assert.equal(settled.readiness.sharedDistill, 'done');
+  assert.equal(settled.readiness.learnerQueue, 'pending');
 });
 
 test('LLM actor can generate initial user prompts from strict JSON', async () => {

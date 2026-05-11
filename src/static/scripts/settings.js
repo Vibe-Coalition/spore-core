@@ -139,9 +139,8 @@ function _renderTelegramPairingPanel() {
 }
 
 function _renderPluginField(pluginId, field, value, meta) {
+  const W = window.SettingsWidgets;
   const id = `settings-plugin-${pluginId}-${field.key}`;
-  const labelEl = `<label for="${id}">${_escapeHtml(field.label || field.key)}</label>`;
-  const help = field.help ? `<div class="settings-note settings-muted-soft">${_escapeHtml(field.help)}</div>` : '';
   // Compute the rendered value (saved slot value > schema default > '').
   // Stash it on the wrapper as `data-plugin-original` so the collector
   // can diff against it on save and only emit fields the operator
@@ -149,27 +148,58 @@ function _renderPluginField(pluginId, field, value, meta) {
   // schema default and clobbers env mirrors with values like
   // authHeader:'bearer' when the wizard had already persisted x-key.
   const v = (value === undefined || value === null) ? (field.default !== undefined ? field.default : '') : value;
-  const originalAttr = `data-plugin-original="${_escapeAttr(String(v))}"`;
-  const wrap = (inner, extraClass = '') => `<div class="settings-plugin-field${extraClass ? ` ${extraClass}` : ''}" data-plugin-field="${pluginId}.${field.key}" data-plugin-secret="${field.secret ? '1' : '0'}" ${originalAttr}>${labelEl}${inner}${help}</div>`;
+  const fieldAttrs = {
+    'data-plugin-field': `${pluginId}.${field.key}`,
+    'data-plugin-secret': field.secret ? '1' : '0',
+    'data-plugin-original': String(v),
+  };
+  const wrap = (inner, extraClass = '') => {
+    if (W?.field) {
+      return W.field({
+        id,
+        label: field.label || field.key,
+        help: field.help,
+        control: inner,
+        className: `settings-plugin-field${extraClass ? ` ${extraClass}` : ''}`,
+        attrs: fieldAttrs,
+      });
+    }
+    const labelEl = `<label for="${id}">${_escapeHtml(field.label || field.key)}</label>`;
+    const help = field.help ? `<div class="settings-note settings-muted-soft">${_escapeHtml(field.help)}</div>` : '';
+    const originalAttr = `data-plugin-original="${_escapeAttr(String(v))}"`;
+    return `<div class="settings-plugin-field${extraClass ? ` ${extraClass}` : ''}" data-plugin-field="${_escapeAttr(pluginId)}.${_escapeAttr(field.key)}" data-plugin-secret="${field.secret ? '1' : '0'}" ${originalAttr}>${labelEl}${inner}${help}</div>`;
+  };
   switch (field.type) {
     case 'toggle': {
-      const checked = !!v ? 'checked' : '';
-      return wrap(`<input type="checkbox" id="${id}" ${checked} />`);
+      return wrap(W?.input ? W.input({ id, type: 'checkbox', checked: !!v }) : `<input type="checkbox" id="${id}" ${!!v ? 'checked' : ''} />`);
     }
     case 'number':
-      return wrap(`<input type="number" id="${id}" value="${_escapeAttr(String(v))}" />`, 'compact');
+      return wrap(W?.input ? W.input({ id, type: 'number', value: String(v) }) : `<input type="number" id="${id}" value="${_escapeAttr(String(v))}" />`, 'compact');
     case 'select': {
+      if (W?.select) return wrap(W.select({ id, value: v, options: field.options || [] }));
       const opts = (field.options || []).map(o => `<option value="${_escapeAttr(o.value)}"${o.value === v ? ' selected' : ''}>${_escapeHtml(o.label || o.value)}</option>`).join('');
       return wrap(`<select id="${id}">${opts}</select>`);
     }
+    case 'segmented': {
+      if (W?.segmented) return wrap(W.segmented({ id, value: v, options: field.options || [], className: 'settings-plugin-segmented' }));
+      const selected = String(v);
+      const buttons = (field.options || []).map(o => {
+        const optionValue = String(o.value);
+        const active = optionValue === selected ? ' active' : '';
+        const pressed = optionValue === selected ? 'true' : 'false';
+        const title = o.description || o.help || o.label || o.value;
+        return `<button class="settings-segmented-btn${active}" type="button" data-settings-segment-value="${_escapeAttr(optionValue)}" aria-pressed="${pressed}" title="${_escapeAttr(title)}">${_escapeHtml(o.label || optionValue)}</button>`;
+      }).join('');
+      return wrap(`<input type="hidden" id="${id}" value="${_escapeAttr(selected)}" /><div class="settings-widget-segmented settings-plugin-segmented" data-settings-segmented-for="${id}">${buttons}</div>`);
+    }
     case 'textarea':
-      return wrap(`<textarea id="${id}" rows="3">${_escapeHtml(String(v))}</textarea>`);
+      return wrap(W?.textarea ? W.textarea({ id, rows: 3, value: String(v) }) : `<textarea id="${id}" rows="3">${_escapeHtml(String(v))}</textarea>`);
     case 'password': {
       const placeholder = meta?.isSet ? '••• stored — leave blank to keep' : '';
-      return wrap(`<input type="password" id="${id}" placeholder="${placeholder}" />`);
+      return wrap(W?.input ? W.input({ id, type: 'password', placeholder }) : `<input type="password" id="${id}" placeholder="${placeholder}" />`);
     }
     default:
-      return wrap(`<input type="text" id="${id}" value="${_escapeAttr(String(v))}" />`);
+      return wrap(W?.input ? W.input({ id, type: 'text', value: String(v) }) : `<input type="text" id="${id}" value="${_escapeAttr(String(v))}" />`);
   }
 }
 
@@ -258,8 +288,14 @@ function _renderChannelRow(hotReload, p) {
   </div>`;
 }
 
-function _escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
-function _escapeAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
+function _escapeHtml(s) {
+  if (window.SettingsWidgets?.escapeHtml) return window.SettingsWidgets.escapeHtml(s);
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function _escapeAttr(s) {
+  if (window.SettingsWidgets?.escapeAttr) return window.SettingsWidgets.escapeAttr(s);
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
 
 function _settingsTelegramPairingStatus(message, kind = '') {
   const el = document.querySelector('[data-telegram-pairing-status]');
@@ -387,6 +423,20 @@ async function _refreshSettingsFromServer() {
 document.addEventListener('click', async (e) => {
   const t = e.target;
   if (!(t instanceof Element)) return;
+
+  const pluginSegment = t.closest?.('[data-plugin-segment-value]');
+  if (pluginSegment) {
+    const group = pluginSegment.closest('[data-plugin-segmented-for]');
+    const inputId = group?.getAttribute('data-plugin-segmented-for');
+    const input = inputId ? document.getElementById(inputId) : null;
+    if (input) input.value = pluginSegment.getAttribute('data-plugin-segment-value') || '';
+    group?.querySelectorAll('[data-plugin-segment-value]').forEach(btn => {
+      const active = btn === pluginSegment;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    return;
+  }
 
   const pairRefresh = t.closest?.('[data-telegram-pair-refresh]');
   if (pairRefresh) {
@@ -2204,9 +2254,8 @@ function _bindResetGraphButton() {
 }
 
 // Agent Effort — 3-button picker (quick / balanced / deep). The selected
-// tier is stored in a data attribute on the buttons container so save can
-// read it; clicking a button updates the active class + redraws the
-// budget input placeholders to reflect that tier's defaults.
+// tier is stored in a hidden widget input and mirrored to the container
+// dataset for older save/summary code.
 let _settingsEffortPresets = null;
 function _populateAgentEffortButtons(effort) {
   const wrap = document.getElementById('settings-effort-buttons');
@@ -2214,20 +2263,51 @@ function _populateAgentEffortButtons(effort) {
   const value = (effort && effort.value) || 'balanced';
   wrap.dataset.value = value;
   _settingsEffortPresets = effort?.presets || null;
-  wrap.querySelectorAll('.settings-effort-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.effort === value);
-  });
+  const W = window.SettingsWidgets;
+  if (W?.segmented && wrap.dataset.widgetMounted !== '1') {
+    wrap.dataset.widgetMounted = '1';
+    wrap.innerHTML = W.segmented({
+      id: 'settings-effort-value',
+      value,
+      className: 'settings-agent-effort-segmented',
+      options: [
+        { value: 'quick', label: 'Quick', description: 'Lower cost and shorter turns.' },
+        { value: 'balanced', label: 'Balanced', description: 'Default budgets and iteration limits.' },
+        { value: 'deep', label: 'Deep', description: 'Higher budgets for long research and coding work.' },
+      ],
+    });
+  } else if (!W?.segmented && !wrap.querySelector('.settings-effort-btn')) {
+    wrap.classList.add('settings-row');
+    wrap.innerHTML = `
+      <button class="settings-effort-btn" type="button" data-effort="quick">Quick</button>
+      <button class="settings-effort-btn" type="button" data-effort="balanced">Balanced</button>
+      <button class="settings-effort-btn" type="button" data-effort="deep">Deep</button>
+    `;
+  }
+  if (W?.setSegmentedValue) {
+    W.setSegmentedValue('settings-effort-value', value);
+  } else {
+    wrap.querySelectorAll('.settings-effort-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.effort === value);
+    });
+  }
   if (!wrap.dataset.bound) {
     wrap.dataset.bound = '1';
+    wrap.addEventListener('settings-segmented-change', (e) => {
+      if (e.detail?.id !== 'settings-effort-value') return;
+      const tier = e.detail.value;
+      if (!tier) return;
+      wrap.dataset.value = tier;
+      _refreshAgentEffortSummary();
+      _refreshAgentBudgetPlaceholders();
+    });
     wrap.addEventListener('click', (e) => {
       const btn = e.target.closest('.settings-effort-btn');
       if (!btn) return;
       const tier = btn.dataset.effort;
       if (!tier) return;
       wrap.dataset.value = tier;
-      wrap.querySelectorAll('.settings-effort-btn').forEach(b => {
-        b.classList.toggle('active', b === btn);
-      });
+      wrap.querySelectorAll('.settings-effort-btn').forEach(b => b.classList.toggle('active', b === btn));
       _refreshAgentEffortSummary();
       _refreshAgentBudgetPlaceholders();
     });
@@ -2269,6 +2349,8 @@ function _refreshAgentBudgetPlaceholders() {
 function _collectAgentEffortPayload() {
   const wrap = document.getElementById('settings-effort-buttons');
   if (!wrap) return null;
+  const widgetValue = document.getElementById('settings-effort-value')?.value;
+  if (widgetValue) return widgetValue;
   return wrap.dataset.value || 'balanced';
 }
 

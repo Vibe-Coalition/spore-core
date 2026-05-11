@@ -8,6 +8,7 @@ const {
   changedFileSummary,
   classifyVerificationClaim,
   deriveSetupStatus,
+  verificationCommandsFromToolCalls,
 } = require('./reporting');
 
 function truncate(s, max = 12000) {
@@ -51,7 +52,9 @@ function scoreScenario(result) {
   const changedPaths = Array.isArray(changed.paths) ? changed.paths : changedPathsFromStatus(statusText);
   const filesChanged = Number.isFinite(changed.count) ? changed.count : changedFileCount(statusText);
   const setupStatus = result?.setupStatus || deriveSetupStatus(result);
-  const verificationClaim = result?.verificationClaim || classifyVerificationClaim(result?.finalText || '', verification);
+  const verificationClaim = result?.verificationClaim || classifyVerificationClaim(result?.finalText || '', verification, {
+    toolCalls: result?.toolCalls || [],
+  });
   const completed = !!result?.finalText && !result?.error && !result?.dryRun;
   const hadToolUse = Array.isArray(result?.toolCalls) && result.toolCalls.length > 0;
   return {
@@ -200,6 +203,17 @@ ${truncate(collectVisibleText(result), 10000)}`;
 function compactTurnTranscript(result = {}) {
   const blocks = [];
   for (const task of result.tasks || []) {
+    const verificationClaim = task.verificationClaim || classifyVerificationClaim(task.finalText || '', task.verification?.commands || [], {
+      toolCalls: task.toolCalls || [],
+    });
+    const toolVerification = verificationCommandsFromToolCalls(task.toolCalls || []).map(v => ({
+      command: v.command,
+      ok: v.ok,
+      scope: v.command ? classifyVerificationClaim('', [v]).evidence.commands[0]?.scope || null : null,
+      exitCode: v.exitCode,
+      stdout: truncate(v.stdout || v.resultSummary || '', 1200),
+      stderr: truncate(v.stderr || '', 800),
+    }));
     const turns = (task.turns || []).map(turn => ({
       turnIndex: turn.turnIndex,
       user: truncate(turn.userText || '', 2000),
@@ -216,7 +230,7 @@ function compactTurnTranscript(result = {}) {
       setupStatus: task.setupStatus || null,
       changedFiles: task.changedFiles || null,
       untrackedSummary: task.git?.untrackedSummary || null,
-      verificationClaim: task.verificationClaim || null,
+      verificationClaim,
       responseRepair: task.responseRepair || null,
       handoffFacts: task.handoffFacts || null,
       verification: (task.verification?.commands || []).map(v => ({
@@ -224,7 +238,12 @@ function compactTurnTranscript(result = {}) {
         ok: v.ok,
         failureReason: v.failureReason || null,
         problems: v.problems || [],
+        stdout: truncate(v.stdout || '', 1200),
+        stderr: truncate(v.stderr || '', 800),
+        checkedFiles: v.checkedFiles || undefined,
+        skippedFiles: v.skippedFiles || undefined,
       })),
+      toolVerification,
       turns,
       finalText: truncate(task.finalText || '', 2500),
       actorDoneReason: task.actorDoneReason || null,
@@ -249,6 +268,145 @@ function parseJsonObjectText(text) {
   } catch (e) {
     return { value: null, error: e.message, jsonText };
   }
+}
+
+function asStringArray(value) {
+  if (Array.isArray(value)) {
+    return value.map(v => {
+      if (typeof v === 'string') return v.trim();
+      if (v && typeof v === 'object') {
+        return String(v.problem || v.recommendation || v.area || JSON.stringify(v)).trim();
+      }
+      return String(v || '').trim();
+    }).filter(Boolean);
+  }
+  const text = String(value || '').trim();
+  return text ? [text] : [];
+}
+
+function normalizeImprovementPoints(value) {
+  if (!Array.isArray(value)) return asStringArray(value).map(text => ({
+    area: 'benchmark',
+    problem: text,
+    recommendation: text,
+    severity: 'medium',
+  }));
+  return value.map(item => {
+    if (typeof item === 'string') {
+      return { area: 'benchmark', problem: item, recommendation: item, severity: 'medium' };
+    }
+    if (!item || typeof item !== 'object') return null;
+    return {
+      area: String(item.area || 'benchmark'),
+      problem: String(item.problem || item.issue || item.summary || item.recommendation || 'Unspecified issue'),
+      recommendation: String(item.recommendation || item.fix || item.problem || 'Review this benchmark finding.'),
+      severity: ['low', 'medium', 'high'].includes(String(item.severity || '').toLowerCase())
+        ? String(item.severity).toLowerCase()
+        : 'medium',
+    };
+  }).filter(Boolean);
+}
+
+function lowValueExperienceSummary(summary) {
+  const overall = String(summary?.overall || '').trim();
+  if (!overall) return true;
+  if (/input summary was missing|structured placeholder|placeholder has been generated/i.test(overall)) return true;
+  if (!Array.isArray(summary?.what_went_well) || summary.what_went_well.length === 0) return true;
+  if (!Array.isArray(summary?.improvement_points)) return true;
+  return false;
+}
+
+function normalizeExperienceSummary(summary, meta = {}) {
+  if (!summary || typeof summary !== 'object') return null;
+  const outcome = String(summary.outcome || '').toLowerCase();
+  const confidence = String(summary.confidence || '').toLowerCase();
+  return {
+    overall: String(summary.overall || summary.summary || '').trim(),
+    outcome: ['strong', 'mixed', 'weak', 'blocked'].includes(outcome) ? outcome : 'mixed',
+    what_went_well: asStringArray(summary.what_went_well),
+    agent_failure_modes: asStringArray(summary.agent_failure_modes),
+    memory_and_handoff: String(summary.memory_and_handoff || '').trim(),
+    tooling_and_execution: String(summary.tooling_and_execution || '').trim(),
+    improvement_points: normalizeImprovementPoints(summary.improvement_points),
+    notable_quotes_or_moments: asStringArray(summary.notable_quotes_or_moments),
+    confidence: ['low', 'medium', 'high'].includes(confidence) ? confidence : 'medium',
+    ...meta,
+  };
+}
+
+function fallbackExperienceSummary({ scenario, result, raw, repairRaw, parseError, repairParseError }) {
+  const score = scoreScenario(result);
+  const tasks = Array.isArray(result?.tasks) ? result.tasks : [];
+  const taskScores = tasks.map(t => t.score || scoreScenario(t));
+  const completedTasks = taskScores.filter(s => s.completed).length;
+  const likelyTasks = taskScores.filter(s => s.likelySuccess).length;
+  const verification = Array.isArray(result?.verification?.commands) ? result.verification.commands : [];
+  const verificationPassed = verification.filter(v => v.ok === true).length;
+  const memoryTimeouts = tasks.filter(t => t.memorySettle?.readiness?.timedOut || /timeout/i.test(String(t.memorySettle?.status || ''))).length;
+  const overclaims = tasks.filter(t => t.verificationClaim?.overclaimed || t.score?.verificationOverclaimed);
+  const repairs = tasks.filter(t => t.responseRepair);
+  const changed = result?.changedFiles || {};
+  const changedPaths = Array.isArray(changed.paths) ? changed.paths : (score.changedPaths || []);
+  const setupStatuses = tasks.reduce((acc, t) => {
+    const status = t.setupStatus?.status || t.score?.setupStatus || 'unknown';
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  const outcome = score.likelySuccess
+    ? ((overclaims.length || memoryTimeouts || repairs.length) ? 'mixed' : 'strong')
+    : (score.completed ? 'mixed' : 'weak');
+  const rawPreview = truncate(raw || repairRaw || '', 1200);
+  const failureModes = [];
+  if (overclaims.length) failureModes.push(`${overclaims.length} task(s) overclaimed verification scope.`);
+  if (repairs.length) failureModes.push(`${repairs.length} final response(s) needed workflow repair.`);
+  if (memoryTimeouts) failureModes.push(`${memoryTimeouts} memory settle operation(s) timed out.`);
+  if (!failureModes.length) failureModes.push('No major failure mode was recoverable from the malformed planner summary.');
+
+  return {
+    overall: `${scenario?.id || 'Repository'} completed ${completedTasks}/${tasks.length || 0} task(s), changed ${score.filesChanged} file(s), and passed ${verificationPassed}/${verification.length} verification command(s). The planner summary was malformed, so this analysis was reconstructed from benchmark telemetry.`,
+    outcome,
+    what_went_well: [
+      likelyTasks ? `${likelyTasks}/${tasks.length || 0} task(s) were likely successful.` : '',
+      score.filesChanged ? `Changed files included: ${changedPaths.slice(0, 8).join(', ')}${changedPaths.length > 8 ? ', ...' : ''}.` : '',
+      verification.length ? `Verification passed ${verificationPassed}/${verification.length} command(s).` : '',
+    ].filter(Boolean),
+    agent_failure_modes: failureModes,
+    memory_and_handoff: memoryTimeouts
+      ? `Handoff worked well enough for task completion, but ${memoryTimeouts} memory settle operation(s) timed out.`
+      : 'No memory settle timeout was detected in telemetry.',
+    tooling_and_execution: `Setup statuses: ${Object.entries(setupStatuses).map(([k, v]) => `${k}=${v}`).join(', ') || 'unknown'}. Tool use was ${score.hadToolUse ? 'present' : 'not detected'}.`,
+    improvement_points: [
+      overclaims.length ? {
+        area: 'verification',
+        problem: `${overclaims.length} task(s) overclaimed verification scope.`,
+        recommendation: 'Tie final verification claims to exact commands and observed outputs.',
+        severity: 'high',
+      } : null,
+      repairs.length ? {
+        area: 'workflow',
+        problem: `${repairs.length} final response(s) needed workflow repair.`,
+        recommendation: 'Strengthen the final-answer gate before the response reaches the user.',
+        severity: 'medium',
+      } : null,
+      memoryTimeouts ? {
+        area: 'memory',
+        problem: `${memoryTimeouts} memory settle operation(s) timed out.`,
+        recommendation: 'Make memory settle readiness clearer and reduce timeout sensitivity for long benchmark sessions.',
+        severity: 'medium',
+      } : null,
+      {
+        area: 'benchmark',
+        problem: 'The planner returned malformed analysis JSON.',
+        recommendation: 'Use deterministic fallback analysis and render raw planner output when JSON repair fails.',
+        severity: 'medium',
+      },
+    ].filter(Boolean),
+    notable_quotes_or_moments: rawPreview ? [`Planner raw output preview: ${rawPreview}`] : [],
+    confidence: rawPreview ? 'medium' : 'low',
+    fallbackGenerated: true,
+    originalParseError: parseError || null,
+    repairParseError: repairParseError || null,
+  };
 }
 
 async function repairExperienceSummaryJson({ llmClient, model, raw, parseError }) {
@@ -316,6 +474,7 @@ Return strict JSON only with this schema:
 }
 
 Focus on product improvements for Spore Code, not on judging the repo maintainers. Be concrete and evidence-based. If the transcript shows confusion, leakage, missing setup, premature success claims, poor handoff, weak verification, or memory not being ready for the next task, call that out.
+Use the embedded verificationClaim audits as the source of truth for final-answer honesty. The audit merges benchmark verifier commands with in-session tool evidence; distinguish full-suite verification from focused or file-specific tests, and call out unsupported test-count claims.
 
 Repository:
 ${JSON.stringify({
@@ -354,9 +513,24 @@ ${truncate(JSON.stringify(result?.verification || {}, null, 2), 6000)}`;
   });
   const text = response?.content?.[0]?.text || '';
   const parsed = parseJsonObjectText(text);
-  if (parsed.value) return parsed.value;
+  if (parsed.value) {
+    const normalized = normalizeExperienceSummary(parsed.value);
+    if (normalized && !lowValueExperienceSummary(normalized)) return normalized;
+  }
   const repaired = await repairExperienceSummaryJson({ llmClient, model, raw: text, parseError: parsed.error });
-  return repaired || { raw: text, parseError: parsed.error };
+  const normalizedRepair = normalizeExperienceSummary(repaired, {
+    repairedFromParseError: !!repaired,
+    originalParseError: parsed.error || null,
+  });
+  if (normalizedRepair && !lowValueExperienceSummary(normalizedRepair)) return normalizedRepair;
+  return fallbackExperienceSummary({
+    scenario,
+    result,
+    raw: text,
+    repairRaw: repaired?.repairRaw || null,
+    parseError: parsed.error,
+    repairParseError: repaired?.repairParseError || null,
+  });
 }
 
 module.exports = {
@@ -371,6 +545,8 @@ module.exports = {
     extractJsonObjectText,
     parseJsonObjectText,
     repairExperienceSummaryJson,
+    fallbackExperienceSummary,
+    normalizeExperienceSummary,
     truncate,
   },
 };

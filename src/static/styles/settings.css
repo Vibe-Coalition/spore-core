@@ -261,17 +261,38 @@
     .settings-panes.settings-search-active .settings-tab-pane[data-search-visible="true"] { grid-template-columns: 1fr; }
     #settings-search-count { min-width: 0; }
   }
-  /* Agent Effort 3-button picker (Agent tab) */
+  /* Reusable segmented picker (Agent effort, plugin policies, routing modes) */
+  .settings-widget-segmented {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+    gap: 8px;
+    align-items: stretch;
+    margin-top: 4px;
+  }
+  .settings-agent-effort-segmented {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 0;
+  }
+  .settings-segmented-btn,
   .settings-effort-btn {
-    flex: 1; padding: 8px 12px; border-radius: 8px;
+    min-width: 0; padding: 8px 12px; border-radius: 8px;
     border: 1px solid var(--border); background: transparent;
     color: var(--text); font-family: var(--font-body); font-size: .78rem;
     cursor: pointer; transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
   }
+  .settings-segmented-btn:hover,
   .settings-effort-btn:hover { border-color: var(--border-active); }
+  .settings-segmented-btn.active,
   .settings-effort-btn.active {
     background: rgba(var(--hl-rgb),.07); border-color: var(--accent);
     color: var(--accent);
+  }
+  .settings-field { min-width: 0; }
+  @media (max-width: 560px) {
+    .settings-agent-effort-segmented {
+      grid-template-columns: 1fr;
+    }
   }
   /* Shared primitives (used inside tab panes) */
   .settings-card {

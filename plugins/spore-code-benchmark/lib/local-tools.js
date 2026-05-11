@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { evaluateCommandResult } = require('./verification');
+const { evaluateCommandResult, isArtifactPath } = require('./verification');
 
 const SKIP_DIRS = new Set([
   '.git',
@@ -124,7 +124,7 @@ function benchmarkRunRoot(absPath) {
   return runId ? p.slice(0, idx + marker.length + runId.length) : null;
 }
 
-function commandIsolationViolation(command, currentRunRoot = null) {
+function commandIsolationViolation(command, currentRunRoot = null, currentEnvRoot = null) {
   const s = String(command || '');
   const compact = s.replace(/\s+/g, ' ');
   if (/\bfind\s+\/(?:\s|$)/.test(compact)) {
@@ -135,10 +135,18 @@ function commandIsolationViolation(command, currentRunRoot = null) {
   }
   const paths = s.match(/\/[A-Za-z0-9._~:+@%=-][^\s"'`$;&|<>)]*/g) || [];
   const current = currentRunRoot ? toPosix(currentRunRoot) : null;
+  const toolEnvRoot = current ? `${current}/.tool-env` : null;
+  const envRoot = currentEnvRoot ? toPosix(path.resolve(currentEnvRoot)) : null;
   for (const raw of paths) {
     const runRoot = benchmarkRunRoot(raw);
     if (runRoot && current && runRoot !== current) {
       return `Command references another benchmark run: ${raw}`;
+    }
+    if (toolEnvRoot && toPosix(path.resolve(raw)).startsWith(toolEnvRoot)) {
+      const abs = toPosix(path.resolve(raw));
+      if (!envRoot || !abs.startsWith(envRoot)) {
+        return 'Command references another benchmark scenario tool environment; use the current repo or $SPORE_BENCHMARK_CACHE only';
+      }
     }
   }
   return null;
@@ -158,12 +166,15 @@ class LocalToolExecutor {
     if (!opts.root) throw new Error('LocalToolExecutor requires root');
     this.root = path.resolve(opts.root);
     this.envHome = path.resolve(opts.envHome || this.root);
+    this.envRoot = path.basename(this.envHome) === 'home' ? path.dirname(this.envHome) : this.envHome;
     this.extraEnv = { ...(opts.extraEnv || {}) };
     this.runRoot = benchmarkRunRoot(this.root) || benchmarkRunRoot(this.envHome);
     this.maxOutputBytes = Math.max(2000, Number(opts.maxOutputBytes) || DEFAULT_MAX_OUTPUT_BYTES);
     this.maxReadBytes = Math.max(4000, Number(opts.maxReadBytes) || DEFAULT_MAX_READ_BYTES);
     this.defaultTimeoutMs = Math.max(1000, Number(opts.defaultTimeoutMs) || DEFAULT_TIMEOUT_MS);
     this.log = opts.log || null;
+    this.bgProcesses = new Map();
+    this.nextBgProcessId = 1;
     fs.mkdirSync(this.envHome, { recursive: true });
   }
 
@@ -211,6 +222,9 @@ class LocalToolExecutor {
         case 'patch_file': return this.patchFile(input);
         case 'run_tests': return this.runTests(input);
         case 'exec': return this.exec(input);
+        case 'bg_list': return this.bgList(input);
+        case 'bg_tail': return this.bgTail(input);
+        case 'bg_kill': return this.bgKill(input);
         default: return stableError(`Unsupported benchmark local tool: ${name}`);
       }
     } catch (e) {
@@ -459,6 +473,96 @@ class LocalToolExecutor {
     return this._runCommand('git apply --whitespace=nowarn -', { cwd, timeoutMs: 30000, stdin: patch });
   }
 
+  async untrackedWhitespaceCheck(input = {}) {
+    const cwd = this.resolvePath(input.path || this.root, { mustExist: true, directory: true });
+    const maxFiles = Math.min(1000, Math.max(1, Math.floor(Number(input.maxFiles) || 250)));
+    const maxBytes = Math.min(4 * 1024 * 1024, Math.max(1024, Math.floor(Number(input.maxBytes) || 512 * 1024)));
+    const listed = await this._runCommand('git ls-files --others --exclude-standard -z', {
+      cwd,
+      timeoutMs: 30000,
+      maxOutputBytes: 300000,
+      keepAliveOnTimeout: false,
+    });
+    if (!listed.ok) return evaluateCommandResult('untracked whitespace check', listed);
+    const files = String(listed.stdout || '')
+      .split('\0')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .filter(p => !isArtifactPath(p));
+    const checked = [];
+    const skipped = [];
+    const problems = [];
+    if (files.length > maxFiles) {
+      problems.push({
+        kind: 'too_many_untracked_files',
+        severity: 'semantic',
+        detail: `${files.length} untracked files need review; refusing to scan more than ${maxFiles}`,
+      });
+    }
+    for (const rel of files.slice(0, maxFiles)) {
+      const abs = this.resolvePath(rel, { base: cwd });
+      if (!fs.existsSync(abs)) continue;
+      const st = fs.statSync(abs);
+      if (!st.isFile()) {
+        skipped.push({ path: rel, reason: 'not_file' });
+        continue;
+      }
+      if (st.size > maxBytes) {
+        skipped.push({ path: rel, reason: 'too_large', bytes: st.size });
+        continue;
+      }
+      const raw = fs.readFileSync(abs);
+      if (raw.includes(0)) {
+        skipped.push({ path: rel, reason: 'binary', bytes: st.size });
+        continue;
+      }
+      const text = raw.toString('utf8');
+      checked.push(rel);
+      const lines = text.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (/[ \t]+$/.test(line)) {
+          problems.push({
+            kind: 'trailing_whitespace',
+            severity: 'semantic',
+            path: rel,
+            line: i + 1,
+            detail: `${rel}:${i + 1}: trailing whitespace`,
+          });
+        }
+        if (/^ *\t/.test(line)) {
+          problems.push({
+            kind: 'space_before_tab',
+            severity: 'semantic',
+            path: rel,
+            line: i + 1,
+            detail: `${rel}:${i + 1}: space before tab in indent`,
+          });
+        }
+      }
+    }
+    const ok = problems.length === 0;
+    const stdout = [
+      `${checked.length} untracked text file${checked.length === 1 ? '' : 's'} checked`,
+      skipped.length ? `${skipped.length} skipped` : '',
+      problems.length ? problems.map(p => p.detail).filter(Boolean).slice(0, 40).join('\n') : 'no untracked whitespace problems',
+    ].filter(Boolean).join('\n');
+    return evaluateCommandResult('untracked whitespace check', {
+      ok,
+      command: 'untracked whitespace check',
+      cwd,
+      exitCode: ok ? 0 : 1,
+      timedOut: false,
+      durationMs: listed.durationMs || null,
+      stdout,
+      stderr: '',
+      checkedFiles: checked,
+      skippedFiles: skipped,
+      untrackedFiles: files,
+      problems,
+    });
+  }
+
   detectTestCommand(cwd) {
     if (fs.existsSync(path.join(cwd, 'package.json'))) {
       try {
@@ -486,12 +590,243 @@ class LocalToolExecutor {
     if (commandLooksDangerous(command)) return Promise.resolve(stableError('Command blocked by benchmark sandbox policy'));
     const resourceViolation = commandResourceViolation(command);
     if (resourceViolation) return Promise.resolve(stableError(resourceViolation));
-    const isolationViolation = commandIsolationViolation(command, this.runRoot);
+    const isolationViolation = commandIsolationViolation(command, this.runRoot, this.envRoot);
     if (isolationViolation) return Promise.resolve(stableError(isolationViolation));
     const cwd = this.resolvePath(input.workdir || this.root, { mustExist: true, directory: true });
     const timeout = Math.min(600000, Math.max(1000, Math.floor(Number(input.timeout) || this.defaultTimeoutMs)));
     const maxOutputBytes = Math.min(400000, Math.max(1000, Math.floor(Number(input.maxOutputBytes) || this.maxOutputBytes)));
-    return this._runCommand(command, { cwd, timeoutMs: timeout, maxOutputBytes });
+    const background = input.background === true || String(input.mode || '').toLowerCase() === 'background';
+    if (background) {
+      const settleMs = Math.min(10000, Math.max(0, Math.floor(Number(input.settleMs ?? input.startupWaitMs ?? 2000) || 0)));
+      return this._startBackground(command, { cwd, maxOutputBytes, settleMs });
+    }
+    return this._runCommand(command, {
+      cwd,
+      timeoutMs: timeout,
+      maxOutputBytes,
+      keepAliveOnTimeout: input.keepAliveOnTimeout !== false,
+    });
+  }
+
+  bgList() {
+    const processes = Array.from(this.bgProcesses.values())
+      .sort((a, b) => a.id - b.id)
+      .map(rec => ({
+        id: rec.id,
+        pid: rec.pid,
+        command: rec.command,
+        cwd: rec.cwd,
+        running: rec.running,
+        exitCode: rec.exitCode,
+        signal: rec.signal,
+        timedOut: !!rec.timedOut,
+        durationMs: (rec.endedMs || Date.now()) - rec.startedMs,
+        startedAt: rec.startedAt,
+        endedAt: rec.endedAt || null,
+        reason: rec.reason || null,
+      }));
+    return { ok: true, count: processes.length, processes };
+  }
+
+  bgTail(input = {}) {
+    const id = Math.floor(Number(input.id) || 0);
+    const rec = this.bgProcesses.get(id);
+    if (!rec) return stableError(`background process #${id} not found`);
+    const lines = Math.min(500, Math.max(1, Math.floor(Number(input.lines) || 80)));
+    return {
+      ok: true,
+      id,
+      pid: rec.pid,
+      command: rec.command,
+      running: rec.running,
+      exitCode: rec.exitCode,
+      signal: rec.signal,
+      durationMs: (rec.endedMs || Date.now()) - rec.startedMs,
+      output: this._tailOutput(rec.output, lines, rec.maxOutputBytes),
+      stdout: compactOutput(rec.stdout, rec.maxOutputBytes),
+      stderr: compactOutput(rec.stderr, Math.min(rec.maxOutputBytes, 40000)),
+    };
+  }
+
+  bgKill(input = {}) {
+    const id = Math.floor(Number(input.id) || 0);
+    const rec = this.bgProcesses.get(id);
+    if (!rec) return stableError(`background process #${id} not found`);
+    const wasRunning = !!rec.running;
+    if (wasRunning) {
+      this._terminateChildTree(rec.child, 'SIGTERM');
+      setTimeout(() => {
+        if (rec.running) this._terminateChildTree(rec.child, 'SIGKILL');
+      }, 1500).unref?.();
+    }
+    return { ok: true, id, running: wasRunning, pid: rec.pid };
+  }
+
+  killAllBackground() {
+    for (const rec of this.bgProcesses.values()) {
+      if (rec.running) this._terminateChildTree(rec.child, 'SIGKILL');
+    }
+  }
+
+  _shellEnv() {
+    const basePath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
+    const cacheRoot = this.extraEnv.SPORE_BENCHMARK_CACHE || path.join(this.envHome, '.cache', 'spore-code-benchmark');
+    const cacheBin = path.join(cacheRoot, 'bin');
+    const goBin = path.join(cacheRoot, 'toolchains', 'go', 'bin');
+    const cargoBin = path.join(cacheRoot, 'cargo', 'bin');
+    const localBin = path.join(this.envHome, '.local', 'bin');
+    fs.mkdirSync(cacheRoot, { recursive: true });
+    fs.mkdirSync(cacheBin, { recursive: true });
+    return {
+      PATH: `${cacheBin}:${goBin}:${cargoBin}:${localBin}:${basePath}`,
+      HOME: this.envHome,
+      CI: '1',
+      TERM: 'dumb',
+      LANG: process.env.LANG || 'C.UTF-8',
+      XDG_CACHE_HOME: path.join(cacheRoot, 'xdg'),
+      npm_config_cache: path.join(cacheRoot, 'npm'),
+      PIP_CACHE_DIR: path.join(cacheRoot, 'pip'),
+      UV_CACHE_DIR: path.join(cacheRoot, 'uv'),
+      GOCACHE: path.join(cacheRoot, 'go-build'),
+      GOMODCACHE: path.join(cacheRoot, 'go-mod'),
+      GOPATH: path.join(cacheRoot, 'go'),
+      GOBIN: cacheBin,
+      CARGO_HOME: path.join(cacheRoot, 'cargo'),
+      RUSTUP_HOME: path.join(cacheRoot, 'rustup'),
+      PYTHONUSERBASE: path.join(this.envHome, '.local'),
+      SPORE_BENCHMARK_CACHE: cacheRoot,
+      ...this.extraEnv,
+    };
+  }
+
+  _spawnTrackedProcess(command, cwd, opts = {}) {
+    const started = Date.now();
+    const rec = {
+      id: null,
+      command,
+      cwd,
+      child: null,
+      pid: null,
+      startedMs: started,
+      startedAt: new Date(started).toISOString(),
+      endedMs: null,
+      endedAt: null,
+      exitCode: null,
+      signal: null,
+      running: true,
+      timedOut: false,
+      error: null,
+      stdout: '',
+      stderr: '',
+      output: '',
+      maxOutputBytes: opts.maxOutputBytes || this.maxOutputBytes,
+      closeCallbacks: [],
+      errorCallbacks: [],
+    };
+    const child = spawn('/bin/bash', ['-o', 'pipefail', '-c', command], {
+      cwd,
+      env: this._shellEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+    rec.child = child;
+    rec.pid = child.pid || null;
+    child.stdout.on('data', d => this._appendProcessOutput(rec, 'stdout', d));
+    child.stderr.on('data', d => this._appendProcessOutput(rec, 'stderr', d));
+    child.on('error', e => {
+      rec.error = e.message;
+      for (const cb of rec.errorCallbacks.splice(0)) cb(e);
+    });
+    child.on('close', (code, signal) => {
+      rec.running = false;
+      rec.exitCode = code;
+      rec.signal = signal;
+      rec.endedMs = Date.now();
+      rec.endedAt = new Date(rec.endedMs).toISOString();
+      for (const cb of rec.closeCallbacks.splice(0)) cb(code, signal);
+    });
+    return rec;
+  }
+
+  _appendProcessOutput(rec, stream, chunk) {
+    const text = chunk.toString();
+    rec[stream] += text;
+    rec.output += text;
+    const max = Math.max(2000, rec.maxOutputBytes * 2);
+    if (rec[stream].length > max) rec[stream] = rec[stream].slice(-max);
+    if (rec.output.length > max) rec.output = rec.output.slice(-max);
+  }
+
+  _trackBackgroundRecord(rec, reason) {
+    if (!rec.id) {
+      rec.id = this.nextBgProcessId++;
+      rec.reason = reason || 'background';
+      this.bgProcesses.set(rec.id, rec);
+    }
+    return rec;
+  }
+
+  _tailOutput(text, lines, maxBytes) {
+    const split = String(text || '').replace(/\r/g, '').split('\n');
+    return compactOutput(split.slice(-lines).join('\n'), maxBytes || this.maxOutputBytes);
+  }
+
+  async _startBackground(command, opts = {}) {
+    const cwd = opts.cwd || this.root;
+    const rec = this._trackBackgroundRecord(
+      this._spawnTrackedProcess(command, cwd, { maxOutputBytes: opts.maxOutputBytes }),
+      'requested'
+    );
+    try { rec.child.stdin.end(); } catch {}
+    if (opts.settleMs) {
+      await new Promise(resolve => setTimeout(resolve, opts.settleMs));
+    }
+    if (!rec.running) {
+      const result = {
+        ok: rec.exitCode === 0 && !rec.error,
+        command,
+        cwd,
+        exitCode: rec.exitCode,
+        signal: rec.signal,
+        timedOut: false,
+        durationMs: (rec.endedMs || Date.now()) - rec.startedMs,
+        stdout: compactOutput(rec.stdout, rec.maxOutputBytes),
+        stderr: compactOutput(rec.stderr, rec.maxOutputBytes),
+        output: compactOutput(rec.output, rec.maxOutputBytes),
+        backgroundId: rec.id,
+        processId: rec.id,
+      };
+      if (rec.error) result.error = rec.error;
+      return evaluateCommandResult(command, result);
+    }
+    return {
+      ok: true,
+      command,
+      cwd,
+      backgrounded: true,
+      processId: rec.id,
+      backgroundId: rec.id,
+      pid: rec.pid,
+      running: true,
+      durationMs: Date.now() - rec.startedMs,
+      stdout: compactOutput(rec.stdout, rec.maxOutputBytes),
+      stderr: compactOutput(rec.stderr, Math.min(rec.maxOutputBytes, 40000)),
+      output: this._tailOutput(rec.output, 80, rec.maxOutputBytes),
+      note: `Running in background as #${rec.id}. Use bg_tail with id ${rec.id} to inspect output and bg_kill to stop it.`,
+    };
+  }
+
+  _terminateChildTree(child, signal = 'SIGTERM') {
+    if (!child || !child.pid) return;
+    try {
+      if (process.platform !== 'win32') {
+        process.kill(-child.pid, signal);
+      } else {
+        child.kill(signal);
+      }
+    } catch {
+      try { child.kill(signal); } catch {}
+    }
   }
 
   _runCommand(command, opts = {}) {
@@ -500,68 +835,66 @@ class LocalToolExecutor {
     const timeoutMs = opts.timeoutMs || this.defaultTimeoutMs;
     return new Promise((resolve) => {
       const started = Date.now();
-      const basePath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
-      const cacheRoot = this.extraEnv.SPORE_BENCHMARK_CACHE || path.join(this.envHome, '.cache', 'spore-code-benchmark');
-      const cacheBin = path.join(cacheRoot, 'bin');
-      const goBin = path.join(cacheRoot, 'toolchains', 'go', 'bin');
-      const cargoBin = path.join(cacheRoot, 'cargo', 'bin');
-      const localBin = path.join(this.envHome, '.local', 'bin');
-      const env = {
-        PATH: `${cacheBin}:${goBin}:${cargoBin}:${localBin}:${basePath}`,
-        HOME: this.envHome,
-        CI: '1',
-        TERM: 'dumb',
-        LANG: process.env.LANG || 'C.UTF-8',
-        XDG_CACHE_HOME: path.join(cacheRoot, 'xdg'),
-        npm_config_cache: path.join(cacheRoot, 'npm'),
-        PIP_CACHE_DIR: path.join(cacheRoot, 'pip'),
-        UV_CACHE_DIR: path.join(cacheRoot, 'uv'),
-        GOCACHE: path.join(cacheRoot, 'go-build'),
-        GOMODCACHE: path.join(cacheRoot, 'go-mod'),
-        GOPATH: path.join(cacheRoot, 'go'),
-        GOBIN: cacheBin,
-        CARGO_HOME: path.join(cacheRoot, 'cargo'),
-        RUSTUP_HOME: path.join(cacheRoot, 'rustup'),
-        PYTHONUSERBASE: path.join(this.envHome, '.local'),
-        SPORE_BENCHMARK_CACHE: cacheRoot,
-        ...this.extraEnv,
+      const rec = this._spawnTrackedProcess(command, cwd, { maxOutputBytes });
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(evaluateCommandResult(command, result));
       };
-      fs.mkdirSync(cacheRoot, { recursive: true });
-      fs.mkdirSync(cacheBin, { recursive: true });
-      const child = spawn('/bin/bash', ['-c', command], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
-      let stdout = '';
-      let stderr = '';
-      let timedOut = false;
       const timer = setTimeout(() => {
-        timedOut = true;
-        try { child.kill('SIGTERM'); } catch {}
-        setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 1500).unref?.();
+        rec.timedOut = true;
+        if (opts.keepAliveOnTimeout && !opts.stdin && rec.running) {
+          this._trackBackgroundRecord(rec, 'foreground-timeout');
+          finish({
+            ok: false,
+            command,
+            cwd,
+            exitCode: null,
+            signal: null,
+            timedOut: true,
+            backgrounded: true,
+            processId: rec.id,
+            backgroundId: rec.id,
+            running: true,
+            durationMs: Date.now() - started,
+            stdout: compactOutput(rec.stdout, maxOutputBytes),
+            stderr: compactOutput(rec.stderr, maxOutputBytes),
+            output: this._tailOutput(rec.output, 80, maxOutputBytes),
+            note: `Command exceeded the ${timeoutMs}ms foreground timeout and is still running as background #${rec.id}. Use bg_tail with id ${rec.id} to inspect output and bg_kill to stop it.`,
+          });
+          return;
+        }
+        this._terminateChildTree(rec.child, 'SIGTERM');
+        setTimeout(() => {
+          if (rec.running) this._terminateChildTree(rec.child, 'SIGKILL');
+        }, 1500).unref?.();
       }, timeoutMs);
       if (opts.stdin) {
-        child.stdin.end(opts.stdin);
+        rec.child.stdin.end(opts.stdin);
       } else {
-        child.stdin.end();
+        rec.child.stdin.end();
       }
-      child.stdout.on('data', d => { stdout += d.toString(); if (stdout.length > maxOutputBytes * 2) stdout = stdout.slice(-maxOutputBytes); });
-      child.stderr.on('data', d => { stderr += d.toString(); if (stderr.length > maxOutputBytes * 2) stderr = stderr.slice(-maxOutputBytes); });
-      child.on('error', e => {
+      rec.errorCallbacks.push(e => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         resolve(stableError(e.message));
       });
-      child.on('close', (code, signal) => {
-        clearTimeout(timer);
+      rec.closeCallbacks.push((code, signal) => {
         const result = {
-          ok: code === 0 && !timedOut,
+          ok: code === 0 && !rec.timedOut,
           command,
           cwd,
           exitCode: code,
           signal,
-          timedOut,
+          timedOut: rec.timedOut,
           durationMs: Date.now() - started,
-          stdout: compactOutput(stdout, maxOutputBytes),
-          stderr: compactOutput(stderr, maxOutputBytes),
+          stdout: compactOutput(rec.stdout, maxOutputBytes),
+          stderr: compactOutput(rec.stderr, maxOutputBytes),
         };
-        resolve(evaluateCommandResult(command, result));
+        finish(result);
       });
     });
   }

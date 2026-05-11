@@ -58,6 +58,15 @@ function _cosine(a, b) {
   return denom === 0 ? 0 : dot / denom;
 }
 
+function _isNodeResult(node) {
+  return !!(node && typeof node === 'object' && node.id);
+}
+
+function _validNodeResults(nodes) {
+  if (!Array.isArray(nodes)) return [];
+  return nodes.filter(_isNodeResult);
+}
+
 function classifyQueryType(query) {
   const q = query.toLowerCase();
   if (/\bhow\s+many\b|\bhow\s+much\b|\btotal\b|\ball\s+the\b|\blist\s+all\b|\bevery\b|\bhow\s+many\s+\w+\s+(?:did|have|do|was|were|are|has)\b|\bcombined\b|\bin\s+total\b/.test(q))
@@ -377,6 +386,8 @@ function applyRetrievalMixin(GraphContext) {
 
   proto._mergeHybridResults = function _mergeHybridResults(query, vectorResults, keywordResults, topK) {
     const exactQ = query.toLowerCase();
+    const safeVectorResults = _validNodeResults(vectorResults);
+    const safeKeywordResults = _validNodeResults(keywordResults);
 
     const _keywordTier = (node) => {
       const label = (node.label || '').toLowerCase();
@@ -394,17 +405,17 @@ function applyRetrievalMixin(GraphContext) {
 
     const scoreMap = new Map();
 
-    for (let i = 0; i < keywordResults.length; i++) {
-      const node = keywordResults[i];
+    for (let i = 0; i < safeKeywordResults.length; i++) {
+      const node = safeKeywordResults[i];
       const tier = _keywordTier(node);
       const keyScore = tier <= 1 ? 1.0 - tier * 0.1
         : tier <= 3 ? 0.7 - (tier - 2) * 0.1
           : 0.4 - (tier - 4) * 0.1;
-      const posBonus = 0.05 * (1 - i / Math.max(keywordResults.length, 1));
+      const posBonus = 0.05 * (1 - i / Math.max(safeKeywordResults.length, 1));
       scoreMap.set(node.id, { node, score: keyScore + posBonus, source: 'keyword' });
     }
 
-    for (const node of vectorResults) {
+    for (const node of safeVectorResults) {
       const vecScore = node._vectorScore || 0;
       const normVec = Math.min(0.8, Math.max(0, (vecScore - 0.3) / 0.6) * 0.8);
       const existing = scoreMap.get(node.id);
@@ -637,7 +648,7 @@ Rules:
       if (!name || name.length < 2 || seen.has(name.toLowerCase())) return;
       seen.add(name.toLowerCase());
       const node = this.getNodeByLabel(name);
-      if (node) pinned.push(node);
+      if (_isNodeResult(node)) pinned.push(node);
     };
 
     const STOP_WORDS = /^(The|This|That|What|When|Where|Who|How|Why|Which|Does|Did|Can|Could|Would|Should|Have|Has|Is|Are|Was|Were|Do|My|His|Her|Its|Our|Their|Your|If|But|And|Also|Then|After|Before|Since|Because|However|Although|Please|Yes|No|Sure|Ok|Thank|Thanks|I|You|We|They|It|He|She|Not|So|Yet|Or|As|At|To|In|On|Of|For|With|From|About)$/;
@@ -679,7 +690,8 @@ Rules:
             .get(`%${joined.toLowerCase()}%`);
           if (row && !seen.has(row.id)) {
             seen.add(row.id);
-            pinned.push(this._hydrateNode(row));
+            const node = this._hydrateNode(row);
+            if (_isNodeResult(node)) pinned.push(node);
           }
         } catch (e) { this.log.warn('[retrieval] db.prepare failed: ' + e.message); }
       }
@@ -731,6 +743,7 @@ Rules:
       const seen = new Set();
       const nodeIds = [];
       for (const r of rows) {
+        if (!r?.node_id) continue;
         if (!seen.has(r.node_id)) {
           seen.add(r.node_id);
           nodeIds.push(r.node_id);
@@ -767,6 +780,7 @@ Rules:
       const seen = new Set();
       const nodeIds = [];
       for (const r of rows) {
+        if (!r?.node_id) continue;
         if (!seen.has(r.node_id)) {
           seen.add(r.node_id);
           nodeIds.push(r.node_id);
@@ -1194,10 +1208,10 @@ Rules:
     const qp = opts._queryParams || QUERY_TYPE_PARAMS.specific;
     const maxContextNodes = qp.maxContextNodes;
 
-    const pinned = this._extractQueryEntities(messageContent);
+    const pinned = _validNodeResults(this._extractQueryEntities(messageContent));
     const pinnedIds = new Set(pinned.map(n => n.id));
 
-    let searchResults = (opts._precomputedResults || this.searchNodesSelf(messageContent))
+    let searchResults = _validNodeResults(opts._precomputedResults || this.searchNodesSelf(messageContent))
       .filter(n => n.id !== agentId && !pinnedIds.has(n.id));
 
     // Project-scope filter for cli sessions. When the caller provided
@@ -1227,11 +1241,11 @@ Rules:
     const filteredPinned = projScope
       ? pinned.filter(n => this._nodeAllowedInProjectScope(n, projScope))
       : pinned;
-    const results = [...filteredPinned, ...searchResults].slice(0, maxContextNodes);
+    const results = _validNodeResults([...filteredPinned, ...searchResults]).slice(0, maxContextNodes);
 
     if (this._sharedGraphs && this._sharedGraphs.length > 0) {
       try {
-        const sharedResults = this._searchSharedGraphs(messageContent, 15);
+        const sharedResults = _validNodeResults(this._searchSharedGraphs(messageContent, 15));
         const seenIds = new Set(results.map(n => n.id));
         for (const sn of sharedResults) {
           // Cross-graph (shared graph) results: skip when project scope
@@ -1274,6 +1288,7 @@ Rules:
         for (const row of edges) {
           if (!seenIds.has(row.id) && edgeHits < 100) {
             const node = this._hydrateNode(row);
+            if (!_isNodeResult(node)) continue;
             node._hybridScore = 0.15;
             results.push(node);
             seenIds.add(row.id);
@@ -1295,14 +1310,14 @@ Rules:
         seenIds.add(agentId);
         for (const sq of subQueries) {
           if (!sq || sq.length < 3) continue;
-          const sqPinned = this._extractQueryEntities(sq);
+          const sqPinned = _validNodeResults(this._extractQueryEntities(sq));
           for (const n of sqPinned) {
             if (!seenIds.has(n.id) && results.length < maxContextNodes + 6) {
               results.push(n);
               seenIds.add(n.id);
             }
           }
-          const sqResults = this.searchNodesSelf(sq);
+          const sqResults = _validNodeResults(this.searchNodesSelf(sq));
           for (const n of sqResults) {
             if (n.id !== agentId && !seenIds.has(n.id) && results.length < maxContextNodes + 6) {
               results.push(n);
@@ -1319,11 +1334,12 @@ Rules:
       const ftsNodeIds = [
         ...this._searchHints(messageContent, 10),
         ...this._searchAttributesFTS(messageContent, 10),
-      ];
+      ].filter(Boolean);
       for (const nid of ftsNodeIds) {
         if (!seenIds.has(nid) && results.length < maxContextNodes + 8) {
-          const node = this._hydrateNode(this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(nid));
-          if (node) { results.push(node); seenIds.add(nid); }
+          const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(nid);
+          const node = row ? this._hydrateNode(row) : null;
+          if (_isNodeResult(node)) { results.push(node); seenIds.add(node.id); }
         }
       }
     } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
@@ -1345,8 +1361,10 @@ Rules:
         `).all(refDate, refDate, agentId);
         for (const row of dateRows) {
           if (!seenIds.has(row.id) && results.length < maxContextNodes + 8) {
-            results.push(this._hydrateNode(row));
-            seenIds.add(row.id);
+            const node = this._hydrateNode(row);
+            if (!_isNodeResult(node)) continue;
+            results.push(node);
+            seenIds.add(node.id);
           }
         }
       } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
@@ -1367,8 +1385,10 @@ Rules:
         `).all(agentId);
         for (const row of prefRows) {
           if (!seenIds.has(row.id) && results.length < maxContextNodes + 5) {
-            results.push(this._hydrateNode(row));
-            seenIds.add(row.id);
+            const node = this._hydrateNode(row);
+            if (!_isNodeResult(node)) continue;
+            results.push(node);
+            seenIds.add(node.id);
           }
         }
       } catch (e) { this.log.warn('[retrieval] Set failed: ' + e.message); }
@@ -1380,7 +1400,7 @@ Rules:
     // node that snuck in via a path we didn't filter individually gets
     // dropped here. Idempotent with the per-path filters above; cheap
     // because the array is bounded by maxContextNodes.
-    let resultsFinal = results;
+    let resultsFinal = _validNodeResults(results);
     if (projScope) {
       const before = resultsFinal.length;
       resultsFinal = resultsFinal.filter(n => this._nodeAllowedInProjectScope(n, projScope));

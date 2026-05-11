@@ -1124,7 +1124,22 @@ The JSON schema for updates becomes:
    * Only scans nodes whose ID contains a fragment of the candidate ID.
    * Returns matched node ID or null.
    */
+  _nodesHaveEmbeddingColumn() {
+    if (this._nodesHaveEmbeddingColumnCache !== undefined) {
+      return this._nodesHaveEmbeddingColumnCache;
+    }
+    try {
+      const cols = this.db.prepare('PRAGMA table_info(nodes)').all();
+      this._nodesHaveEmbeddingColumnCache = cols.some(c => c && c.name === 'embedding');
+    } catch (e) {
+      this._nodesHaveEmbeddingColumnCache = false;
+      this.log?.debug?.('[learner] nodes schema check failed: ' + e.message);
+    }
+    return this._nodesHaveEmbeddingColumnCache;
+  }
+
   _resolveByEmbeddingSimilarity(id, label) {
+    if (!this._nodesHaveEmbeddingColumn()) return null;
     try {
       const idParts = id.split('-').filter(p => p.length >= 3);
       if (idParts.length === 0) return null;
@@ -1165,7 +1180,7 @@ The JSON schema for updates becomes:
         try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(bestId, label || id); } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
         return bestId;
       }
-    } catch (e) { this.log.warn('[learner] id.split failed: ' + e.message); }
+    } catch (e) { this.log.warn('[learner] embedding similarity fallback skipped: ' + e.message); }
     return null;
   }
 

@@ -244,6 +244,60 @@ function setActivity(text) {
   bar.setAttribute('aria-hidden', 'true');
 }
 
+let _plannerAdvisorNotice = { key: '', at: 0 };
+function _plannerAdvisorReasons(msg = {}) {
+  if (Array.isArray(msg.reasons) && msg.reasons.length) return msg.reasons.map(String).join(', ');
+  if (msg.reason) return String(msg.reason);
+  return '';
+}
+
+function _plannerAdvisorModelLabel(msg = {}) {
+  const model = msg.model || msg.activeModel || msg.previousModel;
+  return model ? String(model) : '';
+}
+
+function _plannerAdvisorActivity(msg = {}) {
+  const reasons = _plannerAdvisorReasons(msg);
+  const model = _plannerAdvisorModelLabel(msg);
+  const suffix = [
+    reasons ? reasons : '',
+    model ? model : '',
+  ].filter(Boolean).join(' · ');
+  if (msg.status === 'planner:escalated') return `planner advisor escalated${suffix ? ` · ${suffix}` : ''}`;
+  if (msg.status === 'planner:skipped') return `planner advisor skipped${suffix ? ` · ${suffix}` : ''}`;
+  return `planner advisor${msg.escalate ? ' recommends escalation' : ' advised'}${suffix ? ` · ${suffix}` : ''}`;
+}
+
+function _handlePlannerAdvisorStatus(msg = {}) {
+  const text = _plannerAdvisorActivity(msg);
+  setActivity(text);
+  if (typeof window.setEventLogStatus === 'function') {
+    window.setEventLogStatus({ op: 'planner', detail: text.replace(/^planner advisor\s*/, ''), source: 'agent' });
+  }
+
+  const shouldPersist = msg.status === 'planner:advice'
+    || msg.status === 'planner:escalated'
+    || (msg.status === 'planner:skipped' && (msg.reason === 'error' || msg.error));
+  if (!shouldPersist) return;
+
+  const key = [
+    msg.status,
+    _plannerAdvisorReasons(msg),
+    msg.model || '',
+    msg.activeModel || '',
+    msg.previousModel || '',
+    msg.escalate ? 'escalate' : '',
+  ].join('|');
+  const now = Date.now();
+  if (_plannerAdvisorNotice.key === key && now - _plannerAdvisorNotice.at < 2500) return;
+  _plannerAdvisorNotice = { key, at: now };
+
+  let line = text.replace(/^planner advisor/, 'Planner advisor');
+  if (msg.elapsedMs) line += ` (${msg.elapsedMs}ms)`;
+  const el = addChatMessage('system', line);
+  if (el && msg.preview) el.title = `Planner guidance preview: ${String(msg.preview).slice(0, 500)}`;
+}
+
 function chatShouldAutoScroll() {
   const c = document.getElementById('chat-messages');
   if (!c) return true;
@@ -630,6 +684,8 @@ function handleWsMessage(msg) {
     const s = msg.status;
     if (s === 'thinking_start') {
       setActivity('thinking deeply...');
+    } else if (s === 'planner:advice' || s === 'planner:skipped' || s === 'planner:escalated') {
+      _handlePlannerAdvisorStatus(msg);
     } else if (s === 'thinking') {
       const snippet = msg.snippet ? ' \u2014 ' + msg.snippet.substring(0, 140) : '';
       setActivity('thinking (' + (msg.tokens || 0) + ' tokens)' + snippet);

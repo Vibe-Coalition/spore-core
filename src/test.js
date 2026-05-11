@@ -14,7 +14,8 @@ const os = require('os');
 const { execSync } = require('child_process');
 const { loadConfig, loadConfigFresh, resetConfigCache, createLogger } = require('./config');
 const { GraphContext } = require('./graph');
-const { SessionManager } = require('./agent');
+const { SessionManager, WorkflowManager } = require('./agent');
+const { parsePlanArtifacts } = require('./agent/workflows');
 const { ToolSystem } = require('./tools');
 
 let passed = 0;
@@ -187,6 +188,177 @@ async function runTests() {
   // Test session listing
   const allSessions = sessions.listSessions();
   assert(allSessions.length >= 1, 'Session listing works');
+
+  // ── Test 4b: Workflow Manager ──────────────────────────────────────────
+
+  console.log('\nWorkflow Manager:');
+  const workflows = new WorkflowManager(sessions, log);
+  const wfKey = 'shared:channel:cli:test-project';
+  sessions.addMessage(wfKey, 'user', 'plan this change');
+  const wfInitial = workflows.ensureForTurn(wfKey, {
+    platform: 'cli',
+    content: 'add request ids',
+    projectContext: { mode: 'plan', cwd: '/tmp/project', project: 'project' },
+  });
+  assert(wfInitial?.phase === 'intake', 'Workflow starts in intake for plan-mode router turn');
+
+  const freshWfKey = 'shared:channel:cli:fresh-workflow';
+  const freshWf = workflows.ensureForTurn(freshWfKey, {
+    platform: 'cli',
+    content: 'implement the change',
+    projectContext: { mode: 'execute', cwd: '/tmp/project', project: 'project' },
+  });
+  assert(freshWf?.phase === 'execute', 'Workflow can start before the first session message is persisted');
+  assert(sessions.getSessionMeta(freshWfKey) !== null, 'Workflow start creates the parent session row');
+
+  const blocked = workflows.toolBlockForTool(wfKey, 'write_file');
+  assert(blocked?.blocked === true, 'Workflow blocks mutation during read-only phase');
+
+  workflows.recordFinalText(wfKey, {
+    platform: 'cli',
+    projectContext: { mode: 'plan', cwd: '/tmp/project' },
+  }, [
+    '## Approach',
+    'Add middleware.',
+    '',
+    '## Steps',
+    '1. Add middleware file',
+    '2. Wire export',
+    '',
+    '## Verification',
+    '- `npm test -- --grep requestId` should pass',
+    '',
+    'PLAN_READY',
+  ].join('\n'));
+  const wfPlan = workflows.getStatus(wfKey);
+  assert(wfPlan.phase === 'plan' && wfPlan.artifacts.planReady, 'Workflow captures PLAN_READY artifact');
+  assert(wfPlan.artifacts.steps === 2 && wfPlan.artifacts.verification === 1, 'Workflow parses plan steps and verification');
+  const nestedPlan = parsePlanArtifacts([
+    '## Steps',
+    '1. Fix MQTT reconnect backoff [parallel: critical-fixes]',
+    '   - File path(s): `custom_components/mydolphin_plus/managers/aws_client.py`',
+    '   - Replace blocking sleep with async sleep',
+    '   - Dependencies / order: none.',
+    '',
+    '2. Log coordinator update failures [parallel: critical-fixes]',
+    '   - File path(s): `custom_components/mydolphin_plus/managers/coordinator.py`',
+    '   - Replace bare except with logging',
+    '',
+    '## Verification',
+    '- `python -m compileall custom_components/mydolphin_plus` should exit 0',
+    '- Read-back check: reconnect backoff uses asyncio.sleep',
+  ].join('\n'));
+  assert(nestedPlan.steps.length === 2, 'Workflow ignores nested plan detail bullets when creating step tasks');
+  assert(nestedPlan.verification.length === 2, 'Workflow still captures top-level verification bullets');
+  assert(/File path/.test(nestedPlan.steps[0].raw), 'Workflow keeps nested plan details in the owning task description');
+
+  const created = workflows.ensureExecutionTasks(wfKey, { channelId: 'cli:test-project', userId: 'tester' });
+  assert(created.created.length === 3, 'Workflow creates tasks from approved plan');
+  const wfExec = workflows.getStatus(wfKey);
+  assert(wfExec.phase === 'execute' && wfExec.tasks.total === 3, 'Workflow enters execute with task summary');
+
+  const prematureStepDone = workflows.toolBlockForTool(wfKey, 'task_progress', {
+    id: created.created[0].id,
+    status: 'done',
+    note: 'Implemented middleware.',
+  });
+  assert(/before successful write/.test(prematureStepDone.error), 'Workflow blocks step completion before implementation evidence');
+
+  const weakAlreadyDone = workflows.toolBlockForTool(wfKey, 'task_progress', {
+    id: created.created[0].id,
+    status: 'done',
+    note: 'Already correct.',
+  });
+  assert(/lacks concrete evidence/.test(weakAlreadyDone.error), 'Workflow blocks already-done claims without concrete evidence');
+
+  const sourcedAlreadyDone = workflows.toolBlockForTool(wfKey, 'task_progress', {
+    id: created.created[0].id,
+    status: 'done',
+    note: 'Already correct: read_file confirmed lib/express.js:42.',
+  });
+  assert(!sourcedAlreadyDone, 'Workflow allows already-satisfied task completion with concrete evidence citation');
+
+  const prematureVerificationDone = workflows.toolBlockForTool(wfKey, 'task_progress', {
+    id: created.created[2].id,
+    status: 'done',
+    note: 'Tests passed.',
+  });
+  assert(/Verification task/.test(prematureVerificationDone.error), 'Workflow blocks verification completion before verification evidence');
+
+  workflows.recordToolResult(wfKey, 'edit_file', { path: 'lib/express.js' }, { ok: true });
+  workflows.recordToolResult(wfKey, 'exec', { command: 'npm test -- --grep requestId' }, { output: '7 passing', exitCode: 0 });
+  const verifiedDone = workflows.toolBlockForTool(wfKey, 'task_progress', {
+    id: created.created[2].id,
+    status: 'done',
+    note: '`npm test -- --grep requestId` passed with 7 passing.',
+  });
+  assert(!verifiedDone, 'Workflow allows verification task completion after verification evidence');
+
+  const repair = workflows.finalRepairPrompt(wfKey, 'All tests passed.');
+  assert(!!repair, 'Workflow repairs unsupported full-suite claims');
+  const verificationAllRepair = workflows.finalRepairPrompt(wfKey, 'Verification: all passed, zero failures.');
+  assert(!!verificationAllRepair, 'Workflow repairs broad all-passed verification wording without full-suite evidence');
+  const numberedRepair = workflows.finalRepairPrompt(wfKey, 'All 7 tests pass.');
+  assert(!!numberedRepair, 'Workflow repairs unqualified numbered all-tests claims from focused evidence');
+  const countRepair = workflows.finalRepairPrompt(wfKey, 'Focused request-id tests passed: 9 passing.');
+  assert(/test count/.test(countRepair), 'Workflow repairs unsupported test count claims');
+  const weakAlreadyFinalRepair = workflows.finalRepairPrompt(wfKey, 'The export was already correct.');
+  assert(/already correct/.test(weakAlreadyFinalRepair), 'Workflow repairs already-correct final claims without evidence citation');
+  const sourcedAlreadyFinalRepair = workflows.finalRepairPrompt(wfKey, 'The export was already correct: read_file confirmed lib/express.js:42.');
+  assert(!sourcedAlreadyFinalRepair, 'Workflow allows already-correct final claims with concrete evidence citation');
+
+  const noCountWfKey = 'shared:channel:cli:no-count-workflow';
+  workflows.ensureForTurn(noCountWfKey, {
+    platform: 'cli',
+    content: 'implement the change',
+    projectContext: { mode: 'execute', cwd: '/tmp/project', project: 'project' },
+  });
+  workflows.recordToolResult(noCountWfKey, 'exec', { command: 'npx mocha test/request-id.js' }, {
+    ok: true,
+    output: 'request id tests completed without a parsed count',
+    exitCode: 0,
+  });
+  const noCountRepair = workflows.finalRepairPrompt(noCountWfKey, 'Focused request-id tests passed: 7 passing.');
+  assert(/only supports count/.test(noCountRepair), 'Workflow repairs numeric test count claims without exact output support');
+
+  workflows.recordToolResult(wfKey, 'git_status', {}, {
+    ok: true,
+    output: '## main\n M lib/express.js\n?? lib/request-id.js\n?? test/request-id.test.js\n',
+  });
+  const fileCountRepair = workflows.finalRepairPrompt(wfKey, 'Done. 2 files changed. Focused request-id tests passed: 7 passing.');
+  assert(/3 changed path/.test(fileCountRepair), 'Workflow repairs changed-file count mismatches');
+  const untrackedRepair = workflows.finalRepairPrompt(wfKey, 'Done. Focused request-id tests passed: 7 passing. git diff --check passed.');
+  assert(/untracked changed file/.test(untrackedRepair), 'Workflow warns that git diff --check misses untracked files');
+  const fallback = workflows.finalFallbackText(wfKey, { reason: 'unsupported full-suite claim' });
+  assert(/workflow guard/i.test(fallback) && /lib\/request-id\.js/.test(fallback) && /npm test -- --grep requestId/.test(fallback), 'Workflow can synthesize deterministic fallback from evidence');
+
+  const focusedPhraseWfKey = 'shared:channel:cli:focused-phrase-workflow';
+  workflows.ensureForTurn(focusedPhraseWfKey, {
+    platform: 'cli',
+    content: 'implement the change',
+    projectContext: { mode: 'execute', cwd: '/tmp/project', project: 'project' },
+  });
+  workflows.recordToolResult(focusedPhraseWfKey, 'exec', { command: 'python3 -m pytest tests/test_options.py -k "suggest" -v' }, {
+    ok: true,
+    output: '8 passed',
+    exitCode: 0,
+  });
+  const focusedPhraseRepair = workflows.finalRepairPrompt(focusedPhraseWfKey, 'All matching suggestion tests passed.');
+  assert(!focusedPhraseRepair, 'Workflow allows honest focused matching-test summaries');
+
+  const goFmtWfKey = 'shared:channel:cli:gofmt-workflow';
+  workflows.ensureForTurn(goFmtWfKey, {
+    platform: 'cli',
+    content: 'implement the change',
+    projectContext: { mode: 'execute', cwd: '/tmp/project', project: 'project' },
+  });
+  workflows.recordToolResult(goFmtWfKey, 'edit_file', { path: 'requestid.go' }, { ok: true });
+  workflows.recordToolResult(goFmtWfKey, 'git_status', {}, {
+    ok: true,
+    output: '## main\n M requestid.go\n',
+  });
+  const goFmtRepair = workflows.finalRepairPrompt(goFmtWfKey, 'Done. go test ./... passed.');
+  assert(/gofmt|go fmt/.test(goFmtRepair), 'Workflow requires gofmt evidence before finalizing changed Go files');
   
   // Test session clear
   sessions.clearSession(testKey);

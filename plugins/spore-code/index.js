@@ -34,14 +34,15 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const { coreRequire, modelForTier } = require('../core-require');
-const { projectIdentityFromContext } = coreRequire('graph/scopes');
 const graphEvents = coreRequire('graph/events');
 const routingPresets = coreRequire('settings/routing-presets');
+const {
+  SporeCodeRuntimeController,
+  normalizeToolList,
+  withLearnerDb,
+} = require('./lib/runtime-controller');
 
-const SESSION_GRAPH_SLUGS = new Map();
-const SESSION_PROJECT_KEYS = new Map();
-const SESSION_CLIENT_TOOLS = new Map();
-const SESSION_CLIENT_VERSIONS = new Map();
+const runtime = new SporeCodeRuntimeController();
 const AUTH_ATTEMPTS = new Map();
 const AUTH_RATE_LIMIT = { max: 5, windowMs: 15 * 60 * 1000 };
 const WS_TICKET_TTL_MS = 60 * 1000;
@@ -53,53 +54,26 @@ const LEGACY_SPORE_CODE_TOOLS = new Set([
   'architecture', 'impact', 'verify_implementation',
 ]);
 
-function normalizeToolList(list) {
-  if (!Array.isArray(list)) return null;
-  const names = list.map(x => String(x || '').trim()).filter(Boolean);
-  return names.length ? new Set(names) : null;
-}
-
 function clearSessionRuntimeState(sessionId) {
-  const key = String(sessionId);
-  SESSION_GRAPH_SLUGS.delete(key);
-  SESSION_PROJECT_KEYS.delete(key);
-  SESSION_CLIENT_TOOLS.delete(key);
-  SESSION_CLIENT_VERSIONS.delete(key);
+  runtime.clearSessionRuntimeState(sessionId);
 }
 
 function clientToolsForCtx(ctx) {
-  return normalizeToolList(ctx?.clientTools)
-    || normalizeToolList(ctx?.projectContext?.localTools)
-    || (ctx?.channelId ? SESSION_CLIENT_TOOLS.get(String(ctx.channelId)) : null)
-    || null;
+  return runtime.clientToolsForCtx(ctx);
 }
 
 function sporeClientToolAvailable(toolName, opts = {}) {
-  return (ctx = {}) => {
-    if (ctx.platform !== 'cli') return false;
-    const pc = ctx.projectContext || {};
-    if (!pc.cwd && !pc.clientCwd) return false;
-    const tools = clientToolsForCtx(ctx);
-    if (!tools) return opts.legacy === true && LEGACY_SPORE_CODE_TOOLS.has(toolName);
-    return tools.has(toolName);
-  };
+  return runtime.clientToolAvailable(toolName, {
+    ...opts,
+    legacyTools: opts.legacy === true ? LEGACY_SPORE_CODE_TOOLS : null,
+  });
 }
 
 function sporeClientToolMeta(toolName, opts = {}) {
-  return {
-    platforms: ['cli'],
-    requiresProjectContext: true,
-    requiresClientTool: toolName,
-    available: sporeClientToolAvailable(toolName, opts),
-  };
-}
-
-function withLearnerDb(learner, db, graphSlug = null) {
-  if (!learner || !db) return learner;
-  const scoped = Object.create(learner);
-  scoped.db = db;
-  if (graphSlug) scoped._graphSlug = graphSlug;
-  return scoped;
+  return runtime.clientToolMeta(toolName, {
+    ...opts,
+    legacyTools: opts.legacy === true ? LEGACY_SPORE_CODE_TOOLS : null,
+  });
 }
 
 // ── Resolve the host invite key ────────────────────────────────────
@@ -780,68 +754,15 @@ function shouldSkipRecallForSporeCode({ opts, queryType } = {}) {
 }
 
 function projectGraphForContext(api, userId, pc = {}) {
-  const registry = api._appContext?.tools?._graphRegistry;
-  const learner = api._appContext?.learner;
-  if (!registry || !learner?.getGraphDb || !pc?.cwd) return null;
-  const identity = projectIdentityFromContext(userId || 'anon', pc);
-  if (!identity) return null;
-  const slug = registry.ensureProjectGraph(identity.key, {
-    name: identity.label,
-    description: `${identity.basis} project memory${identity.remote ? ` for ${identity.remote}` : ` for ${identity.root}`}`,
-    source: 'spore-code',
-    createdBy: 'spore-code',
-    userId: userId || 'anon',
-    projectKey: identity.key,
-    projectRoot: identity.root,
-    projectRemote: identity.remote,
-  });
-  const db = learner.getGraphDb(slug);
-  if (!db) return null;
-  return {
-    slug,
-    identityKey: identity.key,
-    identity,
-    learner: withLearnerDb(learner, db, slug),
-  };
+  return runtime.projectGraphForContext(api, userId, pc);
 }
 
 function scopedLearnerForTurn(api, opts) {
-  const slug = opts?.memoryEnvelope?.writeScopes?.projectSlug || opts?.memoryEnvelope?.projectSlug || null;
-  const learner = api._appContext?.learner;
-  if (!slug || !learner?.getGraphDb) return learner;
-  const db = learner.getGraphDb(slug);
-  return db ? withLearnerDb(learner, db, slug) : learner;
+  return runtime.scopedLearnerForTurn(api, opts);
 }
 
 function scopedSessionMemory(api, ws, msg = {}) {
-  const ctx = api._appContext;
-  const baseLearner = ctx?.tools?.learner || ctx?.learner;
-  const sessionId = msg.sessionId != null ? String(msg.sessionId) : null;
-  const userId = ws?._user || msg.userName || 'anon';
-  const pc = { ...(msg.projectContext || {}), cwd: msg.cwd || msg.projectContext?.cwd };
-  let slug = sessionId ? SESSION_GRAPH_SLUGS.get(sessionId) : null;
-  let projectIdentityKey = sessionId ? SESSION_PROJECT_KEYS.get(sessionId) : null;
-
-  if (!slug && pc.cwd) {
-    const scoped = projectGraphForContext(api, userId, pc);
-    if (scoped?.slug) {
-      slug = scoped.slug;
-      projectIdentityKey = scoped.identityKey;
-      if (sessionId) {
-        SESSION_GRAPH_SLUGS.set(sessionId, slug);
-        SESSION_PROJECT_KEYS.set(sessionId, projectIdentityKey);
-      }
-      return { learner: scoped.learner, slug, projectIdentityKey, pc };
-    }
-  }
-
-  const db = slug && baseLearner?.getGraphDb ? baseLearner.getGraphDb(slug) : null;
-  return {
-    learner: db ? withLearnerDb(baseLearner, db, slug) : baseLearner,
-    slug,
-    projectIdentityKey,
-    pc,
-  };
+  return runtime.scopedSessionMemory(api, ws, msg);
 }
 
 // renderCodeGraphMap — pulls the cached `code_graph` aspect off the
@@ -994,12 +915,12 @@ function sessionStartHandler(api, ws, msg) {
     const scoped = projectGraphForContext(api, userId, pc);
     const learner = scoped?.learner || baseLearner;
     if (scoped?.slug) {
-      SESSION_GRAPH_SLUGS.set(String(msg.sessionId), scoped.slug);
-      SESSION_PROJECT_KEYS.set(String(msg.sessionId), scoped.identityKey);
+      runtime.rememberSessionGraph(msg.sessionId, scoped.slug, scoped.identityKey);
     }
-    const localTools = normalizeToolList(msg.localTools || msg.projectContext?.localTools);
-    if (localTools) SESSION_CLIENT_TOOLS.set(String(msg.sessionId), localTools);
-    if (msg.clientVersion) SESSION_CLIENT_VERSIONS.set(String(msg.sessionId), String(msg.clientVersion));
+    runtime.rememberSessionClient(msg.sessionId, {
+      localTools: msg.localTools || msg.projectContext?.localTools,
+      clientVersion: msg.clientVersion,
+    });
     const r = graphEvents.withGraph(scoped?.slug ? { graph: scoped.slug } : null, () => sessions.upsertSessionNode(learner, {
       sessionId: msg.sessionId,
       userId,
@@ -1042,7 +963,7 @@ function sessionEndHandler(api, ws, msg) {
   const log = api.getLogger();
   if (!baseLearner) return;
   try {
-    const slug = SESSION_GRAPH_SLUGS.get(String(msg.sessionId));
+    const slug = runtime.graphSlugForSession(msg.sessionId);
     const db = slug && baseLearner.getGraphDb ? baseLearner.getGraphDb(slug) : null;
     const learner = db ? withLearnerDb(baseLearner, db, slug) : baseLearner;
     const sessions = sessionsLib;
@@ -1196,6 +1117,38 @@ function codeGraphSummaryHandler(api, ws, msg) {
 //   QUESTIONS: marker format, JSON+prose accepted, the 'ask first
 //   then plan' rule, and the PHASE 1-6 structure.
 
+function isWindowsProjectContext(pc = {}) {
+  const os = String(pc.os || pc.platform || '').toLowerCase();
+  const cwd = String(pc.cwd || '');
+  return os === 'windows' || /^[A-Za-z]:[\\/]/.test(cwd) || cwd.includes('\\');
+}
+
+function projectShellContractLines(pc = {}) {
+  const windows = isWindowsProjectContext(pc);
+  const shell = pc.defaultShell || pc.shell || (windows ? 'cmd.exe' : 'sh');
+  const flag = pc.shellFlag || (windows ? '/C' : '-c');
+  const pathSep = pc.pathSeparator || (windows ? '\\' : '/');
+  const pathListSep = pc.pathListSeparator || (windows ? ';' : ':');
+  const lines = [
+    `- Executor shell: ${shell} ${flag}; \`exec\` runs on the user's Spore Code machine in this project, not in the SPORE server container.`,
+    `- Path syntax: separator \`${pathSep}\`, PATH-list separator \`${pathListSep}\`. Prefer project-relative paths in file tools.`,
+  ];
+  if (Array.isArray(pc.availableShells) && pc.availableShells.length) {
+    lines.push(`- Detected shells: ${pc.availableShells.join(', ')}.`);
+  }
+  if (windows) {
+    lines.push('- Windows command contract: `exec` input is parsed by cmd.exe by default. Use cmd syntax (`dir`, `type`, `where`, `%VAR%`, `&&`) unless you explicitly launch another shell.');
+    lines.push('- PowerShell invocation: `exec` is stable for cmd.exe syntax, including quoted arguments. Use `powershell_exec` only when the command itself is PowerShell code (pipelines, script blocks, object formatting, or multiline PowerShell); it calls PowerShell directly. If using `exec` for PowerShell, launch it explicitly with `powershell -NoProfile -ExecutionPolicy Bypass -Command "..."` or `pwsh -NoProfile -Command "..."`.');
+    lines.push('- For multiline or quote-heavy PowerShell, pass the raw script to `powershell_exec({ command: "..." })` or write a `.spore-code/scratch/*.ps1` helper and run it with `powershell -NoProfile -ExecutionPolicy Bypass -File ".spore-code\\scratch\\task.ps1"`; then verify the output. Do not paste bare PowerShell pipeline syntax directly into `exec`, because the outer shell is still cmd.exe.');
+    lines.push('- File tools are shell-free on Windows. Use `read_file`, `read_many_files`, `grep`, `glob`, `edit_file`, and `patch_file` with project-relative paths instead of writing scripts just to read/search/edit files.');
+  } else {
+    lines.push('- POSIX command contract: `exec` input is parsed by `sh -c` by default. Use POSIX shell syntax unless the project context says otherwise.');
+    lines.push('- File tools are shell-free. Use `read_file`, `read_many_files`, `grep`, `glob`, `edit_file`, and `patch_file` before shell pipelines for file inspection or edits.');
+  }
+  lines.push('- If `read_file` fails, retry once with a project-relative path or a narrow range and report the exact tool error; do not jump to ad-hoc reader scripts unless structured file tools cannot represent the operation.');
+  return lines;
+}
+
 function buildProjectContextSection(api, opts) {
   if (opts.platform !== 'cli' || !opts.projectContext) return null;
   const pc = opts.projectContext;
@@ -1209,8 +1162,10 @@ function buildProjectContextSection(api, opts) {
   parts.push(`## Project Context — ${pc.project || 'project'}`);
   parts.push('Project operating rules are loaded from this project graph in the Scoped Recall Bundle. Follow those refs for runtime access, sandboxing, shell quoting, dev servers, helper scripts, listing/output filtering, plan/execute flow, and verification.');
   parts.push('If the Scoped Recall Bundle contains a "Reusable Skill Execution Contract", treat the top applicable shared skill as the default playbook: parameterize it, run it, verify it, and avoid rediscovering or rewriting helpers unless a step fails or the project facts prove it does not apply.');
+  parts.push('One-off helper rule: prefer inline commands (`node -e`, `python -c`, or short project-shell one-liners) for one-time tasks. Write `.spore-code/scratch/*` helpers only when quoting/multiline logic is brittle, the script will be reused, or the user asks for a file. Scratch helpers written through `write_file`/`edit_file` are auto-saved to project memory; do not call `save_project_script` again for the same helper unless auto-save failed or the user explicitly asks.');
   if (pc.cwd) parts.push(`- CWD: ${pc.cwd}`);
   if (pc.os || pc.arch) parts.push(`- Platform: ${pc.os || '?'}/${pc.arch || '?'}`);
+  for (const line of projectShellContractLines(pc)) parts.push(line);
   if (pc.projectType) parts.push(`- Project type: ${pc.projectType}`);
   if (pc.gitBranch) {
     const hash = pc.gitHash ? ` @ ${pc.gitHash}` : '';
@@ -1493,7 +1448,7 @@ function buildPlanRouterSection(api, opts) {
 function buildPlanRouter2Section(api, opts) {
   const parts = [];
   parts.push('## Plan Mode — ROUTER 2 / post-research review (Spore Code)');
-  parts.push('[MODE: Plan only — POST-RESEARCH ROUTER turn. The previous assistant turn in this conversation contains a RESEARCH_DONE: yaml block. Read it carefully — your only job this turn is to decide whether the research SURFACED any new questions worth asking the user before the plan is built.');
+  parts.push('[MODE: Plan only — POST-RESEARCH ROUTER turn. Runtime Workflow State contains the captured RESEARCH_DONE yaml block from the research turn. Read it carefully — your only job this turn is to decide whether the research SURFACED any new questions worth asking the user before the plan is built.');
   parts.push('Do NOT call `ask_user` in CLI plan mode. Use the `QUESTIONS:` block below only for genuinely blocking follow-ups; if the user already clarified the requirement, continue from that clarification.');
   parts.push('');
   parts.push('Stage status: ROUTER1 ✓ → RESEARCH+CODE ✓ → ROUTER2 (this turn) → BUILDING (next).');
@@ -1525,7 +1480,7 @@ function buildPlanRouter2Section(api, opts) {
   parts.push('Option B — No follow-ups, ready to build. Emit:');
   parts.push('NO_FOLLOWUP_QUESTIONS: <one-line reason, ≤120 chars — e.g. "research pointed at server-render approach with no real alternative; ready to build">');
   parts.push('');
-  parts.push('That\'s it. Do NOT write the plan. Do NOT redo any research — your job is to evaluate the existing RESEARCH_DONE block, not extend it.');
+  parts.push('That\'s it. Do NOT write the plan. Do NOT redo any research — your job is to evaluate the captured RESEARCH_DONE block, not extend it.');
   parts.push('');
   parts.push('RULES (HARD):');
   parts.push('- Do NOT call write_file/edit_file/exec. This router turn is output-only.');
@@ -1559,10 +1514,12 @@ function buildPlanResearchSection(api, opts) {
   parts.push('  })');
   parts.push('');
   parts.push('Aim for 1–3 parallel researchers. Skip Prong A entirely if the request is purely codebase-internal (refactor, rename, bug fix) — say so in the RESEARCH_DONE output.');
+  parts.push('After delegating, continue useful local codebase research immediately. Do NOT use `task_status` or `sleep` to wait for delegates. If delegate results are not back by the time your own research is complete, emit RESEARCH_DONE with a pending-delegate caveat; late delegate results are captured into workflow state for the review/building phases.');
   parts.push('Quick one-off lookups (a single CLI flag, a known error string) can use `web_search` + `web_fetch` directly in your turn instead of delegating. Always include the year for recent topics.');
   parts.push('');
   parts.push('--- PRONG B — CODEBASE PRE-IDENTIFICATION ---');
   parts.push('Map the existing codebase against the request. The output is a structured `code_targets` block naming exactly which files get created or modified, with current code excerpts (modifies) and pseudocode shapes (creates).');
+  parts.push('Evidence rule: a `files_to_modify` entry is allowed ONLY after a successful read/search/snippet result proved the path and symbol exist. If a lookup/read failed, do not keep that path in `files_to_modify`; put it in `gaps` or `caveats` instead. Never invent paths from pseudocode or memory.');
   parts.push('');
   if (pc.hasCodeIndex) {
     const learner = scopedLearnerForTurn(api, opts);
@@ -1632,6 +1589,8 @@ function buildPlanResearchSection(api, opts) {
   parts.push('    - name: "<symbol name>"');
   parts.push('      location: "<file>:<line>"');
   parts.push('      why_relevant: "<one sentence>"');
+  parts.push('  gaps:');
+  parts.push('    - "<missing file/symbol or failed lookup that the final plan must not treat as confirmed>"');
   parts.push('```');
   parts.push('');
   parts.push('RULES (HARD):');
@@ -1639,21 +1598,21 @@ function buildPlanResearchSection(api, opts) {
   parts.push('- Do NOT write the plan in this turn. The plan comes in the next (BUILDING) turn.');
   parts.push('- Do NOT emit PLAN_READY in this turn. RESEARCH_DONE is the marker for this turn.');
   parts.push('- For files_to_modify, current_excerpt MUST come from `get_snippet` — do not paraphrase or invent. If the symbol isn\'t in the index, fall back to `read_file` and excerpt the relevant lines.');
+  parts.push('- If `read_file`, `get_snippet`, `search_symbols`, or `trace_calls` failed for a target, do NOT include that target as confirmed. Add it to `gaps` and let the BUILDING turn plan a verification/discovery step instead.');
   parts.push('- For files_to_create, pseudocode MUST be the function shape (types, return, key call sites) — not "// TODO" or "// implement here".');
   parts.push(']');
   return parts.join('\n');
 }
 
 // BUILDING phase prompt — fires when the CLI sends [BUILD_PLAN] after
-// detecting a RESEARCH_DONE block in the prior assistant turn. Reads
-// the prior turn's RESEARCH_DONE: from conversation history (which the
-// agent sees as messages[]) and produces the final plan + Verification
-// + PLAN_READY. Much shorter than RESEARCH because the agent isn't
-// gathering anything new — just shaping the plan around the cached findings.
+// detecting a RESEARCH_DONE artifact from runtime workflow state. Produces
+// the final plan + Verification + PLAN_READY. Much shorter than RESEARCH
+// because the agent isn't gathering anything new — just shaping the plan
+// around the cached findings.
 function buildPlanBuildingSection(api, opts) {
   const parts = [];
   parts.push('## Plan Mode — BUILDING phase (Spore Code)');
-  parts.push('[MODE: Plan only — BUILDING turn. The user has approved the research and is now waiting for the actual plan. The previous assistant message in this conversation contains a RESEARCH_DONE: yaml block — that is your INPUT for this turn. Use its `external.recommended_approach`, `code_targets.files_to_create`, `code_targets.files_to_modify`, and `surrounding_context` directly when shaping the steps below. Do NOT redo research — if a target is missing from RESEARCH_DONE, that\'s a gap to flag in your risk section, not something to go hunt for now.');
+  parts.push('[MODE: Plan only — BUILDING turn. The user has approved the research and is now waiting for the actual plan. Runtime Workflow State contains a captured RESEARCH_DONE yaml block — that is your INPUT for this turn. Use its `external.recommended_approach`, `code_targets.files_to_create`, `code_targets.files_to_modify`, and `surrounding_context` directly when shaping the steps below. Do NOT redo research — if a target is missing from RESEARCH_DONE, that\'s a gap to flag in your risk section, not something to go hunt for now.');
   parts.push('');
   parts.push('OUTPUT — the plan, in this exact structure:');
   parts.push('');
@@ -1697,7 +1656,8 @@ function buildPlanBuildingSection(api, opts) {
   parts.push('');
   parts.push('RULES (HARD):');
   parts.push('- Do NOT call write_file/edit_file/exec. Read-only inspection only.');
-  parts.push('- Do NOT redo research. The previous turn\'s RESEARCH_DONE is your input — use it.');
+  parts.push('- Do NOT redo research. The captured RESEARCH_DONE artifact is your input — use it.');
+  parts.push('- Treat `RESEARCH_DONE.gaps` and failed/uncertain targets as plan constraints. Do not create direct implementation steps for unconfirmed files; create a first step to verify the actual target, then branch/fix based on evidence.');
   parts.push('- Do NOT emit a QUESTIONS: block — that was the RESEARCH phase\'s opportunity.');
   parts.push('- End with `PLAN_READY` on its own line — that\'s the marker the CLI watches for to show the Execute/Revise/Cancel choice. Without it the user has no way to approve.');
   parts.push('- After the user clicks Execute, the SAME plan is replayed as a NEW turn with mode=execute — that\'s when you actually run write_file etc. Do not pre-emptively write now.]');
@@ -1767,7 +1727,7 @@ function buildPlanModeSection_LEGACY(api, opts) {
   parts.push('');
   parts.push('Why delegate instead of web_search yourself: (1) parallel — three sub-agents finish in the time of one. (2) focused — each persona uses a narrow tool set and returns a structured Findings/Caveats/Recommendation summary you can splice straight into the plan. (3) cheap — sub-agents have their own context budget so they do not eat yours. Aim for 1-3 parallel researchers per non-trivial plan; do not delegate trivial lookups (single fact you already know). Codebase reading (read_file, grep, glob) stays in YOUR turns — sub-agents do not have access to the user\'s machine.');
   parts.push('');
-  parts.push('After delegating, the harness wakes you when each sub-agent finishes. Wait for at least the first batch of findings before moving to PHASE 5 — do NOT emit PLAN_READY in the same turn you delegated.');
+  parts.push('After delegating, continue useful local codebase research immediately. Do NOT call `task_status` or `sleep` to wait for delegates. If delegate results are not back by the time your own research is complete, emit RESEARCH_DONE with a pending-delegate caveat; late delegate results are captured into workflow state for the review/building phases. Do NOT emit PLAN_READY in the research turn.');
   parts.push('');
   parts.push('**Research toolbox (plan-phase work — only relevant during planning, not execution):**');
   parts.push('- **Web lookups**: For things you can\'t learn from the user\'s machine — current library versions, framework docs, API changes, error messages, "is X deprecated", recent breaking changes — `web_search` for candidate URLs, then `web_fetch` the 1-3 most authoritative (official docs > GitHub > Stack Overflow > random blog). Always include the current year for recent topics. Quote exact error strings. Cite source URLs.');
@@ -1865,25 +1825,101 @@ function buildExecuteModeSection(api, opts) {
   if (opts.platform !== 'cli' || !opts.projectContext || opts.projectContext.mode !== 'execute') return null;
   const parts = [];
   parts.push('## Execute Mode (Spore Code)');
-  parts.push('You are executing a plan that the user already approved. Your FIRST set of tool calls MUST be `task_create` — one per plan step AND one per verification check from the plan\'s `## Verification` section. Use short `subject` strings (5–10 words) copied from each plan step\'s header.');
+  parts.push('You are executing a plan that the user already approved. The runtime now creates workflow checklist tasks from the approved plan before you start executing. Do NOT recreate those plan/verification tasks with `task_create`; duplicate plan tasks are blocked. Use `task_progress` on the existing task ids when they are visible, and use `workflow_status` if you need the current/next task id or evidence summary. Use `task_create` only for genuinely new ad hoc subtasks discovered during execution.');
+  parts.push('If `workflow_status` shows a current/next task, work that task first. Do not invent a second checklist in parallel with the runtime checklist.');
+  parts.push('The first execute turn after approval must make concrete progress: update the current workflow task, perform the planned edit/check, or mark the task blocked with exact evidence. Do not spend the whole turn rereading files and then send a final answer.');
+  parts.push('Avoid giant file sweeps in execute mode. Prefer `search_symbols`, `grep`, `get_snippet`, and targeted `read_file` ranges. If you already have enough context to edit, edit; if you need more context, read the smallest range that answers the next implementation question.');
+  parts.push('Long-running `exec` results can be moved to a managed background process. Treat `backgrounded/pending/running` as still executing, not failed. Use `bg_tail` to watch it until `running:false` gives the real final `exitCode`; do not enter recovery or summarize failure from the initial pending handoff.');
   parts.push('');
   parts.push('Execution order — group steps by their plan-mode `[parallel: <group-name>]` marker:');
   parts.push('  - **Steps in the same parallel group fire together** as a single tool batch — multiple `tool_use` blocks in the same response. The Anthropic API supports parallel tool calls and the harness dispatches them concurrently. Don\'t serialize what the plan said could parallelize.');
   parts.push('  - Steps with NO `[parallel: ...]` marker run one-by-one in plan order.');
   parts.push('');
-  parts.push('For each step (whether serial or part of a parallel group):');
-  parts.push('  1. `task_progress({id, status: "in_progress"})` BEFORE starting work. For a parallel group, fire the in_progress updates for all steps in the group together (one tool batch with the in_progress calls) BEFORE the work batch — keeps the user\'s checklist accurate.');
-  parts.push('  2. Do the work (write_file / edit_file / exec / etc). For a parallel group, fire all the work tools in ONE batch — a response with N tool_use blocks where N = group size.');
+  parts.push('For each existing workflow task (whether serial or part of a parallel group):');
+  parts.push('  1. `task_progress({id, status: "in_progress"})` BEFORE starting work. Do this once per task. If the task is already in_progress, continue working it; do not re-mark it in_progress. For a parallel group, fire the in_progress updates for all steps in the group together (one tool batch with the in_progress calls) BEFORE the work batch — keeps the user\'s checklist accurate.');
+  parts.push('  2. Do the work (write_file / edit_file / exec / etc). For a parallel group, fire all independent work tools in ONE batch — a response with N tool_use blocks where N = group size.');
   parts.push('  3. `task_progress({id, status: "done"})` IMMEDIATELY after each step completes. For a parallel group, fire the done updates together as a batch once all the work tools have returned.');
-  parts.push('  4. If a step fails: `task_progress({id, status: "error", note: "<what failed>"})` and either propose a fix or ask the user. A failure in one step of a parallel group does NOT cancel the others — let the rest finish, then deal with the failure.');
+  parts.push('  4. If a step fails because of your implementation: `task_progress({id, status: "error", note: "<what failed>"})` and either fix the root cause or ask the user. If a check fails for a pre-existing/unrelated/environment issue, use `task_progress({id, status:"blocked", reason:"pre_existing_failure", evidence:"<exact command/output or file evidence>"})` and keep the distinction clear.');
+  parts.push('  5. Runtime will reject weak done updates. If a planned step is already satisfied or no action is needed, your done note must cite concrete evidence (`path:line`, `read_file`, `grep`, `get_snippet`, or `verify_implementation`). If an edit failed and you cannot prove the target is already correct, mark the task `error`, not `done`.');
   parts.push('');
   parts.push('Parallel-batch SAFETY rules:');
   parts.push('  - Do NOT include two write/edit calls targeting the SAME file in one batch — line-number drift between concurrent edits will corrupt the file.');
   parts.push('  - Do NOT batch an `exec` of a build/migration/install command with file writes — the exec needs the writes to land first.');
   parts.push('  - When in doubt, run the steps serially — a wrong parallelism call wastes time recovering, a serial run just takes a bit longer.');
   parts.push('');
-  parts.push('After all implementation steps are `done`, run the verification checks in the same order (these are typically serial since each tests something specific), updating each task to `done` or `error`. You may only declare the work complete when every task in the checklist (impl + verification) is `done`.');
+  parts.push('After all implementation steps are `done`, run the verification checks in the same order (these are typically serial since each tests something specific), updating each task to `done`, `error`, or evidence-backed `blocked` for unrelated/pre-existing failures. You may only declare the work complete when every workflow task (implementation + verification) is resolved; runtime will ask you to repair overclaimed final responses.');
   parts.push('The user watches this checklist as the live progress signal — skipping updates means they can\'t tell where you are.');
+  return parts.join('\n');
+}
+
+function buildWorkflowStateSection(api, opts) {
+  if (opts.platform !== 'cli' || !opts.projectContext || !opts.workflowStatus) return null;
+  const wf = opts.workflowStatus;
+  const parts = [];
+  parts.push('## Runtime Workflow State (Spore Code)');
+  parts.push(`- Workflow phase: ${wf.phase || 'unknown'} (${wf.status || 'active'}, policy=${wf.policy || 'guided'})`);
+  if (Array.isArray(wf.activeRules) && wf.activeRules.length) {
+    parts.push(`- Active runtime rules: ${wf.activeRules.join(', ')}`);
+  }
+  if (wf.tasks?.total) {
+    parts.push(`- Workflow tasks: ${wf.tasks.done || 0}/${wf.tasks.total} done${wf.tasks.error ? `, ${wf.tasks.error} error` : ''}${wf.tasks.blocked ? `, ${wf.tasks.blocked} blocked` : ''}`);
+  }
+  if (wf.currentTask?.id) {
+    parts.push(`- Current/next workflow task: ${wf.currentTask.id}: ${wf.currentTask.subject} [${wf.currentTask.kind || 'task'}:${wf.currentTask.status || 'pending'}]`);
+  }
+  if (Array.isArray(wf.taskRows) && wf.taskRows.length) {
+    parts.push('- Current workflow task ids:');
+    for (const row of wf.taskRows.slice(0, 20)) {
+      parts.push(`  - ${row.id}: ${row.subject} [${row.kind || 'task'}:${row.status || 'pending'}]`);
+    }
+    if (wf.taskRows.length > 20) parts.push(`  - ...${wf.taskRows.length - 20} more workflow tasks available via workflow_status`);
+  }
+  if (wf.artifacts) {
+    const bits = [];
+    if (wf.artifacts.researchDone) bits.push('research captured');
+    if (wf.artifacts.planReady) bits.push(`plan captured (${wf.artifacts.steps || 0} steps, ${wf.artifacts.verification || 0} verification checks)`);
+    if (wf.artifacts.tasksCreated) bits.push('tasks created from approved plan');
+    if (bits.length) parts.push(`- Artifacts: ${bits.join('; ')}`);
+    if (wf.artifacts.noInterviewNeeded?.preview) {
+      parts.push('');
+      parts.push('Captured router decision:');
+      parts.push('--- captured-router-decision ---');
+      parts.push(String(wf.artifacts.noInterviewNeeded.preview).slice(0, 800));
+      parts.push('--- end-captured-router-decision ---');
+    }
+    if (wf.artifacts.researchDonePreview) {
+      parts.push('');
+      parts.push('Captured RESEARCH_DONE artifact:');
+      parts.push('--- captured-research-done ---');
+      parts.push(String(wf.artifacts.researchDonePreview).slice(0, 2600));
+      parts.push('--- end-captured-research-done ---');
+    }
+    if (Array.isArray(wf.artifacts.backgroundTaskResults) && wf.artifacts.backgroundTaskResults.length) {
+      parts.push('');
+      parts.push('Captured background task results:');
+      for (const r of wf.artifacts.backgroundTaskResults.slice(-3)) {
+        const label = [r.taskId, r.status].filter(Boolean).join(' ');
+        parts.push(`--- background-task ${label || 'result'} ---`);
+        if (r.originalRequest) parts.push(`Original request: ${String(r.originalRequest).slice(0, 500)}`);
+        if (r.resultPreview) parts.push(String(r.resultPreview).slice(0, 1600));
+        parts.push('--- end-background-task ---');
+      }
+    }
+    if (wf.artifacts.noFollowupQuestions?.preview) {
+      parts.push('');
+      parts.push('Captured post-research router decision:');
+      parts.push('--- captured-post-research-router-decision ---');
+      parts.push(String(wf.artifacts.noFollowupQuestions.preview).slice(0, 800));
+      parts.push('--- end-captured-post-research-router-decision ---');
+    }
+  }
+  if (wf.evidenceCount) {
+    parts.push(`- Verification/tool evidence recorded: ${wf.evidenceCount}`);
+  }
+  if (wf.artifacts?.protectedWipPaths?.paths?.length) {
+    parts.push(`- Protected WIP snapshot: ${wf.artifacts.protectedWipPaths.paths.length} dirty path(s). Do not discard/restore/reset them unless the user explicitly asks.`);
+  }
+  parts.push('- Runtime owns phase transitions and completion gates. Use `workflow_status` if you need the current task/evidence details.');
   return parts.join('\n');
 }
 
@@ -1892,12 +1928,14 @@ module.exports = function register(api) {
   api.registerReferenceNodes({
     install:   './sql/install.sql',
     uninstall: './sql/uninstall.sql',
+    // v4 = shell-context refresh: Windows exec is cmd-backed and
+    // PowerShell has a direct client tool when available.
     // v3 = rebrand migration. install.sql Phase 0 renames legacy
     // ref-acorn-* rows to ref-spore-code-* and retags extracted_with
     // 'acorn-cli' → 'spore-code'. v3 also corrects the node's label
     // (the v2 INSERT OR IGNORE inherited the legacy "Acorn Client
     // Context" label; v3 UPDATEs it to "Spore Code Client Context").
-    schemaVersion: 3,
+    schemaVersion: 4,
   });
 
   // HTTP routes — auth issues a CLI-typed Bearer token; sessions
@@ -1954,6 +1992,27 @@ module.exports = function register(api) {
   const requireSporeClient = (toolName) => () => ({
     ok: false,
     error: `${toolName} runs on the user's machine via the Spore Code CLI; no Spore Code v0.4.0+ client is currently connected to this session.`,
+  });
+
+  api.registerTool('powershell_exec', {
+    namespaced: false,
+    ...sporeClientToolMeta('powershell_exec'),
+    mutating: true,
+    description:
+      'Run PowerShell directly on the user machine through the connected Spore Code CLI, bypassing cmd.exe /C quoting. ' +
+      'Use this on Windows when the command is PowerShell code: pipelines, script blocks, object formatting, and multiline PowerShell. ' +
+      'Input `command` is raw PowerShell code, not a shell-quoted command string; do not wrap the whole command in extra cmd quotes. ' +
+      'Prefer read_file/read_many_files/grep/glob/edit_file/patch_file for file work when a structured tool can do it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Raw PowerShell code to run, e.g. `Get-ChildItem -Filter *.tsx | Select-Object -ExpandProperty Name`.' },
+        timeout: { type: 'number', description: 'Timeout in milliseconds. Default 120000, max 600000.' },
+        executable: { type: 'string', description: 'Optional executable preference: pwsh, pwsh.exe, powershell, or powershell.exe.' },
+      },
+      required: ['command'],
+    },
+    execute: requireSporeClient('powershell_exec'),
   });
 
   api.registerTool('index_codebase', {
@@ -2165,6 +2224,7 @@ module.exports = function register(api) {
   // _buildPluginPromptSections sees the leading `## ` and skips its
   // auto-prefix.
   api.registerPromptSection('*', 'Project Context', ({ opts }) => buildProjectContextSection(api, opts));
+  api.registerPromptSection('*', 'Workflow State',   ({ opts }) => buildWorkflowStateSection(api, opts));
   api.registerPromptSection('*', 'Plan Mode',       ({ opts }) => buildPlanModeSection(api, opts));
   api.registerPromptSection('*', 'Execute Mode',    ({ opts }) => buildExecuteModeSection(api, opts));
 
@@ -2187,7 +2247,7 @@ module.exports = function register(api) {
     if (ctx?.platform !== 'cli' || !ctx?.channelId) return;
     if (input?.temp === false || input?.temp === true) return;
     const learner = api._appContext?.learner;
-    const slug = result.graph || ctx?.memoryEnvelope?.writeScopes?.projectSlug || SESSION_GRAPH_SLUGS.get(String(ctx.channelId));
+    const slug = result.graph || ctx?.memoryEnvelope?.writeScopes?.projectSlug || runtime.graphSlugForSession(ctx.channelId);
     const db = slug && learner?.getGraphDb ? learner.getGraphDb(slug) : learner?.db;
     if (!db) return;
     const sessionId = ctx.channelId;
@@ -2231,7 +2291,7 @@ module.exports = function register(api) {
     if (!sessionIdOpt || !Array.isArray(newNodeIds) || newNodeIds.length === 0) return;
     const ctx = api._appContext;
     const learner = ctx?.learner;
-    const slug = SESSION_GRAPH_SLUGS.get(String(sessionIdOpt))
+    const slug = runtime.graphSlugForSession(sessionIdOpt)
       || (Array.isArray(writeTargets) ? writeTargets.find(t => t?.slug)?.slug : null);
     const db = slug && learner?.getGraphDb ? learner.getGraphDb(slug) : learner?.db;
     if (!db) return;
@@ -2351,8 +2411,28 @@ module.exports = function register(api) {
   // The Plugins tab owns Spore Code-specific transport policy.
   api.registerSettingsPane({
     title: 'Spore Code',
-    description: 'CLI pairing and authentication controls for Spore Code clients.',
+    description: 'CLI pairing, authentication, and agent context controls for Spore Code clients.',
     schema: [
+      {
+        key: 'lazyToolSchemas',
+        label: 'Lazy tool schemas',
+        type: 'toggle',
+        default: false,
+        help: 'Experimental. Spore Code starts each agent turn with a small tool-pack catalog and loads full tool schemas only when needed. Reduces context use in CLI sessions; leave off if a model struggles to request tools correctly.',
+      },
+      {
+        key: 'plannerAdvisorPolicy',
+        label: 'Planner involvement',
+        type: 'segmented',
+        default: 'adaptive',
+        options: [
+          { value: 'off', label: 'Off', description: 'No planner advisor use in Spore Code turns.' },
+          { value: 'manual', label: 'Manual', description: 'Planner advice is available only when explicitly requested.' },
+          { value: 'adaptive', label: 'Adaptive', description: 'Adds automatic planner guidance on complex or stuck turns.' },
+          { value: 'aggressive', label: 'Aggressive', description: 'Adaptive guidance plus a final planner review after substantial work.' },
+        ],
+        help: 'Controls how Spore Code uses the planner model. Manual only exposes agent-requested advice; adaptive adds automatic guidance on complex or stuck turns; aggressive also adds a final planner review after substantial tool or edit activity.',
+      },
       {
         key: 'allowInsecureAuth',
         label: 'Allow insecure HTTP authentication',
@@ -2460,8 +2540,9 @@ module.exports = function register(api) {
   // alt-tab-and-leave-it, the session:end never arrives and this is
   // the only chance to distill before the 48h janitor sweep. Gates on
   // ws._role === 'cli' so non-cli closes are a no-op.
-  api.registerLifecycleHook('wsClose', ({ ws, sessionIds, log }) => {
-    if (ws?._role !== 'cli' || !sessionIds?.length) return;
+  api.registerLifecycleHook('wsClose', ({ ws, sessionIds, originSessionIds, log }) => {
+    const closeSessionIds = Array.isArray(originSessionIds) ? originSessionIds : sessionIds;
+    if (ws?._role !== 'cli' || !closeSessionIds?.length) return;
     const ctx = api._appContext;
     const learner = ctx?.tools?.learner || ctx?.learner;
     const config = ctx?.config || {};
@@ -2469,9 +2550,9 @@ module.exports = function register(api) {
     try {
       const sessions = sessionsLib;
       const llmClient = ctx?.tools?.llmClient;
-      for (const sid of sessionIds) {
+      for (const sid of closeSessionIds) {
         try {
-          const slug = SESSION_GRAPH_SLUGS.get(String(sid));
+          const slug = runtime.graphSlugForSession(sid);
           const scopedDb = slug && learner.getGraphDb ? learner.getGraphDb(slug) : null;
           const scopedLearner = scopedDb ? withLearnerDb(learner, scopedDb, slug) : learner;
           graphEvents.withGraph(slug ? { graph: slug } : null, () => sessions.finalizeSessionNode(scopedLearner, sid, { endedAt: new Date().toISOString() }));
@@ -2516,6 +2597,7 @@ module.exports._test = {
   wantsPasswordAuth,
   authenticateAccountPassword,
   buildProjectContextSection,
+  buildWorkflowStateSection,
 };
 module.exports.validateDeviceToken = validateDeviceToken;
 module.exports.setDeviceRoutingPreset = setDeviceRoutingPreset;

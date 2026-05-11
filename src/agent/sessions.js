@@ -175,6 +175,36 @@ class SessionManager {
         applied_at  INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_plan_proposals_session ON plan_proposals(session_key, status);
+
+      CREATE TABLE IF NOT EXISTS session_workflows (
+        id                TEXT PRIMARY KEY,
+        session_key       TEXT NOT NULL UNIQUE,
+        workflow_kind     TEXT NOT NULL,
+        phase             TEXT NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'active',
+        policy            TEXT NOT NULL DEFAULT 'guided',
+        active_rules_json TEXT NOT NULL DEFAULT '[]',
+        artifacts_json    TEXT NOT NULL DEFAULT '{}',
+        evidence_json     TEXT NOT NULL DEFAULT '[]',
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        FOREIGN KEY (session_key) REFERENCES sessions(key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_workflows_session ON session_workflows(session_key);
+      CREATE INDEX IF NOT EXISTS idx_session_workflows_phase ON session_workflows(workflow_kind, phase, status);
+
+      CREATE TABLE IF NOT EXISTS workflow_events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id   TEXT NOT NULL,
+        session_key   TEXT NOT NULL,
+        event_type    TEXT NOT NULL,
+        payload_json  TEXT NOT NULL DEFAULT '{}',
+        created_at    INTEGER NOT NULL,
+        FOREIGN KEY (workflow_id) REFERENCES session_workflows(id),
+        FOREIGN KEY (session_key) REFERENCES sessions(key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow ON workflow_events(workflow_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_workflow_events_session ON workflow_events(session_key, created_at);
     `);
 
     // Backward-compatible column add for plan_mode on sessions.

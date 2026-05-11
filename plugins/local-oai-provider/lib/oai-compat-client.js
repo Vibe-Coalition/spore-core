@@ -146,10 +146,34 @@ function _extractXmlStyleToolArguments(rawArgs, toolName) {
   return body ? body[1].trim() : null;
 }
 
+function _parseFunctionStyleToolInput(rawArgs, toolName) {
+  const raw = String(rawArgs || '').trim();
+  const match = raw.match(/^<function=([^>]+)>\s*([\s\S]*?)\s*<\/function>\s*$/i);
+  if (!match) return null;
+  const name = normalizeToolName(match[1].trim());
+  const expectedName = normalizeToolName(toolName);
+  if (name && expectedName && name !== expectedName) return null;
+
+  const input = {};
+  const paramRe = /<parameter=([^>]+)>([\s\S]*?)<\/parameter>/gi;
+  let paramCount = 0;
+  let pm;
+  while ((pm = paramRe.exec(match[2])) !== null) {
+    const key = _decodeXmlAttr(pm[1].trim());
+    const val = _decodeXmlAttr(pm[2].trim());
+    if (!key) continue;
+    try { input[key] = JSON.parse(val); } catch { input[key] = val; }
+    paramCount++;
+  }
+  return paramCount > 0 ? input : {};
+}
+
 function _parseToolInput(rawArgs, toolName) {
   const raw = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {});
   const xmlArgs = _extractXmlStyleToolArguments(raw, toolName);
   if (xmlArgs && xmlArgs !== raw) return _parseToolInput(xmlArgs, toolName);
+  const functionArgs = _parseFunctionStyleToolInput(raw, toolName);
+  if (functionArgs) return _postProcessToolInput(toolName, functionArgs);
   try {
     return _postProcessToolInput(toolName, JSON.parse(raw || '{}'));
   } catch (e) { console.warn('[oai-compat] _postProcessToolInput failed: ' + e.message); }
@@ -349,7 +373,7 @@ function toOAIRequest(params, opts = {}) {
 // Handles both Qwen-style (<function=name><parameter=k>v</parameter></function>)
 // and Hermes-style (JSON inside <tool_call> tags).
 function _extractInlineToolCalls(text) {
-  if (!text || !/<tool_call\b/i.test(text)) return null;
+  if (!text || !/(<tool_call\b|<function=)/i.test(text)) return null;
   const toolBlocks = [];
   const readAttr = (attrs, key) => {
     const re = new RegExp(`${key}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s/>]+))`, 'i');
@@ -379,6 +403,21 @@ function _extractInlineToolCalls(text) {
     }
     return false;
   };
+  const pushFunctionStyleToolCall = (rawFunction) => {
+    const match = String(rawFunction || '').trim().match(/^<function=([^>]+)>[\s\S]*<\/function>$/i);
+    if (!match) return false;
+    const name = normalizeToolName(match[1].trim());
+    if (!name) return false;
+    const input = _parseFunctionStyleToolInput(rawFunction, name);
+    if (!input) return false;
+    toolBlocks.push({
+      type: 'tool_use',
+      id: `tc_${toolBlocks.length}`,
+      name,
+      input: _postProcessToolInput(name, input),
+    });
+    return true;
+  };
 
   let cleanText = text.replace(/<tool_call\b([^>]*)\/>/gi, (_, attrs) => {
     const attrName = readAttr(attrs, 'name');
@@ -391,25 +430,14 @@ function _extractInlineToolCalls(text) {
     if (pushJsonToolCall(attrName, body)) return '';
     const fnMatch = body.match(/<function=([^>]+)>([\s\S]*?)<\/function>/);
     if (fnMatch) {
-      const name = fnMatch[1].trim();
-      const paramsBody = fnMatch[2];
-      const input = {};
-      const paramRe = /<parameter=([^>]+)>([\s\S]*?)<\/parameter>/g;
-      let pm;
-      while ((pm = paramRe.exec(paramsBody)) !== null) {
-        const val = pm[2].trim();
-        try { input[pm[1].trim()] = JSON.parse(val); } catch { input[pm[1].trim()] = val; }
-      }
-      toolBlocks.push({
-        type: 'tool_use',
-        id: `tc_${toolBlocks.length}`,
-        name: normalizeToolName(name),
-        input: _postProcessToolInput(name, input),
-      });
-      return '';
+      return pushFunctionStyleToolCall(fnMatch[0]) ? '' : '';
     }
     return '';
-  }).trim();
+  });
+
+  cleanText = cleanText.replace(/<function=([^>]+)>[\s\S]*?<\/function>/gi, rawFunction => (
+    pushFunctionStyleToolCall(rawFunction) ? '' : rawFunction
+  )).trim();
   return toolBlocks.length > 0 ? { cleanText, toolBlocks } : null;
 }
 

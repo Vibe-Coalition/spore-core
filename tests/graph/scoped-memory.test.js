@@ -137,6 +137,19 @@ test('project identity prefers normalized git remote over local cwd', () => {
   assert.equal(ssh.basis, 'git-remote');
 });
 
+test('project identity honors explicit project identity key', () => {
+  const identity = projectIdentityFromContext('bench-user', {
+    cwd: '/app',
+    project: 'External Eval hello-world',
+    projectIdentityKey: 'external-eval:suite-a:hello-world',
+  });
+
+  assert.equal(identity.key, 'external-eval:suite-a:hello-world');
+  assert.equal(identity.label, 'External Eval hello-world');
+  assert.equal(identity.basis, 'explicit');
+  assert.equal(identity.root, '/app');
+});
+
 test('distilled project memory is shared across users on the same git remote', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-project-collab-'));
   const log = quietLog();
@@ -541,6 +554,43 @@ test('project graph lookup reuses legacy user-scoped cwd graph by project root',
   assert.equal(registry.list().filter(g => g.role === 'project').length, 1);
   assert.equal(registry.get(legacySlug).identityKey, bobEnv.projectKey);
   assert.deepEqual(registry.get(legacySlug).collaborators.sort(), ['alice', 'bob']);
+});
+
+test('explicit project identity key does not reuse same-cwd legacy project graph', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-project-explicit-'));
+  const registry = new GraphRegistry(dir, { agentId: 'spore', displayName: 'Spore' }, quietLog());
+  registry.init();
+  const explicitKey = 'external-eval:suite-a:hello-world';
+  const cwdSlug = registry.ensureProjectGraph('cwd:unknown-machine:/app', {
+    name: 'app',
+    userId: 'bench',
+    projectRoot: '/app',
+  });
+  registry.get(cwdSlug).identityKey = explicitKey;
+  registry.get(cwdSlug).projectKey = explicitKey;
+  registry._save();
+
+  const env = resolveDefaultMemoryEnvelope({
+    registry,
+    opts: {
+      platform: 'cli',
+      userRole: 'cli',
+      userId: 'yam',
+      userName: 'yam',
+      projectContext: {
+        cwd: '/app',
+        project: 'External Eval hello-world',
+        source: 'spore-code',
+        projectIdentityKey: explicitKey,
+      },
+    },
+  });
+
+  assert.notEqual(env.primarySlug, cwdSlug);
+  assert.equal(env.projectKey, explicitKey);
+  assert.equal(registry.get(env.primarySlug).identityKey, env.projectKey);
+  assert.equal(registry.get(cwdSlug).identityKey, 'cwd:unknown-machine:/app');
+  assert.equal(registry.list().filter(g => g.role === 'project').length, 2);
 });
 
 test('codebase-session scoped recall excludes main graph free-text memory', () => {
@@ -1237,6 +1287,94 @@ test('codebase-session scoped recall always includes project operating refs', as
     assert.match(bundle, /Shell And Quoting/);
     assert.match(bundle, /Processes And Dev Servers/);
     assert.match(bundle, /Verification Discipline/);
+  } finally {
+    graph.db?.close();
+  }
+});
+
+test('scoped recall ignores malformed candidates and stale FTS ids', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-scoped-recall-guards-'));
+  const dbPath = path.join(dir, 'project.db');
+  const db = newDb(dbPath);
+  db.exec(`
+    CREATE TABLE derived_facts (
+      content TEXT,
+      source_node_ids TEXT,
+      invalidated_at TEXT,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE reflections (
+      node_id TEXT,
+      content TEXT,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  db.prepare(`
+    INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'qrcode-npm',
+    'qrcode',
+    'library',
+    'Terminal QR rendering helper for Expo sessions.',
+    8,
+    'project',
+    'test',
+  );
+  const asp = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES (?, ?, ?, ?)
+  `).run('qrcode-npm', 'usage', 8, 'test').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    asp,
+    'Use qrcode to print Expo URLs in the terminal.',
+    9,
+    'test',
+    'test',
+  );
+  db.close();
+
+  const warnings = [];
+  const graph = new GraphContext({
+    graphDbPath: dbPath,
+    sharedGraphsDir: dir,
+    agentId: 'spore',
+    enhancedRecall: false,
+  }, {
+    info() {},
+    warn(...args) { warnings.push(args.map(String).join(' ')); },
+    error() {},
+    debug() {},
+  });
+  assert.equal(graph.init(), true);
+
+  try {
+    const valid = graph.getNode('qrcode-npm');
+    graph.hybridSearch = async () => [
+      null,
+      undefined,
+      { label: 'missing id' },
+      valid,
+      valid,
+    ];
+    graph._searchHints = () => [null, '', 'stale-hint-node'];
+    graph._searchAttributesFTS = () => ['stale-attr-node'];
+
+    const bundle = await graph._buildScopedRecallBundle({
+      messageContent: 'start expo and print a qrcode in the terminal',
+      memoryEnvelope: {
+        mode: 'codebase-session',
+        readScopes: [{ slug: 'project-test', role: 'project', label: 'Project Memory', dbPath, budget: 8 }],
+      },
+    });
+
+    assert.match(bundle, /Project Memory/);
+    assert.match(bundle, /qrcode/);
+    assert.equal(warnings.some(w => w.includes('scoped recall failed')), false);
+    assert.equal(warnings.some(w => w.includes('[retrieval] Set failed')), false);
   } finally {
     graph.db?.close();
   }

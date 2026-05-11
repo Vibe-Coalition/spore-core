@@ -12,6 +12,8 @@ const { MultiProvider, detectBackend } = require('../providers');
 const graphEvents = require('../graph/events');
 const { effortDefaults } = require('./effort');
 const { resolveDefaultMemoryEnvelope, mergeMemoryEnvelope } = require('../graph/scopes');
+const { WorkflowManager } = require('./workflows');
+const { PlannerAdvisor } = require('./planner-advisor');
 
 // ── Budget-scaling constants ─────────────────────────────────────────
 // All message-budget fractions are expressed against the active model's
@@ -61,6 +63,7 @@ const TOOL_RESULT_CAPS = {
   read_file:    120000,
   web_fetch:     30000,
   exec:          30000,
+  verify_implementation: 10000,
   message_read:  15000,
   graph_query:   15000,
 };
@@ -88,6 +91,9 @@ class AgentLoop {
     this.tools = toolSystem;
     this.learner = learner || null;
     this.client = null;
+    this.workflows = new WorkflowManager(sessionManager, logger);
+    this.plannerAdvisor = new PlannerAdvisor(config, logger);
+    if (this.tools) this.tools._workflow = this.workflows;
 
     this.activeRuns = new Set();
     this._pendingInterjections = new Map(); // sessionKey → [content, ...]
@@ -144,13 +150,445 @@ class AgentLoop {
     return out;
   }
 
-  _runtimeToolNames(opts = {}) {
+  _emitWorkflowStatus(opts = {}, workflowStatus = null) {
+    if (!workflowStatus) return;
+    const payload = { type: 'workflow:update', workflow: workflowStatus };
+    if (this.tools?._broadcastSessionEvent && opts.sessionKey) {
+      try {
+        this.tools._broadcastSessionEvent({
+          sessionKey: opts.sessionKey,
+          channelId: opts.channelId || null,
+          platform: opts.platform || null,
+          userId: opts.userId || null,
+        }, payload, { logPrefix: 'workflow:update', fallbackGlobal: false });
+        return;
+      } catch (e) {
+        this.log.warn(`[workflow] status broadcast failed: ${e.message}`);
+      }
+    }
+    if (typeof opts.onStatus === 'function') {
+      try { opts.onStatus(payload); } catch { /* best-effort UI signal */ }
+    }
+  }
+
+  _emitPlannerAdvisorStatus(opts = {}, payload = {}) {
+    const event = { type: payload.type || 'planner:advice', ...payload };
+    const statusPayload = {
+      type: 'chat:status',
+      status: event.type,
+      ...Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'type')),
+    };
+    if (this.tools?._broadcastSessionEvent && opts.sessionKey) {
+      try {
+        const delivered = this.tools._broadcastSessionEvent({
+          sessionKey: opts.sessionKey,
+          channelId: opts.channelId || null,
+          platform: opts.platform || null,
+          userId: opts.userId || null,
+        }, statusPayload, { logPrefix: event.type, fallbackGlobal: false });
+        if (delivered > 0) return;
+      } catch (e) {
+        this.log.warn(`[planner-advisor] status broadcast failed: ${e.message}`);
+      }
+    }
+    if (typeof opts.onStatus === 'function') {
+      try { opts.onStatus(event); } catch { /* best-effort UI signal */ }
+    }
+  }
+
+  _broadcastWorkflowTasks(sessionKey, opts = {}, tasks = []) {
+    if (!tasks.length || !this.tools?._broadcastSessionEvent) return;
+    for (const task of tasks) {
+      try {
+        this.tools._broadcastSessionEvent({
+          sessionKey,
+          channelId: opts.channelId || null,
+          platform: opts.platform || null,
+          userId: opts.userId || null,
+        }, {
+          type: 'task:create',
+          id: task.id,
+          subject: task.subject,
+          description: String(task.description || '').slice(0, 500),
+          status: 'pending',
+          priority: task.kind === 'verification' ? 2 : 3,
+          blockedBy: [],
+          sessionKey,
+          channelId: opts.channelId || null,
+          source: 'workflow',
+          kind: task.kind,
+        }, { logPrefix: 'workflow:task:create', fallbackGlobal: false });
+      } catch (e) {
+        this.log.warn(`[workflow] task broadcast failed: ${e.message}`);
+      }
+    }
+  }
+
+  _lazyToolSchemasEnabled(opts = {}) {
+    if (opts.lazyToolSchemas === false) return false;
+    const sporeCodeRaw = opts.platform === 'cli'
+      ? this.config?.plugins?.['spore-code']?.lazyToolSchemas
+      : undefined;
+    const raw = opts.lazyToolSchemas
+      ?? sporeCodeRaw
+      ?? this.config?.lazyToolSchemas
+      ?? this.config?.agent?.lazyToolSchemas
+      ?? process.env.SPORE_LAZY_TOOL_SCHEMAS;
+    return raw === true || raw === 'true' || raw === '1' || raw === 1;
+  }
+
+  _lazyToolPacks() {
+    return [
+      {
+        id: 'files',
+        description: 'Read, list, search, create, and edit project files.',
+        tools: ['list_dir', 'read_file', 'read_many_files', 'write_file', 'edit_file', 'patch_file', 'glob', 'grep'],
+      },
+      {
+        id: 'shell',
+        description: 'Run commands, tests, installers, servers, and managed background processes.',
+        tools: ['exec', 'powershell_exec', 'run_tests', 'bg_list', 'bg_tail', 'bg_kill'],
+      },
+      {
+        id: 'git',
+        description: 'Inspect repository status and diffs; use shell when an actual git command has no dedicated tool.',
+        tools: ['git_status', 'git_diff'],
+      },
+      {
+        id: 'code_index',
+        description: 'Use indexed symbols, snippets, architecture, impact, traces, and implementation checks.',
+        tools: ['index_codebase', 'search_symbols', 'get_snippet', 'architecture', 'code_overview', 'trace_calls', 'trace_path', 'impact', 'code_diff', 'verify_implementation'],
+      },
+      {
+        id: 'graph',
+        description: 'Query and maintain scoped graph context, nodes, edges, and graph diffs.',
+        tools: ['graph_query', 'graph_update', 'graph_delete', 'graph_diff', 'query_about'],
+      },
+      {
+        id: 'memory',
+        description: 'Record discoveries, decisions, workflow tasks, and reusable project scripts.',
+        tools: ['note_discovery', 'decisions_new', 'decisions_list', 'decisions_get', 'decisions_update', 'task_create', 'task_progress', 'task_list', 'task_get', 'task_status', 'task_cancel', 'task_update', 'workflow_status', 'save_project_script', 'list_project_scripts', 'get_project_script', 'record_script_outcome', 'update_code_graph_summary'],
+      },
+      {
+        id: 'web',
+        description: 'Search the web and fetch static public pages or docs.',
+        tools: ['web_search', 'web_fetch'],
+      },
+      {
+        id: 'browser',
+        description: 'Use interactive browser automation when a browser backend is available.',
+        tools: ['browser'],
+      },
+      {
+        id: 'channels',
+        description: 'Ask the current user or read/send/react/edit messages through channel plugins.',
+        tools: ['ask_user', 'message_send', 'message_read', 'message_react', 'message_edit', 'telegram_pairing'],
+      },
+      {
+        id: 'settings',
+        description: 'Read or update Spore runtime settings and public configuration.',
+        tools: ['settings_read', 'settings_write'],
+      },
+      {
+        id: 'agents',
+        description: 'Delegate, coordinate, or request planner-model guidance when stuck.',
+        tools: ['delegate_task', 'request_planner_advice'],
+      },
+      {
+        id: 'plugins',
+        description: 'Installed plugin tools that do not fit a core pack.',
+        tools: [],
+      },
+    ];
+  }
+
+  _lazyToolPackMap() {
+    const out = new Map();
+    for (const pack of this._lazyToolPacks()) out.set(pack.id, pack);
+    return out;
+  }
+
+  _lazyToolNameToPack() {
+    const out = new Map();
+    for (const pack of this._lazyToolPacks()) {
+      for (const name of pack.tools || []) out.set(name, pack.id);
+    }
+    return out;
+  }
+
+  _toolDefinitionsForContext(opts = {}) {
     try {
-      const defs = this.tools?.getToolDefinitions?.({
+      return this.tools?.getToolDefinitions?.({
         platform: opts.platform,
         projectContext: opts.projectContext,
         trigger: opts.trigger,
       }) || [];
+    } catch (e) {
+      this.log?.warn?.(`[tools] Failed to build tool inventory: ${e.message}`);
+      return [];
+    }
+  }
+
+  _toolDefinitionsByName(names = [], opts = {}) {
+    const wanted = new Set((Array.isArray(names) ? names : [names]).filter(Boolean));
+    if (!wanted.size) return null;
+    const defs = this._toolDefinitionsForContext(opts);
+    const filtered = defs.filter(t => wanted.has(t?.name));
+    return filtered.length ? filtered : null;
+  }
+
+  _lazyAvailablePacks(opts = {}, fullTools = null) {
+    const tools = Array.isArray(fullTools) ? fullTools : this._toolDefinitionsForContext(opts);
+    const available = new Set(tools.map(t => t?.name).filter(Boolean));
+    const nameToPack = this._lazyToolNameToPack();
+    const unclassified = [];
+    const packs = [];
+    for (const pack of this._lazyToolPacks()) {
+      if (pack.id === 'plugins') continue;
+      const names = (pack.tools || []).filter(name => available.has(name));
+      if (names.length) packs.push({ ...pack, tools: names });
+    }
+    for (const name of available) {
+      if (!nameToPack.has(name) && name !== 'request_tools') unclassified.push(name);
+    }
+    if (unclassified.length) {
+      const pluginPack = this._lazyToolPackMap().get('plugins');
+      packs.push({ ...pluginPack, tools: unclassified.sort() });
+    }
+    return packs;
+  }
+
+  _requestToolsDefinition(opts = {}) {
+    const packIds = this._lazyAvailablePacks(opts).map(p => p.id);
+    return {
+      name: 'request_tools',
+      description: [
+        'Load additional tool schemas for this turn. Call this as the only tool in an iteration when the needed tool schema is not currently available.',
+        'Prefer packs for broad work; use exact tool names only when you already know the name. After this returns, retry the real operation.',
+      ].join(' '),
+      input_schema: {
+        type: 'object',
+        properties: {
+          packs: {
+            type: 'array',
+            items: { type: 'string', enum: packIds.length ? packIds : this._lazyToolPacks().map(p => p.id) },
+            description: 'Tool packs to load for the next iteration.',
+          },
+          tools: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Exact tool names to load if known.',
+          },
+          reason: {
+            type: 'string',
+            description: 'Brief reason these schemas are needed.',
+          },
+        },
+        required: [],
+      },
+    };
+  }
+
+  _normalizeLazySelection(selection = {}) {
+    const packs = new Set();
+    const tools = new Set();
+    const packMap = this._lazyToolPackMap();
+    for (const raw of selection.packs || []) {
+      const id = String(raw || '').trim().toLowerCase();
+      if (packMap.has(id)) packs.add(id);
+    }
+    for (const raw of selection.tools || []) {
+      const name = String(raw || '').trim();
+      if (name && name !== 'request_tools') tools.add(name);
+    }
+    return { packs, tools };
+  }
+
+  _inferLazyToolSelection(content, opts = {}) {
+    const t = String(content || '').toLowerCase();
+    const packs = new Set();
+    const tools = new Set();
+    const add = (...ids) => ids.forEach(id => packs.add(id));
+
+    if (/\b(read|open|inspect|show|view|cat|file|files|folder|directory|list|tree|grep|search|find|edit|write|patch|change|replace|refactor|implement|fix|add|update|delete|remove)\b/.test(t)) {
+      add('files');
+    }
+    if (/\b(codebase|symbol|symbols|snippet|architecture|impact|call\s*graph|trace|index|component|function|class|method|interface|implementation)\b/.test(t)) {
+      add('code_index');
+    }
+    if (/\b(run|execute|command|shell|terminal|start|serve|server|build|test|verify|install|npm|pnpm|yarn|node|python|pip|go|cargo|docker|expo|qr|venv)\b/.test(t)) {
+      add('shell');
+    }
+    if (/\b(git|status|diff|commit|push|pull|merge|branch|stash|rebase|tag)\b/.test(t)) {
+      add('git');
+    }
+    if (/\b(graph|node|edge|memory|recall|knowledge|distill|learn|session|summary|summarize)\b/.test(t)) {
+      add('graph', 'memory');
+    }
+    if (/\b(web|internet|search|docs?|documentation|latest|current|website|url|http|https|fetch)\b/.test(t)) {
+      add('web');
+    }
+    if (/\b(browser|browse|open\s+(?:site|website|page)|click|screenshot|playwright|form)\b/.test(t)) {
+      add('browser');
+    }
+    if (/\b(telegram|discord|slack|channel|dm|message|send|react|ask_user|ask\s+the\s+user|pairing)\b/.test(t)) {
+      add('channels');
+    }
+    if (/\b(settings?|config(?:uration)?|routing|preset|provider|public\s+url|web\s+port|theme)\b/.test(t)) {
+      add('settings');
+    }
+    if (/\b(plugin|plugins|tailscale|sidecar|cron|benchmark|longmembench)\b/.test(t)) {
+      add('plugins', 'settings');
+    }
+    if (/\b(delegate|subagent|sub-agent|parallel agent)\b/.test(t)) {
+      add('agents');
+    }
+
+    if (opts.platform === 'cli' && opts.projectContext) {
+      if (/\b(read|audit|inspect|understand|plan|review|analy[sz]e|codebase)\b/.test(t)) add('files', 'code_index');
+      if (/\b(implement|fix|add|update|refactor|change|build|release|publish)\b/.test(t)) add('files', 'code_index', 'shell', 'git');
+      if (opts.projectContext.mode === 'plan') packs.delete('shell');
+    }
+
+    return { packs: [...packs], tools: [...tools] };
+  }
+
+  _getLazyToolDefinitions(opts = {}, selection = {}) {
+    const full = this._toolDefinitionsForContext(opts);
+    const byName = new Map(full.map(t => [t?.name, t]).filter(([name]) => Boolean(name)));
+    const normalized = this._normalizeLazySelection(selection);
+    const packMap = this._lazyToolPackMap();
+    const selectedNames = new Set(normalized.tools);
+    for (const packId of normalized.packs) {
+      const pack = packMap.get(packId);
+      if (!pack) continue;
+      if (packId === 'plugins') {
+        const nameToPack = this._lazyToolNameToPack();
+        for (const name of byName.keys()) {
+          if (!nameToPack.has(name) && name !== 'request_tools') selectedNames.add(name);
+        }
+        continue;
+      }
+      for (const name of pack.tools || []) selectedNames.add(name);
+    }
+    const selected = full.filter(t => selectedNames.has(t?.name));
+    const alwaysAvailable = ['request_planner_advice']
+      .map(name => byName.get(name))
+      .filter(Boolean);
+    const defs = [this._requestToolsDefinition(opts), ...alwaysAvailable, ...selected];
+    const seen = new Set();
+    return defs.filter((tool) => {
+      const name = tool?.name;
+      if (!name || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+  }
+
+  _lazySelectionLabel(selection = {}) {
+    const normalized = this._normalizeLazySelection(selection);
+    const packs = [...normalized.packs].sort();
+    const tools = [...normalized.tools].sort();
+    const bits = [];
+    if (packs.length) bits.push(`packs=${packs.join('+')}`);
+    if (tools.length) bits.push(`tools=${tools.join('+')}`);
+    return bits.join(',') || 'catalog';
+  }
+
+  _buildLazyRuntimeToolContract(opts = {}) {
+    const packs = this._lazyAvailablePacks(opts);
+    if (!packs.length) return null;
+    const inferred = this._inferLazyToolSelection(opts.content || opts.messageContent || '', opts);
+    const inferredLabel = this._lazySelectionLabel(inferred);
+    const lines = [
+      '## Runtime Tool Contract',
+      'Lazy tool schemas are active to preserve context. You may not see every callable schema up front.',
+      `Callable now: \`request_tools\` plus any schemas preloaded for this turn (${inferredLabel}).`,
+        '- If the user request needs a capability whose schema is not currently listed, call `request_tools` as the only tool in that iteration with `packs`, `tools`, and `reason`; after it returns, retry the real operation.',
+        '- Do not claim that a capability is unavailable just because its schema was not preloaded. Request the relevant pack first unless policy or platform restrictions block it.',
+        '- If you are stuck, corrected by the user, repeating unsuccessful attempts, uncertain about tool behavior, or about to tell the user to do something manually, call `request_planner_advice` with what you tried and the exact blocker before giving up.',
+        '- Available packs:',
+      ...packs.map(p => `  - ${p.id}: ${p.description}`),
+    ];
+
+    if (opts.platform === 'cli' && opts.projectContext?.mode === 'plan') {
+      lines.push(
+        '## Plan Mode Guard',
+        'RULES (HARD):',
+        '- Spore Code plan mode is read-only. Do NOT run commands or write/edit files.',
+        '- Do not start servers, install packages, create temp scripts, delete files, or change environment/configuration.',
+        '- Follow the active Plan Mode phase. Router phases emit `QUESTIONS:` or `NO_INTERVIEW_NEEDED`; research emits `RESEARCH_DONE`; building ends with `PLAN_READY`.',
+      );
+    }
+
+    if (opts.platform === 'cli' && opts.projectContext) {
+      lines.push(
+        '- In coding/project sessions, prefer repository/file/shell tools for repo inspection and verification. Use browser/web tools only when the user explicitly asks for live web research or external docs.',
+        '- The latest user message is the active task. Use earlier history only as supporting context; do not resume older tasks, restart servers, kill processes, or continue prior debugging unless the latest message asks for that.',
+        '- Evidence discipline: treat memory, prompt context, prior failures, and inferred environment details as hints, not proof. Before claiming file state, tool availability, test status, project structure, or what changed, check the current repo or command output with the relevant local tool.',
+        '- Before declaring a task blocked or asking the user to run something, try the direct local check once when it is safe: read the file/range, inspect git diff/status, or run the narrow command. Do not infer host/container boundaries, missing toolchains, or missing files from stale context.',
+        '- Ask the user when uncertainty is about intent, desired behavior, acceptable risk, credentials/access, destructive changes, or a product decision that repo/tool evidence cannot answer.',
+        '- After edits or failed edits, re-read the changed range or inspect the diff before deciding the next step. If a command fails, use the exact error output to guide the next check; do not repeat the same failing call without changing something meaningful.',
+        '- After edits, final verification claims must be command-derived: list exact commands run and outcomes. Say "focused tests" when you used grep, -k, a named test file, or another filter.',
+        '- Before a final code-task answer, check git_status and summarize both tracked and untracked changes.',
+        '- If the user asks you to print/show/display a QR code, terminal art, table, or other visual command output, paste the relevant tool output verbatim in a fenced code block in the visible reply.',
+      );
+    }
+
+    return lines.join('\n');
+  }
+
+  _mergeLazyToolState(state, selection = {}) {
+    const normalized = this._normalizeLazySelection(selection);
+    const target = state || { packs: new Set(), tools: new Set(), requestCount: 0 };
+    for (const pack of normalized.packs) target.packs.add(pack);
+    for (const tool of normalized.tools) target.tools.add(tool);
+    return target;
+  }
+
+  _handleLazyToolRequestBlocks(toolBlocks = [], opts = {}, state = null) {
+    const requests = (toolBlocks || []).filter(tb => tb?.name === 'request_tools');
+    if (!requests.length) return null;
+    const nextState = state || { packs: new Set(), tools: new Set(), requestCount: 0 };
+    nextState.requestCount = (nextState.requestCount || 0) + requests.length;
+    for (const tb of requests) {
+      this._mergeLazyToolState(nextState, {
+        packs: Array.isArray(tb.input?.packs) ? tb.input.packs : [],
+        tools: Array.isArray(tb.input?.tools) ? tb.input.tools : [],
+      });
+    }
+    const toolDefinitions = this._getLazyToolDefinitions(opts, nextState);
+    const loadedNames = toolDefinitions.map(t => t.name).filter(name => name && name !== 'request_tools');
+    const resultPayload = {
+      ok: true,
+      loadedPacks: [...nextState.packs].sort(),
+      loadedTools: loadedNames,
+      toolCount: toolDefinitions.length,
+      note: 'Schemas loaded. Retry the actual operation now.',
+    };
+    const toolResults = (toolBlocks || []).map(tb => {
+      if (tb.name === 'request_tools') {
+        return {
+          type: 'tool_result',
+          tool_use_id: tb.id,
+          content: JSON.stringify(resultPayload),
+        };
+      }
+      return {
+        type: 'tool_result',
+        tool_use_id: tb.id,
+        content: JSON.stringify({
+          error: `Tool ${tb.name} was not executed because request_tools must run alone. Retry now that schemas are loaded.`,
+          loadedTools: loadedNames,
+        }),
+      };
+    });
+    return { state: nextState, toolDefinitions, toolResults, loadedNames, loadedPacks: [...nextState.packs].sort() };
+  }
+
+  _runtimeToolNames(opts = {}) {
+    try {
+      const defs = this._toolDefinitionsForContext(opts);
       return [...new Set(defs.map(t => t?.name).filter(Boolean))].sort();
     } catch (e) {
       this.log?.warn?.(`[prompt] Failed to build runtime tool inventory: ${e.message}`);
@@ -159,6 +597,10 @@ class AgentLoop {
   }
 
   _buildRuntimeToolContract(opts = {}) {
+    if (this._lazyToolSchemasEnabled(opts)) {
+      return this._buildLazyRuntimeToolContract(opts);
+    }
+
     const names = this._runtimeToolNames(opts);
     if (names.length === 0) return null;
 
@@ -249,12 +691,15 @@ class AgentLoop {
     }
     if (opts.platform === 'cli' && opts.projectContext) {
       lines.push('- In coding/project sessions, prefer repository/file/shell tools for repo inspection and verification. Use browser/web tools only when the user explicitly asks for live web research or external docs.');
+      lines.push('- The latest user message is the active task. Use earlier history only as supporting context; do not resume older tasks, restart servers, kill processes, or continue prior debugging unless the latest message asks for that.');
       lines.push('- Evidence discipline: treat memory, prompt context, prior failures, and inferred environment details as hints, not proof. Before claiming file state, tool availability, test status, project structure, or what changed, check the current repo or command output with the relevant local tool.');
       lines.push('- Before declaring a task blocked or asking the user to run something, try the direct local check once when it is safe: read the file/range, inspect git diff/status, or run the narrow command. Do not infer host/container boundaries, missing toolchains, or missing files from stale context.');
       lines.push('- Ask the user when uncertainty is about intent, desired behavior, acceptable risk, credentials/access, destructive changes, or a product decision that repo/tool evidence cannot answer. Do not silently choose a risky interpretation just to keep moving.');
       lines.push('- After edits or failed edits, re-read the changed range or inspect the diff before deciding the next step. If a command fails, use the exact error output to guide the next check; do not repeat the same failing call without changing something meaningful.');
       lines.push('- After edits, final verification claims must be command-derived: list exact commands run and outcomes. Say "focused tests" when you used grep, -k, a named test file, or another filter. Do not say "all tests", "full suite", or quote a total test count unless an unfiltered full-suite command produced that output.');
+      lines.push('- Before a final code-task answer, check git_status and summarize both tracked and untracked changes. Remember that `git diff --check` does not cover untracked new files; if untracked files exist, run a safe untracked-file whitespace check or clearly state that only tracked diff whitespace was checked.');
       lines.push('- Keep public API and behavior changes scoped to the user request. If you intentionally add optional surface area beyond the minimal request, call that out briefly and justify it.');
+      lines.push('- If the user asks you to print/show/display a QR code, terminal art, table, or other visual command output, paste the relevant tool output verbatim in a fenced code block in the visible reply. Do not claim it was shown, printed, or stripped by chat unless your visible reply actually includes it or a renderer error says so.');
     }
 
     return lines.join('\n');
@@ -277,6 +722,12 @@ class AgentLoop {
     if (trigger && !['dm', 'mention', 'reply', 'chat', 'manual'].includes(trigger)) return null;
     const names = new Set(this._runtimeToolNames(opts));
     const has = (name) => names.has(name);
+    const escapeRegExp = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const mentionsToolName = (haystack, name) => {
+      const needle = String(name || '').toLowerCase();
+      if (!needle) return false;
+      return new RegExp(`(^|[^a-z0-9_])${escapeRegExp(needle)}([^a-z0-9_]|$)`, 'i').test(haystack);
+    };
 
     const textFromMessage = (msg) => {
       if (!msg) return '';
@@ -298,7 +749,7 @@ class AgentLoop {
 
       const verb = /\b(use|call|run|invoke|execute|try|test|route|open|browse|query|make|create|add|save|write|record)\b/i;
       for (const name of names) {
-        if (t.includes(name.toLowerCase()) && verb.test(t)) return name;
+        if (mentionsToolName(t, name) && verb.test(t)) return name;
       }
 
       const hasUrl = /\bhttps?:\/\/\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?/i.test(t);
@@ -635,6 +1086,7 @@ class AgentLoop {
       isThread: opts.isThread,
       parentChannelName: opts.parentChannelName,
       messageId: opts.messageId,
+      lazyToolSchemas: opts.lazyToolSchemas,
       webappStatus: this.tools?.gateway?.getWebappStatus?.() || null,
       clientCwd: opts.clientCwd || null,
       // Structured project metadata from Spore Code (cwd, git, tree, SPORE.md,
@@ -657,6 +1109,25 @@ class AgentLoop {
       if (memoryEnvelope.mode && memoryEnvelope.mode !== 'normal-chat') {
         this.log.info(`[memory] session=${sessionKey} mode=${memoryEnvelope.mode} write=${memoryEnvelope.writeScopes?.defaultSlug || memoryEnvelope.primarySlug || '(none)'} reads=${(memoryEnvelope.readScopes || []).map(s => s.slug).join(',')}`);
       }
+    }
+
+    const workflow = this.workflows?.ensureForTurn(sessionKey, opts);
+    if (workflow) {
+      const execTasks = opts.projectContext?.mode === 'execute'
+        ? this.workflows.ensureExecutionTasks(sessionKey, {
+            channelId: opts.channelId || null,
+            userId: opts.userId || null,
+          })
+        : null;
+      if (execTasks?.created?.length) {
+        this._broadcastWorkflowTasks(sessionKey, opts, execTasks.created);
+      }
+      const workflowStatus = execTasks?.workflow || this.workflows.getStatus(sessionKey);
+      dynamicOpts.workflowStatus = workflowStatus;
+      opts.workflowStatus = workflowStatus;
+      const ctx = this.tools._sessionContexts?.get(sessionKey);
+      if (ctx) ctx.workflowStatus = workflowStatus;
+      this._emitWorkflowStatus(opts, workflowStatus);
     }
 
     // Detect casual chat for lighter prompt mode
@@ -848,10 +1319,16 @@ class AgentLoop {
         last.content = `[PRIORITY — The user interrupted your previous task. That task is CANCELLED. Focus ONLY on this new message:]\n\n${last.content}`;
       }
       this.log.info(`[interrupt] Priority framing injected for ${sessionKey}`);
+    } else if (opts.platform === 'cli' && opts.projectContext?.mode === 'execute' && messages.length > 1) {
+      const last = messages[messages.length - 1];
+      if (last.role === 'user' && typeof last.content === 'string' && !last.content.startsWith('[CURRENT REQUEST')) {
+        last.content = `[CURRENT REQUEST — treat this latest user message as the active task. Use earlier history only as context; do not continue older tasks unless this message asks for it.]\n\n${last.content}`;
+      }
     }
 
     // 4. Ensure messages alternate user/assistant properly
     messages = this._sanitizeMessages(messages);
+    messages = this._compactVisualHistoryForModel(messages);
 
     // 4.5. Token-aware compaction: summarize old messages instead of dropping them.
     // We pick the active model FIRST so the budget tracks the model that will
@@ -892,7 +1369,7 @@ class AgentLoop {
     if (!_modelLimit?.contextWindow) {
       this.log.debug(`[budget] No modelLimits entry for ${activeModel || '(no model)'}; falling back to ${contextWindow.toLocaleString()}-token default. Set per-model context in Settings → Providers to scale budgets correctly.`);
     }
-    const systemTokens = this._estimateTokens(systemPrompt);
+    let systemTokens = this._estimateTokens(systemPrompt);
     let msgTokens = this._estimateMessageTokens(messages);
 
     // Complexity-aware message budget: casual chat gets a tight budget so
@@ -955,6 +1432,11 @@ class AgentLoop {
     let loopBroken = false;
     let delegatedThisTurn = false;
     let responseRepair = null;
+    let workflowRepairAttempts = 0;
+    let workflowRepairReason = null;
+    let plannerFinalReviewAttempts = 0;
+    let rawToolMarkupRepairAttempts = 0;
+    let nextIterationToolsOverride = null;
 
     // Collect tool call summaries for the learner (procedural knowledge)
     const toolLog = [];
@@ -999,6 +1481,11 @@ class AgentLoop {
       this.log.info(`[routing] BUILDING turn → planner (${activeModel})`);
     }
     let chatTools = null;
+    const lazyToolSchemas = this._lazyToolSchemasEnabled({
+      ...opts,
+      content: opts.content,
+    });
+    let lazyToolState = null;
     let forcedToolName = this._detectForcedToolNameForIntent(opts.content, {
       platform: opts.platform,
       trigger: opts.trigger,
@@ -1008,6 +1495,25 @@ class AgentLoop {
     if (forcedToolName) {
       this.log.info(`[agent] Explicit tool intent detected — forcing first turn to use ${forcedToolName}`);
     }
+    if (lazyToolSchemas) {
+      const inferred = this._inferLazyToolSelection(opts.content, opts);
+      lazyToolState = this._mergeLazyToolState(null, inferred);
+      if (forcedToolName) lazyToolState.tools.add(forcedToolName);
+      chatTools = this._getLazyToolDefinitions(opts, lazyToolState);
+      this.log.info(`[tools] Lazy schemas enabled for ${sessionKey}: ${this._lazySelectionLabel(lazyToolState)} (${chatTools.length} schemas)`);
+      if (typeof opts.onStatus === 'function') {
+        try {
+          opts.onStatus({
+            type: 'tools:lazy',
+            sessionKey,
+            mode: 'initial',
+            packs: [...lazyToolState.packs].sort(),
+            tools: [...lazyToolState.tools].sort(),
+            schemaCount: chatTools.length,
+          });
+        } catch { /* best-effort UI callback */ }
+      }
+    }
 
     const abortSignal = opts._abortSignal;
 
@@ -1015,6 +1521,9 @@ class AgentLoop {
 
     while (iterations < safetyCeiling) {
       iterations++;
+      const toolsOverriddenThisIteration = nextIterationToolsOverride !== null;
+      const iterationTools = toolsOverriddenThisIteration ? nextIterationToolsOverride : chatTools;
+      nextIterationToolsOverride = null;
 
       if (opts.queueJob?.shouldYield?.()) {
         this.log.info(`[queue] Yielding ${sessionKey} before iteration ${iterations} for higher-priority work`);
@@ -1053,17 +1562,35 @@ class AgentLoop {
         contextPressureLevel = 2;
         tokenBudgetWarned = true;
         this.log.warn(`[budget] URGENT: ${currentTokens.toLocaleString()}/${compactionThreshold.toLocaleString()} tokens (${Math.round(currentTokens/compactionThreshold*100)}%) — compaction imminent`);
+        const wfStatus = this.workflows?.recordContextPressure?.(sessionKey, {
+          level: contextPressureLevel,
+          totalTokens: currentTokens,
+          limitTokens: compactionThreshold,
+          usedPercent: Math.round(currentTokens / Math.max(1, compactionThreshold) * 100),
+        });
+        if (wfStatus) {
+          opts.workflowStatus = wfStatus;
+          const ctx = this.tools?._sessionContexts?.get(sessionKey);
+          if (ctx) ctx.workflowStatus = wfStatus;
+          this._emitWorkflowStatus(opts, wfStatus);
+        }
       } else if (contextPressureLevel < 1 && currentTokens > cautionAt) {
         contextPressureLevel = 1;
         this.log.info(`[budget] Caution: ${currentTokens.toLocaleString()}/${compactionThreshold.toLocaleString()} tokens (${Math.round(currentTokens/compactionThreshold*100)}%) — approaching compaction`);
+        const wfStatus = this.workflows?.recordContextPressure?.(sessionKey, {
+          level: contextPressureLevel,
+          totalTokens: currentTokens,
+          limitTokens: compactionThreshold,
+          usedPercent: Math.round(currentTokens / Math.max(1, compactionThreshold) * 100),
+        });
+        if (wfStatus) {
+          opts.workflowStatus = wfStatus;
+          const ctx = this.tools?._sessionContexts?.get(sessionKey);
+          if (ctx) ctx.workflowStatus = wfStatus;
+          this._emitWorkflowStatus(opts, wfStatus);
+        }
       }
 
-      const iterModel = activeModel || this.config.plannerModel;
-      const resolvedIterModel = this.client?.resolveModel?.({
-        model: iterModel,
-        messages,
-        tools: chatTools,
-      }) || iterModel;
       this.log.debug(`Agent iteration ${iterations}, messages: ${messages.length}, sysPromptLen: ${systemPrompt.length}`);
 
       try {
@@ -1094,19 +1621,183 @@ class AgentLoop {
         if (ijResult.systemPrompt && ijResult.systemPrompt !== systemPrompt) {
           systemPrompt = ijResult.systemPrompt;
           ({ staticPrompt, dynamicContext } = this._buildPromptCallParts(systemPrompt, promptMode, dynamicOpts));
+          systemTokens = this._estimateTokens(systemPrompt);
+        }
+        msgTokens = this._estimateMessageTokens(messages);
+
+        const tokenState = {
+          systemTokens,
+          messageTokens: msgTokens,
+          totalTokens: systemTokens + msgTokens,
+          softBudget,
+          hardCeiling,
+          contextWindow,
+          usedPercent: Math.max(0, Math.min(999, Math.round(((systemTokens + msgTokens) / Math.max(1, Math.min(softBudget || Infinity, hardCeiling || Infinity, contextWindow || Infinity))) * 100))),
+        };
+        let callStaticPrompt = staticPrompt;
+        let callDynamicContext = dynamicContext;
+        let plannerAdviceForTrace = null;
+        let plannerAdviceContextText = '';
+        const plannerModel = this._modelForTier('planner', { ...opts, strict: true }) || this.config.plannerModel || null;
+        const activeModelForAdvisor = activeModel || this.config.model || null;
+        try {
+          const advisor = await this.plannerAdvisor.advise({
+            sessionKey,
+            opts,
+            client: this.client,
+            abortSignal,
+            messages,
+            systemPrompt,
+            activeModel: activeModelForAdvisor,
+            plannerModel,
+            isCasualChat,
+            iteration: iterations,
+            toolLog,
+            tokenState,
+            workflowStatus: opts.workflowStatus || null,
+          });
+          if (advisor?.skipped) {
+            if (advisor.reason && !['no_trigger', 'already_advised', 'cooldown', 'casual'].includes(advisor.reason)) {
+              this._emitPlannerAdvisorStatus(opts, {
+                type: 'planner:skipped',
+                reason: advisor.reason,
+                model: plannerModel,
+                activeModel: activeModelForAdvisor,
+              });
+              this.workflows?.recordPlannerAdvisorEvent?.(sessionKey, {
+                status: 'skipped',
+                phase: 'pre_turn',
+                reason: advisor.reason,
+                reasons: advisor.reasons || [],
+                model: plannerModel,
+                activeModel: activeModelForAdvisor,
+              });
+            }
+          } else if (advisor?.advice) {
+            plannerAdviceForTrace = {
+              reasons: advisor.reasons || [],
+              model: advisor.plannerModel || plannerModel,
+              elapsedMs: advisor.elapsedMs || 0,
+              inputTokens: advisor.usage?.input_tokens || 0,
+              outputTokens: advisor.usage?.output_tokens || 0,
+              preview: String(advisor.rendered || '').replace(/\s+/g, ' ').slice(0, 300),
+              escalate: !!advisor.escalate,
+              fallback: !!advisor.fallback,
+              malformed: !!advisor.malformed,
+            };
+            plannerAdviceContextText = advisor.rendered || '';
+            callDynamicContext = [dynamicContext, advisor.rendered].filter(Boolean).join('\n\n');
+            this.log.info(`[planner-advisor] advice for ${sessionKey}: ${(advisor.reasons || []).join(',')} (${advisor.elapsedMs || 0}ms, escalate=${!!advisor.escalate})`);
+            this._emitPlannerAdvisorStatus(opts, {
+              type: 'planner:advice',
+              reasons: advisor.reasons || [],
+              model: advisor.plannerModel || plannerModel,
+              activeModel: activeModelForAdvisor,
+              elapsedMs: advisor.elapsedMs || 0,
+              usage: advisor.usage || null,
+              preview: plannerAdviceForTrace.preview,
+              escalate: !!advisor.escalate,
+              fallback: !!advisor.fallback,
+              malformed: !!advisor.malformed,
+            });
+            this.workflows?.recordPlannerAdvisorEvent?.(sessionKey, {
+              status: 'advice',
+              phase: 'pre_turn',
+              reasons: advisor.reasons || [],
+              model: advisor.plannerModel || plannerModel,
+              activeModel: activeModelForAdvisor,
+              elapsedMs: advisor.elapsedMs || 0,
+              usage: advisor.usage || null,
+              preview: plannerAdviceForTrace.preview,
+              fallback: !!advisor.fallback,
+              malformed: !!advisor.malformed,
+              rawPreview: advisor.rawText || null,
+            });
+            if (advisor.escalate && plannerModel) {
+              activeModel = plannerModel;
+              this.log.info(`[planner-advisor] escalating ${sessionKey} to planner (${plannerModel})`);
+              this._emitPlannerAdvisorStatus(opts, {
+                type: 'planner:escalated',
+                reasons: advisor.reasons || [],
+                model: plannerModel,
+                previousModel: activeModelForAdvisor,
+              });
+            }
+          }
+        } catch (e) {
+          this.log.warn(`[planner-advisor] advice failed for ${sessionKey}: ${e.message}`);
+          this._emitPlannerAdvisorStatus(opts, {
+            type: 'planner:skipped',
+            reason: 'error',
+            error: e.message,
+            model: plannerModel,
+            activeModel: activeModelForAdvisor,
+          });
         }
 
+        const iterModel = activeModel || this.config.plannerModel;
+        const resolvedIterModel = this.client?.resolveModel?.({
+          model: iterModel,
+          messages,
+          tools: iterationTools,
+        }) || iterModel;
+
         const iterStart = Date.now();
-        this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${chatTools ? 'chat' : 'full'}`);
+        const contextToolDefinitions = toolsOverriddenThisIteration
+          ? (Array.isArray(iterationTools) ? iterationTools : [])
+          : (chatTools || this._getContextToolDefinitions({
+            platform: opts.platform,
+            projectContext: opts.projectContext,
+            trigger: opts.trigger,
+          }));
+        const toolsMode = toolsOverriddenThisIteration
+          ? (Array.isArray(iterationTools) && iterationTools.length === 0 ? 'none' : 'override')
+          : (lazyToolSchemas ? `lazy:${this._lazySelectionLabel(lazyToolState)}` : (chatTools ? 'chat' : 'full'));
+        const traceSystemPrompt = plannerAdviceContextText
+          ? [systemPrompt, plannerAdviceContextText].filter(Boolean).join('\n\n')
+          : systemPrompt;
+        const traceSystemTokens = plannerAdviceContextText
+          ? this._estimateTokens(traceSystemPrompt)
+          : systemTokens;
+        const contextTrace = this._buildContextTrace({
+          sessionKey,
+          iteration: iterations,
+          model: resolvedIterModel,
+          messages,
+          systemPrompt: traceSystemPrompt,
+          staticPrompt: callStaticPrompt,
+          dynamicContext: callDynamicContext,
+          systemTokens: traceSystemTokens,
+          msgTokens,
+          contextWindow,
+          hardCeiling,
+          softBudget,
+          toolsMode,
+          toolDefinitions: contextToolDefinitions,
+          opts,
+          plannerAdvice: plannerAdviceForTrace,
+        });
+        this._emitContextTrace(contextTrace, opts);
+        this.log.info(`[agent] Iter ${iterations} starting — model=${resolvedIterModel}, msgs=${messages.length}, tools=${toolsMode}, ctx=${contextTrace.totalTokens}/${contextTrace.limitTokens} (${contextTrace.usedPercent}%), tail=${contextTrace.tail.map(m => `${m.index}:${m.role}:${m.tokens}`).join(',')}`);
+
+        const deferWorkflowText = this._shouldDeferWorkflowText(sessionKey, opts);
+        let deferredText = '';
+        const streamText = (delta) => {
+          if (!delta || !opts.onTextDelta) return;
+          try { opts.onTextDelta(delta); } catch { /* silent: best-effort UI callback */ }
+        };
+        const iterOnTextDelta = deferWorkflowText
+          ? (delta) => { deferredText += delta || ''; }
+          : opts.onTextDelta;
 
         const response = await this._callLLM(systemPrompt, messages, {
-          staticPrompt,
-          dynamicContext,
-          onTextDelta: opts.onTextDelta,
+          staticPrompt: callStaticPrompt,
+          dynamicContext: callDynamicContext,
+          onTextDelta: iterOnTextDelta,
           onThinkingDelta: opts.onThinkingDelta,
           onToolUse: opts.onToolUse,
           onStatus: opts.onStatus,
-          tools: chatTools,
+          tools: iterationTools,
           model: activeModel,
           platform: opts.platform,
           modelRoutingOverride: opts.modelRoutingOverride || null,
@@ -1153,6 +1844,7 @@ class AgentLoop {
         const cacheRead = iterUsage.cache_read_input_tokens || 0;
         const cacheCreate = iterUsage.cache_creation_input_tokens || 0;
         const cacheInfo = (cacheRead || cacheCreate) ? `, cache:${cacheRead}r/${cacheCreate}w` : '';
+        this._emitContextUsageComparison(contextTrace, iterUsage, opts);
         this.log.info(`[agent] Iter ${iterations} done — ${iterMs}ms, ${toolBlocks.length} tools, ${textBlocks.map(b => b.text).join('').length} chars, stop=${response.stop_reason}, ${iterUsage.input_tokens || 0}in/${iterUsage.output_tokens || 0}out${cacheInfo}`);
 
         // Collect text — only keep text from the final turn.
@@ -1163,11 +1855,85 @@ class AgentLoop {
         // servers stream tool_calls and still report finish_reason="stop".
         // A visible tool_use block must be executed, not finalized as text.
         if (toolBlocks.length === 0) {
-          const r = this._handleEndTurn({ response, responseText, finalText, lastSentIntermediate, sessionKey, opts, messages });
+          const r = await this._handleEndTurn({
+            response,
+            responseText,
+            finalText,
+            lastSentIntermediate,
+            sessionKey,
+            opts,
+            messages,
+            client: this.client,
+            abortSignal,
+            systemPrompt,
+            activeModel,
+            plannerModel,
+            isCasualChat,
+            iterations,
+            tokenState,
+            toolLog,
+            workflowRepairAttempts,
+            workflowRepairReason,
+            plannerFinalReviewAttempts,
+            rawToolMarkupRepairAttempts,
+          });
           finalText = r.finalText;
           lastSentIntermediate = r.lastSentIntermediate;
-          if (r.action === 'continue') continue;
+          workflowRepairAttempts = r.workflowRepairAttempts ?? workflowRepairAttempts;
+          workflowRepairReason = r.workflowRepairReason ?? workflowRepairReason;
+          plannerFinalReviewAttempts = r.plannerFinalReviewAttempts ?? plannerFinalReviewAttempts;
+          rawToolMarkupRepairAttempts = r.rawToolMarkupRepairAttempts ?? rawToolMarkupRepairAttempts;
+          if (r.action === 'continue') {
+            if (Object.prototype.hasOwnProperty.call(r, 'toolOverride')) {
+              nextIterationToolsOverride = r.toolOverride;
+            }
+            // The candidate final answer failed plan/workflow validation.
+            // When streaming is deferred, do not leak the rejected answer to
+            // the client; the repair turn will produce the visible response.
+            deferredText = '';
+            continue;
+          }
+          if (deferWorkflowText && finalText && !this.workflows?.hiddenControlKind?.(sessionKey, finalText)) {
+            streamText(finalText);
+          }
           break;
+        }
+
+        if (lazyToolSchemas) {
+          const lazyRequest = this._handleLazyToolRequestBlocks(toolBlocks, opts, lazyToolState);
+          if (lazyRequest) {
+            lazyToolState = lazyRequest.state;
+            chatTools = lazyRequest.toolDefinitions;
+            const assistantContent = this._stripUnsignedThinkingBlocks(response.content);
+            const compactContent = assistantContent.map(block => {
+              if (block.type === 'tool_use' && block.input) {
+                const inputStr = JSON.stringify(block.input);
+                if (inputStr.length > 2000) {
+                  return { ...block, input: { _summary: `[${inputStr.length} chars - see current turn for full input]` } };
+                }
+              }
+              return block;
+            });
+            this.sessions.addMessage(sessionKey, 'assistant', compactContent);
+            messages.push({ role: 'assistant', content: assistantContent });
+            this._persistToolResults(sessionKey, messages, lazyRequest.toolResults, iterations);
+            msgTokens = this._estimateMessageTokens(messages);
+            this.log.info(`[tools] Loaded lazy schemas for ${sessionKey}: packs=${lazyRequest.loadedPacks.join(',') || '(none)'} tools=${lazyRequest.loadedNames.length}/${chatTools.length}`);
+            if (typeof opts.onStatus === 'function') {
+              try {
+                opts.onStatus({
+                  type: 'tools:lazy',
+                  sessionKey,
+                  mode: 'loaded',
+                  packs: lazyRequest.loadedPacks,
+                  tools: lazyRequest.loadedNames,
+                  schemaCount: chatTools.length,
+                  requestCount: lazyToolState.requestCount || 0,
+                });
+              } catch { /* best-effort UI callback */ }
+            }
+            continue;
+          }
         }
 
         // Intermediate turn with tool calls — send text immediately if present,
@@ -1176,6 +1942,10 @@ class AgentLoop {
         // Skip sending if we just delegated a task — the user already got the ack.
         if (responseText) {
           finalText = responseText;
+          if (deferWorkflowText && deferredText) {
+            streamText(deferredText);
+            deferredText = '';
+          }
           if (opts.onIntermediateText && !delegatedThisTurn) {
             opts.onIntermediateText(responseText);
           }
@@ -1216,6 +1986,9 @@ class AgentLoop {
           const toolResults = dispatch.toolResults;
           const criticalBlock = dispatch.criticalBlock;
           if (dispatch.delegated) delegatedThisTurn = true;
+          workflowRepairAttempts = 0;
+          workflowRepairReason = null;
+          rawToolMarkupRepairAttempts = 0;
 
           if (abortSignal?.aborted) {
             this.log.info(`[abort] Session ${sessionKey} aborted during tool execution`);
@@ -1258,6 +2031,13 @@ class AgentLoop {
           }
 
           if (criticalBlock) {
+            // A critical tool guard means the model is stuck or unsafe. Any
+            // text emitted before the tool call is usually just a preamble
+            // ("let me try..."), not a valid final answer. Clear it so the
+            // Spore Code workflow can synthesize an evidence-grounded fallback.
+            if (this.workflows?.get(sessionKey)?.workflow_kind === 'spore-code') {
+              finalText = null;
+            }
             loopBroken = true;
             break;
           }
@@ -1267,7 +2047,7 @@ class AgentLoop {
 
         // Default: done
         if (finalText) {
-          this.sessions.addMessage(sessionKey, 'assistant', finalText);
+          this._persistAssistantFinalText(sessionKey, finalText);
         }
         break;
 
@@ -1291,6 +2071,7 @@ class AgentLoop {
     }
 
     const wasUserAbort = abortSignal?.aborted && opts._abortController?._userAbort;
+    const turnCanceled = !!wasUserAbort;
 
     if (wasUserAbort) {
       this.log.info(`[abort] User-initiated stop for ${sessionKey} — interrupted current generation/tool execution; trimming stale tool context`);
@@ -1300,6 +2081,16 @@ class AgentLoop {
         this.log.warn(`[abort] Session cleanup failed for ${sessionKey}: ${e.message}`);
       }
       finalText = null;
+    } else if (loopBroken && (!finalText || !finalText.trim()) && this.workflows?.get(sessionKey)?.workflow_kind === 'spore-code') {
+      finalText = this.workflows.finalFallbackText(sessionKey, { reason: 'agent loop stopped before a validated final answer' });
+      if (finalText) {
+        const wfStatus = this.workflows.recordFinalText(sessionKey, opts, finalText);
+        if (wfStatus) this._emitWorkflowStatus(opts, wfStatus);
+        this._persistAssistantFinalText(sessionKey, finalText);
+        if (opts.onTextDelta) {
+          try { opts.onTextDelta(finalText); } catch { /* best effort */ }
+        }
+      }
     } else if (loopBroken && (!finalText || !finalText.trim())) {
       try {
         this.log.info(`[loop-detect] Forcing final response for ${sessionKey}`);
@@ -1326,14 +2117,14 @@ class AgentLoop {
         const text = finalResponse.content.filter(b => b.type === 'text').map(b => b.text).join('');
         if (text) {
           finalText = text;
-          this.sessions.addMessage(sessionKey, 'assistant', finalText);
+          this._persistAssistantFinalText(sessionKey, finalText);
         }
       } catch (e) {
         this.log.error(`[loop-detect] Forced response failed: ${e.message}`);
       }
     }
 
-    if (this._shouldRepairEmptyDirectToolReply({ finalText, isDirect, wasUserAbort, opts, toolLog })) {
+    if (!turnCanceled && this._shouldRepairEmptyDirectToolReply({ finalText, isDirect, wasUserAbort, opts, toolLog })) {
       responseRepair = await this._repairEmptyDirectToolReply({
         systemPrompt,
         staticPrompt,
@@ -1346,11 +2137,26 @@ class AgentLoop {
       });
       if (responseRepair?.text) {
         finalText = responseRepair.text;
-        this.sessions.addMessage(sessionKey, 'assistant', finalText);
+        this._persistAssistantFinalText(sessionKey, finalText);
+        if (opts.onTextDelta) {
+          try { opts.onTextDelta(finalText); } catch { /* best effort */ }
+        }
       }
     }
 
-    if (!finalText || finalText.trim() === 'NO_REPLY' || finalText.includes('NO_REPLY') || finalText.trim() === '') {
+    if (!turnCanceled && (!finalText || finalText.trim() === '') && this.workflows?.get(sessionKey)?.workflow_kind === 'spore-code') {
+      finalText = this.workflows.finalFallbackText(sessionKey, { reason: iterations >= safetyCeiling ? 'iteration ceiling reached before a validated final answer' : 'no validated final answer was produced' });
+      if (finalText) {
+        const wfStatus = this.workflows.recordFinalText(sessionKey, opts, finalText);
+        if (wfStatus) this._emitWorkflowStatus(opts, wfStatus);
+        this._persistAssistantFinalText(sessionKey, finalText);
+        if (opts.onTextDelta) {
+          try { opts.onTextDelta(finalText); } catch { /* best effort */ }
+        }
+      }
+    }
+
+    if (!turnCanceled && (!finalText || finalText.trim() === 'NO_REPLY' || finalText.includes('NO_REPLY') || finalText.trim() === '')) {
       if (isDirect) {
         const behaviorSnippet = dynamicContext?.substring(dynamicContext.indexOf('## Conversation'), dynamicContext.indexOf('## Conversation') + 200) || 'NO_BEHAVIOR_SECTION';
         this.log.warn(`NO_REPLY on direct trigger '${opts.trigger}' in ${sessionKey} — suppressed | finalText=${JSON.stringify((finalText || '').substring(0, 100))} | msgCount=${messages.length} | behavior=${behaviorSnippet}`);
@@ -1358,26 +2164,35 @@ class AgentLoop {
       finalText = null;
     }
 
+    const hiddenWorkflowControl = this.workflows?.hiddenControlKind
+      ? this.workflows.hiddenControlKind(sessionKey, finalText)
+      : null;
+    const hookFinalText = turnCanceled || hiddenWorkflowControl ? null : finalText;
+
     // Signal LLM is idle so learner can process its queue
     if (this.learner) this.learner.setLLMBusy(false);
 
-    // Post-loop fire-and-forget hooks (extracted to keep _runLoop slim)
-    this._kickOffLearnerExtraction(opts, finalText, toolLog);
-    // _captureFailureFix + _recordRoundCheckpoint + _noteProjectActivity
-    // moved to plugins/spore-code/ — they now run via the afterTurn
-    // lifecycle hook fired inside _firePluginAfterTurn below.
-    this._firePluginAfterTurn(opts, finalText, toolLog);
+    if (turnCanceled) {
+      this.log.info(`[abort] Skipping learner/plugin after-turn hooks for canceled turn ${sessionKey}`);
+    } else {
+      // Post-loop fire-and-forget hooks (extracted to keep _runLoop slim)
+      this._kickOffLearnerExtraction(opts, hookFinalText, toolLog);
+      // _captureFailureFix + _recordRoundCheckpoint + _noteProjectActivity
+      // moved to plugins/spore-code/ — they now run via the afterTurn
+      // lifecycle hook fired inside _firePluginAfterTurn below.
+      this._firePluginAfterTurn(opts, hookFinalText, toolLog);
 
-    // Plugin middleware: afterIngest — fires once the full turn is complete.
-    // Observers see the incoming message, the assistant's final reply, and
-    // every tool call made along the way.
-    if (this._pluginManager) {
-      for (const handler of this._pluginManager.getMiddleware('afterIngest')) {
-        try { await handler({ sessionKey, content: opts.content, finalText, toolLog, trigger: opts.trigger, platform: opts.platform }); } catch (e) { this.log.warn('[loop] afterIngest handler failed: ' + e.message); }
+      // Plugin middleware: afterIngest — fires once the full turn is complete.
+      // Observers see the incoming message, the assistant's final reply, and
+      // every tool call made along the way.
+      if (this._pluginManager) {
+        for (const handler of this._pluginManager.getMiddleware('afterIngest')) {
+          try { await handler({ sessionKey, content: opts.content, finalText: hookFinalText, toolLog, trigger: opts.trigger, platform: opts.platform }); } catch (e) { this.log.warn('[loop] afterIngest handler failed: ' + e.message); }
+        }
       }
     }
 
-    if (opts.onComplete) opts.onComplete(finalText, totalUsage, { responseRepair });
+    if (opts.onComplete) opts.onComplete(finalText, totalUsage, { responseRepair, hiddenWorkflowControl, canceled: turnCanceled });
 
     // Summarise tool usage: { toolName: callCount }
     const toolUsage = toolLog.reduce((acc, t) => {
@@ -1392,6 +2207,8 @@ class AgentLoop {
       iterations,
       sessionKey,
       responseRepair,
+      hiddenWorkflowControl,
+      canceled: turnCanceled,
     };
   }
 
@@ -1888,6 +2705,30 @@ class AgentLoop {
     this.sessions.addMessage(sessionKey, 'user', '[System: output truncated, retry with smaller operations]');
   }
 
+  _shouldDeferWorkflowText(sessionKey, opts = {}) {
+    if (!opts.onTextDelta || !this.workflows?.get) return false;
+    const wf = this.workflows.get(sessionKey);
+    if (!wf || wf.workflow_kind !== 'spore-code') return false;
+    if (opts.platform === 'cli' && opts.projectContext?.mode === 'plan') return true;
+    // Execute/verify/debug turns have final-answer gatekeeping. If we
+    // stream candidate final text immediately, the user sees both the
+    // rejected answer and the repaired answer. Buffer text until the
+    // final repair checks pass; tool-use preambles are flushed as soon
+    // as we know the iteration is not a final answer.
+    return ['execute', 'verify', 'debug'].includes(wf.phase);
+  }
+
+  _persistAssistantFinalText(sessionKey, text) {
+    if (!text) return false;
+    if (this.workflows?.shouldPersistFinalText
+      && !this.workflows.shouldPersistFinalText(sessionKey, text)) {
+      this.log.debug?.(`[workflow] suppressing hidden control artifact from visible history for ${sessionKey}`);
+      return false;
+    }
+    this.sessions.addMessage(sessionKey, 'assistant', text);
+    return true;
+  }
+
   /**
    * Finalize the iteration when the model produced no tool_use blocks
    * (or signalled end_turn). Persists the assistant text to session
@@ -1895,28 +2736,294 @@ class AgentLoop {
    * intermediate, and detects mid-stream interjections that should keep
    * the loop running for one more iteration.
    *
-   * Returns { action: 'continue' | 'break', finalText, lastSentIntermediate }
+   * Returns { action: 'continue' | 'break', finalText, lastSentIntermediate, workflowRepairAttempts, workflowRepairReason, plannerFinalReviewAttempts, rawToolMarkupRepairAttempts, toolOverride? }
    * — the caller mutates messages in place when a continuation is needed
    * (the response.content is pushed onto messages here).
    */
-  _handleEndTurn(ctx) {
+  _substantialToolWorkForPlannerReview(toolLog = []) {
+    const items = Array.isArray(toolLog) ? toolLog : [];
+    if (items.length >= 6) return true;
+    const mutating = new Set(['write_file', 'edit_file', 'patch_file', 'remote_write_file', 'exec', 'run_tests', 'bg_kill']);
+    const verification = /\b(?:go\s+test|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test|bun\s+(?:run\s+)?test|pytest|cargo\s+test|git\s+diff\s+--check|gofmt|go\s+fmt)\b/i;
+    const hasMutation = items.some(t => mutating.has(t?.tool));
+    const hasVerification = items.some(t => verification.test(String(t?.input || '')));
+    const hasFailure = items.some(t => !t?.pending && (t?.succeeded === false || (Number.isFinite(Number(t?.exitCode)) && Number(t.exitCode) !== 0)));
+    return (hasMutation && (hasVerification || items.length >= 3)) || hasFailure;
+  }
+
+  async _plannerFinalReview(ctx = {}) {
+    const {
+      sessionKey,
+      opts = {},
+      messages = [],
+      finalText = '',
+      toolLog = [],
+      client,
+      abortSignal,
+      systemPrompt,
+      activeModel,
+      plannerModel,
+      isCasualChat,
+      iterations,
+      tokenState,
+    } = ctx;
+    if (!this.plannerAdvisor?.sporeCodeAggressiveEnabled?.(opts)) return null;
+    if (!this._substantialToolWorkForPlannerReview(toolLog)) return null;
+    if (!String(finalText || '').trim()) return null;
+    if (!plannerModel) return null;
+    try {
+      const advisor = await this.plannerAdvisor.advise({
+        force: true,
+        reasons: ['final_review'],
+        sessionKey,
+        opts,
+        client,
+        abortSignal,
+        messages: [
+          ...messages.slice(-12),
+          { role: 'assistant', content: [{ type: 'text', text: String(finalText || '').slice(0, 4000) }] },
+        ],
+        systemPrompt,
+        activeModel,
+        plannerModel,
+        isCasualChat,
+        iteration: iterations,
+        toolLog,
+        tokenState,
+        workflowStatus: opts.workflowStatus || null,
+        advisorRequest: {
+          goal: 'Review the agent draft before it is sent to the user after substantial Spore Code tool activity.',
+          current_blocker: 'Final review: check whether the draft overclaims, misses verification, ignores tool evidence, or should run one more focused check before finalizing.',
+          evidence: this._toolLogEvidenceSummary(toolLog),
+          next_options: [
+            'Approve the final answer as evidence-grounded.',
+            'Ask the agent to revise wording to match recorded evidence.',
+            'Tell the agent to run one narrow missing verification check before finalizing.',
+          ],
+          what_i_tried: String(finalText || '').slice(0, 1200),
+          allow_escalation: false,
+        },
+      });
+      if (advisor?.skipped) {
+        this._emitPlannerAdvisorStatus(opts, {
+          type: 'planner:skipped',
+          reason: advisor.reason || 'final_review_skipped',
+          model: plannerModel,
+          activeModel,
+          phase: 'final_review',
+        });
+        this.workflows?.recordPlannerAdvisorEvent?.(sessionKey, {
+          status: 'skipped',
+          phase: 'final_review',
+          reason: advisor.reason || 'final_review_skipped',
+          model: plannerModel,
+          activeModel,
+        });
+        return null;
+      }
+      if (!advisor?.advice) return null;
+      const preview = String(advisor.rendered || '').replace(/\s+/g, ' ').slice(0, 300);
+      this.log.info(`[planner-advisor] final review for ${sessionKey}: ${(advisor.reasons || []).join(',')} (${advisor.elapsedMs || 0}ms)`);
+      this._emitPlannerAdvisorStatus(opts, {
+        type: 'planner:advice',
+        reasons: advisor.reasons || ['final_review'],
+        model: advisor.plannerModel || plannerModel,
+        activeModel,
+        elapsedMs: advisor.elapsedMs || 0,
+        usage: advisor.usage || null,
+        preview,
+        escalate: false,
+        phase: 'final_review',
+        fallback: !!advisor.fallback,
+        malformed: !!advisor.malformed,
+      });
+      this.workflows?.recordPlannerAdvisorEvent?.(sessionKey, {
+        status: 'advice',
+        phase: 'final_review',
+        reasons: advisor.reasons || ['final_review'],
+        model: advisor.plannerModel || plannerModel,
+        activeModel,
+        elapsedMs: advisor.elapsedMs || 0,
+        usage: advisor.usage || null,
+        preview,
+        fallback: !!advisor.fallback,
+        malformed: !!advisor.malformed,
+        rawPreview: advisor.rawText || null,
+      });
+      return advisor;
+    } catch (e) {
+      this.log.warn(`[planner-advisor] final review failed for ${sessionKey}: ${e.message}`);
+      this._emitPlannerAdvisorStatus(opts, {
+        type: 'planner:skipped',
+        reason: 'final_review_error',
+        error: e.message,
+        model: plannerModel,
+        activeModel,
+        phase: 'final_review',
+      });
+      this.workflows?.recordPlannerAdvisorEvent?.(sessionKey, {
+        status: 'error',
+        phase: 'final_review',
+        reason: 'final_review_error',
+        error: e.message,
+        model: plannerModel,
+        activeModel,
+      });
+      return null;
+    }
+  }
+
+  _isWorkflowRepairMetaResponse(text = '') {
+    const s = String(text || '');
+    if (!s.trim()) return false;
+    if (/\b(?:false trigger|nothing to repair|repair turn|repair prompt|guard reason|workflow guard|validator)\b/i.test(s)) return true;
+    if (/\bmy bad\b/i.test(s) && /\b(?:claim|evidence|repair|tests?|verification|workflow|guard)\b/i.test(s)) return true;
+    if (/\bI\s+(?:did not|didn't)\s+actually\s+run\b.{0,80}\btests?\b/i.test(s)) return true;
+    if (/\bshould(?:'| ha)?ve\s+been\s+clearer\b/i.test(s) && /\b(?:tests?|verification|claim)\b/i.test(s)) return true;
+    return false;
+  }
+
+  async _handleEndTurn(ctx) {
     const { response, responseText, sessionKey, opts, messages } = ctx;
     let { finalText, lastSentIntermediate } = ctx;
+    let workflowRepairAttempts = ctx.workflowRepairAttempts || 0;
+    let workflowRepairReason = ctx.workflowRepairReason || null;
+    let plannerFinalReviewAttempts = ctx.plannerFinalReviewAttempts || 0;
+    let rawToolMarkupRepairAttempts = ctx.rawToolMarkupRepairAttempts || 0;
     finalText = responseText || '';
     const pendingIj = this._pendingInterjections.get(sessionKey);
     const hasPendingInterjection = pendingIj && pendingIj.length > 0;
     if (!hasPendingInterjection) {
+      const toolMarkupRepair = this._rawToolMarkupEndTurnRepair({ responseText: finalText, opts, attempts: rawToolMarkupRepairAttempts });
+      if (toolMarkupRepair?.prompt) {
+        rawToolMarkupRepairAttempts += 1;
+        this.log.warn(`[response-repair] Raw tool-call markup in final text for ${sessionKey}; requesting executable tool retry`);
+        if (opts.onStatus) {
+          try {
+            opts.onStatus({
+              type: 'response_repair',
+              reason: 'raw_tool_markup',
+              attempt: rawToolMarkupRepairAttempts,
+              limit: toolMarkupRepair.limit,
+            });
+          } catch { /* best effort */ }
+        }
+        messages.push({ role: 'assistant', content: response.content || [{ type: 'text', text: finalText }] });
+        messages.push({ role: 'user', content: toolMarkupRepair.prompt });
+        if (finalText) lastSentIntermediate = finalText;
+        return { action: 'continue', finalText: null, lastSentIntermediate, workflowRepairAttempts, workflowRepairReason, plannerFinalReviewAttempts, rawToolMarkupRepairAttempts };
+      }
+      if (toolMarkupRepair?.fallbackText) {
+        this.log.warn(`[response-repair] Raw tool-call markup persisted after repair limit for ${sessionKey}; stripping malformed tags`);
+        finalText = toolMarkupRepair.fallbackText;
+      }
       const repair = this._planModeEndTurnRepair({ responseText: finalText, opts, messages });
       if (repair) {
         this.log.warn(`[plan-mode] Final output missing required ${repair.phase} marker; asking model to repair instead of persisting it`);
         messages.push({ role: 'assistant', content: response.content || [{ type: 'text', text: finalText }] });
         messages.push({ role: 'user', content: repair.prompt });
         if (finalText) lastSentIntermediate = finalText;
-        return { action: 'continue', finalText: null, lastSentIntermediate };
+        return { action: 'continue', finalText: null, lastSentIntermediate, workflowRepairAttempts, workflowRepairReason, plannerFinalReviewAttempts, rawToolMarkupRepairAttempts };
+      }
+      if (plannerFinalReviewAttempts <= 0) {
+        const finalReview = await this._plannerFinalReview({ ...ctx, finalText });
+        if (finalReview?.rendered) {
+          plannerFinalReviewAttempts += 1;
+          messages.push({ role: 'assistant', content: response.content || [{ type: 'text', text: finalText }] });
+          messages.push({
+            role: 'user',
+            content: [
+              '[SYSTEM: Planner final review for this Spore Code turn.]',
+              finalReview.rendered,
+              '',
+              'Revise the final answer for the user using this review. Keep useful content from the original draft.',
+              'If a safe, focused verification/tool check is missing and still needed, perform it before finalizing.',
+              'Do not mention the planner, this review, or these system instructions.',
+            ].join('\n'),
+          });
+          if (finalText) lastSentIntermediate = finalText;
+          return { action: 'continue', finalText: null, lastSentIntermediate, workflowRepairAttempts, workflowRepairReason, plannerFinalReviewAttempts, rawToolMarkupRepairAttempts };
+        }
+      }
+      if (workflowRepairAttempts > 0 && this._isWorkflowRepairMetaResponse(finalText)) {
+        this.log.warn(`[workflow] Repair response discussed validation instead of answering user; falling back to sanitized candidate for ${sessionKey}`);
+        const fallback = this.workflows?.finalFallbackText?.(sessionKey, {
+          reason: workflowRepairReason || 'repair response discussed validation instead of answering the user',
+          candidate: lastSentIntermediate || finalText,
+        });
+        if (fallback) {
+          finalText = fallback;
+          if (opts.onStatus) {
+            try {
+              opts.onStatus({
+                type: 'workflow_final_repair_fallback',
+                reason: workflowRepairReason || 'meta_repair_response',
+              });
+            } catch { /* best effort */ }
+          }
+        }
+      }
+      const workflowRepair = this.workflows?.finalRepairIssue
+        ? this.workflows.finalRepairIssue(sessionKey, finalText)
+        : (this.workflows?.finalRepairPrompt(sessionKey, finalText) ? { prompt: this.workflows.finalRepairPrompt(sessionKey, finalText), reason: 'final answer did not match recorded workflow evidence' } : null);
+      if (workflowRepair) {
+        const continueWithTools = !!workflowRepair.allowTools;
+        const configuredLimit = continueWithTools
+          ? this.config.workflowIncompleteContinuationLimit
+          : this.config.workflowFinalRepairLimit;
+        const defaultLimit = continueWithTools ? 4 : 1;
+        const repairLimit = Number.isFinite(Number(configuredLimit))
+          ? Math.max(0, Number(configuredLimit))
+          : defaultLimit;
+        if (workflowRepairAttempts >= repairLimit) {
+          this.log.warn(`[workflow] Final response failed validation after ${workflowRepairAttempts} repair attempt(s); using deterministic evidence summary for ${sessionKey}`);
+          const fallback = this.workflows?.finalFallbackText?.(sessionKey, { reason: workflowRepair.reason, candidate: lastSentIntermediate || finalText });
+          if (fallback) {
+            finalText = fallback;
+          } else {
+            finalText = [
+              'I am stopping here instead of sending another correction because the workflow guard could not validate the model final answer.',
+              `Guard reason: ${workflowRepair.reason || 'final answer did not match recorded workflow evidence'}.`,
+            ].join('\n');
+          }
+        } else {
+          workflowRepairAttempts += 1;
+          workflowRepairReason = workflowRepair.reason || 'validation failed';
+          this.log.warn(`[workflow] Final response needs repair for ${sessionKey}: ${workflowRepair.reason || 'validation failed'}`);
+          if (opts.onStatus) {
+            try {
+              opts.onStatus({
+                type: 'workflow_final_repair',
+                reason: workflowRepair.reason || 'validation failed',
+                attempt: workflowRepairAttempts,
+                limit: repairLimit,
+              });
+            } catch { /* best effort */ }
+          }
+          messages.push({ role: 'assistant', content: response.content || [{ type: 'text', text: finalText }] });
+          messages.push({ role: 'user', content: workflowRepair.prompt });
+          if (finalText) lastSentIntermediate = finalText;
+          const toolOverride = continueWithTools && workflowRepair.toolNames
+            ? this._toolDefinitionsByName(workflowRepair.toolNames, opts)
+            : null;
+          return {
+            action: 'continue',
+            finalText: null,
+            lastSentIntermediate,
+            workflowRepairAttempts,
+            workflowRepairReason,
+            plannerFinalReviewAttempts,
+            rawToolMarkupRepairAttempts,
+            ...(continueWithTools ? (toolOverride ? { toolOverride } : {}) : { toolOverride: [] }),
+          };
+        }
       }
     }
-    // Store in session regardless (for context continuity)
-    if (finalText) this.sessions.addMessage(sessionKey, 'assistant', finalText);
+    const wfStatus = this.workflows?.recordFinalText(sessionKey, opts, finalText);
+    if (wfStatus) this._emitWorkflowStatus(opts, wfStatus);
+    // Store user-visible final text. Hidden workflow control artifacts
+    // remain in workflow state instead of becoming ordinary chat history.
+    if (finalText) this._persistAssistantFinalText(sessionKey, finalText);
     // If the final text was already sent as intermediate, don't re-send it
     if (finalText && finalText === lastSentIntermediate) finalText = null;
     // Before breaking: if a user interjection arrived while we were streaming,
@@ -1930,9 +3037,65 @@ class AgentLoop {
       }
       messages.push({ role: 'assistant', content: response.content });
       finalText = null;
-      return { action: 'continue', finalText, lastSentIntermediate };
+      return { action: 'continue', finalText, lastSentIntermediate, workflowRepairAttempts, workflowRepairReason, plannerFinalReviewAttempts, rawToolMarkupRepairAttempts };
     }
-    return { action: 'break', finalText, lastSentIntermediate };
+    return { action: 'break', finalText, lastSentIntermediate, workflowRepairAttempts, workflowRepairReason, plannerFinalReviewAttempts, rawToolMarkupRepairAttempts };
+  }
+
+  _rawToolMarkupIssue(text, opts = {}) {
+    const raw = String(text || '');
+    if (!raw.trim()) return null;
+    const hasRawTag = /<\/?(?:tool_call|function|parameter)(?:\b|=|>)/i.test(raw);
+    if (!hasRawTag) return null;
+    const inProjectSession = !!opts.projectContext || opts.platform === 'cli';
+    if (!inProjectSession) return null;
+    const hasFencedBlock = /```[\s\S]*```/.test(raw);
+    const hasDanglingClose = /<\/(?:tool_call|function|parameter)>/i.test(raw);
+    const hasFunctionOpen = /<function=[^>]+>/i.test(raw);
+    if (hasFencedBlock && !hasDanglingClose && !hasFunctionOpen) return null;
+    return {
+      reason: 'raw tool-call markup was emitted as assistant text',
+      excerpt: raw.length > 1200 ? `${raw.slice(0, 1200)}...` : raw,
+    };
+  }
+
+  _stripRawToolMarkup(text) {
+    return String(text || '')
+      .replace(/<tool_call\b[^>]*>/gi, '')
+      .replace(/<\/tool_call>/gi, '')
+      .replace(/<function=[^>]+>/gi, '')
+      .replace(/<\/function>/gi, '')
+      .replace(/<parameter=[^>]+>/gi, '')
+      .replace(/<\/parameter>/gi, '')
+      .trim();
+  }
+
+  _rawToolMarkupEndTurnRepair({ responseText = '', opts = {}, attempts = 0 } = {}) {
+    const issue = this._rawToolMarkupIssue(responseText, opts);
+    if (!issue) return null;
+    const limit = Number.isFinite(Number(this.config.rawToolMarkupRepairLimit))
+      ? Math.max(0, Number(this.config.rawToolMarkupRepairLimit))
+      : 1;
+    if (attempts >= limit) {
+      const stripped = this._stripRawToolMarkup(responseText);
+      return {
+        limit,
+        fallbackText: stripped || 'I hit a tool-call formatting error before the next action could run. Please retry the last step.',
+      };
+    }
+    return {
+      limit,
+      prompt: [
+        '[SYSTEM: Tool-call format repair]',
+        'Your previous assistant message contained raw or incomplete tool-call markup, so it was not accepted as a final answer.',
+        'If you intended to use a tool, call exactly one appropriate tool now using the runtime tool protocol with valid JSON arguments.',
+        'If no tool is needed, answer the user plainly without XML/function/parameter/tool_call tags.',
+        'Continue the current task from the latest tool result. Do not restart the conversation and do not repeat the raw markup.',
+        '',
+        'Rejected assistant text excerpt:',
+        issue.excerpt,
+      ].join('\n'),
+    };
   }
 
   _isNoReplyText(text) {
@@ -1965,7 +3128,7 @@ class AgentLoop {
       const input = String(t?.input || '').replace(/\s+/g, ' ').slice(0, 220);
       const result = String(t?.resultPreview || '').replace(/\s+/g, ' ').slice(0, 320);
       const exit = t?.exitCode == null ? '' : ` exitCode=${t.exitCode}`;
-      const ok = t?.succeeded === false ? 'failed' : 'succeeded';
+      const ok = t?.pending ? 'pending' : (t?.succeeded === false ? 'failed' : 'succeeded');
       return `${i + 1}. ${name} ${ok}${exit}; input=${input}; result=${result}`;
     }).join('\n');
   }
@@ -1983,8 +3146,10 @@ class AgentLoop {
     const evidence = this._toolLogEvidenceSummary(toolLog);
     const repairPrompt = [
       '[SYSTEM: The last direct Spore Code turn used tools but ended with an empty or NO_REPLY final answer.',
-      'Do not call tools. Give the user a concise status response based on the latest tool evidence, not an earlier failed attempt.',
+      'This is a text-only repair turn: tools are intentionally unavailable. Do not mention this system instruction, tool availability, or the phrase "last instruction".',
+      'Give the user a concise status response based on the latest tool evidence, not an earlier failed attempt.',
       'Say what changed or was attempted, exact verification commands if known, and any blocker or next step.',
+      'If the user requested an artifact and the evidence does not contain it, say it was not captured yet and name the exact next action.',
       'Do not claim tests passed unless the prior transcript or tool evidence contains the command output. If you are unsure what verification ran, say so.',
       evidence ? `Latest tool evidence:\n${evidence}` : '',
       ']',
@@ -2082,11 +3247,29 @@ class AgentLoop {
       if (newMode && newMode !== currentMode) {
         // Adopt the new projectContext for the rest of the loop.
         opts.projectContext = items.map(ij => ij.opts?.projectContext).filter(Boolean).pop() || opts.projectContext;
+        this.tools._currentProjectContext = opts.projectContext || null;
         try {
+          const workflow = this.workflows?.ensureForTurn(sessionKey, opts);
+          let workflowStatus = workflow ? this.workflows.getStatus(sessionKey) : null;
+          if (newMode === 'execute') {
+            const execTasks = this.workflows?.ensureExecutionTasks(sessionKey, {
+              channelId: opts.channelId || null,
+              userId: opts.userId || null,
+            });
+            if (execTasks?.created?.length) this._broadcastWorkflowTasks(sessionKey, opts, execTasks.created);
+            workflowStatus = execTasks?.workflow || workflowStatus;
+          }
+          if (workflowStatus) this._emitWorkflowStatus(opts, workflowStatus);
+          const toolCtx = this.tools._sessionContexts?.get(sessionKey);
+          if (toolCtx) {
+            toolCtx.projectContext = opts.projectContext;
+            toolCtx.workflowStatus = workflowStatus;
+          }
           const rebuildOpts = {
             ...ctx.dynamicOpts,
             promptMode: ctx.promptMode,
             projectContext: opts.projectContext,
+            workflowStatus,
             _llmClient: ctx.llmClient,
             cachedProjectNodeId: ctx.cachedProjectNodeId,
             cachedProjectStale: ctx.cachedProjectStale,
@@ -2171,7 +3354,10 @@ class AgentLoop {
     const override = overrideModels?.[key] || overrideModels?.[`models.${key}`] || null;
     if (override) return override;
     const settings = require('../settings');
-    return settings.modelForTier(key, opts);
+    const routed = settings.modelForTier(key, opts);
+    if (routed) return routed;
+    const legacyKey = `${key}Model`;
+    return this.config?.[legacyKey] || null;
   }
 
   _maybeEscalateModel(toolBlocks, activeModel, opts = {}) {
@@ -2248,6 +3434,12 @@ class AgentLoop {
       };
     }
 
+    const normalizedTool = this._normalizeToolInputForExecution(toolBlock.name, toolBlock.input);
+    if (normalizedTool.changed) {
+      toolBlock = { ...toolBlock, input: normalizedTool.input };
+      this.log.info(`[agent] Normalized ${toolBlock.name} tool input aliases before execution`);
+    }
+
     const callHash = this._hashToolCall(toolBlock.name, toolBlock.input);
     const loopCheck = this._checkToolLoop(loopTracker, callHash, toolBlock.name);
 
@@ -2270,6 +3462,38 @@ class AgentLoop {
     graphEvents.emit('change', { op: 'tool:call', tool: toolBlock.name, input: JSON.stringify(toolBlock.input).substring(0, 200), source: 'agent' });
     if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_start', tool: toolBlock.name, detail: toolDetail, input: toolBlock.input }); } catch { /* silent: best-effort UI callback */ } }
     const toolExecStart = Date.now();
+    const duplicateBackgroundBlock = this._duplicateBackgroundToolBlock(toolBlock, loopTracker, callHash);
+    if (duplicateBackgroundBlock) {
+      const resultContent = JSON.stringify(duplicateBackgroundBlock);
+      this.log.warn(`[loop-detect] Blocking duplicate background command for ${sessionKey}: ${duplicateBackgroundBlock.command || toolBlock.name}`);
+      if (opts.onStatus) {
+        try {
+          opts.onStatus({
+            type: 'tool_exec_done',
+            tool: toolBlock.name,
+            detail: toolDetail,
+            durationMs: Date.now() - toolExecStart,
+            resultChars: resultContent.length,
+            blocked: true,
+          });
+        } catch { /* silent: best-effort UI callback */ }
+      }
+      toolLog.push({
+        tool: toolBlock.name,
+        input: JSON.stringify(toolBlock.input).substring(0, 300),
+        resultPreview: resultContent.substring(0, 300),
+        succeeded: false,
+        exitCode: null,
+      });
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: resultContent,
+        },
+        criticalBlock, delegated,
+      };
+    }
     // Pass the session's context explicitly so concurrent sessions
     // don't race on a shared "current session" field in tools.js.
     const toolCtx = {
@@ -2278,6 +3502,74 @@ class AgentLoop {
       platform: opts.platform || this.tools._sessionContexts?.get(sessionKey)?.platform || null,
       projectContext: opts.projectContext || this.tools._sessionContexts?.get(sessionKey)?.projectContext || null,
     };
+    const schemaBlock = this._toolInputSchemaBlock(toolBlock.name, toolBlock.input, opts);
+    if (schemaBlock) {
+      const resultContent = JSON.stringify(schemaBlock);
+      this.log.warn(`[agent] Tool ${toolBlock.name} blocked by input schema guard`);
+      if (opts.onStatus) {
+        try {
+          opts.onStatus({
+            type: 'tool_exec_done',
+            tool: toolBlock.name,
+            detail: toolDetail,
+            durationMs: Date.now() - toolExecStart,
+            resultChars: resultContent.length,
+            blocked: true,
+            reason: schemaBlock.reason,
+          });
+        } catch { /* silent: best-effort UI callback */ }
+      }
+      toolLog.push({
+        tool: toolBlock.name,
+        input: JSON.stringify(toolBlock.input).substring(0, 300),
+        resultPreview: resultContent.substring(0, 300),
+        succeeded: false,
+        exitCode: null,
+      });
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: resultContent,
+        },
+        criticalBlock, delegated,
+      };
+    }
+    const workflowBlock = this.tools.workflowBlockForTool?.(toolBlock.name, toolBlock.input, toolCtx);
+    if (workflowBlock) {
+      const resultContent = JSON.stringify(workflowBlock);
+      this.log.warn(`[agent] Tool ${toolBlock.name} blocked by workflow guard`);
+      if (opts.onStatus) {
+        try {
+          opts.onStatus({
+            type: 'tool_exec_done',
+            tool: toolBlock.name,
+            detail: toolDetail,
+            durationMs: Date.now() - toolExecStart,
+            resultChars: resultContent.length,
+            blocked: true,
+            workflow: workflowBlock.workflow || null,
+            reason: workflowBlock.reason || null,
+            error: workflowBlock.error || null,
+          });
+        } catch { /* silent: best-effort UI callback */ }
+      }
+      toolLog.push({
+        tool: toolBlock.name,
+        input: JSON.stringify(toolBlock.input).substring(0, 300),
+        resultPreview: resultContent.substring(0, 300),
+        succeeded: false,
+        exitCode: null,
+      });
+      return {
+        result: {
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: resultContent,
+        },
+        criticalBlock, delegated,
+      };
+    }
     const planModeBlock = this.tools.planModeBlockForTool?.(toolBlock.name, toolBlock.input, toolCtx);
     if (planModeBlock) {
       const resultContent = JSON.stringify(planModeBlock);
@@ -2291,6 +3583,8 @@ class AgentLoop {
             durationMs: Date.now() - toolExecStart,
             resultChars: resultContent.length,
             blocked: true,
+            reason: planModeBlock.reason || null,
+            error: planModeBlock.error || null,
           });
         } catch { /* silent: best-effort UI callback */ }
       }
@@ -2345,10 +3639,65 @@ class AgentLoop {
       }
     }
     this.log.info(`[agent] Tool ${toolBlock.name} done — ${toolExecMs}ms, ${resultContent.length} chars`);
-    if (opts.onStatus) { try { opts.onStatus({ type: 'tool_exec_done', tool: toolBlock.name, detail: toolDetail, durationMs: toolExecMs, resultChars: resultContent.length }); } catch { /* silent: best-effort UI callback */ } }
+    const pendingBackgroundToolResult = this._isPendingBackgroundToolResult(result);
+    const statusExitCode = (result && typeof result === 'object')
+      ? (result.exitCode ?? result.exit_code ?? result.exit ?? null)
+      : null;
+    const statusError = result && typeof result === 'object' ? (result.error || null) : null;
+    if (opts.onStatus) {
+      try {
+        opts.onStatus({
+          type: 'tool_exec_done',
+          tool: toolBlock.name,
+          detail: toolDetail,
+          durationMs: toolExecMs,
+          resultChars: resultContent.length,
+          error: statusError || undefined,
+          exitCode: statusExitCode ?? undefined,
+          reason: (result && typeof result === 'object' ? result.reason : null) || undefined,
+          blocked: (result && typeof result === 'object' ? result.blocked : null) || undefined,
+          pending: pendingBackgroundToolResult || undefined,
+          backgrounded: result?.backgrounded || undefined,
+        });
+      } catch { /* silent: best-effort UI callback */ }
+    }
 
     if (opts.onStatus && !result.error) {
       try { this._emitCodeEvent(toolBlock.name, toolBlock.input, result, opts.onStatus); } catch (e) { this.log.warn('[loop] this._emitCodeEvent failed: ' + e.message); }
+    }
+
+    const wfStatus = this.workflows?.recordToolResult(sessionKey, toolBlock.name, toolBlock.input, result);
+    if (wfStatus) {
+      opts.workflowStatus = wfStatus;
+      const ctx = this.tools?._sessionContexts?.get(sessionKey);
+      if (ctx) ctx.workflowStatus = wfStatus;
+      this._emitWorkflowStatus(opts, wfStatus);
+    }
+
+    let originalResultChars = resultContent.length;
+    const compactedToolResult = this._compactVisualToolResultForModel(toolBlock.name, toolBlock.input, result, resultContent, {
+      sessionKey,
+      toolUseId: toolBlock.id,
+      latestUserContent: opts.content,
+    });
+    if (compactedToolResult.changed || compactedToolResult.compacted) {
+      originalResultChars = compactedToolResult.originalChars || originalResultChars;
+      resultContent = compactedToolResult.content;
+      if (compactedToolResult.compacted) {
+        this.log.info(`[agent] Tool ${toolBlock.name} result compacted for model context — ${compactedToolResult.originalChars} chars -> ${resultContent.length} chars (${compactedToolResult.reason})`);
+      }
+      if (compactedToolResult.compacted && opts.onStatus) {
+        try {
+          opts.onStatus({
+            type: 'tool_result_compacted',
+            tool: toolBlock.name,
+            reason: compactedToolResult.reason,
+            originalChars: compactedToolResult.originalChars,
+            resultChars: resultContent.length,
+            urls: compactedToolResult.urls || [],
+          });
+        } catch { /* silent: best-effort UI callback */ }
+      }
     }
 
     // Normalize the failure signal across tool result shapes:
@@ -2356,15 +3705,40 @@ class AgentLoop {
     //   • Spore Code shell.go returns { output, exitCode: N } with no error key
     //     even for non-zero exits — succeeded would be true. Surface exitCode
     //     so plugin middleware (e.g. spore-code failure_fix) can detect those.
-    const exitCode = (result && typeof result === 'object')
-      ? (result.exitCode ?? result.exit_code ?? null)
-      : null;
+    const exitCode = statusExitCode;
+    const gitStatusNotRepo = toolBlock.name === 'git_status'
+      && /not a git repository/i.test(`${resultContent || ''} ${statusError || ''}`);
+    const toolFailed = !pendingBackgroundToolResult && !gitStatusNotRepo && (
+      !!(result && typeof result === 'object' && result.error)
+      || (Number.isFinite(Number(exitCode)) && Number(exitCode) !== 0)
+    );
+    if (wfStatus?.artifacts?.recovery?.active && toolFailed) {
+      resultContent += [
+        '',
+        '--- RECOVERY: Workflow recovery is active and this check failed.',
+        'Do not stop solely because of this failure. Use the exact error to make one narrow fix, or report the blocker with the command/output if the failure is outside the requested work.',
+        'Do not rerun the same verification command again until a relevant file change has been made. ---',
+      ].join('\n');
+      this.log.warn(`[workflow] recovery check failed for ${sessionKey} after ${toolBlock.name}`);
+      if (opts.onStatus) {
+        try {
+          opts.onStatus({
+            type: 'workflow:recovery_check_failed',
+            reason: wfStatus.artifacts.recovery.reason,
+            latestFailedCommand: wfStatus.artifacts.recovery.latestFailedCommand || null,
+          });
+        } catch { /* best-effort */ }
+      }
+    }
     toolLog.push({
       tool: toolBlock.name,
       input: JSON.stringify(toolBlock.input).substring(0, 300),
       resultPreview: resultContent.substring(0, 300),
-      succeeded: !result.error,
+      resultChars: originalResultChars,
+      modelResultChars: resultContent.length,
+      succeeded: !toolFailed,
       exitCode,
+      pending: pendingBackgroundToolResult || undefined,
     });
 
     const defaultCap = this.config.maxToolResultChars || effortDefaults(this.config).maxToolResultChars || TOOL_RESULT_DEFAULT_CAP;
@@ -2598,6 +3972,160 @@ class AgentLoop {
 
   // ── Tool Input Summary (for panel streaming) ────────────────────────
 
+  _normalizeToolInputForExecution(name, input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return { input, changed: false };
+    const toolName = name === 'graph'
+      ? 'graph_update'
+      : name === 'analyze'
+        ? 'analyze_media'
+        : String(name || '');
+    const firstDefined = (...keys) => {
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(input, key) && input[key] != null) return input[key];
+      }
+      return undefined;
+    };
+    let next = null;
+    const setIfMissing = (key, value) => {
+      if (value === undefined) return;
+      if (!next) next = { ...input };
+      if (next[key] == null) next[key] = value;
+    };
+    const setPathAliases = () => setIfMissing('path', firstDefined('path', 'file', 'file_path', 'filePath', 'filename'));
+    const setDirectoryAliases = () => setIfMissing('path', firstDefined('path', 'dir', 'directory', 'folder', 'cwd'));
+    const setCommandAliases = () => setIfMissing('command', firstDefined('command', 'cmd', 'shell_command', 'shellCommand'));
+    const setContentAliases = () => setIfMissing('content', firstDefined('content', 'text', 'contents', 'body', 'data'));
+    const setQueryAliases = () => setIfMissing('query', firstDefined('query', 'q', 'search', 'term', 'question'));
+    const setMessageAliases = () => setIfMissing('message', firstDefined('message', 'text', 'content', 'body'));
+    const setIdAliases = () => setIfMissing('id', firstDefined('id', 'taskId', 'task_id', 'processId', 'process_id', 'jobId', 'job_id', 'bgId', 'bg_id'));
+    const setHostAliases = () => setIfMissing('host', firstDefined('host', 'hostname', 'host_id', 'hostId', 'target'));
+    const setTmuxAliases = () => setIfMissing('tmux_session', firstDefined('tmux_session', 'tmuxSession', 'session', 'sessionName', 'session_name'));
+
+    if (toolName === 'edit_file') {
+      setPathAliases();
+      setIfMissing('old_text', firstDefined('old_text', 'old_string', 'oldString', 'old_blob', 'oldBlob', 'old_str', 'oldStr', 'old', 'find', 'search'));
+      setIfMissing('new_text', firstDefined('new_text', 'new_string', 'newString', 'new_blob', 'newBlob', 'new_str', 'newStr', 'new', 'replace', 'replacement'));
+      setIfMissing('all', firstDefined('all', 'replace_all', 'replaceAll'));
+    } else if (toolName === 'patch_file') {
+      setDirectoryAliases();
+      setIfMissing('patch', firstDefined('patch', 'diff', 'unified_diff', 'unifiedDiff'));
+    } else if (toolName === 'read_file' || toolName === 'remote_read_file') {
+      if (toolName === 'remote_read_file') setHostAliases();
+      setPathAliases();
+      setIfMissing('start_line', firstDefined('start_line', 'startLine', 'line_start', 'lineStart', 'from_line', 'fromLine'));
+      setIfMissing('end_line', firstDefined('end_line', 'endLine', 'line_end', 'lineEnd', 'to_line', 'toLine'));
+      const rangeInput = next || input;
+      if (rangeInput?.start_line != null && rangeInput?.end_line != null && rangeInput.offset == null && rangeInput.limit == null) {
+        const start = Number(rangeInput.start_line);
+        const end = Number(rangeInput.end_line);
+        if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+          if (!next) next = { ...input };
+          next.offset = Math.max(0, start - 1);
+          next.limit = end - start + 1;
+        }
+      }
+    } else if (toolName === 'read_many_files') {
+      setIfMissing('paths', firstDefined('paths', 'files', 'file_paths', 'filePaths'));
+      setIfMissing('start_line', firstDefined('start_line', 'startLine', 'line_start', 'lineStart', 'from_line', 'fromLine'));
+      setIfMissing('end_line', firstDefined('end_line', 'endLine', 'line_end', 'lineEnd', 'to_line', 'toLine'));
+    } else if (toolName === 'write_file' || toolName === 'remote_write_file') {
+      if (toolName === 'remote_write_file') setHostAliases();
+      setPathAliases();
+      setContentAliases();
+    } else if (toolName === 'grep') {
+      setDirectoryAliases();
+      setIfMissing('pattern', firstDefined('pattern', 'query', 'q', 'regex', 'search', 'term'));
+      setIfMissing('glob', firstDefined('glob', 'file_glob', 'fileGlob', 'filename_glob', 'filenameGlob', 'type'));
+    } else if (toolName === 'glob') {
+      setDirectoryAliases();
+      setIfMissing('pattern', firstDefined('pattern', 'glob', 'file_glob', 'fileGlob', 'match'));
+    } else if (toolName === 'list_dir' || toolName === 'git_status' || toolName === 'git_diff' || toolName === 'run_tests') {
+      setDirectoryAliases();
+      if (toolName === 'git_diff') setIfMissing('file', firstDefined('file', 'filepath', 'file_path', 'filePath'));
+      if (toolName === 'run_tests') setCommandAliases();
+    } else if (toolName === 'exec' || toolName === 'remote_exec') {
+      if (toolName === 'remote_exec') setHostAliases();
+      setCommandAliases();
+    } else if (toolName === 'web_search' || toolName === 'graph_query' || toolName === 'query_about') {
+      setQueryAliases();
+    } else if (toolName === 'web_fetch') {
+      setIfMissing('url', firstDefined('url', 'uri', 'href', 'link'));
+    } else if (toolName === 'ask_user') {
+      setIfMissing('question', firstDefined('question', 'prompt', 'message', 'text'));
+      setIfMissing('options', firstDefined('options', 'choices', 'answers'));
+      setIfMissing('allowMultiple', firstDefined('allowMultiple', 'allow_multiple', 'multi', 'multiple'));
+    } else if (toolName === 'notify_user' || toolName === 'spore_message') {
+      if (toolName === 'spore_message') setIfMissing('target', firstDefined('target', 'spore', 'sporeId', 'spore_id'));
+      setMessageAliases();
+    } else if (toolName === 'message_send') {
+      setIfMissing('target', firstDefined('target', 'channel', 'channelId', 'channel_id', 'chatId', 'chat_id'));
+      setIfMissing('content', firstDefined('content', 'message', 'text', 'body'));
+    } else if (toolName === 'message_edit') {
+      setIfMissing('messageId', firstDefined('messageId', 'message_id', 'id'));
+      setIfMissing('content', firstDefined('content', 'message', 'text', 'body'));
+    } else if (toolName === 'message_react') {
+      setIfMissing('messageId', firstDefined('messageId', 'message_id', 'id'));
+      setIfMissing('emoji', firstDefined('emoji', 'reaction'));
+    } else if (['task_status', 'task_cancel', 'task_update', 'task_progress', 'task_get', 'bg_tail', 'bg_kill', 'cancel_wakeup', 'log_watch_stop'].includes(toolName)) {
+      setIdAliases();
+      setIfMissing('taskId', firstDefined('taskId', 'task_id', 'id'));
+      setIfMissing('wakeupId', firstDefined('wakeupId', 'wakeup_id', 'id'));
+      setIfMissing('watchId', firstDefined('watchId', 'watch_id', 'id'));
+      if (toolName === 'task_update') setMessageAliases();
+      if (toolName === 'task_progress') setIfMissing('status', firstDefined('status', 'state'));
+    } else if (toolName === 'request_planner_advice') {
+      setIfMissing('goal', firstDefined('goal', 'task', 'question', 'objective'));
+      setIfMissing('current_blocker', firstDefined('current_blocker', 'currentBlocker', 'blocker', 'problem', 'issue'));
+    } else if (toolName === 'save_tool') {
+      setIfMissing('name', firstDefined('name', 'tool_name', 'toolName'));
+      setIfMissing('script', firstDefined('script', 'content', 'code', 'source'));
+    } else if (toolName === 'remote_tail' || toolName === 'remote_tmux_kill') {
+      setHostAliases();
+      setTmuxAliases();
+    } else if (toolName === 'webapp_request') {
+      setIfMissing('method', firstDefined('method', 'verb'));
+      setIfMissing('path', firstDefined('path', 'url', 'route'));
+    } else if (['settings_read', 'env_manage', 'web_serve', 'startup_tasks', 'data_poller', 'skill_lookup', 'ssh_tunnel', 'spore_graph', 'spore_manage'].includes(toolName)) {
+      setIfMissing('action', firstDefined('action', 'mode', 'operation'));
+      setIfMissing('target', firstDefined('target', 'spore', 'sporeId', 'spore_id'));
+      setHostAliases();
+    }
+
+    return next ? { input: next, changed: true } : { input, changed: false };
+  }
+
+  _toolInputSchemaBlock(name, input = {}, opts = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+    const defs = this._toolDefinitionsForContext(opts);
+    const def = defs.find(t => t?.name === name);
+    const required = Array.isArray(def?.input_schema?.required) ? def.input_schema.required : [];
+    if (!required.length) return null;
+    const allowEmpty = new Set([
+      'edit_file:new_text',
+      'write_file:content',
+      'remote_write_file:content',
+    ]);
+    const missing = required.filter(field => {
+      const value = input[field];
+      if (value === undefined || value === null) return true;
+      if (typeof value === 'string' && value.length === 0 && !allowEmpty.has(`${name}:${field}`)) return true;
+      return false;
+    });
+    if (!missing.length) return null;
+    return {
+      error: [
+        `BLOCKED: ${name} is missing required field(s): ${missing.map(f => `\`${f}\``).join(', ')}.`,
+        'The input was normalized for known aliases before this check.',
+        'Retry the same tool with the canonical required fields shown in its schema.',
+      ].join(' '),
+      blocked: true,
+      tool: name,
+      reason: 'tool_input_missing_required_fields',
+      missing,
+      required,
+    };
+  }
+
   _toolInputSummary(name, input) {
     if (!input) return '';
     switch (name) {
@@ -2680,6 +4208,310 @@ class AgentLoop {
     ), 0);
   }
 
+  _getContextToolDefinitions(opts = {}) {
+    try {
+      return this._toolDefinitionsForContext(opts);
+    } catch (e) {
+      this.log?.warn?.(`[context] tool schema estimate failed: ${e.message}`);
+      return [];
+    }
+  }
+
+  _estimateToolSchemaContext(toolDefinitions = []) {
+    const tools = Array.isArray(toolDefinitions) ? toolDefinitions.filter(Boolean) : [];
+    if (tools.length === 0) {
+      return { count: 0, chars: 0, tokens: 0, largest: [] };
+    }
+
+    const largest = tools
+      .map((tool) => {
+        const text = JSON.stringify(tool || {});
+        return {
+          name: tool?.name || 'unknown',
+          chars: text.length,
+          tokens: this._estimateTokens(text),
+        };
+      })
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 8);
+    const text = JSON.stringify(tools);
+    return {
+      count: tools.length,
+      chars: text.length,
+      tokens: this._estimateTokens(text),
+      largest,
+    };
+  }
+
+  _contextTracePreviewChars() {
+    const configured = this.config?.contextTelemetryPreviewChars
+      ?? process.env.SPORE_CONTEXT_PREVIEW_CHARS
+      ?? 120;
+    const n = Number(configured);
+    if (!Number.isFinite(n)) return 120;
+    return Math.max(0, Math.min(500, Math.floor(n)));
+  }
+
+  _previewContextText(text, limit = this._contextTracePreviewChars()) {
+    if (!limit) return '';
+    const compact = String(text || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (compact.length <= limit) return compact;
+    return `${compact.slice(0, Math.max(0, limit - 1))}…`;
+  }
+
+  _messageTokenText(msg = {}) {
+    return typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || '');
+  }
+
+  _summarizeContextMessage(msg = {}, index = 0) {
+    const tokenText = this._messageTokenText(msg);
+    const tokens = this._estimateTokens(tokenText);
+    const out = {
+      index,
+      role: msg.role || 'unknown',
+      tokens,
+      chars: tokenText.length,
+      kind: 'unknown',
+      blocks: {},
+      tools: [],
+      toolResultCount: 0,
+      toolResultChars: 0,
+      preview: '',
+    };
+
+    const addBlock = (type) => {
+      const key = type || 'unknown';
+      out.blocks[key] = (out.blocks[key] || 0) + 1;
+    };
+
+    if (typeof msg.content === 'string') {
+      out.kind = 'text';
+      out.blocks.text = 1;
+      out.preview = this._previewContextText(msg.content);
+      return out;
+    }
+
+    if (!Array.isArray(msg.content)) {
+      out.kind = typeof msg.content;
+      out.preview = this._previewContextText(tokenText);
+      return out;
+    }
+
+    out.kind = 'blocks';
+    const previews = [];
+    for (const block of msg.content) {
+      const type = block?.type || 'unknown';
+      addBlock(type);
+      if (type === 'text') {
+        const p = this._previewContextText(block.text || block.content || '', 80);
+        if (p) previews.push(`text:${p}`);
+      } else if (type === 'tool_use') {
+        const name = block.name || 'unknown';
+        out.tools.push(name);
+        const detail = this._toolInputSummary(name, block.input || {});
+        previews.push(`tool_use:${name}${detail ? `(${this._previewContextText(detail, 80)})` : ''}`);
+      } else if (type === 'tool_result') {
+        const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content || '');
+        out.toolResultCount++;
+        out.toolResultChars += content.length;
+        previews.push(`tool_result:${block.tool_use_id || '?'}:${content.length}c`);
+      } else if (type === 'image' || type === 'image_url') {
+        previews.push(type);
+      }
+    }
+    out.tools = [...new Set(out.tools)];
+    out.preview = this._previewContextText(previews.join(' | '), this._contextTracePreviewChars());
+    return out;
+  }
+
+  _buildContextTrace({
+    sessionKey,
+    iteration,
+    model,
+    messages = [],
+    systemPrompt = '',
+    staticPrompt = '',
+    dynamicContext = '',
+    systemTokens = null,
+    msgTokens = null,
+    contextWindow = null,
+    hardCeiling = null,
+    softBudget = null,
+    toolsMode = 'full',
+    toolDefinitions = null,
+    plannerAdvice = null,
+    opts = {},
+  } = {}) {
+    const systemTokenCount = systemTokens != null && Number.isFinite(Number(systemTokens))
+      ? Math.max(0, Math.round(Number(systemTokens)))
+      : this._estimateTokens(systemPrompt);
+    const messageTokenCount = msgTokens != null && Number.isFinite(Number(msgTokens))
+      ? Math.max(0, Math.round(Number(msgTokens)))
+      : this._estimateMessageTokens(messages);
+    const summaries = (Array.isArray(messages) ? messages : [])
+      .map((msg, index) => this._summarizeContextMessage(msg, index));
+    const roleCounts = {};
+    const roleTokens = {};
+    const blockCounts = {};
+    let toolResultCount = 0;
+    let toolResultChars = 0;
+
+    for (const summary of summaries) {
+      roleCounts[summary.role] = (roleCounts[summary.role] || 0) + 1;
+      roleTokens[summary.role] = (roleTokens[summary.role] || 0) + summary.tokens;
+      toolResultCount += summary.toolResultCount || 0;
+      toolResultChars += summary.toolResultChars || 0;
+      for (const [type, count] of Object.entries(summary.blocks || {})) {
+        blockCounts[type] = (blockCounts[type] || 0) + count;
+      }
+    }
+
+    const conversationTokens = systemTokenCount + messageTokenCount;
+    const resolvedToolDefinitions = Array.isArray(toolDefinitions)
+      ? toolDefinitions
+      : this._getContextToolDefinitions({
+        platform: opts.platform,
+        projectContext: opts.projectContext,
+        trigger: opts.trigger,
+      });
+    const toolSchema = this._estimateToolSchemaContext(resolvedToolDefinitions);
+    const totalTokens = conversationTokens + toolSchema.tokens;
+    const limitTokens = Math.max(1, Math.round(Math.min(
+      Number(softBudget) > 0 ? Number(softBudget) + systemTokenCount : Infinity,
+      Number(hardCeiling) > 0 ? Number(hardCeiling) : Infinity,
+      Number(contextWindow) > 0 ? Number(contextWindow) : Infinity,
+    )));
+    const usedPercent = Math.max(0, Math.min(999, Math.round((totalTokens / limitTokens) * 100)));
+    const largest = [...summaries]
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 6);
+    const largeToolResults = summaries
+      .filter(s => s.toolResultChars > 0)
+      .sort((a, b) => b.toolResultChars - a.toolResultChars)
+      .slice(0, 6)
+      .map(s => ({
+        index: s.index,
+        role: s.role,
+        tokens: s.tokens,
+        toolResultCount: s.toolResultCount,
+        toolResultChars: s.toolResultChars,
+        preview: s.preview,
+      }));
+
+    return {
+      type: 'context:loop',
+      sessionKey,
+      iteration,
+      model,
+      platform: opts.platform || null,
+      mode: opts.projectContext?.mode || null,
+      trigger: opts.trigger || null,
+      toolsMode,
+      messageCount: summaries.length,
+      systemTokens: systemTokenCount,
+      messageTokens: messageTokenCount,
+      conversationTokens,
+      toolSchemaTokens: toolSchema.tokens,
+      toolSchemaChars: toolSchema.chars,
+      toolCount: toolSchema.count,
+      totalTokens,
+      contextWindow: Number(contextWindow) > 0 ? Math.round(Number(contextWindow)) : null,
+      hardCeiling: Number(hardCeiling) > 0 ? Math.round(Number(hardCeiling)) : null,
+      softBudget: Number(softBudget) > 0 ? Math.round(Number(softBudget)) : null,
+      limitTokens,
+      usedPercent,
+      roleCounts,
+      roleTokens,
+      blockCounts,
+      promptParts: {
+        systemChars: String(systemPrompt || '').length,
+        systemTokens: systemTokenCount,
+        staticChars: String(staticPrompt || '').length,
+        staticTokens: this._estimateTokens(staticPrompt || ''),
+        dynamicChars: String(dynamicContext || '').length,
+        dynamicTokens: this._estimateTokens(dynamicContext || ''),
+        toolSchemaChars: toolSchema.chars,
+        toolSchemaTokens: toolSchema.tokens,
+        toolCount: toolSchema.count,
+      },
+      plannerAdvice,
+      toolSchema,
+      toolResultCount,
+      toolResultChars,
+      largest,
+      largeToolResults,
+      tail: summaries.slice(-8),
+    };
+  }
+
+  _emitContextTrace(trace, opts = {}) {
+    if (!trace) return;
+    const roleBits = Object.entries(trace.roleTokens || {})
+      .map(([role, tokens]) => `${role}:${trace.roleCounts?.[role] || 0}/${tokens}`)
+      .join(' ');
+    const largestBits = (trace.largest || [])
+      .map(m => `${m.index}:${m.role}:${m.tokens}:${m.preview || m.kind}`)
+      .join(' | ');
+    const toolBits = (trace.toolSchema?.largest || [])
+      .slice(0, 4)
+      .map(t => `${t.name}:${t.tokens}`)
+      .join(' ');
+    const plannerBit = trace.plannerAdvice
+      ? ` planner=${(trace.plannerAdvice.reasons || []).join('+') || 'advice'}:${trace.plannerAdvice.outputTokens || 0}out`
+      : '';
+    this.log.info(`[context] session=${trace.sessionKey} iter=${trace.iteration} total=${trace.totalTokens}/${trace.limitTokens} (${trace.usedPercent}%) conversation=${trace.conversationTokens} system=${trace.systemTokens} messages=${trace.messageTokens} tools=${trace.toolSchemaTokens}/${trace.toolCount}${plannerBit} roles=[${roleBits}] blocks=${JSON.stringify(trace.blockCounts || {})} toolResults=${trace.toolResultCount}/${trace.toolResultChars}c largestTools=[${toolBits}] largest=[${largestBits}]`);
+
+    if (typeof opts.onStatus === 'function') {
+      try { opts.onStatus(trace); } catch { /* best-effort UI callback */ }
+    }
+
+    const enabled = this.config?.contextTraceJsonl === true
+      || process.env.SPORE_CONTEXT_TRACE === '1';
+    if (!enabled) return;
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const dir = this.config?.contextTraceDir
+        || process.env.SPORE_CONTEXT_TRACE_DIR
+        || '/data/context-traces';
+      fs.mkdirSync(dir, { recursive: true });
+      const safeSession = String(trace.sessionKey || 'session').replace(/[^A-Za-z0-9_.@-]+/g, '_').slice(0, 120);
+      const file = path.join(dir, `${safeSession}.jsonl`);
+      fs.appendFileSync(file, JSON.stringify({ ts: new Date().toISOString(), ...trace }) + '\n');
+    } catch (e) {
+      this.log.warn(`[context] trace write failed: ${e.message}`);
+    }
+  }
+
+  _emitContextUsageComparison(trace, usage = {}, opts = {}) {
+    if (!trace || !usage) return;
+    const providerInput = Number(usage.input_tokens || 0)
+      + Number(usage.cache_read_input_tokens || 0)
+      + Number(usage.cache_creation_input_tokens || 0);
+    if (!Number.isFinite(providerInput) || providerInput <= 0) return;
+    const estimated = Number(trace.totalTokens || 0);
+    const delta = providerInput - estimated;
+    const pct = estimated > 0 ? Math.round((delta / estimated) * 100) : null;
+    this.log.info(`[context] observed session=${trace.sessionKey} iter=${trace.iteration} providerInput=${providerInput} estimated=${estimated} delta=${delta}${pct == null ? '' : ` (${pct}%)`} conversation=${trace.conversationTokens || 0} tools=${trace.toolSchemaTokens || 0}`);
+    if (typeof opts.onStatus === 'function') {
+      try {
+        opts.onStatus({
+          type: 'context:usage',
+          sessionKey: trace.sessionKey,
+          iteration: trace.iteration,
+          providerInputTokens: providerInput,
+          estimatedInputTokens: estimated,
+          deltaTokens: delta,
+          deltaPercent: pct,
+          conversationTokens: trace.conversationTokens || 0,
+          toolSchemaTokens: trace.toolSchemaTokens || 0,
+        });
+      } catch { /* best-effort UI callback */ }
+    }
+  }
+
   _isContextOverflowError(e) {
     const msg = `${e?.message || ''} ${e?.cause?.message || ''} ${e?.error ? JSON.stringify(e.error) : ''}`;
     const isBadRequest = e?.status === 400 || /\bHTTP 400\b/i.test(msg);
@@ -2688,6 +4520,280 @@ class AgentLoop {
 
   _hashResult(resultStr) {
     return String(resultStr).substring(0, 500);
+  }
+
+  _isPendingBackgroundToolResult(result) {
+    if (!result || typeof result !== 'object') return false;
+    if (result.pending === true) return true;
+    if (result.running === true && (result.id != null || result.processId != null || result.logFile || result.log_file)) return true;
+    if (result.running === true && result.backgrounded === true) return true;
+    if (result.backgrounded === true) {
+      const exitCode = result.exitCode ?? result.exit_code;
+      if (exitCode == null || Number(exitCode) === -1) return true;
+      const note = `${result.note || ''} ${result.status || ''}`;
+      if (/moved to background|running in background|use bg_tail/i.test(note)) return true;
+    }
+    return false;
+  }
+
+  _compactVerifyImplementationResult(result, resultContent) {
+    if (!result || typeof result !== 'object') return { compacted: false, content: resultContent };
+    const originalChars = String(resultContent || '').length;
+    const results = Array.isArray(result.results) ? result.results : [];
+    if (originalChars <= 8000 && results.length <= 30) return { compacted: false, content: resultContent };
+
+    const failed = results.filter(item => item && (
+      item.exists === false
+      || item.substantive === false
+      || item.wired === false
+      || item.export_level === false
+      || item.exportLevel === false
+      || item.ok === false
+    ));
+    const passed = results.filter(item => !failed.includes(item));
+    const summarizeItem = (item = {}) => ({
+      qname: item.qname || item.name || null,
+      file: item.file || null,
+      line: item.line || null,
+      kind: item.kind || null,
+      exists: item.exists,
+      substantive: item.substantive,
+      wired: item.wired,
+      export_level: item.export_level ?? item.exportLevel,
+      callers_count: item.callers_count ?? item.callersCount,
+      notes: Array.isArray(item.notes) ? item.notes.slice(0, 4) : item.notes,
+    });
+    const compact = {
+      ok: result.ok,
+      count: Number.isFinite(Number(result.count)) ? Number(result.count) : results.length,
+      passed: result.passed ?? passed.length,
+      failed: result.failed ?? failed.length,
+      hint: result.hint,
+      index_refreshed: result.index_refreshed || undefined,
+      compactedForModelContext: true,
+      omittedResultCount: Math.max(0, results.length - Math.min(results.length, failed.length + Math.min(8, passed.length))),
+      topFailures: failed.slice(0, 20).map(summarizeItem),
+      samplePasses: passed.slice(0, 8).map(summarizeItem),
+      guidance: [
+        'Full verify_implementation result was compacted to keep context stable.',
+        failed.length
+          ? 'Fix or classify topFailures first; rerun verify_implementation with targeted qnames/paths after edits.'
+          : 'No failures shown in the compact summary; use targeted qnames/paths if you need per-symbol detail.',
+      ].join(' '),
+    };
+    if (!results.length && typeof result.output === 'string') {
+      compact.output = result.output.slice(0, 6000);
+    }
+    return {
+      compacted: true,
+      reason: 'verify_implementation_summary',
+      originalChars,
+      content: JSON.stringify(compact),
+    };
+  }
+
+  _compactVisualToolResultForModel(toolName, input, result, resultContent, meta = {}) {
+    const name = String(toolName || '');
+    if (name === 'verify_implementation') {
+      return this._compactVerifyImplementationResult(result, resultContent);
+    }
+    if (!['exec', 'run_tests', 'remote_exec', 'web_serve', 'read_file'].includes(name)) {
+      return { compacted: false, content: resultContent };
+    }
+    if (!result || typeof result !== 'object') {
+      return { compacted: false, content: resultContent };
+    }
+
+    const outputKey = typeof result.output === 'string'
+      ? 'output'
+      : (typeof result.stdout === 'string'
+        ? 'stdout'
+        : (typeof result.content === 'string' ? 'content' : null));
+    if (!outputKey) return { compacted: false, content: resultContent };
+    if (name === 'read_file' && this._isSourceLikeReadFilePath(input?.path || result.path || '')) {
+      return { compacted: false, content: resultContent };
+    }
+
+    const info = this._visualTerminalOutputInfo(result[outputKey]);
+    if (!info) return { compacted: false, content: resultContent };
+
+    const userAskedToDisplay = this._isVisualDisplayRequest(meta.latestUserContent)
+      || this._isVisualOutputDisplaySource(input?.command || input?.cmd || '')
+      || this._isVisualOutputDisplaySource(input?.path || result.path || result.logFile || result.log_file || '');
+    if (userAskedToDisplay && info.originalChars <= 4000) {
+      const clone = { ...result };
+      clone.visualOutputHint = [
+        'The user asked to see this terminal visual/QR output.',
+        `Paste ${outputKey} verbatim in a fenced code block in the next visible reply.`,
+        'Do not claim chat stripped or cannot display it unless the visible reply actually includes the output or a renderer error says so.',
+      ].join(' ');
+      return {
+        changed: true,
+        compacted: false,
+        reason: 'visual_display_hint',
+        originalChars: String(resultContent || '').length,
+        urls: info.urls,
+        content: JSON.stringify(clone),
+      };
+    }
+
+    const summary = this._summarizeVisualTerminalOutput(result[outputKey], result, info);
+    if (!summary) return { compacted: false, content: resultContent };
+    const artifactPath = result.logFile || result.log_file || result.path
+      || this._writeVisualToolArtifact(toolName, result[outputKey], meta);
+
+    const clone = { ...result };
+    clone[outputKey] = summary.output;
+    if (typeof clone.stdout === 'string' && outputKey !== 'stdout') clone.stdout = summary.output;
+    clone.outputSummary = summary.summary;
+    clone.visualArtifact = {
+      type: 'terminal_visual_or_qr',
+      omittedFromModelContext: true,
+      originalOutputChars: summary.originalChars,
+      artLikeLines: summary.artLikeLines,
+      urls: summary.urls,
+      logFile: artifactPath || null,
+    };
+
+    return {
+      compacted: true,
+      reason: 'visual_terminal_output',
+      originalChars: String(resultContent || '').length,
+      urls: summary.urls,
+      content: JSON.stringify(clone),
+    };
+  }
+
+  _isVisualDisplayRequest(text) {
+    return /\b(?:print|show|display|render|paste|give|send)\b[\s\S]{0,80}\b(?:qr|qrcode|qr-code|terminal art|ascii|box[-\s]?drawing|table|diagram|chart)\b/i.test(String(text || ''))
+      || /\b(?:qr|qrcode|qr-code|terminal art|ascii|box[-\s]?drawing|table|diagram|chart)\b[\s\S]{0,80}\b(?:print|show|display|render|paste|give|send)\b/i.test(String(text || ''));
+  }
+
+  _isVisualOutputDisplaySource(text) {
+    const value = String(text || '');
+    if (!value) return false;
+    if (this._isVisualDisplayRequest(value)) return true;
+    if (/\b(?:qrcode|qr-code|qr_code|qrcode-terminal)\b/i.test(value)) return true;
+    if (/\bqr\s*\.\s*(?:generate|tostring)\b/i.test(value)) return true;
+    if (/\bqrcode\s*\.\s*tostring\b/i.test(value)) return true;
+    if (/(?:^|[\\/])qrcode(?:[-_.][^\\/\s"'`<>]*)?\.(?:txt|log|out|ansi|ascii)$/i.test(value)) return true;
+    return false;
+  }
+
+  _isSourceLikeReadFilePath(filePath) {
+    const path = String(filePath || '').toLowerCase().split(/[?#]/)[0];
+    return /\.(?:[cm]?[jt]sx?|tsx?|jsx?|vue|svelte|go|rs|py|rb|php|java|kt|kts|swift|c|cc|cpp|cxx|h|hh|hpp|cs|m|mm|scala|clj|erl|ex|exs|fs|fsx|dart|lua|r|sql|sh|bash|zsh|fish|ps1|bat|cmd|css|scss|sass|less|html?|xml|json|jsonc|ya?ml|toml|ini|env|mdx?)$/i.test(path);
+  }
+
+  _visualTerminalOutputInfo(output) {
+    const text = String(output || '');
+    const urls = [...new Set(
+      [...text.matchAll(/\b(?:exp|https?):\/\/[^\s"'`<>]+/gi)].map(m => m[0])
+    )];
+    const lines = text.split(/\r?\n/);
+    const artLines = lines.filter(line => {
+      const s = String(line || '').trim();
+      if (s.length < 12) return false;
+      if (/\b(?:exp|https?):\/\//i.test(s)) return false;
+      const nonSpace = s.replace(/\s/g, '');
+      if (nonSpace.length < 12) return false;
+      const visualChars = (nonSpace.match(/[█▀▄░▒▓■□▪▫▌▐#.+|/\\_\-─│┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╠╣╦╩╬]/g) || []).join('').length;
+      const alphaNumChars = (nonSpace.match(/[A-Za-z0-9]/g) || []).join('').length;
+      return visualChars / Math.max(1, nonSpace.length) > 0.75
+        && alphaNumChars / Math.max(1, nonSpace.length) < 0.2;
+    });
+
+    if (artLines.length < 6) return null;
+
+    return {
+      text,
+      originalChars: text.length,
+      artLikeLines: artLines.length,
+      urls,
+    };
+  }
+
+  _summarizeVisualTerminalOutput(output, result = {}, precomputedInfo = null) {
+    const info = precomputedInfo || this._visualTerminalOutputInfo(output);
+    if (!info) return null;
+    if (info.originalChars < 500) return null;
+
+    const logFile = result.logFile || result.log_file || result.path || 'the tool log';
+    const summary = [
+      `Visual/QR-like terminal output omitted from model context (${info.originalChars} chars, ${info.artLikeLines} art-like lines).`,
+      info.urls.length ? `URL(s): ${info.urls.join(', ')}.` : '',
+      `Full output remains in ${logFile}.`,
+      'If the user asked to see it, say it was not included in context and fetch the log/output before claiming it was shown.',
+    ].filter(Boolean).join(' ');
+
+    return {
+      originalChars: info.originalChars,
+      artLikeLines: info.artLikeLines,
+      urls: info.urls,
+      summary,
+      output: [
+        ...info.urls,
+        `[${summary}]`,
+      ].join('\n'),
+    };
+  }
+
+  _compactVisualHistoryForModel(messages = []) {
+    if (!Array.isArray(messages) || messages.length === 0) return messages;
+    let changed = false;
+    const compactText = (text) => {
+      const summary = this._summarizeVisualTerminalOutput(text, { path: 'assistant history' });
+      if (!summary) return text;
+      changed = true;
+      return summary.output;
+    };
+    const mapped = messages.map(msg => {
+      if (!msg || msg.role !== 'assistant') return msg;
+      if (typeof msg.content === 'string') {
+        const next = compactText(msg.content);
+        return next === msg.content ? msg : { ...msg, content: next };
+      }
+      if (!Array.isArray(msg.content)) return msg;
+      let blockChanged = false;
+      const blocks = msg.content.map(block => {
+        if (!block || block.type !== 'text' || typeof block.text !== 'string') return block;
+        const next = compactText(block.text);
+        if (next !== block.text) blockChanged = true;
+        return next === block.text ? block : { ...block, text: next };
+      });
+      return blockChanged ? { ...msg, content: blocks } : msg;
+    });
+    if (changed) this.log?.info?.('[context] Compacted visual/QR assistant history before model context');
+    return mapped;
+  }
+
+  _writeVisualToolArtifact(toolName, output, meta = {}) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const crypto = require('crypto');
+      const root = this.config?.dataDir
+        || process.env.SPORE_DATA_DIR
+        || '/data';
+      const dir = path.join(root, 'tool-artifacts', 'visual');
+      fs.mkdirSync(dir, { recursive: true });
+      const safeSession = String(meta.sessionKey || 'session')
+        .replace(/[^A-Za-z0-9_.@-]+/g, '_')
+        .slice(0, 80);
+      const safeTool = String(toolName || 'tool')
+        .replace(/[^A-Za-z0-9_.-]+/g, '_')
+        .slice(0, 40);
+      const hash = crypto.createHash('sha256')
+        .update(String(output || ''))
+        .digest('hex')
+        .slice(0, 12);
+      const file = path.join(dir, `${Date.now()}-${safeSession}-${safeTool}-${hash}.txt`);
+      fs.writeFileSync(file, String(output || ''), 'utf8');
+      return file;
+    } catch (e) {
+      this.log?.warn?.(`[agent] visual tool artifact write failed: ${e.message}`);
+      return null;
+    }
   }
 
   _recordToolResult(tracker, callHash, resultHash) {
@@ -2762,6 +4868,26 @@ class AgentLoop {
     }
 
     return { blocked: false, warning: false };
+  }
+
+  _duplicateBackgroundToolBlock(toolBlock, tracker, callHash) {
+    const name = String(toolBlock?.name || '');
+    const input = toolBlock?.input || {};
+    if (name !== 'exec' && name !== 'remote_exec') return null;
+    if (input.background !== true && !input.tmux_session) return null;
+    const entry = tracker?.history?.find?.(h => h.callHash === callHash);
+    if (!entry || entry.count <= 1) return null;
+    const command = input.command || input.cmd || '';
+    return {
+      blocked: true,
+      error: 'Duplicate background command blocked in this turn.',
+      command,
+      guidance: [
+        'This exact background command was already started or attempted in the current turn.',
+        'Do not start another copy. Inspect the existing background process/log instead, then report from that evidence.',
+        'For Spore Code local exec, use the existing background id/log from the previous tool result, or run the narrow bg-tail/status command if one is available.',
+      ].join(' '),
+    };
   }
 
   _graphDiscoveryCategory(toolName, input = {}) {
@@ -3276,18 +5402,14 @@ class AgentLoop {
       cleaned.push(msg);
     }
 
-    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === 'user') {
-      cleaned.push({ role: 'assistant', content: 'OK.' });
-    }
-
-    // Cancellation note + ack
+    // Cancellation note. Do not add an assistant ack here: a user stop
+    // should not create visible assistant chatter or trigger learning.
     cleaned.push({
       role: 'user',
       content: pendingAskUser.length > 0
         ? '[You were working on a task but the user STOPPED you while an ask_user question was pending. That task is CANCELLED. Await their next message as a new instruction, but if it appears to answer the pending question in the summary, briefly ask whether they want to resume that task from the saved context.]'
         : '[You were working on a task but the user STOPPED you. That task is CANCELLED. Await their next message — it is a completely new instruction. Follow ONLY the new instruction. You can reference the session summary above if context is needed, and use read_file to check file state.]',
     });
-    cleaned.push({ role: 'assistant', content: 'Understood — previous task cancelled. I have the summary of what was done. What would you like me to do?' });
 
     // Mark as recently interrupted
     if (!this._recentAborts) this._recentAborts = new Set();

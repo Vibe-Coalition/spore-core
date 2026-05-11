@@ -10,6 +10,16 @@ function compactText(text, max = 800) {
   return s.length > max ? `${s.slice(0, max)}...[truncated]` : s;
 }
 
+function safeJsonParse(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return fallback;
+  }
+}
+
 function parseStatusLine(line) {
   const raw = String(line || '');
   if (!raw.trim() || raw.startsWith('##')) return null;
@@ -47,20 +57,58 @@ function commandHasFocusedSelector(command) {
     || /(?:^|[\s;|&])-k\s+\S+/i.test(s)
     || /\bpytest\b[^\n;&|]*\s+tests?\/[^\s;&|]+/i.test(s)
     || /\bpython3?\s+-m\s+pytest\b[^\n;&|]*\s+tests?\/[^\s;&|]+/i.test(s)
+    || /\bgo\s+test\b[^\n;&|]*\s+-run\s+\S+/i.test(s)
     || /\bmocha\b[^\n;&|]*\s+test\/[^\s;&|]+/i.test(s)
     || /\b(?:npm|pnpm|yarn)\s+(?:test|run\s+test)\b[^\n;&|]*(?:--\s+)?--grep(?:[=\s]|$)/i.test(s);
+}
+
+function commandLooksPytestFullSuite(command) {
+  const s = String(command || '').replace(/\s+/g, ' ').trim();
+  if (!/\b(?:pytest|python3?\s+-m\s+pytest)\b/i.test(s)) return false;
+  if (/(?:^|\s)(?:-k|--lf|--last-failed|--failed-first|--ff|--sw|--stepwise|--testmon)(?:\s|=|$)/i.test(s)) return false;
+  if (/::/.test(s)) return false;
+  if (/\btests?\/[^/\s;&|]+\.py\b/i.test(s)) return false;
+  if (/\btests?\/[^\s;&|]*\*/i.test(s)) return false;
+  if (/\b(?:pytest|python3?\s+-m\s+pytest)(?:\s+(?:-[A-Za-z][^\s;&|]*|--[A-Za-z0-9_-]+(?:=\S+)?|tests?\/?))*\s*(?:2>&1)?\s*(?:\|\s*(?:tail|head)\b[^\n;&|]*)?$/i.test(s)) return true;
+  return false;
+}
+
+function combinedCommandOutput(command = {}) {
+  return [
+    command.stdout,
+    command.stderr,
+    command.output,
+    command.resultSummary,
+    command.error,
+  ].filter(v => v != null).join('\n');
 }
 
 function commandScope(command) {
   const s = String(command || '');
   if (!commandLooksLikeTest(s)) {
-    if (/\bgit\s+diff\s+--check\b/.test(s) || /\b(?:eslint|ruff|flake8|prettier|tsc)\b/i.test(s)) return 'lint';
+    if (/\bgit\s+diff\s+--check\b/.test(s)
+      || /\buntracked\s+whitespace\s+check\b/i.test(s)
+      || /\bgofmt\b/i.test(s)
+      || /\bgo\s+fmt\b/i.test(s)
+      || /\b(?:eslint|ruff|flake8|prettier|tsc)\b/i.test(s)) return 'lint';
     if (/\bpy_compile\b/.test(s) || /\bnode\s+--check\b/.test(s)) return 'static';
     return 'command';
   }
   if (commandHasFocusedSelector(s)) return 'focused-test';
+  if (commandLooksPytestFullSuite(s)) return 'full-test';
   if (/\b(?:npm\s+test|pnpm\s+test|yarn\s+test|go\s+test\s+\.\/\.\.\.|cargo\s+test|python3?\s+-m\s+pytest(?:\s+(-q|--quiet))?\s*$|pytest(?:\s+(-q|--quiet))?\s*$|node\s+--test(?:\s+test|\s+tests)?\s*$)/i.test(s)) return 'full-test';
   return 'focused-test';
+}
+
+function extractTestCounts(text) {
+  const out = [];
+  const re = /\b(\d{1,6})\s+(?:passing|passed|tests?\s+(?:passed|passing|run|ran))\b/ig;
+  let m;
+  while ((m = re.exec(String(text || '')))) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return [...new Set(out)];
 }
 
 function verificationEvidence(commands = []) {
@@ -68,6 +116,7 @@ function verificationEvidence(commands = []) {
   const ok = list.filter(c => c && c.ok === true);
   const scopes = ok.map(c => commandScope(c.command));
   const failed = list.filter(c => c && c.ok === false);
+  const observedTestCounts = [...new Set(list.flatMap(c => extractTestCounts(combinedCommandOutput(c))))];
   return {
     total: list.length,
     passed: ok.length,
@@ -76,6 +125,7 @@ function verificationEvidence(commands = []) {
     hasFocusedTest: scopes.includes('focused-test'),
     hasLint: scopes.includes('lint'),
     hasStatic: scopes.includes('static'),
+    observedTestCounts,
     scopes,
     commands: list.map(c => ({
       command: c.command,
@@ -86,18 +136,112 @@ function verificationEvidence(commands = []) {
   };
 }
 
-function classifyVerificationClaim(finalText, commands = []) {
-  const text = String(finalText || '').toLowerCase();
-  const evidence = verificationEvidence(commands);
-  const claimsAll = /\b(all|full|entire)\b.{0,40}\b(test|suite|checks?)\b.{0,40}\b(pass|passed|green|passing)\b|\b(all|full|entire)\b.{0,40}\b(pass|passed|green|passing)\b/i.test(text);
+function toolCallToVerificationCommand(call = {}) {
+  const name = String(call.name || call.tool || '').trim();
+  if (!['exec', 'run_tests', 'bg_tail'].includes(name)) return null;
+  const input = safeJsonParse(call.input, null) || safeJsonParse(call.inputText, null) || {};
+  const result = safeJsonParse(call.result, null) || safeJsonParse(call.resultSummary, null) || {};
+  const command = String(
+    result.command
+    || input.command
+    || input.cmd
+    || input.path
+    || ''
+  ).trim();
+  if (!commandLooksLikeTest(command) && !/\bgit\s+diff\s+--check\b|\bnode\s+--check\b|\buntracked\s+whitespace\s+check\b/i.test(command)) {
+    return null;
+  }
+  const exitCode = result.exitCode ?? result.exit_code;
+  const ok = result.ok === true || (Number.isFinite(Number(exitCode)) && Number(exitCode) === 0);
+  return {
+    source: 'tool_call',
+    tool: name,
+    command,
+    ok,
+    exitCode: Number.isFinite(Number(exitCode)) ? Number(exitCode) : undefined,
+    stdout: result.stdout || result.output || '',
+    stderr: result.stderr || result.error || '',
+    resultSummary: typeof call.resultSummary === 'string' ? call.resultSummary : '',
+    failureReason: result.failureReason || result.error || null,
+  };
+}
+
+function verificationCommandsFromToolCalls(toolCalls = []) {
+  return (Array.isArray(toolCalls) ? toolCalls : [])
+    .map(toolCallToVerificationCommand)
+    .filter(Boolean);
+}
+
+function combinedVerificationCommands(commands = [], opts = {}) {
+  return [
+    ...(Array.isArray(commands) ? commands.map(c => ({ ...c, source: c.source || 'benchmark' })) : []),
+    ...verificationCommandsFromToolCalls(opts.toolCalls || []),
+  ];
+}
+
+function focusedClaimQualifier(text = '') {
+  return /\b(focused|targeted|specific|named|filtered|matching|selected|subset|grep|request[-\s]?id|req\.?id|single\s+file|test\s+file|file[-\s]?level|smoke|suggest(?:ion)?|hidden|filter\s+runs?)\b/i.test(text);
+}
+
+function numberedAllTestClaims(finalText = '') {
+  const text = String(finalText || '');
+  const out = [];
+  const re = /\ball\s+\d{1,6}\s+(?:(?:focused|targeted|specific|named|filtered|request[-\s]?id|req\.?id|smoke)\s+)?(?:tests?\s+)?(?:pass|passed|passing)\b/ig;
+  let m;
+  while ((m = re.exec(text))) {
+    const phrase = m[0];
+    out.push({
+      phrase,
+      focused: focusedClaimQualifier(phrase),
+    });
+  }
+  return out;
+}
+
+function finalClaimedTestCounts(finalText = '') {
+  const out = extractTestCounts(finalText);
+  const re = /\ball\s+(\d{1,6})\s+(?:tests?\s+)?(?:pass|passed|passing)\b/ig;
+  let m;
+  while ((m = re.exec(String(finalText || '')))) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return [...new Set(out)];
+}
+
+function hasUnqualifiedBroadAllClaim(finalText = '') {
+  const text = String(finalText || '');
+  const patterns = [
+    /\b(?:all|full|entire)\b.{0,40}\b(?:test|suite|checks?)\b.{0,40}\b(?:pass|passed|green|passing)\b/ig,
+    /\b(?:all|full|entire)\b.{0,40}\b(?:pass|passed|green|passing)\b/ig,
+  ];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(text))) {
+      const phrase = m[0];
+      if (!focusedClaimQualifier(phrase)) return true;
+    }
+  }
+  return false;
+}
+
+function auditVerificationClaim(finalText, commands = [], opts = {}) {
+  const text = String(finalText || '');
+  const combined = combinedVerificationCommands(commands, opts);
+  const evidence = verificationEvidence(combined);
+  const numberedClaims = numberedAllTestClaims(text);
+  const claimsAll = hasUnqualifiedBroadAllClaim(text)
+    || numberedClaims.some(c => !c.focused);
   const claimsFocused = /\b(focused|targeted|specific|request[-\s]?id|smoke)\b.{0,50}\b(test|check|verification|passed|passing)\b/i.test(text);
   const claimsLint = /\b(diff --check|lint|typecheck|py_compile|static)\b.{0,50}\b(pass|passed|clean|ok)\b/i.test(text);
+  const claimedTestCounts = finalClaimedTestCounts(text);
+  const unsupportedTestCounts = claimedTestCounts.filter(n => !evidence.observedTestCounts.includes(n));
 
   let classification = 'unknown';
   let overclaimed = false;
   let note = null;
   if (claimsAll) {
-    if (evidence.hasFullTest && evidence.failed === 0) classification = 'full';
+    if (evidence.hasFullTest) classification = 'full';
     else {
       classification = 'overclaimed';
       overclaimed = true;
@@ -110,13 +254,33 @@ function classifyVerificationClaim(finalText, commands = []) {
   } else if (claimsLint || evidence.hasLint || evidence.hasStatic) {
     classification = 'lint-only';
   }
+  if (!overclaimed && unsupportedTestCounts.length && evidence.observedTestCounts.length) {
+    classification = 'overclaimed';
+    overclaimed = true;
+    note = `Assistant claimed unsupported test count(s): ${unsupportedTestCounts.join(', ')}.`;
+  }
 
   return {
     classification,
     overclaimed,
     note,
     evidence,
+    fullSuiteClaim: !!claimsAll,
+    focusedClaim: !!claimsFocused,
+    lintClaim: !!claimsLint,
+    numberedAllClaims: numberedClaims,
+    claimedTestCounts,
+    observedTestCounts: evidence.observedTestCounts,
+    unsupportedTestCounts,
+    sourceBreakdown: {
+      benchmarkCommands: Array.isArray(commands) ? commands.length : 0,
+      toolCommands: verificationCommandsFromToolCalls(opts.toolCalls || []).length,
+    },
   };
+}
+
+function classifyVerificationClaim(finalText, commands = [], opts = {}) {
+  return auditVerificationClaim(finalText, commands, opts);
 }
 
 function deriveSetupStatus(result = {}) {
@@ -158,17 +322,13 @@ function deriveSetupStatus(result = {}) {
 }
 
 function extractTestCount(text) {
-  const s = String(text || '');
-  const m = s.match(/\b(\d+)\s+(?:passing|passed|tests?\s+(?:passed|run|ran))\b/i);
-  return m ? Number(m[1]) : null;
+  return extractTestCounts(text)[0] ?? null;
 }
 
 function buildHandoffFacts(task = {}) {
   const changed = task.changedFiles || changedFileSummary(task.git?.status || '');
-  const verification = verificationEvidence(task.verification?.commands || []);
-  const testCounts = (task.verification?.commands || [])
-    .map(c => extractTestCount(`${c.stdout || ''}\n${c.stderr || ''}`))
-    .filter(n => Number.isFinite(n));
+  const claimAudit = task.verificationClaim || classifyVerificationClaim(task.finalText || '', task.verification?.commands || [], { toolCalls: task.toolCalls || [] });
+  const verification = claimAudit.evidence || verificationEvidence(task.verification?.commands || []);
   return {
     taskId: task.taskId || null,
     userName: task.userName || null,
@@ -178,16 +338,16 @@ function buildHandoffFacts(task = {}) {
       total: verification.total,
       scopes: verification.scopes,
       commands: verification.commands.map(c => c.command).filter(Boolean),
-      observedTestCounts: testCounts,
+      observedTestCounts: verification.observedTestCounts || [],
     },
-    verificationClaim: task.verificationClaim || null,
+    verificationClaim: claimAudit || null,
     responseRepair: task.responseRepair || null,
     setupStatus: task.setupStatus || null,
     finalSummary: compactText(task.finalText || task.turns?.at?.(-1)?.assistantText || '', 900),
     openIssues: [
       ...(task.error ? [task.error] : []),
       ...((task.verification?.commands || []).filter(c => c.ok === false).map(c => c.failureReason || 'verification_failed')),
-      ...(task.verificationClaim?.overclaimed ? ['verification_claim_overstated'] : []),
+      ...(claimAudit?.overclaimed ? ['verification_claim_overstated'] : []),
     ].filter(Boolean),
   };
 }
@@ -197,12 +357,20 @@ module.exports = {
   changedFileSummary,
   classifyVerificationClaim,
   commandScope,
+  auditVerificationClaim,
   deriveSetupStatus,
+  extractTestCounts,
   verificationEvidence,
+  verificationCommandsFromToolCalls,
   _test: {
     commandHasFocusedSelector,
+    commandLooksPytestFullSuite,
     compactText,
     extractTestCount,
+    extractTestCounts,
+    focusedClaimQualifier,
+    hasUnqualifiedBroadAllClaim,
+    numberedAllTestClaims,
     parseStatusLine,
   },
 };

@@ -286,6 +286,12 @@ class HarnessTools {
     return null;
   }
 
+  workflowBlockForTool(name, input, ctx = {}) {
+    const sessionKey = ctx?.sessionKey || null;
+    if (!sessionKey || !this._workflow?.toolBlockForTool) return null;
+    return this._workflow.toolBlockForTool(sessionKey, name, input);
+  }
+
   killSessionLogWatches() {}
   cancelSessionAskUser() {}
   listPendingQuestions() { return []; }

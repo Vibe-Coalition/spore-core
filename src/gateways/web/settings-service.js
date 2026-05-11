@@ -666,6 +666,7 @@ class WebSettingsService {
 
     if (snap.voice) this.config.voice = { ...(this.config.voice || {}), ...snap.voice };
     if (snap.proactive) this.config.proactive = { ...(this.config.proactive || {}), ...snap.proactive };
+    if (snap.plannerAdvisor) this.config.plannerAdvisor = { ...(this.config.plannerAdvisor || {}), ...snap.plannerAdvisor };
     if (snap.plugins && typeof snap.plugins === 'object') {
       this.config.plugins = { ...(this.config.plugins || {}), ...snap.plugins };
     }

@@ -88,6 +88,7 @@ function createSessionSettleWaiter(ctx, log) {
     let lastActivity = started;
     let sawSessionEvent = false;
     let sawSummarizeDone = false;
+    let summarizeError = null;
     let sawDistillDone = false;
     let distillError = null;
     let timer = null;
@@ -97,8 +98,32 @@ function createSessionSettleWaiter(ctx, log) {
         if (timer) clearTimeout(timer);
         if (graphEvents?.off) graphEvents.off('change', onGraphChange);
       };
+      const readinessFor = (pendingLearner = [], timedOut = false) => ({
+        summary: sawSummarizeDone
+          ? (summarizeError ? 'error' : 'ready')
+          : (sawSessionEvent ? 'pending' : 'unobserved'),
+        projectHandoff: sawSummarizeDone && !summarizeError ? 'ready' : 'pending',
+        sharedDistill: sawDistillDone
+          ? (distillError ? 'error' : 'done')
+          : (sawSummarizeDone ? 'pending' : 'waiting_summary'),
+        learnerQueue: pendingLearner.length > 0 ? 'pending' : 'drained',
+        timedOut: !!timedOut,
+      });
+      const statusFromReadiness = (pendingLearner = [], timedOut = false) => {
+        if (!sawSummarizeDone) return timedOut ? 'timeout' : 'pending';
+        if (summarizeError) return 'summary_error';
+        if (sawDistillDone && distillError) return 'project_ready_shared_error';
+        if (sawDistillDone && pendingLearner.length > 0) return timedOut
+          ? 'project_ready_shared_done_queue_pending_timeout'
+          : 'project_ready_shared_done_queue_pending';
+        if (sawDistillDone) return 'ready';
+        return timedOut ? 'project_ready_shared_pending_timeout' : 'project_ready_shared_pending';
+      };
       const finish = (status, extra = {}) => {
         cleanup();
+        const pendingLearnerJobs = Number(extra.pendingLearnerJobs || 0);
+        const pendingLearner = Array.from({ length: pendingLearnerJobs });
+        const readiness = extra.readiness || readinessFor(pendingLearner, /timeout/i.test(String(status || '')));
         resolve({
           status,
           sessionId,
@@ -111,7 +136,9 @@ function createSessionSettleWaiter(ctx, log) {
           events,
           sawSummarizeDone,
           sawDistillDone,
+          summarizeError,
           distillError,
+          readiness,
           ...extra,
         });
       };
@@ -127,7 +154,10 @@ function createSessionSettleWaiter(ctx, log) {
           error: evt.error || null,
         };
         if (events.length < 25) events.push(entry);
-        if (evt.op === 'session:summarize-done') sawSummarizeDone = true;
+        if (evt.op === 'session:summarize-done') {
+          sawSummarizeDone = true;
+          if (evt.error) summarizeError = evt.error;
+        }
         if (evt.op === 'session:distill-done') {
           sawDistillDone = true;
           if (evt.error) distillError = evt.error;
@@ -141,12 +171,10 @@ function createSessionSettleWaiter(ctx, log) {
         const pendingLearner = pendingLearnerJobsForSession(queue, sessionKey);
         const quiet = Date.now() - lastActivity >= quietMs;
         if (sawDistillDone && quiet) {
-          const status = distillError
-            ? 'settled_with_distill_error'
-            : pendingLearner.length > 0
-              ? 'settled_with_pending_learner'
-              : 'settled';
-          finish(status, { pendingLearnerJobs: pendingLearner.length });
+          finish(statusFromReadiness(pendingLearner, false), {
+            pendingLearnerJobs: pendingLearner.length,
+            readiness: readinessFor(pendingLearner, false),
+          });
           return;
         }
 
@@ -156,12 +184,25 @@ function createSessionSettleWaiter(ctx, log) {
         // window, move on and record that the settle signal was inferred.
         const fallbackMs = Math.min(timeoutMs, Math.max(10_000, quietMs * 2));
         if (!sawSessionEvent && pendingLearner.length === 0 && elapsed >= fallbackMs) {
-          finish('settled_without_session_events', { pendingLearnerJobs: 0 });
+          finish('settled_without_session_events', {
+            pendingLearnerJobs: 0,
+            readiness: {
+              summary: 'unobserved',
+              projectHandoff: 'unknown',
+              sharedDistill: 'unknown',
+              learnerQueue: 'drained',
+              timedOut: false,
+            },
+          });
           return;
         }
 
         if (elapsed >= timeoutMs) {
-          finish('timeout', { pendingLearnerJobs: pendingLearner.length });
+          const readiness = readinessFor(pendingLearner, true);
+          finish(statusFromReadiness(pendingLearner, true), {
+            pendingLearnerJobs: pendingLearner.length,
+            readiness,
+          });
           if (log?.warn) log.warn(`[spore-code-benchmark] memory settle timed out for ${sessionId}`);
           return;
         }

@@ -52,10 +52,40 @@ const {
   syncSkillToGeneralKb,
 } = coreRequire('graph/general-kb-skills');
 
+const SESSION_SUMMARY_INFLIGHT = new Map();
+const SESSION_DISTILL_INFLIGHT = new Map();
+const DISTILLING_STALE_MS = 30 * 60 * 1000;
+
 function emitChange(learner, payload) {
   try {
     graphEvents.emit('change', learner?._graphSlug && !payload.graph ? { ...payload, graph: learner._graphSlug } : payload);
   } catch {}
+}
+
+function sessionWorkKey(learner, nodeId) {
+  return `${learner?._graphSlug || 'default'}:${nodeId}`;
+}
+
+function withSessionWorkLock(map, key, log, label, fn) {
+  const existing = map.get(key);
+  if (existing) {
+    if (log) log.info(`[graphcorn] ${label} already in progress for ${key}, joining existing run`);
+    return existing;
+  }
+  const promise = Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      if (map.get(key) === promise) map.delete(key);
+    });
+  map.set(key, promise);
+  return promise;
+}
+
+function staleIso(value, maxAgeMs) {
+  if (!value) return false;
+  const t = Date.parse(value);
+  if (!Number.isFinite(t)) return false;
+  return Date.now() - t > maxAgeMs;
 }
 
 // Shared helper — uses the same streaming pattern as maintainer.js
@@ -320,6 +350,17 @@ function bumpTurnCount(learner, sessionId) {
 // the agent dispatching tools during a session that's literally
 // closing. Fail-soft — any error logs and returns without writing.
 async function summarizeSessionNode(learner, llmClient, config, sessionId, log) {
+  const id = sessionNodeId(sessionId);
+  return withSessionWorkLock(
+    SESSION_SUMMARY_INFLIGHT,
+    sessionWorkKey(learner, id),
+    log,
+    'summary',
+    () => summarizeSessionNodeInner(learner, llmClient, config, sessionId, log),
+  );
+}
+
+async function summarizeSessionNodeInner(learner, llmClient, config, sessionId, log) {
   if (!learner?.db || !llmClient || !sessionId) return;
   const id = sessionNodeId(sessionId);
   const db = learner.db;
@@ -834,6 +875,17 @@ function repairGeneralKnowledgeBase(learner, log) {
 // node gets extra.distill_error set so we can spot trouble. Temps stay
 // temp and the existing 48h janitor is the safety net.
 async function distillSession(learner, llmClient, config, sessionId, log) {
+  const id = sessionNodeId(sessionId);
+  return withSessionWorkLock(
+    SESSION_DISTILL_INFLIGHT,
+    sessionWorkKey(learner, id),
+    log,
+    'distill',
+    () => distillSessionInner(learner, llmClient, config, sessionId, log),
+  );
+}
+
+async function distillSessionInner(learner, llmClient, config, sessionId, log) {
   if (!learner?.db || !llmClient || !sessionId) return { skipped: 'missing-deps' };
   const db = learner.db;
   const id = sessionNodeId(sessionId);
@@ -848,14 +900,18 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     if (log) log.info(`[distill] ${id} already distilled at ${extraObj.distilled_at}, skipping`);
     return { skipped: 'already-distilled' };
   }
-  if (extraObj.distilling) {
+  if (extraObj.distilling && !staleIso(extraObj.distilling_at, DISTILLING_STALE_MS)) {
     if (log) log.info(`[distill] ${id} distillation in progress (concurrent call), skipping`);
     return { skipped: 'in-progress' };
+  }
+  if (extraObj.distilling && staleIso(extraObj.distilling_at, DISTILLING_STALE_MS) && log) {
+    log.warn(`[distill] ${id} had stale distilling flag from ${extraObj.distilling_at}; retrying`);
   }
 
   // Race lock — both session:end frame and ws.on('close') can fire.
   // Setting `distilling` makes the second caller bail at the check above.
   extraObj.distilling = true;
+  extraObj.distilling_at = new Date().toISOString();
   db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
     .run(JSON.stringify(extraObj), id);
   emitChange(learner, { op: 'session:distill-start', nodeId: id, source: 'graphcorn' });
@@ -888,6 +944,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
       extraObj.distilled_promoted = 0;
       extraObj.distilled_dropped = 0;
       delete extraObj.distilling;
+      delete extraObj.distilling_at;
       db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(extraObj), id);
       emitChange(learner, { op: 'session:distill-done', nodeId: id, promoted: 0, created: 0, dropped: 0, notesAppended: 0, empty: true, source: 'graphcorn' });
@@ -1254,6 +1311,7 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     extraObj.distilled_notes_appended = notesAppended;
     extraObj.general_kb_promoted = kbPromotion.promoted || 0;
     delete extraObj.distilling;
+    delete extraObj.distilling_at;
     db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
       .run(JSON.stringify(extraObj), id);
 
@@ -1338,7 +1396,8 @@ async function distillSession(learner, llmClient, config, sessionId, log) {
     if (log) log.info(`[distill] ${id} done: promoted=${promotedIds.size} created=${createdCount.value} dropped=${dropped} notes=${notesAppended} model=${model}`);
     return { promoted: promotedIds.size, created: createdCount.value, dropped, notesAppended, archived: archiveResult.archived };
   } catch (e) {
-    extraObj.distilling = false;
+    delete extraObj.distilling;
+    delete extraObj.distilling_at;
     extraObj.distill_error = e.message;
     extraObj.distill_error_at = new Date().toISOString();
     try {

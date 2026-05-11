@@ -13,6 +13,9 @@ const DEFAULT_LOCAL_TOOLS = Object.freeze([
   'git_diff',
   'patch_file',
   'run_tests',
+  'bg_list',
+  'bg_tail',
+  'bg_kill',
 ]);
 
 const DEFAULT_TASK_USERS = Object.freeze(['Mara', 'Devon', 'Noa']);
@@ -450,6 +453,7 @@ function buildBenchmarkContext(scenario, task, { runId, sessionId, canary } = {}
     'Verification wording rule: final claims must match the commands you actually ran. If you used --grep, -k, a named test file, or any other filter, call it focused/targeted verification. Do not say "all tests", "full suite", "zero regressions", or quote a total test count unless that exact unfiltered suite output is in the tool results.',
     'Scope rule: avoid expanding public API or behavior beyond the requested feature. If a small optional expansion is genuinely useful, explicitly say it is extra and why.',
     'Local repo rule: use repository/file/shell tools for this coding task. Do not use browser/web tools unless the user specifically asks for live web research or external docs.',
+    'Long command rule: if a command may watch, serve, hang after test failure, or take a long time, run exec with background=true, inspect it with bg_tail, and stop it with bg_kill when enough output is available.',
     'Setup rule: if dependencies or toolchains are missing, install them locally for this benchmark run. Use repo-local dependencies, virtualenvs, node_modules, or $SPORE_BENCHMARK_CACHE for caches/toolchains; $HOME, $GOBIN, $GOPATH, $CARGO_HOME, $RUSTUP_HOME, PYTHONUSERBASE, and package caches already point at isolated benchmark directories. For Go repos, install Go into $SPORE_BENCHMARK_CACHE/toolchains/go when `go` is absent. Do not search `/data/spore-code-benchmark/runs`, `/`, or old benchmark directories for reusable binaries. Do not use sudo, apt/dpkg/apk/yum/dnf/pacman/brew, docker/podman, global npm installs, or system pip installs. If local setup is not reasonable, report the exact blocker instead of claiming success.',
     'Resource rule: keep setup lightweight. Do not install heavyweight ML/GPU stacks such as torch, tensorflow, jax, transformers, triton, or NVIDIA/CUDA packages unless the scenario explicitly asks for a heavyweight dependency run. For AI smoke checks, prefer py_compile, static/import-light checks, tiny tests that do not require missing heavy frameworks, or report the dependency blocker honestly.',
   ].filter(Boolean).join('\n');

@@ -32,6 +32,14 @@
       .scb-scenario-list { max-height: 150px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px; margin: 8px 0; }
       .scb-scenario { display: flex; align-items: center; gap: 7px; padding: 3px 0; font-size: .68rem; }
       .scb-scenario span { color: var(--text-dim); }
+      .scb-analysis { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 9px; }
+      .scb-analysis-title { font-size: .72rem; font-weight: 800; color: var(--text); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+      .scb-card { border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 7px 0; background: color-mix(in srgb, var(--bg) 88%, var(--panel, var(--bg)) 12%); }
+      .scb-card h4 { margin: 0 0 5px; font-size: .75rem; line-height: 1.2; color: var(--text); }
+      .scb-card p { margin: 5px 0; font-size: .68rem; line-height: 1.35; color: var(--text-dim); }
+      .scb-card ul { margin: 5px 0 0 16px; padding: 0; color: var(--text-dim); font-size: .66rem; line-height: 1.35; }
+      .scb-pill { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 2px 6px; margin-left: 5px; font-size: .56rem; text-transform: uppercase; color: var(--text-dim); }
+      .scb-warn { color: var(--danger, #ef4444); }
     `;
     document.head.appendChild(style);
 
@@ -74,6 +82,7 @@
               <div class="scb-kpi"><div class="scb-kpi-v" id="scb-k-leaks">0</div><div class="scb-kpi-l">Leaks</div></div>
             </div>
             <div class="scb-log" id="scb-log"></div>
+            <div class="scb-analysis" id="scb-analysis"></div>
           </div>
         </div>
       </div>
@@ -175,6 +184,13 @@
         status.summary ? JSON.stringify(status.summary, null, 2) : '',
       ].filter(Boolean);
       document.getElementById('scb-log').textContent = lines.join('\n');
+      try {
+        const report = await apiJson('/results');
+        scbRenderReport(report);
+      } catch (e) {
+        const box = document.getElementById('scb-analysis');
+        if (box) box.innerHTML = `<div class="scb-analysis-title">Performance analysis</div><p class="scb-warn">${scbEsc(e.message)}</p>`;
+      }
       if (['done', 'error', 'cancelled', 'idle'].includes(status.phase) && pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
@@ -183,6 +199,91 @@
       const log = document.getElementById('scb-log');
       if (log) log.textContent = e.message;
     }
+  }
+
+  function scbEsc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[ch]));
+  }
+
+  function scbList(items, max) {
+    const arr = Array.isArray(items) ? items.filter(Boolean).slice(0, max || 4) : [];
+    if (!arr.length) return '';
+    return `<ul>${arr.map(item => `<li>${scbEsc(typeof item === 'string' ? item : (item.problem || item.recommendation || JSON.stringify(item)))}</li>`).join('')}</ul>`;
+  }
+
+  function scbImprovementList(items) {
+    const arr = Array.isArray(items) ? items.filter(Boolean).slice(0, 4) : [];
+    if (!arr.length) return '';
+    return `<ul>${arr.map(item => {
+      if (typeof item === 'string') return `<li>${scbEsc(item)}</li>`;
+      const head = [item.area, item.severity].filter(Boolean).join(' / ');
+      const body = item.problem || item.recommendation || JSON.stringify(item);
+      return `<li>${head ? `<b>${scbEsc(head)}:</b> ` : ''}${scbEsc(body)}</li>`;
+    }).join('')}</ul>`;
+  }
+
+  function scbRenderSummary(summary) {
+    if (!summary) return '';
+    const bits = [
+      `${summary.completedTasks ?? 0}/${summary.tasks ?? 0} tasks`,
+      `${summary.verificationPassed ?? 0}/${summary.verificationTotal ?? 0} verification`,
+      `${summary.experienceSummaries ?? 0} summaries`,
+      `${summary.experienceSummaryErrors ?? 0} summary errors`,
+      `${summary.verificationOverclaims ?? 0} overclaims`,
+      `${summary.memorySettleTimeouts ?? 0} memory timeouts`,
+      `${summary.memoryProjectReady ?? 0}/${summary.memorySettleTotal ?? 0} project handoffs ready`,
+      `${summary.memorySharedDistillDone ?? 0}/${summary.memorySettleTotal ?? 0} shared distills done`,
+      `${summary.memoryLearnerQueuePending ?? 0} learner queues pending`,
+    ];
+    return `<p>${bits.map(scbEsc).join(' · ')}</p>`;
+  }
+
+  function scbRenderExperience(result) {
+    const s = result.experienceSummary;
+    const score = result.score || {};
+    const title = result.scenarioId || 'scenario';
+    const pills = [
+      s?.outcome || (score.likelySuccess ? 'likely success' : 'review'),
+      s?.confidence ? `confidence ${s.confidence}` : '',
+      s?.fallbackGenerated ? 'fallback analysis' : '',
+      s?.parseError ? 'parse error' : '',
+    ].filter(Boolean).map(p => `<span class="scb-pill">${scbEsc(p)}</span>`).join('');
+    if (!s) {
+      return `<div class="scb-card"><h4>${scbEsc(title)}${pills}</h4><p>No planner analysis was generated for this scenario.</p></div>`;
+    }
+    const raw = s.raw || s.repairRaw;
+    const overall = s.overall || s.summary || (raw ? String(raw).slice(0, 900) : 'No structured summary available.');
+    return `
+      <div class="scb-card">
+        <h4>${scbEsc(title)}${pills}</h4>
+        <p>${scbEsc(overall)}</p>
+        ${scbList(s.agent_failure_modes, 3)}
+        ${scbImprovementList(s.improvement_points)}
+        ${s.originalParseError || s.parseError ? `<p class="scb-warn">Summary parser issue: ${scbEsc(s.originalParseError || s.parseError)}</p>` : ''}
+      </div>
+    `;
+  }
+
+  function scbRenderReport(report) {
+    const box = document.getElementById('scb-analysis');
+    if (!box) return;
+    if (!report || report.empty) {
+      box.innerHTML = '<div class="scb-analysis-title">Performance analysis</div><p>No benchmark report yet.</p>';
+      return;
+    }
+    const results = Array.isArray(report.results) ? report.results : [];
+    box.innerHTML = `
+      <div class="scb-analysis-title">Performance analysis</div>
+      <p><b>${scbEsc(report.runId || 'latest run')}</b>${report.finishedAt ? ` · finished ${scbEsc(report.finishedAt)}` : ''}</p>
+      ${scbRenderSummary(report.summary)}
+      ${results.map(scbRenderExperience).join('')}
+    `;
   }
 
   window.__scbOpen = openPane;

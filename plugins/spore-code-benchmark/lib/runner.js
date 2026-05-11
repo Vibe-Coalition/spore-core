@@ -17,7 +17,7 @@ const { LocalToolExecutor } = require('./local-tools');
 const { LiveSporeCodeSession } = require('./live-session');
 const { judgeWithLlm, scanLeakage, scoreScenario, summarizeExperienceWithLlm } = require('./judge');
 const { generateActorFollowup, generateActorTurn } = require('./actor');
-const { evaluateCommandResult, normalizeVerificationSpec } = require('./verification');
+const { evaluateCommandResult, isArtifactPath, normalizeVerificationSpec } = require('./verification');
 const {
   buildHandoffFacts,
   changedFileSummary,
@@ -54,6 +54,28 @@ function compactOutput(text, max = 12000) {
   return s.length > max ? `${s.slice(0, max)}\n...[truncated ${s.length - max} chars]` : s;
 }
 
+function verificationRecord(taskId, command, verification = {}) {
+  return {
+    taskId,
+    command,
+    kind: verification.kind,
+    ok: !!verification.ok,
+    exitOk: verification.exitOk,
+    semanticOk: verification.semanticOk,
+    infraOk: verification.infraOk,
+    failureReason: verification.failureReason || null,
+    problems: verification.problems || [],
+    exitCode: verification.exitCode,
+    timedOut: verification.timedOut,
+    durationMs: verification.durationMs,
+    stdout: compactOutput(verification.stdout, 8000),
+    stderr: compactOutput(verification.stderr, 8000),
+    error: verification.error || null,
+    checkedFiles: verification.checkedFiles || undefined,
+    skippedFiles: verification.skippedFiles || undefined,
+  };
+}
+
 function summarizeEventEntries(entries = []) {
   const list = Array.isArray(entries) ? entries : [];
   const byType = {};
@@ -73,6 +95,36 @@ function summarizeEventEntries(entries = []) {
   };
 }
 
+function summarizeWorkflowEntries(entries = []) {
+  const list = Array.isArray(entries) ? entries : [];
+  const phases = [];
+  const seen = new Set();
+  let latest = null;
+  let debugTransitions = 0;
+  for (const entry of list) {
+    const wf = entry?.workflow || entry;
+    if (!wf) continue;
+    latest = wf;
+    const phase = wf.phase || null;
+    if (phase && !seen.has(phase)) {
+      seen.add(phase);
+      phases.push(phase);
+    }
+    if (phase === 'debug') debugTransitions += 1;
+  }
+  return {
+    total: list.length,
+    phases,
+    debugTransitions,
+    latest: latest ? {
+      phase: latest.phase || null,
+      status: latest.status || null,
+      tasks: latest.tasks || null,
+      evidenceCount: latest.evidenceCount || 0,
+    } : null,
+  };
+}
+
 function compactTaskForReport(task = {}) {
   const compact = { ...task };
   const eventSummary = Array.isArray(task.events)
@@ -81,10 +133,15 @@ function compactTaskForReport(task = {}) {
   const transcriptSummary = Array.isArray(task.transcript)
     ? summarizeEventEntries(task.transcript)
     : (task.transcriptSummary || summarizeEventEntries([]));
+  const workflowSummary = Array.isArray(task.workflowEvents)
+    ? summarizeWorkflowEntries(task.workflowEvents)
+    : (task.workflowSummary || summarizeWorkflowEntries([]));
   delete compact.events;
   delete compact.transcript;
+  delete compact.workflowEvents;
   compact.eventSummary = eventSummary;
   compact.transcriptSummary = transcriptSummary;
+  compact.workflowSummary = workflowSummary;
   return compact;
 }
 
@@ -139,6 +196,7 @@ function rawTraceForStorage(report = {}) {
         sessionId: task.sessionId,
         transcript: task.transcript || [],
         events: task.events || [],
+        workflowEvents: task.workflowEvents || [],
       })),
     })),
   };
@@ -161,7 +219,7 @@ function runShell(command, opts = {}) {
     const started = Date.now();
     const cwd = opts.cwd || process.cwd();
     const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || 120000);
-    const child = spawn('/bin/bash', ['-c', command], {
+    const child = spawn('/bin/bash', ['-o', 'pipefail', '-c', command], {
       cwd,
       env: {
         PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
@@ -203,6 +261,164 @@ function runShell(command, opts = {}) {
   });
 }
 
+function normalizedChangedPaths(changedFiles = {}, extraFiles = []) {
+  const extra = (Array.isArray(extraFiles) ? extraFiles : [])
+    .map(p => String(p || '').replace(/\\/g, '/'))
+    .filter(Boolean);
+  if (Array.isArray(changedFiles)) {
+    return [
+      ...changedFiles.map(p => String(p || '').replace(/\\/g, '/')).filter(Boolean),
+      ...extra,
+    ];
+  }
+  if (Array.isArray(changedFiles.paths)) {
+    return [
+      ...changedFiles.paths.map(p => String(p || '').replace(/\\/g, '/')).filter(Boolean),
+      ...extra,
+    ];
+  }
+  return extra;
+}
+
+function isTestFilePath(filePath) {
+  const p = String(filePath || '').replace(/\\/g, '/');
+  return /(^|\/)(test|tests|spec|__tests__)\/.+/i.test(p)
+    || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(p)
+    || /(^|\/)test_[^/]+\.py$/i.test(p)
+    || /_test\.go$/i.test(p);
+}
+
+function readJsonIfExists(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function packageUsesMocha(pkg = {}) {
+  const scripts = Object.values(pkg.scripts || {}).join('\n');
+  const deps = {
+    ...(pkg.dependencies || {}),
+    ...(pkg.devDependencies || {}),
+    ...(pkg.optionalDependencies || {}),
+  };
+  return /\bmocha\b/i.test(scripts) || Object.prototype.hasOwnProperty.call(deps, 'mocha');
+}
+
+function untrackedSummaryPaths(untrackedSummary = {}) {
+  return (Array.isArray(untrackedSummary.files) ? untrackedSummary.files : [])
+    .map(f => String(f?.path || '').replace(/\\/g, '/'))
+    .filter(Boolean);
+}
+
+function changedFileSummaryFromNameStatus(output = {}) {
+  const stdout = typeof output === 'string' ? output : (output.stdout || '');
+  const entries = [];
+  for (const raw of String(stdout || '').split(/\r?\n/)) {
+    if (!raw.trim()) continue;
+    const parts = raw.split(/\t+/).map(s => s.trim()).filter(Boolean);
+    if (parts.length < 2) continue;
+    const status = parts[0];
+    const filePath = (parts[parts.length - 1] || '').replace(/\\/g, '/').replace(/\/+$/g, '');
+    if (!filePath || isArtifactPath(filePath)) continue;
+    entries.push({ path: filePath, status, tracked: true });
+  }
+  return {
+    count: entries.length,
+    paths: entries.map(e => e.path),
+    tracked: entries.map(e => e.path),
+    untracked: [],
+    entries,
+  };
+}
+
+function mergeChangedFileSummaries(...summaries) {
+  const byPath = new Map();
+  for (const summary of summaries) {
+    for (const entry of summary?.entries || []) {
+      if (!entry?.path || isArtifactPath(entry.path)) continue;
+      const existing = byPath.get(entry.path);
+      byPath.set(entry.path, {
+        path: entry.path,
+        status: existing?.status || entry.status || '',
+        tracked: !!(existing?.tracked || entry.tracked),
+      });
+    }
+  }
+  const entries = [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+  return {
+    count: entries.length,
+    paths: entries.map(e => e.path),
+    tracked: entries.filter(e => e.tracked).map(e => e.path),
+    untracked: entries.filter(e => !e.tracked).map(e => e.path),
+    entries,
+  };
+}
+
+function inferChangedTestVerificationCommands(workDir, changedFiles = {}, existingCommands = [], opts = {}) {
+  const paths = normalizedChangedPaths(changedFiles, [
+    ...untrackedSummaryPaths(opts.untrackedSummary),
+    ...(Array.isArray(opts.extraPaths) ? opts.extraPaths : []),
+  ]).filter(isTestFilePath);
+  if (!paths.length) return [];
+  const existingList = (existingCommands || []).map(c => String(c.command || c || '').trim()).filter(Boolean);
+  const existing = new Set(existingList);
+  const out = [];
+  const add = (command, reason) => {
+    if (!command || existing.has(command)) return;
+    existing.add(command);
+    out.push({ command, kind: 'test', reason });
+  };
+  const existingMentionsPath = (filePath) => {
+    const normalized = String(filePath || '').replace(/\\/g, '/');
+    const quoted = shellQuote(normalized);
+    return existingList.some(command => {
+      const c = command.replace(/\\/g, '/');
+      return c.includes(normalized) || c.includes(quoted);
+    });
+  };
+  const existingCoversFiles = (files) => files.length > 0 && files.every(existingMentionsPath);
+
+  const goFiles = paths.filter(p => /_test\.go$/i.test(p));
+  if (goFiles.length && ![...existing].some(c => /\bgo\s+test\s+\.\/\.\.\./i.test(c))) {
+    add('go test ./...', 'changed_go_test_files');
+  }
+
+  const pyFiles = paths.filter(p => /\.py$/i.test(p));
+  if (pyFiles.length
+    && !existingCoversFiles(pyFiles)
+    && (fs.existsSync(path.join(workDir, 'pytest.ini')) || fs.existsSync(path.join(workDir, 'pyproject.toml')) || pyFiles.some(p => /(^|\/)tests?\//i.test(p)))) {
+    add(`python3 -m pytest ${pyFiles.map(shellQuote).join(' ')} -q`, 'changed_python_test_files');
+  }
+
+  const jsFiles = paths.filter(p => /\.(?:[cm]?[jt]sx?)$/i.test(p));
+  const pkg = readJsonIfExists(path.join(workDir, 'package.json'));
+  if (jsFiles.length && !existingCoversFiles(jsFiles) && packageUsesMocha(pkg || {})) {
+    const supportEnv = ['test/support/env.js', 'tests/support/env.js']
+      .find(p => fs.existsSync(path.join(workDir, p)));
+    const requirePart = supportEnv ? `--require ${shellQuote(supportEnv)} ` : '';
+    add(`npx mocha ${requirePart}--reporter spec ${jsFiles.map(shellQuote).join(' ')}`, 'changed_javascript_mocha_tests');
+  }
+
+  return out;
+}
+
+function inferGoFormatCheckCommands(changedFiles = {}, existingCommands = [], opts = {}) {
+  const paths = normalizedChangedPaths(changedFiles, [
+    ...untrackedSummaryPaths(opts.untrackedSummary),
+    ...(Array.isArray(opts.extraPaths) ? opts.extraPaths : []),
+  ]).filter(p => /\.go$/i.test(p) && !isArtifactPath(p));
+  if (!paths.length) return [];
+  const existingList = (existingCommands || []).map(c => String(c.command || c || '').trim()).filter(Boolean);
+  if (existingList.some(command => /\bgofmt\b|\bgo\s+fmt\b/i.test(command))) return [];
+  const unique = [...new Set(paths)].sort();
+  const fileArgs = unique.map(shellQuote).join(' ');
+  const command = `out=$(gofmt -l ${fileArgs}); status=$?; if [ $status -ne 0 ]; then exit $status; fi; if [ -n "$out" ]; then printf '%s\\n' "$out"; exit 1; fi; echo "gofmt clean"`;
+  return [{ command, kind: 'lint', reason: 'changed_go_files_format' }];
+}
+
 async function mapWithConcurrency(items, limit, mapper) {
   const max = Math.max(1, Math.floor(Number(limit) || 1));
   const results = new Array(items.length);
@@ -234,8 +450,11 @@ function summarizeRun(results, leakage) {
     .map(t => t.memorySettle)
     .filter(Boolean)
     .filter(s => s.status !== 'disabled');
-  const memorySettleTimeouts = memorySettle.filter(s => s.status === 'timeout').length;
+  const memorySettleTimeouts = memorySettle.filter(s => s.readiness?.timedOut || /timeout/i.test(String(s.status || ''))).length;
   const memorySettleErrors = memorySettle.filter(s => /error/i.test(String(s.status || ''))).length;
+  const memoryProjectReady = memorySettle.filter(s => s.readiness?.projectHandoff === 'ready').length;
+  const memorySharedDistillDone = memorySettle.filter(s => s.readiness?.sharedDistill === 'done').length;
+  const memoryLearnerQueuePending = memorySettle.filter(s => s.readiness?.learnerQueue === 'pending').length;
   const experienceSummaries = results
     .map(r => r.experienceSummary)
     .filter(Boolean);
@@ -247,6 +466,19 @@ function summarizeRun(results, leakage) {
   }, {});
   const verificationOverclaims = tasks.filter(t => t.verificationClaim?.overclaimed).length;
   const responseRepairs = tasks.filter(t => t.responseRepair).length;
+  const workflowUpdates = tasks.reduce((n, t) => n + (Array.isArray(t.workflowEvents) ? t.workflowEvents.length : 0), 0);
+  const workflowDebugTransitions = tasks.reduce((n, t) => {
+    if (Array.isArray(t.workflowEvents)) {
+      return n + t.workflowEvents.filter(evt => (evt.workflow || evt)?.phase === 'debug').length;
+    }
+    return n;
+  }, 0);
+  const workflowCompletionGated = tasks.filter(t => t.workflow?.tasks && (
+    Number(t.workflow.tasks.pending || 0)
+    + Number(t.workflow.tasks.in_progress || 0)
+    + Number(t.workflow.tasks.blocked || 0)
+    + Number(t.workflow.tasks.error || 0)
+  ) > 0).length;
   const dryRun = results.length > 0 && results.every(r => r.dryRun);
   return {
     scenarios: results.length,
@@ -264,11 +496,17 @@ function summarizeRun(results, leakage) {
     memorySettleTotal: memorySettle.length,
     memorySettleTimeouts,
     memorySettleErrors,
+    memoryProjectReady,
+    memorySharedDistillDone,
+    memoryLearnerQueuePending,
     experienceSummaries: experienceSummaries.length,
     experienceSummaryErrors,
     setupStatuses,
     verificationOverclaims,
     responseRepairs,
+    workflowUpdates,
+    workflowDebugTransitions,
+    workflowCompletionGated,
     verificationPassRate: verificationTotal ? verificationPassed / verificationTotal : null,
     leakageOk: !!leakage?.ok,
     leakageHits: leakage?.hits?.length || 0,
@@ -470,6 +708,7 @@ class SporeCodeBenchmarkRunner {
     let session = null;
     let activeTaskResult = null;
     let postExecutor = null;
+    let taskExecutor = null;
     try {
       if (opts.prepareRepos) {
         this._broadcast({ latest: { scenarioId, status: 'preparing repo' } });
@@ -532,6 +771,7 @@ class SporeCodeBenchmarkRunner {
         const taskId = safeIdPart(task.id || `task-${taskIndex + 1}`);
         const taskSessionId = `scb:${opts.runId}:${safeIdPart(scenarioId)}:${taskId}:${crypto.randomBytes(3).toString('hex')}`;
         const taskUserName = task.userName || opts.userName;
+        const taskStartHead = await this._gitHead(workDir);
         const baseTaskPrompt = buildUserPrompt(scenario, { task });
         const previousTaskResults = result.tasks.slice();
         let actorInitial = null;
@@ -568,13 +808,13 @@ class SporeCodeBenchmarkRunner {
           events: [],
           toolCalls: [],
           verification: { commands: [] },
-          git: {},
+          git: { startHead: taskStartHead },
         };
         result.tasks.push(activeTaskResult);
         if (!result.prompt) result.prompt = taskPrompt;
 
         const token = await this.createCliTicket(taskUserName, 60 * 60 * 1000);
-        const executor = new LocalToolExecutor({
+        taskExecutor = new LocalToolExecutor({
           ...executorOpts,
           root: workDir,
           defaultTimeoutMs: 30000,
@@ -588,7 +828,7 @@ class SporeCodeBenchmarkRunner {
           cwd: workDir,
           userName: taskUserName,
           localTools: DEFAULT_LOCAL_TOOLS,
-          toolExecutor: executor,
+          toolExecutor: taskExecutor,
           askUserResponder: opts.actor ? async (msg) => {
             const question = askUserText(msg);
             const actorDecision = await generateActorFollowup({
@@ -653,7 +893,9 @@ class SporeCodeBenchmarkRunner {
           turnRecord.iterations = turn.iterations || 0;
           turnRecord.toolUsage = turn.toolUsage || {};
           turnRecord.responseRepair = turn.responseRepair || null;
+          turnRecord.workflow = turn.workflow || null;
           activeTaskResult.finalText = turn.text || '';
+          if (turn.workflow) activeTaskResult.workflow = turn.workflow;
           if (turn.responseRepair) activeTaskResult.responseRepair = turn.responseRepair;
           if (turn.usage) {
             activeTaskResult.usage = activeTaskResult.usage || {};
@@ -703,6 +945,8 @@ class SporeCodeBenchmarkRunner {
         if (!lastTurn && !activeTaskResult.finalText) activeTaskResult.finalText = '';
         activeTaskResult.transcript = session.transcript;
         activeTaskResult.events = session.events;
+        activeTaskResult.workflowEvents = session.workflowEvents || [];
+        activeTaskResult.workflow = activeTaskResult.workflow || session.latestWorkflow || null;
         activeTaskResult.toolCalls = session.toolCalls.map(call => ({ ...call, taskId: task.id }));
 
         result.transcript.push(...activeTaskResult.transcript);
@@ -719,6 +963,8 @@ class SporeCodeBenchmarkRunner {
         await session.close(true);
         session = null;
         activeTaskResult.memorySettle = await settlePromise;
+        try { taskExecutor?.killAllBackground?.(); } catch {}
+        taskExecutor = null;
 
         if (opts.runVerification) {
           for (const commandSpec of task.verification?.commands || scenario.verification?.commands || []) {
@@ -729,32 +975,65 @@ class SporeCodeBenchmarkRunner {
               spec,
               await postExecutor.exec({ command: spec.command, workdir: workDir, timeout: 180000, maxOutputBytes: 120000 })
             );
-            activeTaskResult.verification.commands.push({
-              taskId: task.id,
-              command: spec.command,
-              kind: spec.kind,
-              ok: !!verification.ok,
-              exitOk: verification.exitOk,
-              semanticOk: verification.semanticOk,
-              infraOk: verification.infraOk,
-              failureReason: verification.failureReason || null,
-              problems: verification.problems || [],
-              exitCode: verification.exitCode,
-              timedOut: verification.timedOut,
-              durationMs: verification.durationMs,
-              stdout: compactOutput(verification.stdout, 8000),
-              stderr: compactOutput(verification.stderr, 8000),
-              error: verification.error || null,
-            });
+            activeTaskResult.verification.commands.push(verificationRecord(task.id, spec.command, verification));
           }
         }
 
         activeTaskResult.git.status = await postExecutor.gitStatus({ path: workDir });
         activeTaskResult.git.untrackedSummary = await postExecutor.gitUntrackedSummary({ path: workDir });
-        activeTaskResult.changedFiles = changedFileSummary(activeTaskResult.git.status);
+        if (taskStartHead) {
+          activeTaskResult.git.committedChanges = await runShell(`git diff --name-status ${shellQuote(taskStartHead)}..HEAD`, {
+            cwd: workDir,
+            timeoutMs: 15000,
+          });
+        }
+        activeTaskResult.changedFiles = mergeChangedFileSummaries(
+          changedFileSummary(activeTaskResult.git.status),
+          changedFileSummaryFromNameStatus(activeTaskResult.git.committedChanges)
+        );
+        if (opts.runVerification) {
+          const inferredSpecs = inferChangedTestVerificationCommands(
+            workDir,
+            activeTaskResult.changedFiles,
+            activeTaskResult.verification.commands,
+            { untrackedSummary: activeTaskResult.git.untrackedSummary }
+          );
+          for (const spec of inferredSpecs) {
+            if (this.cancelled) break;
+            this._broadcast({ latest: { scenarioId, taskId: task.id, status: 'changed-test verification', command: spec.command } });
+            const verification = evaluateCommandResult(
+              spec,
+              await postExecutor.exec({ command: spec.command, workdir: workDir, timeout: 180000, maxOutputBytes: 120000 })
+            );
+            activeTaskResult.verification.commands.push(verificationRecord(task.id, spec.command, verification));
+          }
+          const goFormatSpecs = inferGoFormatCheckCommands(
+            activeTaskResult.changedFiles,
+            activeTaskResult.verification.commands,
+            { untrackedSummary: activeTaskResult.git.untrackedSummary }
+          );
+          for (const spec of goFormatSpecs) {
+            if (this.cancelled) break;
+            this._broadcast({ latest: { scenarioId, taskId: task.id, status: 'go format verification', command: spec.command } });
+            const verification = evaluateCommandResult(
+              spec,
+              await postExecutor.exec({ command: spec.command, workdir: workDir, timeout: 60000, maxOutputBytes: 60000 })
+            );
+            activeTaskResult.verification.commands.push(verificationRecord(task.id, spec.command, verification));
+          }
+        }
+        if (activeTaskResult.changedFiles.untracked?.length) {
+          const untrackedWhitespace = await postExecutor.untrackedWhitespaceCheck({ path: workDir });
+          activeTaskResult.verification.commands.push(verificationRecord(
+            task.id,
+            'untracked whitespace check',
+            untrackedWhitespace
+          ));
+        }
         activeTaskResult.verificationClaim = classifyVerificationClaim(
           activeTaskResult.finalText || '',
-          activeTaskResult.verification.commands
+          activeTaskResult.verification.commands,
+          { toolCalls: activeTaskResult.toolCalls || [] }
         );
         activeTaskResult.setupStatus = deriveSetupStatus(activeTaskResult);
         activeTaskResult.setupCompleted = !!activeTaskResult.setupStatus?.setupCompleted;
@@ -791,9 +1070,20 @@ class SporeCodeBenchmarkRunner {
       result.git.status = await postExecutor.gitStatus({ path: workDir });
       result.git.diffStat = await postExecutor.gitDiff({ path: workDir, stat: true, limit: 30000 });
       result.git.untrackedSummary = await postExecutor.gitUntrackedSummary({ path: workDir });
+      if (result.repo?.commit) {
+        result.git.committedChanges = await runShell(`git diff --name-status ${shellQuote(result.repo.commit)}..HEAD`, {
+          cwd: workDir,
+          timeoutMs: 15000,
+        });
+      }
       if (opts.includeDiff) result.git.diff = await postExecutor.gitDiff({ path: workDir, limit: 160000 });
-      result.changedFiles = changedFileSummary(result.git.status);
-      result.verificationClaim = classifyVerificationClaim(result.finalText || '', result.verification.commands);
+      result.changedFiles = mergeChangedFileSummaries(
+        changedFileSummary(result.git.status),
+        changedFileSummaryFromNameStatus(result.git.committedChanges)
+      );
+      result.verificationClaim = classifyVerificationClaim(result.finalText || '', result.verification.commands, {
+        toolCalls: result.toolCalls || [],
+      });
       result.setupStatus = deriveSetupStatus(result);
       result.setupCompleted = !!result.setupStatus?.setupCompleted;
       result.handoffFacts = result.tasks.map(t => t.handoffFacts).filter(Boolean);
@@ -828,21 +1118,43 @@ class SporeCodeBenchmarkRunner {
       }
     } catch (e) {
       result.error = e.message;
-      if (session) {
+        if (session) {
         if (activeTaskResult) {
           activeTaskResult.error = e.message;
           activeTaskResult.finishedAt = new Date().toISOString();
           activeTaskResult.transcript = session.transcript;
           activeTaskResult.events = session.events;
+          activeTaskResult.workflowEvents = session.workflowEvents || [];
+          activeTaskResult.workflow = activeTaskResult.workflow || session.latestWorkflow || null;
           activeTaskResult.toolCalls = session.toolCalls;
           try {
             if (postExecutor) activeTaskResult.git.status = await postExecutor.gitStatus({ path: workDir });
             if (postExecutor) activeTaskResult.git.untrackedSummary = await postExecutor.gitUntrackedSummary({ path: workDir });
+            if (postExecutor && activeTaskResult.git.startHead) {
+              activeTaskResult.git.committedChanges = await runShell(`git diff --name-status ${shellQuote(activeTaskResult.git.startHead)}..HEAD`, {
+                cwd: workDir,
+                timeoutMs: 15000,
+              });
+            }
           } catch {}
-          activeTaskResult.changedFiles = changedFileSummary(activeTaskResult.git.status);
+          activeTaskResult.changedFiles = mergeChangedFileSummaries(
+            changedFileSummary(activeTaskResult.git.status),
+            changedFileSummaryFromNameStatus(activeTaskResult.git.committedChanges)
+          );
+          try {
+            if (postExecutor && activeTaskResult.changedFiles.untracked?.length) {
+              const untrackedWhitespace = await postExecutor.untrackedWhitespaceCheck({ path: workDir });
+              activeTaskResult.verification.commands.push(verificationRecord(
+                activeTaskResult.taskId,
+                'untracked whitespace check',
+                untrackedWhitespace
+              ));
+            }
+          } catch {}
           activeTaskResult.verificationClaim = classifyVerificationClaim(
             activeTaskResult.finalText || '',
-            activeTaskResult.verification.commands
+            activeTaskResult.verification.commands,
+            { toolCalls: activeTaskResult.toolCalls || [] }
           );
           activeTaskResult.setupStatus = deriveSetupStatus(activeTaskResult);
           activeTaskResult.setupCompleted = !!activeTaskResult.setupStatus?.setupCompleted;
@@ -858,20 +1170,35 @@ class SporeCodeBenchmarkRunner {
         }
         try { await session.close(false); } catch {}
       }
+      try { taskExecutor?.killAllBackground?.(); } catch {}
+      taskExecutor = null;
       try {
         if (postExecutor) {
           result.git.status = await postExecutor.gitStatus({ path: workDir });
           result.git.diffStat = await postExecutor.gitDiff({ path: workDir, stat: true, limit: 30000 });
           result.git.untrackedSummary = await postExecutor.gitUntrackedSummary({ path: workDir });
+          if (result.repo?.commit) {
+            result.git.committedChanges = await runShell(`git diff --name-status ${shellQuote(result.repo.commit)}..HEAD`, {
+              cwd: workDir,
+              timeoutMs: 15000,
+            });
+          }
         }
       } catch {}
-      result.changedFiles = changedFileSummary(result.git.status);
-      result.verificationClaim = classifyVerificationClaim(result.finalText || '', result.verification.commands);
+      result.changedFiles = mergeChangedFileSummaries(
+        changedFileSummary(result.git.status),
+        changedFileSummaryFromNameStatus(result.git.committedChanges)
+      );
+      result.verificationClaim = classifyVerificationClaim(result.finalText || '', result.verification.commands, {
+        toolCalls: result.toolCalls || [],
+      });
       result.setupStatus = deriveSetupStatus(result);
       result.setupCompleted = !!result.setupStatus?.setupCompleted;
       result.handoffFacts = result.tasks.map(t => t.handoffFacts).filter(Boolean);
       result.score = scoreScenario(result);
     } finally {
+      try { taskExecutor?.killAllBackground?.(); } catch {}
+      try { postExecutor?.killAllBackground?.(); } catch {}
       result.finishedAt = new Date().toISOString();
     }
     return result;
@@ -955,7 +1282,12 @@ module.exports = {
     compactOutput,
     makeCanary,
     mapWithConcurrency,
+    changedFileSummaryFromNameStatus,
     compactReportForStorage,
+    inferGoFormatCheckCommands,
+    inferChangedTestVerificationCommands,
+    isTestFilePath,
+    mergeChangedFileSummaries,
     runShell,
     safeIdPart,
     summarizeEventEntries,
