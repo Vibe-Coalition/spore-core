@@ -92,6 +92,17 @@ COPY src/plugins/ ./plugins/
 # Layered on top of the manager files; manager.loadAll() filters to subdirs
 # with manifests, so the .js files at the top level are ignored.
 COPY plugins/ ./plugins/
+
+# Bundled plugins own their optional npm dependencies. The repo-level
+# .dockerignore excludes node_modules, so install locked plugin deps inside the
+# image or hot-installing a bundled provider can fail with module-not-found.
+RUN set -eux; \
+    find ./plugins -mindepth 2 -maxdepth 2 -name package-lock.json -print | while read -r lockfile; do \
+      dir="$(dirname "$lockfile")"; \
+      npm ci --omit=dev --prefix "$dir"; \
+    done; \
+    npm cache clean --force
+
 COPY src/lib/ ./lib/
 COPY src/reference-nodes.sql ./
 COPY src/migrate-ref-*.sql ./
