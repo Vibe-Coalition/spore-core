@@ -1009,6 +1009,17 @@ const SETTINGS_RUNTIME_QUEUE_LANE_HELP = {
   maintenance: 'Operational upkeep: graph maintenance, janitor runs, backups, and manual maintenance actions.',
   background: 'Low-priority enrichment jobs such as General KB research, channel distillation, and graph side work.',
 };
+const SETTINGS_LEARNER_PLATFORMS = ['web', 'cli', 'telegram', 'slack', 'discord', 'chatroom', 'api', 'unknown'];
+const SETTINGS_LEARNER_PLATFORM_LABELS = {
+  web: 'Web',
+  cli: 'Spore Code',
+  telegram: 'Telegram',
+  slack: 'Slack',
+  discord: 'Discord',
+  chatroom: 'Chatroom',
+  api: 'API',
+  unknown: 'Unknown',
+};
 
 function _settingsCheckboxIfPresent(id) {
   const el = document.getElementById(id);
@@ -1035,6 +1046,59 @@ function _settingsRuntimeLaneLimitsPayload() {
     out[lane] = _settingsPositiveNumberIfPresent(`settings-runtime-lane-${lane}`, SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1, { integer: true }) || SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1;
   }
   return out;
+}
+
+function _settingsLearnerModeValue(data) {
+  const learningMode = _settingsCanonicalValue(data, 'learningMode', 'always');
+  if (learningMode === 'disabled' || learningMode === 'flush_only') return learningMode;
+  const activation = _settingsCanonicalValue(data, 'learnerActivationMode', 'every_turn');
+  return activation === 'idle_batch' ? 'idle_batch' : 'every_turn';
+}
+
+function _settingsApplyLearnerModeAvailability() {
+  const mode = document.getElementById('settings-learner-activation-mode')?.value || 'every_turn';
+  const disabled = mode === 'disabled' || mode === 'flush_only';
+  const idle = mode === 'idle_batch';
+  for (const id of [
+    'settings-learner-idle-delay',
+    'settings-learner-batch-min',
+    'settings-learner-batch-max',
+  ]) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !idle;
+  }
+  const minChars = document.getElementById('settings-learner-min-chars');
+  if (minChars) minChars.disabled = disabled;
+  for (const platform of SETTINGS_LEARNER_PLATFORMS) {
+    const el = document.getElementById(`settings-learner-platform-${platform}`);
+    if (el) el.disabled = disabled;
+  }
+}
+
+function _settingsLearnerPlatformsPayload() {
+  if (!document.getElementById('settings-learner-platform-web')) return undefined;
+  return SETTINGS_LEARNER_PLATFORMS.filter(platform =>
+    !!document.getElementById(`settings-learner-platform-${platform}`)?.checked
+  );
+}
+
+function _settingsLearnerModePatch(patch) {
+  const select = document.getElementById('settings-learner-activation-mode');
+  if (!select) return;
+  const mode = select.value || 'every_turn';
+  if (mode === 'disabled') {
+    patch.learningMode = 'disabled';
+    patch.learnerActivationMode = 'every_turn';
+  } else if (mode === 'flush_only') {
+    patch.learningMode = 'flush_only';
+    patch.learnerActivationMode = 'every_turn';
+  } else if (mode === 'idle_batch') {
+    patch.learningMode = 'always';
+    patch.learnerActivationMode = 'idle_batch';
+  } else {
+    patch.learningMode = 'always';
+    patch.learnerActivationMode = 'every_turn';
+  }
 }
 
 function _settingsEnsureGraphRuntimeStyles() {
@@ -1094,6 +1158,67 @@ function _settingsEnsureGraphRuntimeControls() {
   const janitorRow = document.getElementById('settings-janitor-run')?.closest('div');
   if (janitorRow && janitorRow.parentElement === section) section.insertBefore(wrap, janitorRow);
   else section.appendChild(wrap);
+}
+
+function _settingsEnsureLearnerActivationControls() {
+  if (document.getElementById('settings-learner-activation-controls')) return;
+  const anchor = document.getElementById('settings-enhanced-recall')?.closest('.settings-section');
+  if (!anchor) return;
+  _settingsEnsureGraphRuntimeStyles();
+  const section = document.createElement('div');
+  section.className = 'settings-section wide';
+  section.id = 'settings-learner-activation-section';
+  section.setAttribute('data-target-tab', 'graph-memory');
+  section.innerHTML = `
+    <h4>Learner activation</h4>
+    <div class="settings-note">Controls when conversation turns become learner jobs. Compaction and manual session distill can still run when after-turn learning is paused.</div>
+    <div id="settings-learner-activation-controls">
+      <div class="settings-runtime-card">
+        <div class="settings-runtime-card-head">
+          <div>
+            <div class="settings-runtime-card-title">After-turn learner</div>
+            <span class="settings-runtime-status">Applies to web, Spore Code, channels, and API sessions.</span>
+          </div>
+          <select id="settings-learner-activation-mode" aria-label="Learner activation mode">
+            <option value="every_turn">Every turn</option>
+            <option value="idle_batch">Idle/batched</option>
+            <option value="flush_only">Compaction/manual only</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </div>
+        <div class="settings-runtime-grid">
+          <div>
+            <label for="settings-learner-idle-delay">Idle delay seconds</label>
+            <input id="settings-learner-idle-delay" type="number" min="1" step="1" placeholder="45">
+          </div>
+          <div>
+            <label for="settings-learner-batch-min">Minimum turns</label>
+            <input id="settings-learner-batch-min" type="number" min="1" step="1" placeholder="1">
+          </div>
+          <div>
+            <label for="settings-learner-batch-max">Maximum turns</label>
+            <input id="settings-learner-batch-max" type="number" min="1" step="1" placeholder="6">
+          </div>
+          <div>
+            <label for="settings-learner-min-chars">Minimum exchange chars</label>
+            <input id="settings-learner-min-chars" type="number" min="1" step="1" placeholder="20">
+          </div>
+        </div>
+        <div class="settings-learner-platforms">
+          ${SETTINGS_LEARNER_PLATFORMS.map(platform => `
+            <label class="settings-check" for="settings-learner-platform-${platform}">
+              <input id="settings-learner-platform-${platform}" type="checkbox">
+              <span>${SETTINGS_LEARNER_PLATFORM_LABELS[platform] || platform}</span>
+            </label>
+          `).join('')}
+        </div>
+        <div class="settings-runtime-note">Idle batches are isolated by graph, platform, and session so one user's channel context cannot merge into another user's CLI or web graph.</div>
+      </div>
+    </div>
+  `;
+  anchor.insertAdjacentElement('afterend', section);
+  const select = section.querySelector('#settings-learner-activation-mode');
+  select?.addEventListener('change', _settingsApplyLearnerModeAvailability);
 }
 
 function _settingsEnsureCoreRuntimeControls() {
@@ -1175,6 +1300,7 @@ function _settingsSetRuntimeChecked(id, value) {
 
 function _populateGraphRuntimeSettings(data) {
   _settingsEnsureGraphRuntimeControls();
+  _settingsEnsureLearnerActivationControls();
   _settingsEnsureCoreRuntimeControls();
   _settingsSetRuntimeChecked('settings-graph-maintenance-enabled',
     _settingsCanonicalValue(data, 'graphMaintenanceEnabled', true));
@@ -1199,6 +1325,23 @@ function _populateGraphRuntimeSettings(data) {
   for (const lane of SETTINGS_RUNTIME_QUEUE_LANES) {
     _settingsSetRuntimeInput(`settings-runtime-lane-${lane}`, Math.floor(_settingsNumberValue(lanes[lane], SETTINGS_RUNTIME_QUEUE_DEFAULT_LANES[lane] || 1)));
   }
+  const learnerMode = document.getElementById('settings-learner-activation-mode');
+  if (learnerMode) learnerMode.value = _settingsLearnerModeValue(data);
+  _settingsSetRuntimeInput('settings-learner-idle-delay',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'learnerIdleDelaySeconds', 45), 45)));
+  _settingsSetRuntimeInput('settings-learner-batch-min',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'learnerBatchMinTurns', 1), 1)));
+  _settingsSetRuntimeInput('settings-learner-batch-max',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'learnerBatchMaxTurns', 6), 6)));
+  _settingsSetRuntimeInput('settings-learner-min-chars',
+    Math.floor(_settingsNumberValue(_settingsCanonicalValue(data, 'learnerMinExchangeChars', 20), 20)));
+  const enabledPlatforms = new Set((_settingsCanonicalValue(data, 'learnerEnabledPlatforms', SETTINGS_LEARNER_PLATFORMS) || SETTINGS_LEARNER_PLATFORMS)
+    .map(v => String(v || '').trim().toLowerCase())
+    .filter(Boolean));
+  for (const platform of SETTINGS_LEARNER_PLATFORMS) {
+    _settingsSetRuntimeChecked(`settings-learner-platform-${platform}`, enabledPlatforms.has(platform));
+  }
+  _settingsApplyLearnerModeAvailability();
   _runtimeQueueRefreshStatus();
 }
 
@@ -1277,6 +1420,17 @@ function _buildSettingsPatchPayload(modelLimits, models) {
     _settingsRuntimeLaneLimitsPayload());
   _settingsPatchIfPresent(patch, 'nodePerformanceMetricViz',
     _settingsCheckboxIfPresent('settings-node-performance-metric-viz'));
+  _settingsLearnerModePatch(patch);
+  _settingsPatchIfPresent(patch, 'learnerIdleDelaySeconds',
+    _settingsPositiveNumberIfPresent('settings-learner-idle-delay', 45, { integer: true }));
+  _settingsPatchIfPresent(patch, 'learnerBatchMinTurns',
+    _settingsPositiveNumberIfPresent('settings-learner-batch-min', 1, { integer: true }));
+  _settingsPatchIfPresent(patch, 'learnerBatchMaxTurns',
+    _settingsPositiveNumberIfPresent('settings-learner-batch-max', 6, { integer: true }));
+  _settingsPatchIfPresent(patch, 'learnerMinExchangeChars',
+    _settingsPositiveNumberIfPresent('settings-learner-min-chars', 20, { integer: true }));
+  _settingsPatchIfPresent(patch, 'learnerEnabledPlatforms',
+    _settingsLearnerPlatformsPayload());
 
   for (const [tier, value] of Object.entries(models || {})) {
     patch[`models.${tier}`] = _settingsComposeModelRef(value.provider, value.model);

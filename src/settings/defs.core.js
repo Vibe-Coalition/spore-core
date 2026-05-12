@@ -18,6 +18,16 @@ const { register } = require('./registry');
 // Helper for repetitive registration patterns ─────────────────────────
 function R(def) { return register(def); }
 
+const LEARNER_ENABLED_PLATFORMS = new Set([
+  'web', 'cli', 'telegram', 'slack', 'discord', 'chatroom', 'api', 'unknown',
+]);
+
+function learnerPlatformListError(value) {
+  if (!Array.isArray(value) || value.length === 0) return 'must include at least one platform';
+  const invalid = value.filter(v => !LEARNER_ENABLED_PLATFORMS.has(String(v).toLowerCase()));
+  return invalid.length ? `unknown learner platform(s): ${invalid.join(', ')}` : null;
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Bootstrap (read before settings.db opens — env-only)
 // ──────────────────────────────────────────────────────────────────────
@@ -180,7 +190,7 @@ R({ key: 'voice.maxUtteranceSecs',  type: 'integer', default: 30,
 // ──────────────────────────────────────────────────────────────────────
 // Proactive outreach
 // ──────────────────────────────────────────────────────────────────────
-R({ key: 'proactive.enabled',         type: 'boolean', default: true, envVar: 'SPORE_PROACTIVE_ENABLED',
+R({ key: 'proactive.enabled',         type: 'boolean', default: false, envVar: 'SPORE_PROACTIVE_ENABLED',
     scope: ['server', 'settings', 'runtime'], group: 'proactive' });
 R({ key: 'proactive.cooldownMinutes', type: 'integer', default: 60, envVar: 'SPORE_PROACTIVE_COOLDOWN',
     scope: ['server', 'settings', 'runtime'], group: 'proactive',
@@ -337,6 +347,31 @@ R({ key: 'compactTokenThreshold',    type: 'integer', default: 120000, envVar: '
 R({ key: 'learningMode',       type: 'enum', default: 'always',
     enum: ['always', 'flush_only', 'disabled'], envVar: 'SPORE_LEARNING_MODE',
     scope: ['server', 'settings', 'runtime'], group: 'learning' });
+R({ key: 'learnerActivationMode', type: 'enum', default: 'every_turn',
+    enum: ['every_turn', 'idle_batch'], envVar: 'SPORE_LEARNER_ACTIVATION_MODE',
+    scope: ['server', 'settings', 'runtime'], group: 'learning' });
+R({ key: 'learnerIdleDelaySeconds', type: 'integer', default: 45,
+    envVar: 'SPORE_LEARNER_IDLE_DELAY_SECONDS',
+    scope: ['server', 'settings', 'runtime'], group: 'learning',
+    validate: v => v >= 1 ? null : 'must be ≥1' });
+R({ key: 'learnerBatchMinTurns', type: 'integer', default: 1,
+    envVar: 'SPORE_LEARNER_BATCH_MIN_TURNS',
+    scope: ['server', 'settings', 'runtime'], group: 'learning',
+    validate: v => v >= 1 ? null : 'must be ≥1' });
+R({ key: 'learnerBatchMaxTurns', type: 'integer', default: 6,
+    envVar: 'SPORE_LEARNER_BATCH_MAX_TURNS',
+    scope: ['server', 'settings', 'runtime'], group: 'learning',
+    validate: v => v >= 1 ? null : 'must be ≥1' });
+R({ key: 'learnerMinExchangeChars', type: 'integer', default: 20,
+    envVar: 'SPORE_LEARNER_MIN_EXCHANGE_CHARS',
+    scope: ['server', 'settings', 'runtime'], group: 'learning',
+    validate: v => v >= 1 ? null : 'must be ≥1' });
+R({ key: 'learnerEnabledPlatforms', type: 'array<string>',
+    default: [...LEARNER_ENABLED_PLATFORMS],
+    envVar: 'SPORE_LEARNER_ENABLED_PLATFORMS',
+    scope: ['server', 'settings', 'runtime'], group: 'learning',
+    coerce: v => Array.isArray(v) ? [...new Set(v.map(x => String(x).trim().toLowerCase()).filter(Boolean))] : v,
+    validate: learnerPlatformListError });
 R({ key: 'maintainerIdleOnly', type: 'boolean', default: false, envVar: 'SPORE_MAINTAINER_IDLE_ONLY',
     scope: ['server', 'settings'], group: 'learning' });
 R({ key: 'enhancedRecall',     type: 'boolean', default: false,

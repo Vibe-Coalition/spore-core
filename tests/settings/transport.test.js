@@ -23,6 +23,9 @@ function freshSettings() {
   process.env.SPORE_DATA_DIR = tmp;
   delete process.env.OPENAI_API_KEY;
   delete process.env.SPORE_PLANNER_MODEL;
+  delete process.env.SPORE_PROACTIVE_ENABLED;
+  delete process.env.SPORE_LEARNER_ACTIVATION_MODE;
+  delete process.env.SPORE_LEARNER_ENABLED_PLATFORMS;
   const settings = require('../../src/settings');
   settings.boot({ skipLegacy: true });
   return { settings, tmp };
@@ -87,6 +90,41 @@ test('out-of-range integer rejected via per-def validate', () => {
     () => settings.applyPatch({ 'voice.silenceThresholdMs': 50 }),  // min is 100
     err => err.errors[0].key === 'voice.silenceThresholdMs'
   );
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('learner activation settings are typed and proactive defaults off', () => {
+  const { settings, tmp } = freshSettings();
+  assert.equal(settings.get('proactive.enabled'), false);
+  assert.equal(settings.get('learningMode'), 'always');
+  assert.equal(settings.get('learnerActivationMode'), 'every_turn');
+  assert.deepEqual(settings.get('learnerEnabledPlatforms'), ['web', 'cli', 'telegram', 'slack', 'discord', 'chatroom', 'api', 'unknown']);
+
+  settings.applyPatch({
+    learnerActivationMode: 'idle_batch',
+    learnerIdleDelaySeconds: 30,
+    learnerBatchMinTurns: 2,
+    learnerBatchMaxTurns: 5,
+    learnerMinExchangeChars: 64,
+    learnerEnabledPlatforms: ['web', 'cli'],
+  });
+
+  assert.equal(settings.get('learnerActivationMode'), 'idle_batch');
+  assert.equal(settings.get('learnerIdleDelaySeconds'), 30);
+  assert.equal(settings.get('learnerBatchMinTurns'), 2);
+  assert.equal(settings.get('learnerBatchMaxTurns'), 5);
+  assert.equal(settings.get('learnerMinExchangeChars'), 64);
+  assert.deepEqual(settings.get('learnerEnabledPlatforms'), ['web', 'cli']);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('invalid learner platform list is rejected atomically', () => {
+  const { settings, tmp } = freshSettings();
+  assert.throws(
+    () => settings.applyPatch({ learnerActivationMode: 'idle_batch', learnerEnabledPlatforms: ['web', 'fax'] }),
+    err => err.errors.some(e => e.key === 'learnerEnabledPlatforms')
+  );
+  assert.equal(settings.get('learnerActivationMode'), 'every_turn');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 

@@ -427,3 +427,40 @@ test('wakeup session callbacks stop after first delivered route', async () => {
     fixture.cleanup();
   }
 });
+
+test('learner.extract handler accepts scoped batched entries', async () => {
+  const fixture = makeDb();
+  const calls = [];
+  const learner = {
+    async extractAndLearn() {
+      throw new Error('single extractor should not be used for batched payload');
+    },
+    async extractBatchAndLearn(entries, opts) {
+      calls.push({ entries, opts });
+      return { processed: entries.length };
+    },
+  };
+  const queue = makeQueue(fixture.sessions, { learner });
+
+  try {
+    const result = await queue.submitWorkerJob('learner.extract', {
+      entries: [
+        { userMessage: 'first', assistantResponse: 'first answer', opts: { platform: 'web' } },
+        { userMessage: 'second', assistantResponse: 'second answer', opts: { platform: 'web' } },
+      ],
+    }, {
+      awaitResult: true,
+      lane: 'learner',
+      sessionKey: 'web:tester',
+      graph: 'user-tester',
+    });
+
+    assert.deepEqual(result, { processed: 2 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].entries.length, 2);
+    assert.ok(calls[0].opts.queueJob);
+  } finally {
+    queue.stop();
+    fixture.cleanup();
+  }
+});

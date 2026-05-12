@@ -290,6 +290,21 @@ class RuntimeJobQueue {
     this.registerHandler('learner.extract', payload => {
       const learner = this.learner || this.workerDeps.learner;
       if (!learner?.extractAndLearn) return { skipped: 'learner-unavailable' };
+      if (Array.isArray(payload.entries)) {
+        if (learner.extractBatchAndLearn) {
+          return learner.extractBatchAndLearn(payload.entries, {
+            ...(payload.opts || {}),
+            queueJob: payload.queueJob || null,
+          });
+        }
+        return Promise.all(payload.entries.map(entry =>
+          learner.extractAndLearn(entry.userMessage, entry.assistantResponse, {
+            ...(payload.opts || {}),
+            ...(entry.opts || {}),
+            queueJob: payload.queueJob || null,
+          })
+        ));
+      }
       return learner.extractAndLearn(payload.userMessage, payload.assistantResponse, {
         ...(payload.opts || {}),
         queueJob: payload.queueJob || null,

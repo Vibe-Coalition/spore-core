@@ -423,49 +423,86 @@ class Learner {
    * Runs extraction immediately after every conversation turn.
    */
   async extractAndLearn(userMessage, assistantResponse, opts = {}) {
+    return await this.extractBatchAndLearn([{ userMessage, assistantResponse, opts }], opts);
+  }
+
+  /**
+   * Extract and learn from one or more scoped conversation exchanges.
+   * Batches are expected to already be isolated by graph/platform/session.
+   */
+  async extractBatchAndLearn(entries, opts = {}) {
     this._refreshSharedGraphWriters();
-    const observedAt = opts.observedAt || new Date().toISOString();
-    const scopedOpts = { ...opts, observedAt };
-    const exchange = this._buildExchange(userMessage, assistantResponse, scopedOpts, observedAt);
-    if (exchange.length < 20) return;
+    const prepared = [];
+    const queueJob = opts.queueJob || null;
+    const minCharsRaw = Number(this.config.learnerMinExchangeChars);
+    const minChars = Number.isFinite(minCharsRaw) && minCharsRaw > 0 ? Math.floor(minCharsRaw) : 20;
+    const sourceEntries = Array.isArray(entries) ? entries : [];
+    const batchHashes = new Set();
 
-    let episodeId = null;
-    try {
-      episodeId = this.storeEpisode(userMessage, assistantResponse, {
-        sessionId: opts.channelName || opts.userId || 'conversation',
+    for (const rawEntry of sourceEntries) {
+      if (!rawEntry || typeof rawEntry !== 'object') continue;
+      const userMessage = rawEntry.userMessage ?? rawEntry.content ?? '';
+      const assistantResponse = rawEntry.assistantResponse ?? rawEntry.finalText ?? '';
+      const observedAt = rawEntry.observedAt || rawEntry.opts?.observedAt || opts.observedAt || new Date().toISOString();
+      const scopedOpts = {
+        ...opts,
+        ...(rawEntry.opts || {}),
         observedAt,
-        turnIdx: this.stats.runs,
-        userId: opts.userId || null,
-        userName: opts.userName || null,
-      });
-    } catch (e) { this.log.warn('[learner] storeEpisode failed: ' + e.message); }
-
-    // Per-turn dedup: SHA256 over (userMessage \0 assistantResponse). If
-    // we've already extracted from this exact exchange before, skip the
-    // LLM call. The episode is still recorded — the dedup only short-
-    // circuits the expensive extraction step.
-    const contentHash = require('crypto').createHash('sha256')
-      .update(String(userMessage || ''))
-      .update('\x00')
-      .update(String(assistantResponse || ''))
-      .digest('hex');
-    try {
-      const seen = this.db.prepare('SELECT 1 FROM learner_processed WHERE content_hash = ?').get(contentHash);
-      if (seen) {
+        queueJob: rawEntry.opts?.queueJob || queueJob,
+      };
+      const exchange = this._buildExchange(userMessage, assistantResponse, scopedOpts, observedAt);
+      if (exchange.length < minChars) {
         this.stats.skipped++;
-        this.log.info(`[learner] Skipped extraction — exchange already processed (hash=${contentHash.slice(0, 8)})`);
-        graphEvents.emit('change', { op: 'learner:skip', reason: 'duplicate-exchange', source: 'learner' });
-        return;
+        graphEvents.emit('change', { op: 'learner:skip', reason: 'exchange-too-short', source: 'learner' });
+        continue;
       }
-    } catch (e) { this.log.warn('[learner] dedup lookup failed: ' + e.message); }
 
-    const entry = { userMessage, assistantResponse, opts: scopedOpts, exchange, observedAt, episodeId, contentHash };
+      let episodeId = null;
+      try {
+        episodeId = this.storeEpisode(userMessage, assistantResponse, {
+          sessionId: scopedOpts.channelName || scopedOpts.userId || 'conversation',
+          observedAt,
+          turnIdx: this.stats.runs + prepared.length,
+          userId: scopedOpts.userId || null,
+          userName: scopedOpts.userName || null,
+        });
+      } catch (e) { this.log.warn('[learner] storeEpisode failed: ' + e.message); }
 
-    if (this._queueJobShouldYield(scopedOpts.queueJob)) return { yielded: true };
+      // Per-turn dedup: SHA256 over (userMessage \0 assistantResponse). If
+      // we've already extracted from this exact exchange before, skip the
+      // LLM call. The episode is still recorded — the dedup only short-
+      // circuits the expensive extraction step.
+      const contentHash = require('crypto').createHash('sha256')
+        .update(String(userMessage || ''))
+        .update('\x00')
+        .update(String(assistantResponse || ''))
+        .digest('hex');
+      if (batchHashes.has(contentHash)) {
+        this.stats.skipped++;
+        graphEvents.emit('change', { op: 'learner:skip', reason: 'duplicate-exchange', source: 'learner' });
+        continue;
+      }
+      try {
+        const seen = this.db.prepare('SELECT 1 FROM learner_processed WHERE content_hash = ?').get(contentHash);
+        if (seen) {
+          this.stats.skipped++;
+          this.log.info(`[learner] Skipped extraction — exchange already processed (hash=${contentHash.slice(0, 8)})`);
+          graphEvents.emit('change', { op: 'learner:skip', reason: 'duplicate-exchange', source: 'learner' });
+          continue;
+        }
+      } catch (e) { this.log.warn('[learner] dedup lookup failed: ' + e.message); }
+
+      batchHashes.add(contentHash);
+      prepared.push({ userMessage, assistantResponse, opts: scopedOpts, exchange, observedAt, episodeId, contentHash });
+    }
+
+    if (prepared.length === 0) return { skipped: 'empty-batch' };
+
+    if (this._queueJobShouldYield(prepared[prepared.length - 1].opts.queueJob)) return { yielded: true };
 
     if (this._running || this._llmBusy) {
       const reason = this._running ? 'already-running' : 'llm-busy';
-      if (scopedOpts.queueJob) {
+      if (prepared[prepared.length - 1].opts.queueJob) {
         this.log.info(`[learner] Runtime queue yield — ${reason}`);
         return { yielded: true };
       }
@@ -475,14 +512,14 @@ class Learner {
         graphEvents.emit('change', { op: 'learner:skip', reason: `${reason}-queue-full`, source: 'learner' });
         return;
       }
-      this._queue.push({ batch: [entry] });
+      this._queue.push({ batch: prepared });
       this.stats.queued++;
       this.log.info(`[learner] Extraction queued — ${reason} (queue depth ${this._queue.length}/${this._maxQueue})`);
       graphEvents.emit('change', { op: 'learner:queue', reason, queueDepth: this._queue.length, source: 'learner' });
       return;
     }
 
-    return await this._processBatchExtraction([entry]);
+    return await this._processBatchExtraction(prepared);
   }
 
 

@@ -7,11 +7,16 @@
   #onboarding-overlay {
     position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center;
     color: var(--text);
+    color-scheme: dark;
+    accent-color: var(--accent);
     background-color: var(--graph-bg);
     background-image:
       radial-gradient(circle at 22% 32%, var(--graph-glow-1) 0%, transparent 42%),
       radial-gradient(circle at 78% 68%, var(--graph-glow-2) 0%, transparent 48%),
       radial-gradient(circle at 55% 85%, var(--graph-glow-3) 0%, transparent 40%);
+  }
+  [data-theme="light"] #onboarding-overlay {
+    color-scheme: light;
   }
   #onboarding-overlay.hidden { display: none; }
   #onboarding-box {
@@ -36,9 +41,26 @@
   #onboarding-body::-webkit-scrollbar-track { background: transparent; }
   #onboarding-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
   #onboarding-body::-webkit-scrollbar-thumb:hover { background: var(--accent); }
-  /* Inputs + selects: themed scrollbars too */
+  /* Inputs + selects: let native controls follow the active wizard theme.
+     The old hard-coded dark color-scheme left black native accents behind in
+     light mode, especially checkboxes, radios, text caret/selection, and
+     autofill surfaces. */
   #onboarding-overlay input, #onboarding-overlay select, #onboarding-overlay textarea {
-    color-scheme: dark;
+    color-scheme: inherit;
+    accent-color: var(--accent);
+    caret-color: var(--accent);
+  }
+  #onboarding-overlay input::placeholder,
+  #onboarding-overlay textarea::placeholder {
+    color: color-mix(in srgb, var(--text-dim) 72%, transparent);
+  }
+  #onboarding-overlay input[type="checkbox"],
+  #onboarding-overlay input[type="radio"] {
+    flex: 0 0 auto;
+    inline-size: 16px;
+    block-size: 16px;
+    margin: 0;
+    accent-color: var(--accent);
   }
   .ob-models-row {
     display: flex; gap: 6px; align-items: stretch;
@@ -69,13 +91,30 @@
     display: block; font-size: .68rem; color: var(--text-dim); letter-spacing: .08em;
     text-transform: uppercase; margin: 14px 0 4px;
   }
-  .ob-step input[type="text"], .ob-step input[type="password"], .ob-step input[type="url"], .ob-step select {
+  .ob-step input[type="text"],
+  .ob-step input[type="password"],
+  .ob-step input[type="url"],
+  .ob-step input[type="email"],
+  .ob-step input[type="number"],
+  .ob-step input[type="search"],
+  .ob-step textarea,
+  .ob-step select {
     width: 100%; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px;
     background: var(--bg); color: var(--text-bright); font-size: .92rem; outline: none;
     font-family: inherit;
-    transition: border-color .2s ease, box-shadow .2s ease;
+    transition: border-color .2s ease, box-shadow .2s ease, background-color .2s ease;
   }
-  .ob-step input:focus, .ob-step select:focus {
+  [data-theme="light"] .ob-step input[type="text"],
+  [data-theme="light"] .ob-step input[type="password"],
+  [data-theme="light"] .ob-step input[type="url"],
+  [data-theme="light"] .ob-step input[type="email"],
+  [data-theme="light"] .ob-step input[type="number"],
+  [data-theme="light"] .ob-step input[type="search"],
+  [data-theme="light"] .ob-step textarea,
+  [data-theme="light"] .ob-step select {
+    background: color-mix(in srgb, var(--panel) 76%, #fff 24%);
+  }
+  .ob-step input:focus, .ob-step select:focus, .ob-step textarea:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
   }

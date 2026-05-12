@@ -1496,7 +1496,8 @@
 	  }
 
 	  #settings-graph-runtime-controls,
-	  #settings-core-runtime-controls {
+	  #settings-core-runtime-controls,
+	  #settings-learner-activation-controls {
 	    margin-top: 14px;
 	    margin-bottom: 16px;
 	    display: grid;
@@ -1543,6 +1544,20 @@
 	    padding: 6px 8px;
 	    font-size: .76rem;
 	  }
+	  .settings-runtime-card-head select {
+	    min-width: 180px;
+	    padding: 6px 8px;
+	    font-size: .76rem;
+	  }
+	  .settings-learner-platforms {
+	    display: flex;
+	    flex-wrap: wrap;
+	    gap: 6px 12px;
+	    margin-top: 10px;
+	  }
+	  .settings-learner-platforms .settings-check {
+	    margin: 0;
+	  }
 	  .settings-runtime-lane-control {
 	    display: grid;
 	    gap: 4px;
@@ -1587,4 +1602,5 @@
 	    .settings-runtime-card-head { align-items: flex-start; flex-direction: column; }
 	    .settings-runtime-grid { grid-template-columns: 1fr; }
 	    .settings-runtime-card .settings-check { white-space: normal; }
+	    .settings-runtime-card-head select { width: 100%; min-width: 0; }
 	  }

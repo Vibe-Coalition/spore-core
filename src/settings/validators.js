@@ -75,7 +75,7 @@ function coerceValue(def, raw) {
       }
       if (!Array.isArray(arr)) return { error: 'expected array' };
       const out = arr.map(v => String(v).trim()).filter(Boolean);
-      return { value: out };
+      return { value: def.coerce ? def.coerce(out) : out };
     }
     case 'json': {
       if (typeof raw === 'string') {

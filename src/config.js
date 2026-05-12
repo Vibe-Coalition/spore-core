@@ -90,6 +90,12 @@ const DEFAULTS = {
 
   // Learner
   learningMode: 'always', // 'always' | 'flush_only' | 'disabled'
+  learnerActivationMode: 'every_turn', // 'every_turn' | 'idle_batch'
+  learnerIdleDelaySeconds: 45,
+  learnerBatchMinTurns: 1,
+  learnerBatchMaxTurns: 6,
+  learnerMinExchangeChars: 20,
+  learnerEnabledPlatforms: ['web', 'cli', 'telegram', 'slack', 'discord', 'chatroom', 'api', 'unknown'],
   subagentMaxTokens: null, // null = auto, derived from the active model's modelLimits[].maxTokens
   maintainerIdleOnly: false,
   // SPORE_LEARNER_HYPEREDGES — when true, the extraction prompt asks the
@@ -272,7 +278,7 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
 
   // Proactive outreach (heartbeat-triggered, personality-gated)
   proactive: {
-    enabled: true,
+    enabled: false,
     cooldownMinutes: 60,
     maxPerDay: 5,
     channels: [],
@@ -522,6 +528,29 @@ function loadConfigFresh() {
     if (['quick', 'balanced', 'deep'].includes(e)) config.agentEffort = e;
   }
   if (process.env.SPORE_LEARNING_MODE) config.learningMode = process.env.SPORE_LEARNING_MODE;
+  if (process.env.SPORE_LEARNER_ACTIVATION_MODE) config.learnerActivationMode = process.env.SPORE_LEARNER_ACTIVATION_MODE;
+  if (process.env.SPORE_LEARNER_IDLE_DELAY_SECONDS) {
+    const n = parseInt(process.env.SPORE_LEARNER_IDLE_DELAY_SECONDS, 10);
+    if (Number.isFinite(n) && n > 0) config.learnerIdleDelaySeconds = n;
+  }
+  if (process.env.SPORE_LEARNER_BATCH_MIN_TURNS) {
+    const n = parseInt(process.env.SPORE_LEARNER_BATCH_MIN_TURNS, 10);
+    if (Number.isFinite(n) && n > 0) config.learnerBatchMinTurns = n;
+  }
+  if (process.env.SPORE_LEARNER_BATCH_MAX_TURNS) {
+    const n = parseInt(process.env.SPORE_LEARNER_BATCH_MAX_TURNS, 10);
+    if (Number.isFinite(n) && n > 0) config.learnerBatchMaxTurns = n;
+  }
+  if (process.env.SPORE_LEARNER_MIN_EXCHANGE_CHARS) {
+    const n = parseInt(process.env.SPORE_LEARNER_MIN_EXCHANGE_CHARS, 10);
+    if (Number.isFinite(n) && n > 0) config.learnerMinExchangeChars = n;
+  }
+  if (process.env.SPORE_LEARNER_ENABLED_PLATFORMS) {
+    config.learnerEnabledPlatforms = process.env.SPORE_LEARNER_ENABLED_PLATFORMS
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean);
+  }
   if (process.env.SPORE_MAINTAINER_IDLE_ONLY) config.maintainerIdleOnly = process.env.SPORE_MAINTAINER_IDLE_ONLY === 'true';
 
   // Web server port (0 / unset = disabled)
@@ -925,7 +954,9 @@ function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
     'subagentMaxTokens', 'subagentMaxIter', 'subagentTimeoutSeconds',
     'maxSubagentChildren', 'lullMaxIterations',
     'tokenBudgetPressure', 'intermediateTextThrottleSeconds',
-    'openaiReasoningEffort', 'learningMode', 'maintainerIdleOnly',
+    'openaiReasoningEffort', 'learningMode', 'learnerActivationMode',
+    'learnerIdleDelaySeconds', 'learnerBatchMinTurns', 'learnerBatchMaxTurns',
+    'learnerMinExchangeChars', 'learnerEnabledPlatforms', 'maintainerIdleOnly',
     'tempNodeTtlHours', 'janitorMode', 'janitorIntervalMinutes',
     'janitorRecycleBinTtlDays', 'janitorPruneBatchSize', 'janitorEnabled',
     'channelDistillerEnabled', 'channelDistillerIntervalMinutes',

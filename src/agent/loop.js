@@ -68,6 +68,7 @@ const TOOL_RESULT_CAPS = {
   graph_query:   15000,
 };
 const DUPLICATE_TOOL_BATCH_CRITICAL = 10;
+const LEARNER_DEFAULT_PLATFORMS = ['web', 'cli', 'telegram', 'slack', 'discord', 'chatroom', 'api', 'unknown'];
 const CONTEXT_OVERFLOW_RETRY_FLOOR_TOKENS = 4000;
 const CONTEXT_OVERFLOW_RETRY_FRACTION = 0.55;
 // Compaction message-window shape:
@@ -98,6 +99,7 @@ class AgentLoop {
     this.activeRuns = new Set();
     this._pendingInterjections = new Map(); // sessionKey → [content, ...]
     this._sessionWaiters = new Map();       // sessionKey → [resolve, ...]
+    this._learnerBatches = new Map();       // scoped idle-batch learner buffers
   }
 
   /**
@@ -2221,46 +2223,208 @@ class AgentLoop {
   // _firePluginAfterTurn — see plugins/spore-code/index.js.
 
 
-  /**
-   * Fire-and-forget: kick off the learner's async extractAndLearn for the
-   * just-completed turn. No-op if no finalText, no learner, or learning is
-   * disabled by config.
-   */
-  _kickOffLearnerExtraction(opts, finalText, toolLog) {
-    const learningMode = this.config.learningMode || 'always';
-    if (opts.suppressLearning === true) return;
-    if (!(finalText && this.learner && learningMode === 'always')) return;
-    const learnOpts = {
+  _normalLearnerPlatform(platform) {
+    return String(platform || 'unknown').trim().toLowerCase() || 'unknown';
+  }
+
+  _normalLearnerPlatforms(value) {
+    const raw = Array.isArray(value)
+      ? value
+      : (typeof value === 'string' ? value.split(',') : LEARNER_DEFAULT_PLATFORMS);
+    const out = raw.map(v => this._normalLearnerPlatform(v)).filter(Boolean);
+    return out.length ? [...new Set(out)] : [...LEARNER_DEFAULT_PLATFORMS];
+  }
+
+  _learnerGraphKey(opts = {}) {
+    return opts.memoryEnvelope?.primarySlug
+      || opts.graph
+      || opts.projectContext?.graphSlug
+      || opts.projectContext?.slug
+      || 'default';
+  }
+
+  _learnerSessionKey(opts = {}, platform = 'unknown') {
+    return opts.sessionKey
+      || opts.channelId
+      || opts.userId
+      || opts.channelName
+      || `${platform}:conversation`;
+  }
+
+  _learnerBatchKey(opts = {}, platform = 'unknown') {
+    return JSON.stringify({
+      graph: this._learnerGraphKey(opts),
+      platform,
+      session: this._learnerSessionKey(opts, platform),
+    });
+  }
+
+  _learnerMinExchangeChars() {
+    const n = Number(this.config.learnerMinExchangeChars);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 20;
+  }
+
+  _buildLearnerOpts(opts = {}, toolLog = []) {
+    const platform = this._normalLearnerPlatform(opts.platform);
+    return {
       userName: opts.userName,
       userId: opts.userId,
       channelName: opts.channelName,
-      toolCalls: toolLog.length > 0 ? toolLog : undefined,
-      platform: opts.platform || null,
+      toolCalls: Array.isArray(toolLog) && toolLog.length > 0 ? toolLog : undefined,
+      platform,
       projectContext: opts.projectContext || null,
       memoryEnvelope: opts.memoryEnvelope || null,
       // graphcorn: pass the sessionId (= opts.channelId for Spore Code —
-      // see web.js:4719 where agentOpts.channelId is set to the WS
-      // sessionId). The learner uses this to link every newly-
-      // created entity to the session-<id> node via a
-      // `discovered_in` edge. Only fires for cli-platform turns
+      // see web.js where agentOpts.channelId is set to the WS sessionId).
+      // The learner uses this to link every newly-created entity to the
+      // session node via a `discovered_in` edge. Only fires for cli turns
       // where the session node was actually created at session:start.
-      sessionId: opts.platform === 'cli' ? opts.channelId : null,
+      sessionId: platform === 'cli' ? opts.channelId : null,
     };
+  }
+
+  _learnerDecision(opts = {}, finalText = '') {
+    if (opts.suppressLearning === true) return { ok: false, reason: 'suppressed' };
+    if (!this.learner) return { ok: false, reason: 'learner-unavailable' };
+    if (!String(finalText || '').trim()) return { ok: false, reason: 'empty-assistant-response' };
+
+    const learningMode = this.config.learningMode || 'always';
+    if (learningMode === 'disabled') return { ok: false, reason: 'learning-disabled' };
+    if (learningMode === 'flush_only') return { ok: false, reason: 'flush-only' };
+    if (learningMode !== 'always') return { ok: false, reason: `unknown-learning-mode:${learningMode}` };
+
+    const platform = this._normalLearnerPlatform(opts.platform);
+    const enabled = this._normalLearnerPlatforms(this.config.learnerEnabledPlatforms);
+    if (!enabled.includes(platform)) return { ok: false, reason: `platform-disabled:${platform}`, platform };
+
+    const exchangeChars = `${String(opts.content || '').trim()}\n${String(finalText || '').trim()}`.trim().length;
+    if (exchangeChars < this._learnerMinExchangeChars()) {
+      return { ok: false, reason: 'exchange-too-short', platform, exchangeChars };
+    }
+
+    const mode = this.config.learnerActivationMode === 'idle_batch' ? 'idle_batch' : 'every_turn';
+    return { ok: true, mode, platform };
+  }
+
+  _submitLearnerExtraction(payload, meta) {
     const queue = this.tools?._jobQueue || this._jobQueue || null;
     if (queue?.submitWorkerJob) {
-      queue.submitWorkerJob('learner.extract', {
-        userMessage: opts.content,
-        assistantResponse: finalText,
-        opts: learnOpts,
-      }, {
+      queue.submitWorkerJob('learner.extract', payload, {
         lane: 'learner',
         priority: 40,
         route: 'learner.extract',
-        sessionKey: opts.sessionKey || null,
-        graph: opts.memoryEnvelope?.primarySlug || null,
+        ...meta,
+      });
+      return true;
+    }
+    return false;
+  }
+
+  _flushLearnerBatch(key, reason = 'idle') {
+    const batch = this._learnerBatches?.get(key);
+    if (!batch) return;
+    if (batch.timer) clearTimeout(batch.timer);
+    this._learnerBatches.delete(key);
+
+    const minTurns = Math.max(1, Math.floor(Number(this.config.learnerBatchMinTurns) || 1));
+    if (batch.entries.length < minTurns) {
+      graphEvents.emit('change', {
+        op: 'learner:skip',
+        reason: 'idle-batch-below-min-turns',
+        batchSize: batch.entries.length,
+        minTurns,
+        source: 'learner',
       });
       return;
     }
+
+    const payload = { entries: batch.entries };
+    if (this._submitLearnerExtraction(payload, batch.meta)) return;
+    if (this.learner?.extractBatchAndLearn) {
+      this.learner.extractBatchAndLearn(batch.entries)
+        .catch(e => this.log.error('[learner] Background batch extraction error:', e.message));
+    } else {
+      Promise.all(batch.entries.map(entry =>
+        this.learner.extractAndLearn(entry.userMessage, entry.assistantResponse, entry.opts)
+      )).catch(e => this.log.error('[learner] Background extraction error:', e.message));
+    }
+    graphEvents.emit('change', {
+      op: 'learner:batch-flush',
+      reason,
+      batchSize: batch.entries.length,
+      source: 'learner',
+    });
+  }
+
+  _enqueueLearnerBatch(opts, finalText, learnOpts, decision) {
+    if (!this._learnerBatches) this._learnerBatches = new Map();
+    const key = this._learnerBatchKey(opts, decision.platform);
+    const meta = {
+      sessionKey: this._learnerSessionKey(opts, decision.platform),
+      graph: this._learnerGraphKey(opts),
+    };
+    const entry = {
+      userMessage: opts.content,
+      assistantResponse: finalText,
+      opts: learnOpts,
+    };
+    let batch = this._learnerBatches.get(key);
+    if (!batch) {
+      batch = { entries: [], timer: null, meta };
+      this._learnerBatches.set(key, batch);
+    }
+    batch.entries.push(entry);
+    batch.meta = meta;
+
+    const maxTurns = Math.max(1, Math.floor(Number(this.config.learnerBatchMaxTurns) || 6));
+    if (batch.entries.length >= maxTurns) {
+      this._flushLearnerBatch(key, 'max-turns');
+      return;
+    }
+
+    const delaySeconds = Math.max(1, Math.floor(Number(this.config.learnerIdleDelaySeconds) || 45));
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = setTimeout(() => this._flushLearnerBatch(key, 'idle'), delaySeconds * 1000);
+    if (typeof batch.timer.unref === 'function') batch.timer.unref();
+    graphEvents.emit('change', {
+      op: 'learner:batch-queued',
+      batchSize: batch.entries.length,
+      maxTurns,
+      idleDelaySeconds: delaySeconds,
+      source: 'learner',
+    });
+  }
+
+  /**
+   * Fire-and-forget: kick off learner extraction for the just-completed
+   * turn. Learning mode remains the master switch; activation settings
+   * control whether eligible turns run immediately or are idle-batched.
+   */
+  _kickOffLearnerExtraction(opts, finalText, toolLog) {
+    const decision = this._learnerDecision(opts, finalText);
+    if (!decision.ok) {
+      if (decision.reason && !['suppressed', 'learner-unavailable', 'empty-assistant-response'].includes(decision.reason)) {
+        this.log.debug?.(`[learner] skipped after-turn extraction: ${decision.reason}`);
+      }
+      return;
+    }
+
+    const learnOpts = this._buildLearnerOpts(opts, toolLog);
+    if (decision.mode === 'idle_batch') {
+      this._enqueueLearnerBatch(opts, finalText, learnOpts, decision);
+      return;
+    }
+
+    const payload = {
+      userMessage: opts.content,
+      assistantResponse: finalText,
+      opts: learnOpts,
+    };
+    const meta = {
+      sessionKey: this._learnerSessionKey(opts, decision.platform),
+      graph: this._learnerGraphKey(opts),
+    };
+    if (this._submitLearnerExtraction(payload, meta)) return;
     this.learner.extractAndLearn(opts.content, finalText, learnOpts)
       .catch(e => this.log.error('[learner] Background extraction error:', e.message));
   }
