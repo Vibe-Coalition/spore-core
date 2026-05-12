@@ -156,6 +156,117 @@ function readCrontab({ includeLines = false, maxLines = 80 } = {}) {
   return result;
 }
 
+function readActiveCrontabRaw() {
+  const info = commandInfo();
+  const crontab = info.crontabWrapper || info.realCrontab;
+  if (!crontab) throw new Error('crontab command is unavailable.');
+  try {
+    return execText(crontab, ['-l'], { maxBuffer: 512 * 1024 }).replace(/\s+$/g, '');
+  } catch (e) {
+    const text = String(e.stderr || e.message || '');
+    if (/no crontab/i.test(text)) return '';
+    throw e;
+  }
+}
+
+function writeActiveCrontabRaw(raw) {
+  const info = commandInfo();
+  const crontab = info.crontabWrapper || info.realCrontab;
+  if (!crontab) throw new Error('crontab command is unavailable.');
+  const file = path.join('/tmp', `spore-cron-${process.pid}-${Date.now()}`);
+  fs.writeFileSync(file, String(raw || '').replace(/\s+$/g, '') + '\n', { mode: 0o600 });
+  try {
+    execText(crontab, [file], { timeout: 5000, maxBuffer: 256 * 1024 });
+  } finally {
+    try { fs.unlinkSync(file); } catch {}
+  }
+}
+
+function managedMarkers(name) {
+  const clean = sanitizeName(name);
+  return {
+    name: clean,
+    begin: `# SPORE-CRON-BEGIN ${clean}`,
+    end: `# SPORE-CRON-END ${clean}`,
+  };
+}
+
+function removeManagedBlock(raw, name) {
+  const markers = managedMarkers(name);
+  const lines = String(raw || '').split(/\r?\n/);
+  const kept = [];
+  let removed = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() === markers.begin) {
+      removed++;
+      while (i < lines.length && lines[i].trim() !== markers.end) i++;
+      continue;
+    }
+    kept.push(lines[i]);
+  }
+  return { raw: kept.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/g, ''), removed };
+}
+
+function installEntry(input = {}, ctx = {}) {
+  const built = input.entry ? null : buildExample(input, ctx);
+  const entry = String(input.entry || built?.entry || '').trim();
+  if (!entry) return { ok: false, error: 'entry is required unless example fields are supplied.' };
+  const name = sanitizeName(input.name || built?.name || 'cron-job');
+  const validation = validateEntry({ entry });
+  if (!validation.ok) return { ok: false, error: 'Cron entry failed validation.', validation };
+
+  const markers = managedMarkers(name);
+  const current = readActiveCrontabRaw();
+  const stripped = removeManagedBlock(current, name);
+  const existingLines = new Set(stripped.raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean));
+  const kept = stripped.raw ? stripped.raw.split(/\r?\n/) : [];
+  if (!existingLines.has(entry)) {
+    if (kept.length && kept[kept.length - 1].trim()) kept.push('');
+    kept.push(markers.begin, entry, markers.end);
+  }
+  const next = kept.join('\n').replace(/\s+$/g, '') + '\n';
+  writeActiveCrontabRaw(next);
+  return {
+    ok: true,
+    action: 'install',
+    name,
+    entry,
+    replacedManagedBlock: stripped.removed > 0,
+    alreadyPresent: existingLines.has(entry),
+    validation,
+    crontab: readCrontab({ includeLines: true }),
+  };
+}
+
+function removeEntry(input = {}) {
+  const rawName = String(input.name || '').trim();
+  const name = rawName ? sanitizeName(rawName) : '';
+  const entry = String(input.entry || '').trim();
+  if (!name && !entry) return { ok: false, error: 'name or entry is required for remove.' };
+  const current = readActiveCrontabRaw();
+  let next = current;
+  let removed = 0;
+  if (name) {
+    const stripped = removeManagedBlock(next, name);
+    next = stripped.raw;
+    removed += stripped.removed;
+  }
+  if (entry) {
+    const before = next.split(/\r?\n/);
+    const after = before.filter(line => line.trim() !== entry);
+    removed += before.length - after.length;
+    next = after.join('\n').replace(/\s+$/g, '');
+  }
+  if (removed > 0) writeActiveCrontabRaw(next);
+  return {
+    ok: true,
+    action: 'remove',
+    name: name || null,
+    removed,
+    crontab: readCrontab({ includeLines: true }),
+  };
+}
+
 function status(input = {}) {
   const persistDir = process.env.CRONTAB_PERSIST_DIR || DEFAULT_PERSIST_DIR;
   const includeCrontab = !!input.includeCrontab || input.action === 'list';
@@ -204,8 +315,9 @@ function guide() {
       'Call cron { action:"status" } to check daemon and persisted crontabs.',
       'Create cron entries with absolute paths, sparse environment assumptions, and explicit log redirection to an existing directory.',
       'Create the log directory first, for example mkdir -p /workspace/logs; if the redirect target directory is missing, the shell fails before the job command runs.',
-      'Install by replacing the current crontab with a temp file: crontab -l 2>/dev/null > /tmp/spore.cron; append the new line; crontab /tmp/spore.cron.',
       'Call cron { action:"validate", entry:"..." } before installing a new entry.',
+      'Install with cron { action:"install", name:"job-name", entry:"..." }. This preserves existing jobs and upserts only that named managed block.',
+      'Remove managed jobs with cron { action:"remove", name:"job-name" }. Do not replace the whole crontab from exec unless explicitly preserving every existing line.',
       'Use /api/proactive/trigger when a job needs to notify the operator or start an agent turn.',
     ],
     proactiveTrigger: {
@@ -332,6 +444,85 @@ function parseCronLine(line) {
   return { schedule: parts.slice(0, 5).join(' '), command: parts.slice(5).join(' '), raw: trimmed };
 }
 
+function extractJsonPayload(command) {
+  const text = String(command || '');
+  const matches = [
+    /(?:--data|-d)\s+'([^']*)'/,
+    /(?:--data|-d)\s+"([^"]*)"/,
+  ];
+  for (const re of matches) {
+    const m = re.exec(text);
+    if (!m) continue;
+    try { return JSON.parse(m[1]); } catch {}
+  }
+  return null;
+}
+
+function extractLogPath(command) {
+  return redirectTargets(command).find(t => t.startsWith('/')) || null;
+}
+
+function scheduleSummary(schedule) {
+  const raw = String(schedule || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('@')) return raw;
+  const parts = raw.split(/\s+/);
+  if (parts.length !== 5) return raw;
+  const [min, hour, dom, month, dow] = parts;
+  if (raw === '* * * * *') return 'Every minute';
+  if (/^\*\/(\d+)$/.test(min) && hour === '*' && dom === '*' && month === '*' && dow === '*') {
+    return `Every ${min.slice(2)} minutes`;
+  }
+  if (/^\d+$/.test(min) && hour === '*' && dom === '*' && month === '*' && dow === '*') {
+    return `Hourly at :${min.padStart(2, '0')}`;
+  }
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && month === '*' && dow === '*') {
+    return `Daily at ${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  }
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && month === '*' && dow !== '*') {
+    return `${raw} (${hour.padStart(2, '0')}:${min.padStart(2, '0')} on days ${dow})`;
+  }
+  return raw;
+}
+
+function listJobs() {
+  const raw = readActiveCrontabRaw();
+  const jobs = [];
+  let managedName = null;
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const begin = /^#\s*SPORE-CRON-BEGIN\s+(.+)$/.exec(trimmed);
+    if (begin) {
+      managedName = sanitizeName(begin[1]);
+      continue;
+    }
+    if (/^#\s*SPORE-CRON-END\b/.test(trimmed)) {
+      managedName = null;
+      continue;
+    }
+    const parsed = parseCronLine(line);
+    if (!parsed || !parsed.command) continue;
+    const payload = extractJsonPayload(parsed.command);
+    const inferredName = managedName
+      || sanitizeName(String(payload?.source || '').replace(/^cron:/, '') || parsed.command.split(/\s+/)[0] || 'cron-job');
+    jobs.push({
+      name: inferredName,
+      managed: !!managedName,
+      schedule: parsed.schedule,
+      summary: scheduleSummary(parsed.schedule),
+      command: parsed.command,
+      entry: parsed.raw,
+      logPath: extractLogPath(parsed.command),
+      proactive: /api\/proactive\/trigger/.test(parsed.command),
+      source: payload?.source || null,
+      mode: payload?.mode || null,
+      message: payload?.message || payload?.text || payload?.context || null,
+      channelId: payload?.channelId || payload?.target || payload?.chatId || null,
+    });
+  }
+  return jobs;
+}
+
 function commandStartsAbsolute(command) {
   let cmd = String(command || '').trim();
   cmd = cmd.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, '');
@@ -391,7 +582,61 @@ function validateEntry(input = {}) {
   };
 }
 
+function json(res, statusCode, payload) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(payload));
+}
+
+async function readJsonBody(req, limit = 64 * 1024) {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > limit) throw new Error('request body too large');
+  }
+  if (!body.trim()) return {};
+  return JSON.parse(body);
+}
+
 module.exports = function register(api) {
+  api.registerWebRoute('GET', '/jobs', (_req, res) => {
+    try {
+      json(res, 200, {
+        ok: true,
+        status: status({ includeCrontab: false }),
+        jobs: listJobs(),
+      });
+    } catch (e) {
+      json(res, 500, { ok: false, error: e.message });
+    }
+  });
+
+  api.registerWebRoute('POST', '/jobs', async (req, res) => {
+    try {
+      const body = await readJsonBody(req);
+      const result = installEntry(body);
+      json(res, result.ok ? 200 : 400, result);
+    } catch (e) {
+      json(res, 500, { ok: false, error: e.message });
+    }
+  });
+
+  api.registerWebRoute('DELETE', '/jobs', async (req, res) => {
+    try {
+      const body = await readJsonBody(req);
+      const result = removeEntry(body);
+      json(res, result.ok ? 200 : 400, result);
+    } catch (e) {
+      json(res, 500, { ok: false, error: e.message });
+    }
+  });
+
+  api.registerSettingsPane({
+    title: 'Cron',
+    description: 'Scheduled jobs in this Spore container. Jobs are persisted at /workspace/.crontabs and restored on restart.',
+    html: '<div data-plugin-mount="cron">Loading cron jobs...</div>',
+  });
+  api.registerFrontendAsset('cron-settings.js');
+
   api.registerTool('cron', {
     namespaced: false,
     available: (ctx = {}) => ctx.platform !== 'cli',
@@ -401,8 +646,8 @@ module.exports = function register(api) {
       properties: {
         action: {
           type: 'string',
-          enum: ['guide', 'status', 'list', 'example', 'validate'],
-          description: 'guide returns the cron workflow; status checks daemon and persistence state; list includes current/persisted crontab lines; example builds a safe crontab line; validate checks a crontab entry.',
+          enum: ['guide', 'status', 'list', 'example', 'validate', 'install', 'remove'],
+          description: 'guide returns the cron workflow; status checks daemon and persistence state; list includes current/persisted crontab lines; example builds a safe crontab line; validate checks a crontab entry; install upserts a named managed entry without clobbering other jobs; remove deletes a managed entry.',
         },
         includeCrontab: {
           type: 'boolean',
@@ -410,7 +655,7 @@ module.exports = function register(api) {
         },
         entry: {
           type: 'string',
-          description: 'Crontab line or full crontab text to validate when action=validate.',
+          description: 'Crontab line or full crontab text to validate when action=validate. For action=install/remove, this is the exact cron line to add/remove.',
         },
         schedule: {
           type: 'string',
@@ -422,7 +667,7 @@ module.exports = function register(api) {
         },
         name: {
           type: 'string',
-          description: 'Short job name for examples and proactive trigger source, such as "daily-report".',
+          description: 'Short job name for examples, proactive trigger source, and managed install/remove blocks, such as "daily-report".',
         },
         mode: {
           type: 'string',
@@ -457,6 +702,8 @@ module.exports = function register(api) {
       if (action === 'status' || action === 'list') return status({ ...input, action });
       if (action === 'example') return buildExample(input, ctx);
       if (action === 'validate') return validateEntry(input);
+      if (action === 'install') return installEntry(input, ctx);
+      if (action === 'remove') return removeEntry(input);
       return { ok: false, error: `Unknown cron action: ${action}` };
     },
   });

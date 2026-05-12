@@ -1,9 +1,9 @@
 {
   "id": "cron",
   "name": "Cron Runtime",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "kind": "tool",
   "entry": "./index.js",
-  "description": "Agent-facing cron runtime guide, status, examples, and crontab validation. Hidden from CLI sessions.",
+  "description": "Cron runtime guide, safe managed job install/remove, status, examples, validation, and settings UI. Hidden from CLI sessions.",
   "category": "runtime"
 }

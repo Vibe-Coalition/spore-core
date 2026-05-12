@@ -728,6 +728,13 @@
   #logs-content::-webkit-scrollbar { width: 4px; }
   #logs-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
   #logs-toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
+  #logs-status {
+    min-width: 118px;
+    color: var(--text-dim);
+    font-size: .62rem;
+    text-align: right;
+    white-space: nowrap;
+  }
   #logs-view-switcher {
     display: inline-flex; align-items: center; gap: 3px;
     padding: 2px; border: 1px solid var(--border); border-radius: 999px;

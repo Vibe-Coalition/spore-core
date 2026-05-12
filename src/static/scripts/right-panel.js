@@ -77,7 +77,7 @@ function closeRightPanel(tabId = null) {
     }
     if (activeRpTabs.size === 0) rightPanel.classList.add('closed');
     else rightPanel.classList.remove('closed');
-    if (!activeRpTabs.has('logs-pane') && logsAutoInterval) { clearInterval(logsAutoInterval); logsAutoInterval = null; }
+    if (!activeRpTabs.has('logs-pane')) _stopSystemLogAutoRefresh();
     _savePanelState();
     _syncResizeHandles();
     _syncPanelFill();
@@ -91,7 +91,7 @@ function closeRightPanel(tabId = null) {
   rpPanes.forEach(p => p.classList.remove('active'));
   activeRpTab = null;
   activeRpTabs.clear();
-  if (logsAutoInterval) { clearInterval(logsAutoInterval); logsAutoInterval = null; }
+  _stopSystemLogAutoRefresh();
   _savePanelState();
   _syncResizeHandles();
   _syncPanelFill();
@@ -118,12 +118,27 @@ const LOG_VIEWS = {
   activity: { label: 'Activity', description: 'Cross-session agent activity' },
   tokens: { label: 'Tokens', description: 'Usage and cost dashboard' },
 };
+const SYSTEM_LOG_LINES = 2000;
+const SYSTEM_LOG_REFRESH_MS = 3000;
+const SYSTEM_LOG_BOTTOM_EPSILON = 32;
 let activeLogView = (() => {
   try {
     const saved = localStorage.getItem(LOG_VIEW_STORAGE_KEY);
     return LOG_VIEWS[saved] ? saved : 'system';
   } catch { return 'system'; }
 })();
+const systemLogState = {
+  text: '',
+  loaded: false,
+  follow: true,
+  pendingText: null,
+  pendingChanged: false,
+  requestId: 0,
+  abort: null,
+  loading: false,
+  lastLoadedAt: null,
+  lastError: '',
+};
 
 function _logsEsc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -147,6 +162,17 @@ function _ensureLogsPaneSwitcher() {
     setLogView(btn.dataset.logView, { open: false });
   });
   toolbar.prepend(switcher);
+}
+
+function _ensureSystemLogControls() {
+  const toolbar = document.getElementById('logs-toolbar');
+  if (!toolbar) return;
+  if (!document.getElementById('logs-status')) {
+    const status = document.createElement('span');
+    status.id = 'logs-status';
+    status.setAttribute('aria-live', 'polite');
+    toolbar.appendChild(status);
+  }
 }
 
 function _ensureDockLogsMenu() {
@@ -182,8 +208,7 @@ function _syncLogViewUi() {
   });
   const title = document.querySelector('#logs-pane .floating-pane-title');
   if (title) title.textContent = `${LOG_VIEWS[activeLogView]?.label || 'System'} Log`;
-  const auto = document.getElementById('logs-auto');
-  if (auto) auto.style.display = activeLogView === 'system' ? '' : 'none';
+  _syncSystemLogUi();
 }
 
 function _openDockLogsMenu() {
@@ -219,8 +244,7 @@ function setLogView(view, opts = {}) {
   activeLogView = view;
   try { localStorage.setItem(LOG_VIEW_STORAGE_KEY, activeLogView); } catch {}
   if (activeLogView !== 'system' && logsAutoInterval) {
-    clearInterval(logsAutoInterval);
-    logsAutoInterval = null;
+    _stopSystemLogAutoRefresh();
   }
   _syncLogViewUi();
   if (opts.open) openRightPanel('logs-pane', false);
@@ -228,21 +252,121 @@ function setLogView(view, opts = {}) {
 }
 window.setLogView = setLogView;
 
-async function loadLogs() {
+async function loadLogs(opts = {}) {
   _syncLogViewUi();
   if (activeLogView === 'tokens') return loadTokenLog();
   if (activeLogView === 'activity') return loadActivityLog();
-  return loadSystemLog();
+  _startSystemLogAutoRefresh();
+  return loadSystemLog(opts);
 }
 
-async function loadSystemLog() {
+function _systemLogNearBottom() {
+  if (!logsContent) return true;
+  return (logsContent.scrollHeight - logsContent.scrollTop - logsContent.clientHeight) <= SYSTEM_LOG_BOTTOM_EPSILON;
+}
+
+function _renderSystemLogText(text, opts = {}) {
+  const scroll = opts.scroll || 'preserve';
+  const previousTop = logsContent.scrollTop;
   logsContent.classList.remove('logs-rich');
-  logsContent.textContent = 'Loading...';
-  try {
-    const r = await fetch(API + '/api/logs?lines=500', { headers: authHeaders() });
-    logsContent.textContent = await r.text();
+  logsContent.textContent = text || '[no log entries captured yet]';
+  systemLogState.text = text || '';
+  systemLogState.loaded = true;
+  if (scroll === 'bottom') {
     logsContent.scrollTop = logsContent.scrollHeight;
-  } catch (e) { logsContent.textContent = 'Failed to load logs: ' + e.message; }
+  } else if (scroll === 'preserve') {
+    logsContent.scrollTop = previousTop;
+  }
+  _syncSystemLogUi();
+}
+
+function _logsPaneOpen() {
+  try {
+    if (activeRpTabs?.has?.('logs-pane')) return true;
+  } catch {}
+  const pane = document.getElementById('logs-pane');
+  return !!pane?.classList.contains('active') || !!pane?.classList.contains('window-open');
+}
+
+function _startSystemLogAutoRefresh() {
+  if (activeLogView !== 'system' || !_logsPaneOpen() || logsAutoInterval) return;
+  logsAutoInterval = setInterval(() => {
+    if (activeLogView !== 'system' || !_logsPaneOpen()) {
+      _stopSystemLogAutoRefresh();
+      return;
+    }
+    loadLogs({ reason: 'auto' });
+  }, SYSTEM_LOG_REFRESH_MS);
+  _syncSystemLogUi();
+}
+
+function _stopSystemLogAutoRefresh() {
+  if (logsAutoInterval) {
+    clearInterval(logsAutoInterval);
+    logsAutoInterval = null;
+  }
+  _syncSystemLogUi();
+}
+
+function _syncSystemLogUi() {
+  _ensureSystemLogControls();
+  const status = document.getElementById('logs-status');
+  if (status) {
+    status.style.display = activeLogView === 'system' ? '' : 'none';
+    if (systemLogState.lastError) status.textContent = systemLogState.lastError;
+    else if (systemLogState.pendingChanged) status.textContent = 'New lines - scroll to bottom';
+    else if (!systemLogState.follow) status.textContent = 'Paused while reading';
+    else {
+      const refreshed = systemLogState.lastLoadedAt
+        ? systemLogState.lastLoadedAt.toLocaleTimeString([], { hour12: false })
+        : 'starting';
+      status.textContent = `Live tail - ${refreshed}`;
+    }
+  }
+}
+
+async function loadSystemLog(opts = {}) {
+  const reason = opts.reason || 'manual';
+  if (systemLogState.loading && reason === 'auto') return;
+  const nearBottom = _systemLogNearBottom();
+  const shouldFollow = systemLogState.follow || nearBottom || !systemLogState.loaded;
+  logsContent.classList.remove('logs-rich');
+  if (!systemLogState.loaded) logsContent.textContent = 'Loading...';
+  systemLogState.lastError = '';
+  if (systemLogState.abort && reason !== 'auto') {
+    try { systemLogState.abort.abort(); } catch {}
+  }
+  const requestId = ++systemLogState.requestId;
+  const controller = new AbortController();
+  systemLogState.abort = controller;
+  systemLogState.loading = true;
+  _syncSystemLogUi();
+  try {
+    const r = await fetch(API + `/api/logs?lines=${SYSTEM_LOG_LINES}`, { headers: authHeaders(), signal: controller.signal });
+    const text = await r.text();
+    if (requestId !== systemLogState.requestId) return;
+    if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
+    systemLogState.lastLoadedAt = new Date();
+    if (reason === 'auto' && systemLogState.loaded && !shouldFollow) {
+      systemLogState.pendingText = text;
+      systemLogState.pendingChanged = text !== systemLogState.text;
+      _syncSystemLogUi();
+      return;
+    }
+    systemLogState.pendingText = null;
+    systemLogState.pendingChanged = false;
+    _renderSystemLogText(text, { scroll: shouldFollow ? 'bottom' : 'preserve' });
+  } catch (e) {
+    if (e?.name === 'AbortError') return;
+    if (!systemLogState.loaded) logsContent.textContent = 'Failed to load logs: ' + e.message;
+    systemLogState.lastError = 'Refresh failed: ' + e.message;
+    _syncSystemLogUi();
+  } finally {
+    if (requestId === systemLogState.requestId) {
+      systemLogState.abort = null;
+      systemLogState.loading = false;
+    }
+  }
 }
 
 async function loadActivityLog() {
@@ -281,20 +405,24 @@ async function loadTokenLog() {
   logsContent.innerHTML = '<div class="logs-empty">Token dashboard is still loading. Try again in a moment.</div>';
 }
 
-document.getElementById('logs-refresh').onclick = loadLogs;
-document.getElementById('logs-auto').onclick = function() {
-  if (activeLogView !== 'system') {
-    setLogView('system', { open: false });
+logsContent?.addEventListener('scroll', () => {
+  if (activeLogView !== 'system' || !systemLogState.loaded) return;
+  if (_systemLogNearBottom()) {
+    if (!systemLogState.follow) {
+      systemLogState.follow = true;
+      if (systemLogState.pendingText != null) {
+        _renderSystemLogText(systemLogState.pendingText, { scroll: 'bottom' });
+        systemLogState.pendingText = null;
+        systemLogState.pendingChanged = false;
+      }
+      _syncSystemLogUi();
+    }
+  } else if (systemLogState.follow) {
+    systemLogState.follow = false;
+    _syncSystemLogUi();
   }
-  if (logsAutoInterval) {
-    clearInterval(logsAutoInterval); logsAutoInterval = null;
-    this.style.borderColor = ''; this.style.color = '';
-  } else {
-    logsAutoInterval = setInterval(loadLogs, 3000);
-    this.style.borderColor = 'var(--accent)'; this.style.color = 'var(--accent)';
-    loadLogs();
-  }
-};
+});
+
 _syncLogViewUi();
 
 // ── Local Mount (Browser File System Access API) ──

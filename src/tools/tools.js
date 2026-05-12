@@ -2174,6 +2174,9 @@ Set wait:false when you've submitted a long background job and just want to retu
     const processKillBlock = this._broadProcessKillBlock(command);
     if (processKillBlock) return processKillBlock;
 
+    const crontabBlock = this._directCrontabMutationBlock(command);
+    if (crontabBlock) return crontabBlock;
+
     // Check for dangerous patterns
     for (const pattern of this.dangerousPatterns) {
       if (pattern.test(command)) {
@@ -2356,6 +2359,31 @@ Set wait:false when you've submitted a long background job and just want to retu
       reason: 'broad_node_process_kill',
       matched: lower.includes('node') ? 'node' : null,
     };
+  }
+
+  _directCrontabMutationBlock(command) {
+    const c = String(command || '');
+    const normalized = c.replace(/\\\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+    const crontabCall = /(?:^|[;&|]\s*)(?:sudo\s+)?(?:\/usr\/(?:local\/bin\/)?crontab|crontab)\b([^;&|]*)/gi;
+    let match;
+    while ((match = crontabCall.exec(normalized))) {
+      const args = String(match[1] || '').trim();
+      if (!args) continue;
+      const readsOnly =
+        /^-l(?:\s|$)/.test(args)
+        || /^-u\s+\S+\s+-l(?:\s|$)/.test(args)
+        || /^--?(?:help|version)(?:\s|$)/.test(args)
+        || /^-[hV](?:\s|$)/.test(args);
+      if (readsOnly) continue;
+      return {
+        error: 'Blocked: direct crontab mutation through exec is disabled because it can replace and delete unrelated scheduled jobs. Use the cron tool with action:"install" or action:"remove" so jobs are merged safely.',
+        command: c,
+        guidance: 'Call cron { action:"install", name:"job-name", entry:"..." } to upsert one job without clobbering the rest of the crontab. Call cron { action:"list" } first to inspect existing jobs.',
+        blocked: true,
+        reason: 'direct_crontab_mutation',
+      };
+    }
+    return null;
   }
 
   /**
