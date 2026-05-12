@@ -15,20 +15,46 @@
 const http = require('http');
 const https = require('https');
 
-function _searxngSearch({ query, count, baseUrl, apiKey }) {
+const MAX_SEARCH_RESPONSE_BYTES = 2 * 1024 * 1024;
+const SEARXNG_TIMEOUT_MS = 15000;
+const BRAVE_TIMEOUT_MS = 10000;
+
+function _searxngSearch({ query, count, baseUrl, apiKey, timeoutMs = SEARXNG_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     const url = baseUrl.replace(/\/$/, '');
     const params = new URLSearchParams({ q: query, format: 'json', categories: 'general' });
     const fullUrl = `${url}/search?${params}`;
     const mod = fullUrl.startsWith('https') ? https : http;
-    const opts = { timeout: 15000, headers: {} };
+    const opts = { timeout: timeoutMs, headers: {} };
     if (apiKey) opts.headers['Authorization'] = `Bearer ${apiKey}`;
-    const req = mod.get(fullUrl, opts, (res) => {
+    let settled = false;
+    let req;
+    let timer;
+    const settle = (err, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    timer = setTimeout(() => {
+      if (req) req.destroy(new Error('SearXNG hard timeout'));
+      settle(new Error(`SearXNG timed out after ${timeoutMs}ms`));
+    }, timeoutMs + 1000);
+    timer.unref?.();
+
+    req = mod.get(fullUrl, opts, (res) => {
       let data = '';
-      res.on('data', c => data += c);
+      res.on('data', c => {
+        data += c;
+        if (data.length > MAX_SEARCH_RESPONSE_BYTES) {
+          if (req) req.destroy(new Error('SearXNG response too large'));
+          settle(new Error(`SearXNG response exceeded ${MAX_SEARCH_RESPONSE_BYTES} bytes`));
+        }
+      });
       res.on('end', () => {
         if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`SearXNG HTTP ${res.statusCode}${data ? ': ' + data.slice(0, 120) : ''}`));
+          settle(new Error(`SearXNG HTTP ${res.statusCode}${data ? ': ' + data.slice(0, 120) : ''}`));
           return;
         }
         try {
@@ -38,16 +64,19 @@ function _searxngSearch({ query, count, baseUrl, apiKey }) {
             url: r.url || '',
             description: r.content || r.description || '',
           }));
-          resolve({ provider: 'searxng', results, query, total: (json.results || []).length });
-        } catch (e) { reject(new Error(`SearXNG parse error: ${e.message}`)); }
+          settle(null, { provider: 'searxng', results, query, total: (json.results || []).length });
+        } catch (e) { settle(new Error(`SearXNG parse error: ${e.message}`)); }
       });
     });
-    req.on('error', e => reject(new Error(`SearXNG request failed: ${e.message}`)));
-    req.on('timeout', () => { req.destroy(); reject(new Error('SearXNG timed out')); });
+    req.on('error', e => settle(new Error(`SearXNG request failed: ${e.message}`)));
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('SearXNG socket timeout'));
+      settle(new Error(`SearXNG timed out after ${timeoutMs}ms`));
+    });
   });
 }
 
-function _braveSearch({ query, count, apiKey }) {
+function _braveSearch({ query, count, apiKey, timeoutMs = BRAVE_TIMEOUT_MS }) {
   return new Promise((resolve) => {
     const params = new URLSearchParams({ q: query, count: Math.min(count, 20).toString() });
     const options = {
@@ -60,9 +89,30 @@ function _braveSearch({ query, count, apiKey }) {
         'X-Subscription-Token': apiKey,
       },
     };
-    const req = https.request(options, (res) => {
+    let settled = false;
+    let req;
+    let timer;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      if (req) req.destroy(new Error('Brave hard timeout'));
+      finish({ error: `Brave timed out after ${timeoutMs}ms` });
+    }, timeoutMs + 1000);
+    timer.unref?.();
+
+    req = https.request(options, (res) => {
       let data = '';
-      res.on('data', c => data += c);
+      res.on('data', c => {
+        data += c;
+        if (data.length > MAX_SEARCH_RESPONSE_BYTES) {
+          if (req) req.destroy(new Error('Brave response too large'));
+          finish({ error: `Brave response exceeded ${MAX_SEARCH_RESPONSE_BYTES} bytes` });
+        }
+      });
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
@@ -70,17 +120,20 @@ function _braveSearch({ query, count, apiKey }) {
             const results = json.web.results.slice(0, count).map(r => ({
               title: r.title, url: r.url, description: r.description || '',
             }));
-            resolve({ provider: 'brave', results, query, total: json.web.results.length });
+            finish({ provider: 'brave', results, query, total: json.web.results.length });
           } else if (json.error || json.message) {
-            resolve({ error: `Brave: ${json.error?.message || json.message || 'unknown error'}` });
+            finish({ error: `Brave: ${json.error?.message || json.message || 'unknown error'}` });
           } else {
-            resolve({ provider: 'brave', results: [], query, note: 'No results found' });
+            finish({ provider: 'brave', results: [], query, note: 'No results found' });
           }
-        } catch (e) { resolve({ error: `Brave parse error: ${e.message}` }); }
+        } catch (e) { finish({ error: `Brave parse error: ${e.message}` }); }
       });
     });
-    req.on('error', e => resolve({ error: `Brave request failed: ${e.message}` }));
-    req.setTimeout(10000, () => { req.destroy(); resolve({ error: 'Brave timed out' }); });
+    req.on('error', e => finish({ error: `Brave request failed: ${e.message}` }));
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('Brave socket timeout'));
+      finish({ error: `Brave timed out after ${timeoutMs}ms` });
+    });
     req.end();
   });
 }

@@ -25,6 +25,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { buildBuiltinToolHandlers } = require('./builtin-registry');
 const { PlannerAdvisor } = require('../agent/planner-advisor');
+const { searchWeb } = require('../lib/web-search');
 
 // Per-tool-call async context. Replaces any notion of a "global current
 // session" — carries sessionKey + userId + channelId + platform through the
@@ -5163,24 +5164,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
   async _webSearchTool(input) {
     const { query, count = 5 } = input;
 
-    // Try SearXNG first
     const searxngUrl = this.config.searxngUrl || process.env.SEARXNG_URL;
     const searxngApiKey = this.config.searxngApiKey || process.env.SEARXNG_API_KEY || '';
-    if (searxngUrl) {
-      try {
-        const result = await this._searxngSearch(query, count, searxngUrl, searxngApiKey);
-        if (result.results && result.results.length > 0) return result;
-        // Fall through to Brave if SearXNG returned nothing
-      } catch (e) {
-        this.log.warn(`[search] SearXNG failed: ${e.message}, trying Brave fallback`);
-      }
-    }
-
-    // Brave fallback
-    const apiKey = this.config.braveApiKey;
-    if (!apiKey && !searxngUrl) return { error: 'No search provider configured. Set SEARXNG_URL or BRAVE_API_KEY.' };
-    if (!apiKey) return { results: [], query, note: 'SearXNG returned no results and no Brave API key configured' };
-    return this._braveSearch(query, count, apiKey);
+    const braveApiKey = this.config.braveApiKey || process.env.BRAVE_API_KEY || '';
+    return searchWeb({ query, count, searxngUrl, searxngApiKey, braveApiKey, log: this.log });
   }
 
   async _searxngSearch(query, count, baseUrl, apiKey) {

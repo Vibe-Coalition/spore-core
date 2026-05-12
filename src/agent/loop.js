@@ -2767,6 +2767,78 @@ class AgentLoop {
       return r.result;
     };
 
+    // Race externally backed read tools against a hard deadline. Provider
+    // socket timeouts are not enough: DNS/proxy/stream edge cases can leave
+    // the Promise unsettled and strand the whole agent turn.
+    const toolHardTimeoutMs = (tb) => {
+      if (!tb?.name) return 0;
+      if (tb.name === 'web_search') return 30000;
+      if (tb.name === 'web_fetch') return 60000;
+      return 0;
+    };
+
+    const timedOutToolResult = (tb, timeoutMs) => ({
+      type: 'tool_result',
+      tool_use_id: tb.id,
+      content: JSON.stringify({
+        timeout: true,
+        recoverable: true,
+        error: `Tool ${tb.name} timed out after ${Math.round(timeoutMs / 1000)}s.`,
+        note: 'The session was unblocked. Continue with available context, try a narrower request, or use a different source instead of waiting on the same call.',
+      }),
+    });
+
+    const guardedRunOne = (tb) => {
+      const timeoutMs = toolHardTimeoutMs(tb);
+      const running = runOne(tb).catch(e => ({
+        type: 'tool_result',
+        tool_use_id: tb.id,
+        content: JSON.stringify({
+          error: `Tool ${tb.name} failed before returning a result: ${e.message}`,
+          recoverable: true,
+        }),
+      }));
+      if (!timeoutMs) return running;
+
+      let timer;
+      const timeout = new Promise(resolve => {
+        timer = setTimeout(() => {
+          const result = timedOutToolResult(tb, timeoutMs);
+          const resultContent = result.content;
+          const detail = this._toolInputSummary(tb.name, tb.input);
+          this.log.warn(`[tool-timeout] ${tb.name} exceeded ${timeoutMs}ms in ${sessionKey}`);
+          if (opts.onStatus) {
+            try {
+              opts.onStatus({
+                type: 'tool_exec_done',
+                tool: tb.name,
+                detail,
+                durationMs: timeoutMs,
+                resultChars: resultContent.length,
+                error: `Timed out after ${Math.round(timeoutMs / 1000)}s`,
+                timeout: true,
+              });
+            } catch { /* silent: best-effort UI callback */ }
+          }
+          toolLog.push({
+            tool: tb.name,
+            input: JSON.stringify(tb.input).substring(0, 300),
+            resultPreview: resultContent.substring(0, 300),
+            succeeded: false,
+            exitCode: null,
+            timeout: true,
+          });
+          resolve(result);
+        }, timeoutMs);
+        timer.unref?.();
+      });
+
+      return Promise.race([
+        running.finally(() => { if (timer) clearTimeout(timer); }),
+        timeout,
+      ]);
+    };
+
     // Race each tool against the abort signal so a stuck tool doesn't block the loop
     const interruptedToolResult = (tb) => ({
       type: 'tool_result',
@@ -2779,13 +2851,13 @@ class AgentLoop {
     });
 
     const abortRace = abortSignal ? (tb) => Promise.race([
-      runOne(tb),
+      guardedRunOne(tb),
       new Promise(resolve => {
         const onAbort = () => resolve(interruptedToolResult(tb));
         if (abortSignal.aborted) { onAbort(); return; }
         abortSignal.addEventListener('abort', onAbort, { once: true });
       }),
-    ]) : runOne;
+    ]) : guardedRunOne;
 
     const deduped = this._dedupeToolBlocksForBatch(toolBlocks);
     if (deduped.duplicateCount > 0) {

@@ -45,6 +45,20 @@ function _formatDurationMs(ms) {
   return rem ? `${mins}m ${rem}s` : `${mins}m`;
 }
 
+function _isSporeCodeSessionId(sessionId, userId = '') {
+  const sid = String(sessionId || '');
+  if (!sid || sid.startsWith('web:')) return false;
+  if (sid.startsWith('cli:')) return true;
+  // Older Spore Code builds used bare "user@project-..." ids before the
+  // explicit cli: prefix. Keep that path, but never classify web:* as CLI.
+  const user = String(userId || '').trim();
+  return !!user && sid.startsWith(`${user}@`);
+}
+
+function _isCliChatSession(ws, sessionId) {
+  return ws?._role === 'cli' && _isSporeCodeSessionId(sessionId, ws?._user || '');
+}
+
 function _clearCliPendingToolTimers(entry) {
   if (!entry) return;
   if (entry.timeout) clearTimeout(entry.timeout);
@@ -181,6 +195,19 @@ function _writeJsonAtomic(filePath, data) {
   const tmp = filePath + '.tmp.' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, filePath);
+}
+
+function _lookupWebappUserRole(dataDir, username, fallback = 'webapp') {
+  const user = String(username || '').trim();
+  if (!user) return fallback;
+  try {
+    const users = JSON.parse(fs.readFileSync(path.join(dataDir, 'webapp-users.json'), 'utf8'));
+    const found = Array.isArray(users) ? users.find(u => u?.username === user) : null;
+    const role = String(found?.role || '').toLowerCase();
+    if (role === 'creator' || role === 'admin') return role;
+    if (role === 'webapp') return 'webapp';
+  } catch { /* silent: absent/malformed users file -> fallback */ }
+  return fallback;
 }
 
 function _graphAuthIsCreator(authContext) {
@@ -3139,7 +3166,7 @@ class WebGateway {
 
     try {
       const userId = ws._user || 'operator';
-      const isCli = ws._role === 'cli';
+      const isCli = _isCliChatSession(ws, msg?.sessionId);
       if (msg?.sessionId && this.tools?._sessions?.constructor?.buildKey) {
         add(this.tools._sessions.constructor.buildKey(
           isCli ? msg.sessionId : 'web:control-panel',
@@ -3152,7 +3179,7 @@ class WebGateway {
     if (candidates.has(pendingKey)) return true;
     if (this._sessionKeyClientMatches(ws, pending.sessionKey, pending.channelId)) return true;
 
-    if (ws._role !== 'cli') {
+    if (!_isCliChatSession(ws, msg?.sessionId)) {
       const userId = ws._user || 'operator';
       if (pendingKey === `dm:${userId}` || pendingKey === `shared:dm:web:${userId}` || pendingKey === `private:dm:web:${userId}`) {
         return true;
@@ -6934,8 +6961,8 @@ class WebGateway {
         if (msg.type === 'chat:history-request' && msg.sessionId) {
           try {
             if (this.tools._sessions) {
-              const isCli = ws._role === 'cli';
               const reqSessionId = msg.sessionId;
+              const isCli = _isCliChatSession(ws, reqSessionId);
               const userId = ws._user || 'operator';
               // Use legacy buildKey format to match how processMessage stores messages
               const historyKey = isCli
@@ -7188,7 +7215,7 @@ class WebGateway {
           if (this.tools._agent) {
             const userId = ws._user || 'operator';
             const sessionId = msg.sessionId || 'web:control-panel';
-            const isCli = ws._role === 'cli';
+            const isCli = _isCliChatSession(ws, sessionId);
             const stopped = isCli
               ? this.tools._agent.abortSession(sessionId, false, userId)
               : this.tools._agent.abortSession('web:control-panel', true, userId);
@@ -7214,8 +7241,8 @@ class WebGateway {
         if (msg.type === 'chat:clear') {
           if (this.tools._sessions) {
             const userId = ws._user || 'operator';
-            const isCli = ws._role === 'cli';
             const clearSessionId = msg.sessionId || 'web:control-panel';
+            const isCli = _isCliChatSession(ws, clearSessionId);
             const clearKey = isCli
               ? this.tools._sessions.constructor.buildKey(clearSessionId, false, userId)
               : this.tools._sessions.constructor.buildKey('web:control-panel', true, userId);
@@ -7232,7 +7259,7 @@ class WebGateway {
             return;
           }
           const sessionId = msg.sessionId || 'web:control-panel';
-          const isCli = ws._role === 'cli';
+          const isCli = _isCliChatSession(ws, sessionId);
           // If auth is required (webapp users exist or manager URL is set), refuse
           // anonymous chat — otherwise every user's messages collapse into the same
           // 'dm:operator' session and the agent can't tell them apart.
@@ -7250,6 +7277,11 @@ class WebGateway {
           this.log.info(`[ws] chat from user=${ws._user || '(anon)'} role=${ws._role || '(none)'} displayName=${(msg.userName || '').slice(0, 40)} sessionId=${sessionId}`);
 
           const userId = ws._user || 'operator';
+          const effectiveUserRole = isCli
+            ? (ws._role || 'cli')
+            : (ws._role === 'cli'
+              ? _lookupWebappUserRole(this.config.dataDir, userId, 'webapp')
+              : (ws._role || 'creator'));
           const activeSessionKey = this.tools._sessions?.constructor?.buildKey(
             isCli ? sessionId : 'web:control-panel',
             !isCli,
@@ -7437,7 +7469,7 @@ class WebGateway {
               // Role comes from the WS session (server-trusted). The agent
               // uses this to decide what it will / won't agree to do for
               // non-creator users.
-              userRole: ws._role || (isCli ? 'cli' : 'creator'),
+              userRole: effectiveUserRole,
               sessionToken: ws._authSessionToken || null,
               sessionCookieName: ws._sessionCookieName || null,
               deviceId: isCli ? (ws._deviceId || null) : null,
@@ -7486,6 +7518,10 @@ class WebGateway {
               // Acorn: forward tool calls to the origin CLI client for local execution.
               // tool:request only goes to origin client. Observers get tool:pending notification.
               onToolExecute: isCli ? async (toolName, toolInput, toolId) => {
+                const requiresCliExecutor = !!this.tools?.isCliLocalTool?.(toolName);
+                const forceServerExecutor = !!this.tools?.isCliServerTool?.(toolName);
+                if (forceServerExecutor || !requiresCliExecutor) return null;
+
                 // Notify observers that a tool is awaiting approval/execution
                 const summary = toolName === 'exec' ? (toolInput?.command || '').substring(0, 120)
                   : toolName === 'write_file' || toolName === 'edit_file' || toolName === 'read_file' ? (toolInput?.path || '')
@@ -7495,22 +7531,15 @@ class WebGateway {
                   type: 'tool:pending', id: toolId, name: toolName, summary,
                 });
 
-                const requiresCliExecutor = !!this.tools?.isCliLocalTool?.(toolName);
-                const forceServerExecutor = !!this.tools?.isCliServerTool?.(toolName);
-                if (forceServerExecutor) return null;
-
                 // Check if CLI is actually reachable before waiting
                 if (!originWs || originWs.readyState !== 1) {
-                  if (requiresCliExecutor) {
-                    this.log.warn(`[ws] CLI disconnected for local tool ${toolName}`);
-                    return {
-                      error: `The ${toolName} tool must be handled by the connected Spore Code CLI executor for this project session.`,
-                      blocked: true,
-                      tool: toolName,
-                      cliLocalOnly: true,
-                    };
-                  }
-                  return null; // server-side tool fallback
+                  this.log.warn(`[ws] CLI disconnected for local tool ${toolName}`);
+                  return {
+                    error: `The ${toolName} tool must be handled by the connected Spore Code CLI executor for this project session.`,
+                    blocked: true,
+                    tool: toolName,
+                    cliLocalOnly: true,
+                  };
                 }
 
                 return new Promise((resolve, reject) => {
