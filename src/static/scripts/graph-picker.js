@@ -244,9 +244,12 @@ function renderGraphPicker(filter) {
       : (g.communityState === 'unclustered'
         ? 'unclustered'
         : (backlog > 0 ? `${backlog} embed` : (g.lastMaintainedAt ? 'maintained' : 'new')));
+    const clean = g.janitorStatus === 'running'
+      ? 'cleaning'
+      : (g.janitorStatus === 'error' ? 'clean failed' : (g.lastCleanedAt ? 'cleaned' : 'not cleaned'));
     html += `<div class="gp-item${g.active ? ' active' : ''}${viewing ? ' viewing' : ''}${inspectOnly ? ' protected' : ''}" data-slug="${esc(g.slug)}">`;
     html += `<div class="gp-name" title="${esc(g.description || '')}">${esc(g.name)}</div>`;
-    html += `<div class="gp-meta">${nodes}n · ${date}${g.role ? ` · ${esc(g.role)}` : ''} · ${esc(maint)}</div>`;
+    html += `<div class="gp-meta">${nodes}n · ${date}${g.role ? ` · ${esc(g.role)}` : ''} · ${esc(maint)} · ${esc(clean)}</div>`;
     if (g.active) {
       html += `<span class="gp-active-badge">ACTIVE</span>`;
     } else if (viewing) {
@@ -256,11 +259,13 @@ function renderGraphPicker(filter) {
       html += `<span class="gp-active-badge">${badge}</span>`;
       html += `<div class="gp-actions">`;
       if (canManage) html += `<button onclick="event.stopPropagation();maintainGraph('${esc(g.slug)}')" title="Run safe graph maintenance">maintain</button>`;
+      if (canManage) html += `<button onclick="event.stopPropagation();cleanGraph('${esc(g.slug)}')" title="Run graph janitor cleanup">clean</button>`;
       html += `<button onclick="event.stopPropagation();inspectGraph('${esc(g.slug)}')" title="Inspect managed graph">inspect</button>`;
       html += `</div>`;
     } else {
       html += `<div class="gp-actions">`;
       html += `<button onclick="event.stopPropagation();maintainGraph('${esc(g.slug)}')" title="Run graph maintenance">maintain</button>`;
+      html += `<button onclick="event.stopPropagation();cleanGraph('${esc(g.slug)}')" title="Run graph janitor cleanup">clean</button>`;
       html += `<button onclick="event.stopPropagation();switchToGraph('${esc(g.slug)}')" title="Switch to this graph">use</button>`;
       html += `<button onclick="event.stopPropagation();duplicateGraph('${esc(g.slug)}','${esc(g.name)}')" title="Duplicate">dup</button>`;
       html += `<button class="gp-del" onclick="event.stopPropagation();deleteGraph('${esc(g.slug)}','${esc(g.name)}')" title="Delete">del</button>`;
@@ -368,6 +373,23 @@ async function switchToGraph(slug) {
     }
   } catch (e) {
     toast('Switch failed: ' + e.message, true);
+  }
+}
+
+async function cleanGraph(slug) {
+  try {
+    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/janitor/run`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true, reason: 'graph-picker' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) { toast(data.error || 'Clean failed', true); return; }
+    toast(`Cleaned "${slug}"`);
+    await loadGraphsList();
+    if (_viewedGraphSlug === slug) inspectGraph(slug);
+  } catch (e) {
+    toast('Clean failed: ' + e.message, true);
   }
 }
 

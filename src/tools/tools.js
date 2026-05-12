@@ -405,6 +405,35 @@ class ToolSystem {
     return { target, platform, id: target };
   }
 
+  _plannerAdviceToolAvailability(ctx = {}) {
+    const platform = String(ctx.platform || '').toLowerCase();
+    const trigger = String(ctx.trigger || '').toLowerCase();
+    const backgroundTriggers = new Set(['worker', 'maintenance', 'background', 'model-test', 'lull', 'proactive']);
+    if (backgroundTriggers.has(trigger)) {
+      return { ok: false, reason: 'background_trigger' };
+    }
+
+    if (platform === 'cli') {
+      return ctx.projectContext
+        ? { ok: true, reason: 'spore_code' }
+        : { ok: false, reason: 'cli_requires_project_context' };
+    }
+
+    const userFacingPlatforms = new Set(['web', 'telegram', 'discord', 'slack', 'chatroom', 'voice']);
+    if (platform && !userFacingPlatforms.has(platform)) {
+      return { ok: false, reason: `unsupported_platform:${platform}` };
+    }
+
+    const directTriggers = new Set(['dm', 'mention', 'reply', 'chat', 'manual']);
+    if (trigger && !directTriggers.has(trigger)) {
+      return { ok: false, reason: `non_direct_trigger:${trigger}` };
+    }
+
+    // Legacy web callers may not always set platform/trigger. Keep the tool
+    // available there unless a known non-user-facing trigger ruled it out.
+    return { ok: true, reason: platform || 'legacy_user_session' };
+  }
+
   /**
    * Get tool definitions for the Anthropic API.
    *
@@ -1315,7 +1344,7 @@ class ToolSystem {
       },
       {
         name: 'request_planner_advice',
-        description: 'Ask the planner model for compact guidance when you are stuck, corrected by the user, repeating attempts, uncertain about tool behavior, or about to hand work back to the user. Use before giving up or before repeating the same kind of attempt. Available only in Spore Code project/task sessions.',
+        description: 'Ask the planner model for compact guidance when you are stuck, corrected by the user, repeating attempts, uncertain about tool behavior, or about to hand work back to the user. Use before giving up or before repeating the same kind of attempt. Available in Spore Code project sessions and direct user-facing web/channel sessions such as Telegram DMs, mentions, or replies.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1365,9 +1394,12 @@ class ToolSystem {
       || null;
     const modalAskUserCapable = platform === 'web' || platform === 'cli';
     const backgroundTrigger = ['worker', 'maintenance', 'background', 'task_complete', 'model-test'].includes(String(trigger || '').toLowerCase());
-    const available = (!modalAskUserCapable || backgroundTrigger)
+    let available = (!modalAskUserCapable || backgroundTrigger)
       ? all.filter(t => t.name !== 'ask_user')
       : all;
+    if (!this._plannerAdviceToolAvailability({ ...toolCtx, trigger }).ok) {
+      available = available.filter(t => t.name !== 'request_planner_advice');
+    }
     if (platform === 'cli') {
       let filtered = available.filter(t => !TOOLS_EXCLUDED_FROM_CLI.has(t.name));
       const advertised = Array.isArray(toolCtx.clientTools) && toolCtx.clientTools.length > 0
@@ -6612,9 +6644,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
   async _requestPlannerAdviceTool(input = {}) {
     const ctx = _execContext.getStore() || this._resolveFallbackCtx() || {};
-    if (ctx.platform !== 'cli' || !ctx.projectContext) {
+    const availability = this._plannerAdviceToolAvailability(ctx);
+    if (!availability.ok) {
       return {
-        error: 'request_planner_advice is only available inside Spore Code project sessions.',
+        error: `request_planner_advice is only available in Spore Code project sessions or direct user-facing web/channel sessions (${availability.reason}).`,
         blocked: true,
       };
     }

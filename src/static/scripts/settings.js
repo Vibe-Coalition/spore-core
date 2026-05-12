@@ -1132,7 +1132,7 @@ function _settingsEnsureGraphRuntimeControls() {
           <input id="settings-graph-maintenance-batch" type="number" min="1" step="1" placeholder="4">
         </div>
       </div>
-      <div class="settings-runtime-note">Runs per-graph upkeep through the central queue: gap filling, sparse-node connection, dedup, reasoning, clustering, and embeddings.</div>
+      <div class="settings-runtime-note">Scheduled cycles cover every due graph through the central queue: gap filling, sparse-node connection, dedup, reasoning, clustering, and embeddings. Use each graph row's clean action for janitor cleanup.</div>
     </div>
     <div class="settings-runtime-card">
       <div class="settings-runtime-card-head">
@@ -2072,6 +2072,16 @@ async function renderSettingsGraphsList() {
         : (g.maintenanceStatus === 'running'
           ? 'running'
           : ((g.communityState === 'unclustered' || backlog > 0 || !g.lastMaintainedAt) ? 'stale' : 'ok'));
+      const cleanLabel = g.janitorStatus === 'running'
+        ? 'cleaning'
+        : (g.janitorStatus === 'error'
+          ? 'clean failed'
+          : (g.lastCleanedAt ? `cleaned ${new Date(g.lastCleanedAt).toLocaleDateString()}` : 'not cleaned'));
+      const cleanTone = g.janitorStatus === 'error'
+        ? 'error'
+        : (g.janitorStatus === 'running'
+          ? 'running'
+          : (g.lastCleanedAt ? 'ok' : 'stale'));
       const inspectOnly = typeof _isInspectOnlyGraph === 'function'
         ? _isInspectOnlyGraph(g)
         : !!(g.inspectOnly || g.activationLocked || g.managed || g.protected || _settingsGraphIsManagedMemoryRole(role));
@@ -2089,9 +2099,11 @@ async function renderSettingsGraphsList() {
           ${viewing ? '<span class="sg-badge">viewing</span>' : ''}
           ${badgeLabel ? `<span class="sg-badge">${esc(badgeLabel)}</span>` : ''}
           <span class="sg-maintenance ${maintenanceTone}" title="${esc(g.maintenanceError || maintenanceLabel)}">${esc(maintenanceLabel)}</span>
+          <span class="sg-maintenance ${cleanTone}" title="${esc(g.janitorError || cleanLabel)}">${esc(cleanLabel)}</span>
         </div>
         <div class="sg-actions">
           ${canManage ? `<button type="button" class="sg-action" data-graph-maintain="${esc(g.slug)}">maintain</button>` : ''}
+          ${canManage ? `<button type="button" class="sg-action" data-graph-clean="${esc(g.slug)}">clean</button>` : ''}
           ${canResearchGeneralKb ? `<button type="button" class="sg-action" data-graph-research-general-kb="${esc(g.slug)}">research</button>` : ''}
           ${canReset ? `<button type="button" class="sg-action" data-graph-reset="${esc(g.slug)}">reset</button>` : ''}
           ${canDelete ? `<button type="button" class="sg-action danger" data-graph-delete="${esc(g.slug)}">delete</button>` : ''}
@@ -2151,6 +2163,9 @@ async function renderSettingsGraphsList() {
     container.querySelectorAll('[data-graph-maintain]').forEach(btn => {
       btn.addEventListener('click', () => _maintainSettingsGraph(btn.dataset.graphMaintain, graphs.find(g => g.slug === btn.dataset.graphMaintain)));
     });
+    container.querySelectorAll('[data-graph-clean]').forEach(btn => {
+      btn.addEventListener('click', () => _cleanSettingsGraph(btn.dataset.graphClean, graphs.find(g => g.slug === btn.dataset.graphClean)));
+    });
     container.querySelectorAll('[data-graph-research-general-kb]').forEach(btn => {
       btn.addEventListener('click', () => _researchSettingsGeneralKb(btn.dataset.graphResearchGeneralKb, graphs.find(g => g.slug === btn.dataset.graphResearchGeneralKb), btn));
     });
@@ -2176,6 +2191,27 @@ async function _maintainSettingsGraph(slug, graph) {
     if (typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === slug && typeof inspectGraph === 'function') inspectGraph(slug);
   } catch (e) {
     toast(`Maintenance failed: ${e.message || e}`, true);
+    await renderSettingsGraphsList();
+  }
+}
+
+async function _cleanSettingsGraph(slug, graph) {
+  if (!slug) return;
+  const name = graph?.name || slug;
+  try {
+    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/janitor/run`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true, reason: 'settings' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'clean failed');
+    toast(`Cleaned ${name}`);
+    if (typeof loadGraphsList === 'function') loadGraphsList();
+    await renderSettingsGraphsList();
+    if (typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === slug && typeof inspectGraph === 'function') inspectGraph(slug);
+  } catch (e) {
+    toast(`Clean failed: ${e.message || e}`, true);
     await renderSettingsGraphsList();
   }
 }

@@ -2,8 +2,8 @@
  * graph-maintenance.js — registry-aware graph maintenance coordinator.
  *
  * The normal Maintainer/Janitor are bound to the active graph DB. This worker
- * keeps managed graphs from going stale without activating them or running
- * speculative/proactive passes across isolated memory scopes.
+ * gives scheduled/manual maintenance a registry-wide path so every graph can be
+ * maintained or cleaned without making it the active graph.
  */
 
 const { Maintainer } = require('./maintainer');
@@ -36,11 +36,14 @@ class GraphMaintenanceCoordinator {
     this._running = false;
     this._locks = new Set();
     this._lastRunAt = null;
+    this._lastJanitorRunAt = null;
     this.stats = {
       cycles: 0,
       graphsChecked: 0,
       graphsMaintained: 0,
+      graphsCleaned: 0,
       graphsSkipped: 0,
+      maintainerRuns: 0,
       embeddings: 0,
       communities: 0,
       overviews: 0,
@@ -48,6 +51,7 @@ class GraphMaintenanceCoordinator {
       backups: 0,
       errors: 0,
       lastRunAt: null,
+      lastJanitorRunAt: null,
     };
   }
 
@@ -64,12 +68,10 @@ class GraphMaintenanceCoordinator {
     const managed = role === 'project' || role === 'channel' || role === 'user' || role === 'general_kb';
     return {
       role,
-      structural: true,
-      embedLimit: role === 'general_kb' ? 20 : 12,
-      janitor: active && !managed ? 'active' : (role === 'general_kb' ? 'bin' : 'temp'),
+      maintainer: active && !managed ? 'active' : 'scoped',
+      janitor: active && !managed ? 'active' : (!managed ? 'full' : 'scoped'),
       backup: true,
       distill: role === 'project' || role === 'channel' || role === 'user',
-      activeFullMaintainer: active && !managed,
     };
   }
 
@@ -88,24 +90,62 @@ class GraphMaintenanceCoordinator {
       || (Number(graph.embeddingBacklog || 0) > 0 && Date.now() - last >= 30 * 60_000);
   }
 
-  async run({ force = false, includeActive = false, batchSize = null, reason = 'scheduled' } = {}) {
+  _shouldClean(graph, { force = false } = {}) {
+    if (!graph?.slug) return false;
+    if (force) return true;
+    if (graph.janitorStatus === 'running') {
+      const started = Date.parse(graph.janitorStartedAt || 0);
+      if (Number.isFinite(started) && Date.now() - started < 30 * 60_000) return false;
+    }
+    const mins = _minutes(this.config.janitorIntervalMinutes, 360);
+    const last = Date.parse(graph.lastCleanedAt || 0);
+    if (!Number.isFinite(last)) return true;
+    return Date.now() - last >= mins * 60_000;
+  }
+
+  _runLimit(batchSize) {
+    const raw = batchSize ?? this.config.graphMaintenanceBatchSize;
+    if (raw === 'all' || raw === Infinity) return null;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n <= 0) return null;
+    return Math.max(1, Math.floor(Number.isFinite(n) ? n : DEFAULT_BATCH_SIZE));
+  }
+
+  async run({
+    force = false,
+    includeActive = true,
+    batchSize = null,
+    reason = 'scheduled',
+    runMaintainer = true,
+    runJanitor = false,
+    runDistill = true,
+    runBackup = true,
+  } = {}) {
     if (this._running) return { running: true };
     if (!this.registry || !this.learner) return { skipped: 'missing-registry-or-learner' };
 
-    const intervalMs = _minutes(this.config.graphMaintenanceIntervalMinutes, DEFAULT_INTERVAL_MINUTES) * 60_000;
-    if (!force && this._lastRunAt && Date.now() - this._lastRunAt < intervalMs) return null;
+    const intervalMs = (runMaintainer
+      ? _minutes(this.config.graphMaintenanceIntervalMinutes, DEFAULT_INTERVAL_MINUTES)
+      : _minutes(this.config.janitorIntervalMinutes, 360)) * 60_000;
+    const lastRunAt = runMaintainer ? this._lastRunAt : this._lastJanitorRunAt;
+    if (!force && lastRunAt && Date.now() - lastRunAt < intervalMs) return null;
 
     this._running = true;
-    this._lastRunAt = Date.now();
+    if (runMaintainer) this._lastRunAt = Date.now();
+    if (runJanitor && !runMaintainer) this._lastJanitorRunAt = Date.now();
     this.stats.cycles++;
-    this.stats.lastRunAt = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    if (runMaintainer) this.stats.lastRunAt = nowIso;
+    if (runJanitor && !runMaintainer) this.stats.lastJanitorRunAt = nowIso;
 
     const activeSlug = this.registry.getActiveSlug?.();
-    const limit = Math.max(1, Math.floor(Number(batchSize || this.config.graphMaintenanceBatchSize) || DEFAULT_BATCH_SIZE));
-    const graphs = (this.registry.list?.() || [])
+    const limit = this._runLimit(batchSize);
+    const candidates = (this.registry.list?.() || [])
       .filter(g => includeActive || g.slug !== activeSlug)
-      .filter(g => this._shouldMaintain(g, { force }))
-      .slice(0, limit);
+      .filter(g => runMaintainer
+        ? this._shouldMaintain(g, { force })
+        : (runJanitor ? this._shouldClean(g, { force }) : false));
+    const graphs = limit ? candidates.slice(0, limit) : candidates;
 
     const results = [];
     try {
@@ -115,9 +155,14 @@ class GraphMaintenanceCoordinator {
           force,
           includeActive,
           reason,
+          runMaintainer,
+          runJanitor,
+          runDistill,
+          runBackup,
         });
         results.push(result);
-        if (result?.ok) this.stats.graphsMaintained++;
+        if (result?.ok && runMaintainer) this.stats.graphsMaintained++;
+        else if (result?.ok && runJanitor) this.stats.graphsCleaned++;
         else this.stats.graphsSkipped++;
       }
       return { checked: graphs.length, results };
@@ -126,7 +171,26 @@ class GraphMaintenanceCoordinator {
     }
   }
 
-  async maintainGraph(slug, { force = false, includeActive = true, reason = 'manual' } = {}) {
+  async cleanGraph(slug, opts = {}) {
+    return this.maintainGraph(slug, {
+      ...opts,
+      runMaintainer: false,
+      runJanitor: true,
+      runDistill: false,
+      runBackup: false,
+      reason: opts.reason || 'manual-clean',
+    });
+  }
+
+  async maintainGraph(slug, {
+    force = false,
+    includeActive = true,
+    reason = 'manual',
+    runMaintainer = true,
+    runJanitor = true,
+    runDistill = true,
+    runBackup = true,
+  } = {}) {
     const graph = this.registry?.get?.(slug);
     if (!graph) return { slug, ok: false, error: 'graph not found' };
     if (this._locks.has(slug)) return { slug, ok: false, skipped: 'already-running' };
@@ -138,18 +202,22 @@ class GraphMaintenanceCoordinator {
     if (!db) return { slug, ok: false, error: 'graph db unavailable' };
 
     const started = Date.now();
+    const maintenanceStarted = runMaintainer || runDistill || runBackup;
+    const janitorStarted = runJanitor;
     const policy = this.policyFor(graph, { active });
     const summary = {
       role: policy.role,
-      structural: false,
+      maintainer: null,
       janitor: null,
       distill: null,
       backup: null,
     };
 
     this._locks.add(slug);
-    this.registry.recordMaintenanceStart?.(slug, { reason });
+    if (maintenanceStarted) this.registry.recordMaintenanceStart?.(slug, { reason });
+    if (janitorStarted) this.registry.recordJanitorStart?.(slug, { reason });
     try {
+      const scoped = (fn) => graphEvents.withGraph({ graph: slug }, fn);
       try {
         graphEvents.emit('change', {
           op: 'graph-maintenance:start',
@@ -159,28 +227,38 @@ class GraphMaintenanceCoordinator {
         });
       } catch {}
 
-      if (policy.activeFullMaintainer && this.activeMaintainer && !this.activeMaintainer._running) {
-        summary.activeMaintainer = await this.activeMaintainer.runMaintenance({ force: true });
-      } else if (policy.structural) {
-        summary.structural = await this._runStructuralPasses(graph, db, policy, { force });
-        this.stats.embeddings += summary.structural?.embedded || 0;
-        if (summary.structural?.clustered) this.stats.communities++;
-        if (summary.structural?.overviewed) this.stats.overviews++;
+      if (runMaintainer) {
+        this.log.info(`[graph-maintenance] ${slug} maintainer start`);
+        summary.maintainer = await scoped(() => (
+          policy.maintainer === 'active' && this.activeMaintainer
+            ? this._runActiveMaintainer(db, { force })
+            : this._runScopedMaintainer(graph, db, { force })
+        ));
+        if (summary.maintainer && !summary.maintainer.skipped) this.stats.maintainerRuns++;
+        this.stats.embeddings += summary.maintainer?.embedded || 0;
+        if (summary.maintainer?.clustered) this.stats.communities++;
+        if (summary.maintainer?.overviewed) this.stats.overviews++;
       }
 
-      if (policy.janitor === 'active' && this.activeJanitor && !this.activeJanitor._running) {
-        summary.janitor = await this.activeJanitor.runJanitor({ force: true });
+      if (runJanitor) {
+        this.log.info(`[graph-maintenance] ${slug} janitor start`);
+        summary.janitor = await scoped(() => {
+          if (policy.janitor === 'active' && this.activeJanitor) {
+            return this._runActiveJanitor({ force });
+          }
+          if (policy.janitor === 'full') {
+            return this._runFullJanitor(db, { force });
+          }
+          return this._runScopedJanitor(graph, db, { force });
+        });
         if (summary.janitor) this.stats.janitorRuns++;
-      } else if (policy.janitor && policy.janitor !== 'active') {
-        summary.janitor = await this._runScopedJanitor(graph, db, { force });
-        if (summary.janitor) this.stats.janitorRuns++;
       }
 
-      if (policy.distill && this.scopedDistiller?.distillGraph && (force || graph.distillDirty)) {
-        summary.distill = await this.scopedDistiller.distillGraph(graph);
+      if (runDistill && policy.distill && this.scopedDistiller?.distillGraph && (force || graph.distillDirty)) {
+        summary.distill = await scoped(() => this.scopedDistiller.distillGraph(graph));
       }
 
-      if (policy.backup && this.backup?.runBackupForGraph) {
+      if (runBackup && policy.backup && this.backup?.runBackupForGraph) {
         const dbPath = this.registry.getDbPath?.(slug);
         summary.backup = await this.backup.runBackupForGraph({
           slug,
@@ -192,17 +270,27 @@ class GraphMaintenanceCoordinator {
       }
 
       const durationMs = Date.now() - started;
-      this.registry.recordMaintenanceResult?.(slug, {
-        success: true,
-        durationMs,
-        summary,
-        embedded: (summary.structural?.embedded || 0) > 0,
-        clustered: !!summary.structural?.clustered,
-        overviewed: !!summary.structural?.overviewed,
-        backedUp: !!(summary.backup?.ok && !summary.backup?.skipped),
-        communityState: summary.structural?.communityState,
-        embeddingBacklog: summary.structural?.embeddingBacklog,
-      });
+      if (maintenanceStarted) {
+        this.registry.recordMaintenanceResult?.(slug, {
+          success: true,
+          durationMs,
+          summary,
+          embedded: (summary.maintainer?.embedded || 0) > 0,
+          clustered: !!summary.maintainer?.clustered,
+          overviewed: !!summary.maintainer?.overviewed,
+          backedUp: !!(summary.backup?.ok && !summary.backup?.skipped),
+          communityState: summary.maintainer?.communityState,
+          embeddingBacklog: summary.maintainer?.embeddingBacklog,
+        });
+      }
+      if (janitorStarted) {
+        this.registry.recordJanitorResult?.(slug, {
+          success: !summary.janitor?.error,
+          durationMs,
+          summary: summary.janitor,
+          error: summary.janitor?.error,
+        });
+      }
       this.log.info(`[graph-maintenance] ${slug} (${policy.role}) done in ${durationMs}ms`);
       try {
         graphEvents.emit('change', {
@@ -216,12 +304,22 @@ class GraphMaintenanceCoordinator {
     } catch (e) {
       this.stats.errors++;
       const durationMs = Date.now() - started;
-      this.registry.recordMaintenanceResult?.(slug, {
-        success: false,
-        durationMs,
-        error: e.message,
-        summary,
-      });
+      if (maintenanceStarted) {
+        this.registry.recordMaintenanceResult?.(slug, {
+          success: false,
+          durationMs,
+          error: e.message,
+          summary,
+        });
+      }
+      if (janitorStarted) {
+        this.registry.recordJanitorResult?.(slug, {
+          success: false,
+          durationMs,
+          error: e.message,
+          summary: summary.janitor,
+        });
+      }
       this.log.warn(`[graph-maintenance] ${slug} failed: ${e.message}`);
       try {
         graphEvents.emit('change', {
@@ -237,32 +335,60 @@ class GraphMaintenanceCoordinator {
     }
   }
 
-  async _runStructuralPasses(graph, db, policy, { force = false } = {}) {
+  async _runActiveMaintainer(db, { force = false } = {}) {
+    if (!this.activeMaintainer) return { skipped: 'active-maintainer-unavailable' };
+    if (this.activeMaintainer._running) return { skipped: 'already-running' };
+    const beforeStats = { ...this.activeMaintainer.stats };
+    const counts = this._graphCounts(db);
+    const result = await this.activeMaintainer.runMaintenance({ force });
+    return this._withMaintenanceCounts(result, db, counts, beforeStats, this.activeMaintainer.stats);
+  }
+
+  async _runScopedMaintainer(graph, db, { force = false } = {}) {
     const maintainer = new Maintainer(this.config, this.log, this.client, db);
     try {
       maintainer.ensureSchema();
-      const beforeEmbedded = maintainer.stats.nodesEmbedded || 0;
       const counts = this._graphCounts(db);
-      await maintainer.embedUnembeddedNodes(policy.embedLimit);
-      const community = await maintainer.runCommunityDetection({ force });
-      const overview = await maintainer.runGraphOverview({ force });
-      const afterCounts = this._graphCounts(db);
-      return {
-        nodeCount: afterCounts.nodes,
-        edgeCount: afterCounts.edges,
-        embedded: (maintainer.stats.nodesEmbedded || 0) - beforeEmbedded,
-        clustered: !!community?.communityCount,
-        communityCount: community?.communityCount || afterCounts.communityCount || 0,
-        communityState: (community?.communityCount || afterCounts.communityCount)
-          ? 'ready'
-          : ((afterCounts.nodes >= 20 && afterCounts.edges >= 10) ? 'unclustered' : 'too_small'),
-        overviewed: !!overview,
-        embeddingBacklog: afterCounts.embeddingBacklog,
-        skippedSmall: afterCounts.nodes < 20 || afterCounts.edges < 10,
-        before: counts,
-      };
+      const beforeStats = { ...maintainer.stats };
+      const result = await maintainer.runMaintenance({ force });
+      return this._withMaintenanceCounts(result, db, counts, beforeStats, maintainer.stats);
     } finally {
       try { maintainer.shutdown?.(); } catch {}
+    }
+  }
+
+  _withMaintenanceCounts(result, db, beforeCounts, beforeStats = {}, afterStats = {}) {
+    const afterCounts = this._graphCounts(db);
+    const skipped = !result || result.skipped;
+    return {
+      ...(result || { skipped: 'no-maintainer-result' }),
+      nodeCount: afterCounts.nodes,
+      edgeCount: afterCounts.edges,
+      embedded: (afterStats.nodesEmbedded || 0) - (beforeStats.nodesEmbedded || 0),
+      clustered: !skipped && afterCounts.communityCount > 0,
+      communityCount: afterCounts.communityCount || 0,
+      communityState: afterCounts.communityCount
+        ? 'ready'
+        : ((afterCounts.nodes >= 20 && afterCounts.edges >= 10) ? 'unclustered' : 'too_small'),
+      overviewed: !skipped,
+      embeddingBacklog: afterCounts.embeddingBacklog,
+      before: beforeCounts,
+    };
+  }
+
+  async _runActiveJanitor({ force = false } = {}) {
+    if (!this.activeJanitor) return { skipped: 'active-janitor-unavailable' };
+    if (this.activeJanitor._running) return { skipped: 'already-running' };
+    return this.activeJanitor.runJanitor({ force });
+  }
+
+  async _runFullJanitor(db, { force = false } = {}) {
+    const janitor = new Janitor(this.config, this.log, this.client, db);
+    try {
+      janitor.ensureSchema();
+      return janitor.runJanitor({ force });
+    } finally {
+      janitor._running = false;
     }
   }
 

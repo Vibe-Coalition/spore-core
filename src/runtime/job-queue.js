@@ -315,6 +315,7 @@ class RuntimeJobQueue {
     this.registerHandler('backup.run', payload => this.workerDeps.backup?.runBackups?.(payload?.opts || {}), { lane: 'maintenance', priority: 15 });
     this.registerHandler('graphMaintenance.run', payload => this.workerDeps.graphMaintenance?.run?.(payload?.opts || {}), { lane: 'maintenance', priority: 22 });
     this.registerHandler('graphMaintenance.maintainGraph', payload => this.workerDeps.graphMaintenance?.maintainGraph?.(payload.slug, payload.opts || {}), { lane: 'maintenance', priority: 30 });
+    this.registerHandler('graphMaintenance.cleanGraph', payload => this.workerDeps.graphMaintenance?.cleanGraph?.(payload.slug, payload.opts || {}), { lane: 'maintenance', priority: 30 });
     this.registerHandler('generalKbResearch.run', payload => this.workerDeps.generalKbResearch?.runJob?.(payload), { lane: 'background', priority: 10 });
     this.registerHandler('channelDistill.run', payload => this.workerDeps.channelDistiller?.run?.(payload?.opts || {}), { lane: 'background', priority: 12 });
   }

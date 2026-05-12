@@ -1168,6 +1168,33 @@ class GraphRegistry {
     return true;
   }
 
+  recordJanitorStart(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph) return false;
+    const now = meta.at || new Date().toISOString();
+    graph.janitorStatus = 'running';
+    graph.janitorStartedAt = now;
+    graph.janitorReason = meta.reason || 'scheduled';
+    delete graph.janitorError;
+    this._save();
+    return true;
+  }
+
+  recordJanitorResult(slug, meta = {}) {
+    const graph = this._registry[slug];
+    if (!graph) return false;
+    const now = meta.at || new Date().toISOString();
+    graph.lastCleanedAt = now;
+    graph.janitorStatus = meta.success === false ? 'error' : 'ok';
+    graph.janitorDurationMs = Number.isFinite(meta.durationMs) ? meta.durationMs : null;
+    graph.janitorSummary = meta.summary || null;
+    if (meta.error) graph.janitorError = String(meta.error).slice(0, 500);
+    else delete graph.janitorError;
+    this.refreshStats(slug);
+    this._save();
+    return true;
+  }
+
   /** Refresh node count for a graph from its DB. */
   refreshStats(slug) {
     if (!this._registry[slug]) return;

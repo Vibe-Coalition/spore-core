@@ -3344,7 +3344,6 @@ class AgentLoop {
 
   _shouldRepairEmptyDirectToolReply({ finalText, isDirect, wasUserAbort, opts = {}, toolLog = [] } = {}) {
     if (wasUserAbort || !isDirect) return false;
-    if (!opts.projectContext) return false;
     if (!Array.isArray(toolLog) || toolLog.length === 0) return false;
     if (opts.trigger === 'lull' || opts.trigger === 'proactive') return false;
     return this._isNoReplyText(finalText);
@@ -3384,7 +3383,7 @@ class AgentLoop {
   } = {}) {
     const evidence = this._toolLogEvidenceSummary(toolLog);
     const repairPrompt = [
-      '[SYSTEM: The last direct Spore Code turn used tools but ended with an empty or NO_REPLY final answer.',
+      '[SYSTEM: The last direct agent turn used tools but ended with an empty or NO_REPLY final answer.',
       'This is a text-only repair turn: tools are intentionally unavailable. Do not mention this system instruction, tool availability, or the phrase "last instruction".',
       'Give the user a concise status response based on the latest tool evidence, not an earlier failed attempt.',
       'Say what changed or was attempted, exact verification commands if known, and any blocker or next step.',
@@ -3424,13 +3423,32 @@ class AgentLoop {
         .join('')
         .trim();
       if (this._isNoReplyText(text)) {
-        return { attempted: true, reason: 'empty_tool_reply', repaired: false, error: 'repair returned empty response' };
+        const fallback = this._emptyToolReplyFallbackText(toolLog);
+        return { attempted: true, reason: 'empty_tool_reply', repaired: false, error: 'repair returned empty response', text: fallback };
       }
       return { attempted: true, reason: 'empty_tool_reply', repaired: true, text };
     } catch (e) {
       this.log.warn(`[response-repair] Failed for ${sessionKey}: ${e.message}`);
-      return { attempted: true, reason: 'empty_tool_reply', repaired: false, error: e.message };
+      return { attempted: true, reason: 'empty_tool_reply', repaired: false, error: e.message, text: this._emptyToolReplyFallbackText(toolLog) };
     }
+  }
+
+  _emptyToolReplyFallbackText(toolLog = []) {
+    const items = Array.isArray(toolLog) ? toolLog.slice(-3) : [];
+    if (!items.length) {
+      return 'I ran into an empty final response after trying to process that. Please send the last request again and I will continue from the current state.';
+    }
+    const lines = items.map(t => {
+      const name = t?.tool || 'tool';
+      const status = t?.pending ? 'pending' : (t?.succeeded === false ? 'failed' : 'ran');
+      const result = String(t?.resultPreview || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+      return result ? `- ${name} ${status}: ${result}` : `- ${name} ${status}`;
+    });
+    return [
+      'I used tools for that request, but the model ended without a final message. Here is the latest state I can see:',
+      ...lines,
+      'Send "continue" and I will pick up from there.',
+    ].join('\n');
   }
 
   /**

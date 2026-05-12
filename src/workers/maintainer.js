@@ -22,7 +22,7 @@
 
 const https = require('https');
 const graphEvents = require('../graph/events');
-const { embedNode, getActive: getActiveEmbedder } = require('../graph/embedder');
+const { embedNode, getActive: getActiveEmbedder, buildNodeText } = require('../graph/embedder');
 const { ProactiveEngine } = require('./proactive');
 
 const DECAY_DAYS = {
@@ -49,7 +49,8 @@ class Maintainer {
 
     this.stats = {
       cycles: 0, gapsDetected: 0, gapsFilled: 0, gapsDormant: 0,
-      reflections: 0, staleMarked: 0, edgesCreated: 0, errors: 0,
+      reflections: 0, staleMarked: 0, edgesCreated: 0,
+      semanticEdgesCreated: 0, reasonedMergeCandidates: 0, errors: 0,
     };
 
     this.proactive = new ProactiveEngine(this);
@@ -224,11 +225,12 @@ class Maintainer {
       await this.fillGaps(scale + 1);
       await this.reflectOnNodes(Math.min(scale, 2));
       await this.checkStale(scale + 1);
+      await this.embedUnembeddedNodes(10);
       await this.connectSparseNodes(scale);
+      await this.connectSemanticNeighbors(scale + 2);
       await this.mergeNodes(scale + 2);
       await this.deriveInferences(scale);
       await this.expireEpisodicAttributes(10);
-      await this.embedUnembeddedNodes(10);
       await this.runCommunityDetection({ force });
       await this.runGraphOverview({ force });
 
@@ -248,6 +250,7 @@ class Maintainer {
         reflections: this.stats.reflections - before.reflections,
         staleMarked: this.stats.staleMarked - before.staleMarked,
         edgesCreated: this.stats.edgesCreated - before.edgesCreated,
+        semanticEdgesCreated: this.stats.semanticEdgesCreated - before.semanticEdgesCreated,
       };
     } catch (e) {
       this.stats.errors++;
@@ -830,6 +833,170 @@ If no good connections exist, return: []`,
     }
   }
 
+  // ── Semantic Neighbor Connection ───────────────────────────────────────────
+
+  async connectSemanticNeighbors(count = 4) {
+    if (!this.db) return;
+
+    try {
+      const active = getActiveEmbedder();
+      const providerFilter = active
+        ? 'AND ((n.embedding_provider = ? AND n.embedding_dim = ?) OR (n.embedding_provider IS NULL AND n.embedding_dim IS NULL))'
+        : '';
+      const providerArgs = active ? [active.name, active.dim] : [];
+      const rows = this.db.prepare(`
+        SELECT n.id, n.label, n.type, n.description, n.importance, n.embedding,
+               COALESCE(n.updated, n.extracted_at, n.created) AS touched_at,
+               (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) AS degree,
+               (
+                 SELECT COUNT(*)
+                 FROM edges e
+                 JOIN nodes other ON other.id = CASE WHEN e.source = n.id THEN e.target ELSE e.source END
+                 WHERE (e.source = n.id OR e.target = n.id)
+                   AND other.type IN ('person', 'self', 'agent')
+               ) AS person_edges,
+               (
+                 SELECT COUNT(*)
+                 FROM edges e
+                 WHERE (e.source = n.id OR e.target = n.id)
+                   AND e.type NOT IN ('knows', 'owns', 'created', 'mentioned', 'discovered_in')
+               ) AS semantic_edges
+        FROM nodes n
+        WHERE n.embedding IS NOT NULL
+          AND n.embedding != ''
+          ${providerFilter}
+          AND n.id NOT LIKE 'ref-%'
+          AND n.type NOT IN ('tool', 'reference', 'episode', 'message', 'session')
+          AND (n.provenance = 'self' OR n.provenance IS NULL)
+        ORDER BY n.importance DESC, touched_at DESC
+        LIMIT 1200
+      `).all(...providerArgs);
+
+      if (rows.length < 2) return;
+
+      const nodes = [];
+      for (const row of rows) {
+        const vec = this._parseEmbedding(row.embedding);
+        if (!vec) continue;
+        const semanticText = this._normalizeSemanticText(`${row.label} ${row.description || ''} ${this._buildNodeContext(row.id)}`);
+        nodes.push({
+          ...row,
+          vec,
+          semantic_text: semanticText,
+          semantic_tokens: this._semanticTokens(semanticText),
+          semantic_prefixes: this._extractEntityPrefixes(semanticText),
+          degree: Number(row.degree || 0),
+          person_edges: Number(row.person_edges || 0),
+          semantic_edges: Number(row.semantic_edges || 0),
+        });
+      }
+      if (nodes.length < 2) return;
+
+      const existingPairs = this._loadExistingEdgePairs();
+      const sources = this._semanticSourceNodes(nodes, count);
+      const targetCandidates = Math.max(12, count * 8);
+      const candidates = [];
+      const seen = new Set();
+
+      for (const source of sources) {
+        for (const target of nodes) {
+          if (source.id === target.id) continue;
+          if (this._skipSemanticCandidate(source, target, existingPairs)) continue;
+
+          const sim = this._cosine(source.vec, target.vec);
+          if (sim < 0.52) continue;
+
+          const lexical = this._semanticLexicalBoost(source, target);
+          const typeBoost = this._semanticTypeBoost(source, target);
+          const sparseBoost = source.semantic_edges === 0 || source.person_edges >= Math.max(1, source.degree - 1) ? 0.04 : 0;
+          const score = sim + lexical + typeBoost + sparseBoost;
+          const lowDegreeParentCandidate = source.degree <= 4 && typeBoost > 0;
+          if (sim < 0.76 && score < 0.80 && !(lowDegreeParentCandidate && score >= 0.74)) continue;
+
+          const key = [source.id, target.id].sort().join('|');
+          if (seen.has(key)) continue;
+          seen.add(key);
+          candidates.push({ source, target, sim, score, lexical, typeBoost });
+        }
+      }
+
+      if (candidates.length === 0) return;
+
+      candidates.sort((a, b) => b.score - a.score || b.sim - a.sim);
+      const shortlist = candidates.slice(0, targetCandidates);
+      const shortlistPairs = new Set(shortlist.map(c => [c.source.id, c.target.id].sort().join('|')));
+      const prompt = shortlist.map((c, idx) => {
+        const sourceText = this._nodeSemanticText(c.source.id);
+        const targetText = this._nodeSemanticText(c.target.id);
+        return [
+          `Candidate ${idx + 1}`,
+          `A: ${c.source.id} | "${c.source.label}" (${c.source.type}, degree ${c.source.degree}, semantic_edges ${c.source.semantic_edges})`,
+          this._truncate(sourceText, 700),
+          `B: ${c.target.id} | "${c.target.label}" (${c.target.type}, degree ${c.target.degree}, semantic_edges ${c.target.semantic_edges})`,
+          this._truncate(targetText, 700),
+          `embedding_similarity=${c.sim.toFixed(3)} score=${c.score.toFixed(3)}`,
+        ].join('\n');
+      }).join('\n\n');
+
+      const response = await this._callLLM(
+        `You add missing semantic edges in a personal knowledge graph.
+You are given candidate node pairs found by embedding similarity. Approve ONLY relationships that are clearly useful and supported by the labels/descriptions/aspects.
+Do not merge nodes. Do not create duplicate person ownership edges. Prefer connecting a low-degree entity/device/file/account/event into the system, skill, project, registry, or concept it belongs to.
+Allowed edge types: part_of, uses, depends_on, manages, configured_by, related_to, documents, implements, monitors.
+Direction rules:
+- part_of: child/source -> parent/target
+- uses: actor/tool/system -> resource/system
+- depends_on: dependent/source -> dependency/target
+- configured_by: configured thing/source -> configuring system/skill/agent
+- related_to: either direction, choose the more useful navigation direction
+Return ONLY JSON:
+[{"source":"node_id","target":"node_id","type":"edge_type","confidence":"inferred","reason":"brief"}]
+Return [] if no candidate is strong enough.`,
+        prompt
+      );
+
+      const approved = this._parseJSON(response, "connectSemanticNeighbors");
+      if (!Array.isArray(approved)) return;
+
+      const validIds = new Set(nodes.map(n => n.id));
+      let created = 0;
+      for (const edge of approved.slice(0, count)) {
+        if (!edge?.source || !edge?.target || !edge?.type) continue;
+        if (edge.source === edge.target) continue;
+        if (!validIds.has(edge.source) || !validIds.has(edge.target)) continue;
+        if (!shortlistPairs.has([edge.source, edge.target].sort().join('|'))) continue;
+        if (!this._isAllowedSemanticEdgeType(edge.type)) continue;
+
+        const srcExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(edge.source);
+        const tgtExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(edge.target);
+        if (!srcExists || !tgtExists) continue;
+
+        const dup = this.db.prepare(
+          'SELECT id FROM edges WHERE source = ? AND target = ? AND type = ?'
+        ).get(edge.source, edge.target, edge.type);
+        if (dup) continue;
+
+        this.db.prepare(
+          "INSERT INTO edges (source, target, type, weight, extracted_with, confidence) VALUES (?, ?, ?, 0.7, 'maintainer-semantic', 'inferred')"
+        ).run(edge.source, edge.target, edge.type);
+        graphEvents.emit('change', {
+          op: 'edge:create',
+          edge: { source: edge.source, target: edge.target, type: edge.type, confidence: 'inferred' },
+          source: 'maintainer',
+        });
+        created++;
+      }
+
+      if (created > 0) {
+        this.stats.edgesCreated += created;
+        this.stats.semanticEdgesCreated += created;
+        this.log.info(`[maintainer] Connected ${created} semantic neighbor edge(s)`);
+      }
+    } catch (e) {
+      this.log.error('[maintainer] Semantic neighbor connect error:', e.message);
+    }
+  }
+
   // ── Community Detection ────────────────────────────────────────────────────
 
   /**
@@ -930,10 +1097,15 @@ If no good connections exist, return: []`,
 
       const freshIds = new Set(freshNodes.map(n => n.id));
       const allNodes = [...freshNodes, ...olderNodes.filter(n => !freshIds.has(n.id))];
-      if (allNodes.length < 2) return;
+      const reviewNodes = this._loadMergeReviewNodes();
+      if (allNodes.length < 2 && reviewNodes.length < 2) return;
 
       const candidates = [];
-      const targetCandidates = batchSize * 4;
+      const candidateKeys = new Set();
+      const targetCandidates = Math.max(50, batchSize * 12);
+
+      this._seedExactLabelMergeCandidates(reviewNodes.length ? reviewNodes : allNodes, candidates, candidateKeys);
+      await this._seedReasonedMergeCandidates(reviewNodes, candidates, candidateKeys, batchSize);
 
       // Phase 1: compare every fresh node against ALL other nodes (aggressive)
       for (const fresh of freshNodes) {
@@ -946,7 +1118,7 @@ If no good connections exist, return: []`,
           try { emb_o = JSON.parse(other.embedding); } catch { continue; }
           const sim = this._cosine(emb_f, emb_o);
           if (sim >= 0.85) {
-            candidates.push({ a: fresh, b: other, sim });
+            this._addMergeCandidate(candidates, candidateKeys, fresh, other, sim);
           }
         }
       }
@@ -962,7 +1134,7 @@ If no good connections exist, return: []`,
           try { emb_j = JSON.parse(allNodes[j].embedding); } catch { continue; }
           const sim = this._cosine(emb_i, emb_j);
           if (sim >= 0.92) {
-            candidates.push({ a: allNodes[i], b: allNodes[j], sim });
+            this._addMergeCandidate(candidates, candidateKeys, allNodes[i], allNodes[j], sim);
           }
         }
       }
@@ -978,14 +1150,26 @@ If no good connections exist, return: []`,
         seen.add(key);
         unique.push(c);
       }
-      unique.sort((x, y) => y.sim - x.sim);
+      unique.sort((x, y) =>
+        (y.auto ? 1 : 0) - (x.auto ? 1 : 0) ||
+        (y.reasoned ? 1 : 0) - (x.reasoned ? 1 : 0) ||
+        y.sim - x.sim
+      );
 
       let merged = 0;
-      for (const pair of unique.slice(0, batchSize)) {
+      for (const pair of unique) {
         try {
+          const aExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(pair.a.id);
+          const bExists = this.db.prepare('SELECT id FROM nodes WHERE id = ?').get(pair.b.id);
+          if (!aExists || !bExists) continue;
           const ctxA = this._buildNodeContext(pair.a.id);
           const ctxB = this._buildNodeContext(pair.b.id);
-          const prompt = `Two nodes in a knowledge graph may refer to the same real-world entity.
+          let result = pair.auto
+            ? { same: true, reason: pair.reason || 'normalized labels match' }
+            : null;
+
+          if (!result) {
+            const prompt = `Two nodes in a knowledge graph may refer to the same real-world entity.
 
 Node A: "${pair.a.label}" (${pair.a.type})
 ${ctxA}
@@ -993,25 +1177,33 @@ ${ctxA}
 Node B: "${pair.b.label}" (${pair.b.type})
 ${ctxB}
 
-Embedding similarity: ${pair.sim.toFixed(3)}
+${pair.reasoned ? `Inventory review reason: ${pair.reason || 'candidate proposed by full-node inventory review'}\n` : ''}Embedding similarity: ${pair.reasoned ? 'not used for this candidate' : pair.sim.toFixed(3)}
 
 Do these two nodes refer to the SAME real-world entity/concept? Consider that the same place, person, or thing can have multiple names or partial names. Answer ONLY with JSON:
 {"same": true/false, "reason": "brief explanation"}`;
 
-          const response = await this._callLLM(
-            'You are a knowledge graph deduplication judge. Determine if two nodes refer to the same entity. Consider aliases, abbreviations, and partial names.',
-            prompt
-          );
-          const result = this._parseJSON(response, "mergeNodes");
+            const response = await this._callLLM(
+              'You are a knowledge graph deduplication judge. Determine if two nodes refer to the same entity. Consider aliases, abbreviations, and partial names.',
+              prompt
+            );
+            result = this._parseJSON(response, "mergeNodes");
+          }
           if (!result || !result.same) continue;
 
           const attrsA = this.db.prepare('SELECT COUNT(*) as c FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = ?').get(pair.a.id).c;
           const attrsB = this.db.prepare('SELECT COUNT(*) as c FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = ?').get(pair.b.id).c;
           const [canonical, duplicate] = attrsA >= attrsB ? [pair.a, pair.b] : [pair.b, pair.a];
+          const preferredLabel = this._preferredMergeLabel(canonical, duplicate);
 
           this._mergeNodeInto(canonical.id, duplicate.id);
+          if (preferredLabel && preferredLabel !== canonical.label) {
+            try { this.db.prepare('INSERT OR IGNORE INTO aliases (node_id, alias) VALUES (?, ?)').run(canonical.id, canonical.label); } catch (e) { this.log.warn('[maintainer] db.prepare failed: ' + e.message); }
+            try { this.db.prepare("UPDATE nodes SET label = ?, updated = datetime('now') WHERE id = ?").run(preferredLabel, canonical.id); } catch (e) { this.log.warn('[maintainer] db.prepare failed: ' + e.message); }
+            canonical.label = preferredLabel;
+          }
           merged++;
-          this.log.info(`[maintainer] Merged duplicate: "${duplicate.label}" → "${canonical.label}" (sim=${pair.sim.toFixed(3)}, reason: ${result.reason})`);
+          const basis = pair.reasoned ? 'reasoned-inventory' : `sim=${pair.sim.toFixed(3)}`;
+          this.log.info(`[maintainer] Merged duplicate: "${duplicate.label}" → "${canonical.label}" (${basis}, reason: ${result.reason})`);
           graphEvents.emit('change', { op: 'node:merge', canonicalId: canonical.id, duplicateId: duplicate.id, source: 'maintainer' });
         } catch (e) {
           this.log.debug?.(`[maintainer] Merge pair failed: ${e.message}`);
@@ -1027,7 +1219,206 @@ Do these two nodes refer to the SAME real-world entity/concept? Consider that th
     }
   }
 
+  _addMergeCandidate(candidates, seen, a, b, sim, extra = {}) {
+    if (!a?.id || !b?.id || a.id === b.id) return false;
+    const key = [a.id, b.id].sort().join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    candidates.push({ a, b, sim, ...extra });
+    return true;
+  }
+
+  _seedExactLabelMergeCandidates(nodes, candidates, seen) {
+    const buckets = new Map();
+    for (const node of nodes || []) {
+      if (!node?.id || String(node.id).startsWith('ref-')) continue;
+      const key = this._normalizedMergeLabel(node.label);
+      if (!key) continue;
+      const bucket = buckets.get(key) || [];
+      bucket.push(node);
+      buckets.set(key, bucket);
+    }
+    for (const [key, bucket] of buckets) {
+      if (bucket.length < 2) continue;
+      for (let i = 0; i < bucket.length; i++) {
+        for (let j = i + 1; j < bucket.length; j++) {
+          this._addMergeCandidate(candidates, seen, bucket[i], bucket[j], 1, {
+            auto: true,
+            reason: `normalized label match: ${key}`,
+          });
+        }
+      }
+    }
+  }
+
+  _loadMergeReviewNodes() {
+    if (!this.db) return [];
+    try {
+      const total = this.db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM nodes
+        WHERE id NOT LIKE 'ref-%'
+          AND type NOT IN ('tool', 'reference', 'episode', 'message', 'session')
+          AND (provenance = 'self' OR provenance IS NULL)
+      `).get()?.c || 0;
+      if (total < 2) return [];
+
+      const limit = Math.max(50, Math.min(500, Number(this.config.maintainerMergeInventoryLimit || 350)));
+      const rows = this.db.prepare(`
+        SELECT n.id, n.label, n.type, n.description, n.importance, n.embedding,
+               COALESCE(n.updated, n.extracted_at, n.created) AS touched_at,
+               (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) AS degree
+        FROM nodes n
+        WHERE n.id NOT LIKE 'ref-%'
+          AND n.type NOT IN ('tool', 'reference', 'episode', 'message', 'session')
+          AND (n.provenance = 'self' OR n.provenance IS NULL)
+        ORDER BY
+          CASE WHEN (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) <= 4 THEN 0 ELSE 1 END,
+          n.importance DESC,
+          touched_at DESC
+        LIMIT ?
+      `).all(limit);
+
+      for (const row of rows) {
+        row.degree = Number(row.degree || 0);
+        row.total_graph_nodes = Number(total);
+      }
+      return rows;
+    } catch (e) {
+      this.log.debug?.(`[maintainer] merge inventory load failed: ${e.message}`);
+      return [];
+    }
+  }
+
+  async _seedReasonedMergeCandidates(nodes, candidates, seen, batchSize = 5) {
+    if (!Array.isArray(nodes) || nodes.length < 2) return;
+    try {
+      const maxGroups = Math.max(4, Math.min(12, batchSize * 2));
+      const byId = new Map(nodes.map(n => [n.id, n]));
+      const total = nodes[0]?.total_graph_nodes || nodes.length;
+      const listed = nodes.length;
+      const nodeList = nodes.map(n => this._mergeInventoryLine(n)).join('\n');
+
+      const response = await this._callLLM(
+        `You review a knowledge graph node inventory for duplicate or fragmented nodes.
+Find merge groups using reasoning over labels, types, descriptions, aliases, aspects, and obvious naming variants. Do NOT rely on embedding similarity.
+Only propose merges when nodes are the same real-world entity, account, project, device, concept, or artifact.
+Do NOT merge parent/child relationships, systems with their devices, a person with things they own, related but distinct projects, or broad categories with examples.
+Return ONLY JSON:
+{"groups":[{"canonical":"node_id","duplicates":["node_id"],"reason":"why they are the same"}]}
+Return {"groups":[]} if no safe merges are visible. Max ${maxGroups} groups.`,
+        `Total graph nodes: ${total}
+Listed nodes for this review: ${listed}${listed < total ? ' (bounded inventory window for prompt safety)' : ' (full graph inventory)'}
+
+Nodes:
+${nodeList}`
+      );
+
+      const parsed = this._parseJSON(response, "_seedReasonedMergeCandidates");
+      const groups = Array.isArray(parsed) ? parsed : parsed?.groups;
+      if (!Array.isArray(groups) || groups.length === 0) return;
+
+      let added = 0;
+      for (const group of groups.slice(0, maxGroups)) {
+        const ids = Array.isArray(group?.ids)
+          ? group.ids
+          : [group?.canonical, ...(Array.isArray(group?.duplicates) ? group.duplicates : [])];
+        const uniqueIds = [...new Set(ids.filter(id => typeof id === 'string' && byId.has(id)))];
+        if (uniqueIds.length < 2) continue;
+
+        const canonicalId = byId.has(group?.canonical) ? group.canonical : uniqueIds[0];
+        for (const id of uniqueIds) {
+          if (id === canonicalId) continue;
+          const ok = this._addMergeCandidate(candidates, seen, byId.get(canonicalId), byId.get(id), 0, {
+            reasoned: true,
+            reason: group.reason || 'candidate proposed by node inventory review',
+          });
+          if (ok) added++;
+        }
+      }
+
+      if (added > 0) {
+        this.stats.reasonedMergeCandidates += added;
+        this.log.info(`[maintainer] Reasoned merge inventory proposed ${added} candidate pair(s)`);
+      }
+    } catch (e) {
+      this.log.warn(`[maintainer] Reasoned merge inventory failed: ${e.message}`);
+    }
+  }
+
+  _mergeInventoryLine(node) {
+    const aliases = this._nodeAliases(node.id).slice(0, 4).join(', ');
+    const aspects = this._nodeAspectNames(node.id).slice(0, 6).join(', ');
+    const desc = this._truncate(String(node.description || '').replace(/\s+/g, ' ').trim(), 180);
+    return [
+      `- ${node.id}`,
+      `label="${node.label}"`,
+      `type=${node.type}`,
+      `importance=${node.importance || 0}`,
+      `degree=${node.degree || 0}`,
+      desc ? `desc="${desc}"` : null,
+      aliases ? `aliases=[${aliases}]` : null,
+      aspects ? `aspects=[${aspects}]` : null,
+    ].filter(Boolean).join(' | ');
+  }
+
+  _nodeAliases(nodeId) {
+    try {
+      return this.db.prepare('SELECT alias FROM aliases WHERE node_id = ? ORDER BY alias LIMIT 8')
+        .all(nodeId)
+        .map(r => r.alias)
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  _nodeAspectNames(nodeId) {
+    try {
+      return this.db.prepare('SELECT name FROM aspects WHERE node_id = ? ORDER BY weight DESC LIMIT 10')
+        .all(nodeId)
+        .map(r => r.name)
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  _normalizedMergeLabel(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return '';
+    const normalized = raw
+      .replace(/['’]s\b/g, 's')
+      .replace(/[()[\]{}]/g, ' ')
+      .replace(/[_-]+/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\b(the|a|an)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalized) return '';
+    const tokens = normalized.split(' ').filter(Boolean);
+    if (tokens.length < 2 && normalized.length < 12) return '';
+    return normalized;
+  }
+
+  _preferredMergeLabel(a, b) {
+    const labelA = String(a?.label || '').trim();
+    const labelB = String(b?.label || '').trim();
+    if (!labelA || !labelB) return '';
+    if (this._normalizedMergeLabel(labelA) !== this._normalizedMergeLabel(labelB)) return '';
+    const score = (label) => {
+      let s = 0;
+      if (!/^(the|a|an)\s+/i.test(label)) s += 4;
+      if (!/[()[\]{}]/.test(label)) s += 3;
+      if (!/[_-]/.test(label)) s += 1;
+      s += Math.max(0, 60 - label.length) / 20;
+      return s;
+    };
+    return score(labelB) > score(labelA) ? labelB : labelA;
+  }
+
   _cosine(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || a.length !== b.length) return 0;
     let dot = 0, na = 0, nb = 0;
     for (let k = 0; k < a.length; k++) {
       dot += a[k] * b[k];
@@ -1125,6 +1516,171 @@ Do these two nodes refer to the SAME real-world entity/concept? Consider that th
     } catch {
       return 'Context query failed.';
     }
+  }
+
+  _parseEmbedding(raw) {
+    try {
+      const vec = JSON.parse(raw);
+      if (!Array.isArray(vec) || vec.length === 0) return null;
+      if (!vec.every(v => Number.isFinite(Number(v)))) return null;
+      return vec.map(Number);
+    } catch {
+      return null;
+    }
+  }
+
+  _loadExistingEdgePairs() {
+    const pairs = new Map();
+    try {
+      const rows = this.db.prepare('SELECT source, target, type FROM edges').all();
+      for (const row of rows) {
+        const key = [row.source, row.target].sort().join('|');
+        if (!pairs.has(key)) pairs.set(key, new Set());
+        pairs.get(key).add(row.type);
+      }
+    } catch {}
+    return pairs;
+  }
+
+  _semanticSourceNodes(nodes, count) {
+    const max = Math.max(30, count * 24);
+    const lowDegree = nodes
+      .filter(n => !['person', 'self', 'agent'].includes(n.type))
+      .filter(n => n.degree <= 4 || n.semantic_edges <= 1 || n.person_edges >= Math.max(1, n.degree - 1));
+
+    const sourceIds = new Set();
+    const sources = [];
+    const add = (node) => {
+      if (!node || sourceIds.has(node.id) || sources.length >= max) return;
+      sourceIds.add(node.id);
+      sources.push(node);
+    };
+
+    lowDegree
+      .sort((a, b) =>
+        (a.semantic_edges - b.semantic_edges) ||
+        (a.degree - b.degree) ||
+        (b.importance - a.importance)
+      )
+      .forEach(add);
+
+    // On small graphs, scan every non-person node so manual maintenance has
+    // the "look at the whole graph" behavior users expect.
+    if (nodes.length <= 250) {
+      nodes
+        .filter(n => !['person', 'self', 'agent'].includes(n.type))
+        .sort((a, b) => b.importance - a.importance)
+        .forEach(add);
+    }
+
+    return sources;
+  }
+
+  _skipSemanticCandidate(source, target, existingPairs) {
+    if (!source || !target || source.id === target.id) return true;
+    if (['person', 'self', 'agent'].includes(target.type)) return true;
+    if (['person', 'self', 'agent'].includes(source.type) && ['person', 'self', 'agent'].includes(target.type)) return true;
+    const pairKey = [source.id, target.id].sort().join('|');
+    const types = existingPairs.get(pairKey);
+    if (!types) return false;
+
+    // Existing ownership/person edges are not enough semantic structure, but
+    // an existing non-person semantic edge means this pair is already useful.
+    for (const type of types) {
+      if (!['knows', 'owns', 'created', 'mentioned', 'discovered_in'].includes(type)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  _nodeSemanticText(nodeId) {
+    try {
+      return buildNodeText(this.db, nodeId) || this._buildNodeContext(nodeId);
+    } catch {
+      return this._buildNodeContext(nodeId);
+    }
+  }
+
+  _semanticLexicalBoost(source, target) {
+    const sourceText = source.semantic_text || this._normalizeSemanticText(`${source.label} ${source.description || ''}`);
+    const targetText = target.semantic_text || this._normalizeSemanticText(`${target.label} ${target.description || ''}`);
+    const sourceTokens = source.semantic_tokens || this._semanticTokens(sourceText);
+    const targetTokens = target.semantic_tokens || this._semanticTokens(targetText);
+    if (sourceTokens.length === 0 || targetTokens.length === 0) return 0;
+
+    let overlap = 0;
+    const targetSet = new Set(targetTokens);
+    for (const token of sourceTokens) {
+      if (targetSet.has(token)) overlap++;
+    }
+
+    const directLabelMention =
+      targetText.includes(this._normalizeSemanticText(source.label)) ||
+      sourceText.includes(this._normalizeSemanticText(target.label));
+    const entityMention =
+      (source.semantic_prefixes || this._extractEntityPrefixes(sourceText)).some(prefix => targetText.includes(prefix)) ||
+      (target.semantic_prefixes || this._extractEntityPrefixes(targetText)).some(prefix => sourceText.includes(prefix));
+
+    let boost = Math.min(0.08, overlap / Math.min(sourceTokens.length, targetTokens.length) * 0.08);
+    if (directLabelMention) boost += 0.08;
+    if (entityMention) boost += 0.06;
+    return Math.min(0.18, boost);
+  }
+
+  _semanticTypeBoost(source, target) {
+    const sourceTypes = new Set(['product', 'device', 'sensor', 'entity', 'account', 'file', 'system_event', 'system_state', 'planned_action']);
+    const parentTypes = new Set(['project', 'system', 'service', 'device_registry', 'concept', 'skill', 'software_agent']);
+    if (sourceTypes.has(source.type) && parentTypes.has(target.type)) return 0.06;
+    if (source.type === 'project' && ['system', 'service', 'concept'].includes(target.type)) return 0.03;
+    if (source.type === 'file' && ['project', 'system'].includes(target.type)) return 0.05;
+    return 0;
+  }
+
+  _isAllowedSemanticEdgeType(type) {
+    return new Set([
+      'part_of', 'uses', 'depends_on', 'manages', 'configured_by',
+      'related_to', 'documents', 'implements', 'monitors',
+    ]).has(String(type || '').trim());
+  }
+
+  _normalizeSemanticText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/[_./:-]+/g, ' ')
+      .replace(/[^a-z0-9\s]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  _semanticTokens(value) {
+    const stop = new Set([
+      'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'used',
+      'user', 'node', 'system', 'status', 'current', 'main', 'skill',
+    ]);
+    return this._normalizeSemanticText(value)
+      .split(/\s+/)
+      .filter(token => token.length >= 4 && !stop.has(token))
+      .slice(0, 80);
+  }
+
+  _extractEntityPrefixes(value) {
+    const prefixes = [];
+    const text = String(value || '').toLowerCase();
+    const re = /\b(?:sensor|switch|light|climate|cover|lock|media_player|camera|binary_sensor)\.([a-z0-9_]+)/g;
+    let match;
+    while ((match = re.exec(text))) {
+      const parts = match[1].split('_').filter(Boolean);
+      for (let len = Math.min(parts.length, 4); len >= 2; len--) {
+        prefixes.push(parts.slice(0, len).join(' '));
+      }
+    }
+    return [...new Set(prefixes)].slice(0, 20);
+  }
+
+  _truncate(text, max = 1000) {
+    const s = String(text || '');
+    return s.length <= max ? s : `${s.slice(0, max)}...`;
   }
 
   // ── Formal Reasoning / Dreaming ─────────────────────────────────────────────

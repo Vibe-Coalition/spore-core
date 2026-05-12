@@ -504,7 +504,7 @@ async function boot() {
 
   const maintainer = new Maintainer(config, log, llmClient, learner.db);
   maintainer.ensureSchema();
-  log.info('Maintainer initialized (gaps, reflections, stale-check, sparse-connect)');
+  log.info('Maintainer initialized (gaps, reflections, stale-check, sparse-connect, semantic-neighbor)');
 
   const janitor = new Janitor(config, log, llmClient, learner.db);
   janitor.ensureSchema();
@@ -803,17 +803,38 @@ async function boot() {
       if (config.maintainerIdleOnly && agent.activeRuns.size > 0) {
         log.info('[heartbeat] Skipping maintenance — conversations active');
       } else {
-        cycleSummary = await runRuntimeWorker('maintenance.run', { opts: {} }, {
-          lane: 'maintenance',
-          priority: 25,
-          route: 'heartbeat',
-        }, () => maintainer.runMaintenance({}));
         if (config.graphMaintenanceEnabled !== false) {
-          await runRuntimeWorker('graphMaintenance.run', { opts: { reason: 'heartbeat' } }, {
+          const registrySummary = await runRuntimeWorker('graphMaintenance.run', {
+            opts: {
+              reason: 'heartbeat',
+              includeActive: true,
+              batchSize: 'all',
+              runMaintainer: true,
+              runJanitor: false,
+              runDistill: true,
+              runBackup: true,
+            },
+          }, {
             lane: 'maintenance',
-            priority: 22,
+            priority: 25,
             route: 'heartbeat',
-          }, () => graphMaintenance.run({ reason: 'heartbeat' }));
+          }, () => graphMaintenance.run({
+            reason: 'heartbeat',
+            includeActive: true,
+            batchSize: 'all',
+            runMaintainer: true,
+            runJanitor: false,
+            runDistill: true,
+            runBackup: true,
+          }));
+          const activeSlug = graphRegistry.getActiveSlug?.();
+          cycleSummary = registrySummary?.results?.find(r => r?.slug === activeSlug)?.summary?.maintainer || null;
+        } else {
+          cycleSummary = await runRuntimeWorker('maintenance.run', { opts: {} }, {
+            lane: 'maintenance',
+            priority: 25,
+            route: 'heartbeat',
+          }, () => maintainer.runMaintenance({}));
         }
       }
     } catch (e) {
@@ -860,20 +881,42 @@ async function boot() {
   log.info(`[maintainer] First cycle delayed ${Math.round(maintainerDelay / 60000)}m after boot`);
   setTimeout(async () => {
     try {
-      const cycleSummary = await runRuntimeWorker('maintenance.run', { opts: {} }, {
-        lane: 'maintenance',
-        priority: 25,
-        route: 'boot-maintenance',
-      }, () => maintainer.runMaintenance({}));
+      let cycleSummary = null;
+      if (config.graphMaintenanceEnabled !== false) {
+        const registrySummary = await runRuntimeWorker('graphMaintenance.run', {
+          opts: {
+            reason: 'boot',
+            includeActive: true,
+            batchSize: 'all',
+            runMaintainer: true,
+            runJanitor: false,
+            runDistill: true,
+            runBackup: true,
+          },
+        }, {
+          lane: 'maintenance',
+          priority: 25,
+          route: 'boot-maintenance',
+        }, () => graphMaintenance.run({
+          reason: 'boot',
+          includeActive: true,
+          batchSize: 'all',
+          runMaintainer: true,
+          runJanitor: false,
+          runDistill: true,
+          runBackup: true,
+        }));
+        const activeSlug = graphRegistry.getActiveSlug?.();
+        cycleSummary = registrySummary?.results?.find(r => r?.slug === activeSlug)?.summary?.maintainer || null;
+      } else {
+        cycleSummary = await runRuntimeWorker('maintenance.run', { opts: {} }, {
+          lane: 'maintenance',
+          priority: 25,
+          route: 'boot-maintenance',
+        }, () => maintainer.runMaintenance({}));
+      }
       if (cycleSummary && config.proactive?.enabled) {
         dispatchProactive(cycleSummary);
-      }
-      if (config.graphMaintenanceEnabled !== false) {
-        await runRuntimeWorker('graphMaintenance.run', { opts: { reason: 'boot' } }, {
-          lane: 'maintenance',
-          priority: 22,
-          route: 'boot-maintenance',
-        }, () => graphMaintenance.run({ reason: 'boot' }));
       }
     } catch (e) {
       log.error('[boot-maintenance] Error:', e.message);
@@ -887,22 +930,74 @@ async function boot() {
     if (config.janitorEnabled === false) return;
     if (config.maintainerIdleOnly && agent.activeRuns.size > 0) return;
     try {
-      await runRuntimeWorker('janitor.run', { opts: {} }, {
-        lane: 'maintenance',
-        priority: 20,
-        route: 'janitor.interval',
-      }, () => janitor.runJanitor({}));
+      if (config.graphMaintenanceEnabled !== false) {
+        await runRuntimeWorker('graphMaintenance.run', {
+          opts: {
+            reason: 'janitor.interval',
+            includeActive: true,
+            batchSize: 'all',
+            runMaintainer: false,
+            runJanitor: true,
+            runDistill: false,
+            runBackup: false,
+          },
+        }, {
+          lane: 'maintenance',
+          priority: 20,
+          route: 'janitor.interval',
+        }, () => graphMaintenance.run({
+          reason: 'janitor.interval',
+          includeActive: true,
+          batchSize: 'all',
+          runMaintainer: false,
+          runJanitor: true,
+          runDistill: false,
+          runBackup: false,
+        }));
+      } else {
+        await runRuntimeWorker('janitor.run', { opts: {} }, {
+          lane: 'maintenance',
+          priority: 20,
+          route: 'janitor.interval',
+        }, () => janitor.runJanitor({}));
+      }
     } catch (e) { log.error('[janitor] Interval error:', e.message); }
   }, janitorIntervalMs);
   log.info(`[janitor] Scheduled every ${Math.round(janitorIntervalMs / 60000)}m, first cycle in ${Math.round(janitorBootDelay / 60000)}m`);
   setTimeout(async () => {
     if (config.janitorEnabled === false) return;
     try {
-      await runRuntimeWorker('janitor.run', { opts: {} }, {
-        lane: 'maintenance',
-        priority: 20,
-        route: 'janitor.boot',
-      }, () => janitor.runJanitor({}));
+      if (config.graphMaintenanceEnabled !== false) {
+        await runRuntimeWorker('graphMaintenance.run', {
+          opts: {
+            reason: 'janitor.boot',
+            includeActive: true,
+            batchSize: 'all',
+            runMaintainer: false,
+            runJanitor: true,
+            runDistill: false,
+            runBackup: false,
+          },
+        }, {
+          lane: 'maintenance',
+          priority: 20,
+          route: 'janitor.boot',
+        }, () => graphMaintenance.run({
+          reason: 'janitor.boot',
+          includeActive: true,
+          batchSize: 'all',
+          runMaintainer: false,
+          runJanitor: true,
+          runDistill: false,
+          runBackup: false,
+        }));
+      } else {
+        await runRuntimeWorker('janitor.run', { opts: {} }, {
+          lane: 'maintenance',
+          priority: 20,
+          route: 'janitor.boot',
+        }, () => janitor.runJanitor({}));
+      }
     } catch (e) { log.error('[boot-janitor] Error:', e.message); }
   }, janitorBootDelay);
 

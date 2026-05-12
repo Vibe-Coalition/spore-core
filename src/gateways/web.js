@@ -8364,6 +8364,10 @@ class WebGateway {
             force: body.force !== false,
             includeActive: true,
             reason: body.reason || 'manual',
+            runMaintainer: true,
+            runJanitor: false,
+            runDistill: body.runDistill !== false,
+            runBackup: body.runBackup !== false,
           },
         };
         const result = this.tools?._jobQueue?.submitWorkerJob
@@ -8374,6 +8378,34 @@ class WebGateway {
               graph: slug,
             })
           : await coordinator.maintainGraph(slug, payload.opts);
+        return jsonRes(result, result.ok ? 200 : 400);
+      } catch (e) {
+        return jsonRes({ error: e.message }, 500);
+      }
+    }
+
+    if (action === 'janitor/run' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
+      try {
+        const coordinator = this.tools?._graphMaintenance;
+        if (!coordinator) return jsonRes({ error: 'graph maintenance coordinator not available' }, 503);
+        const body = await jsonBody().catch(() => ({}));
+        const payload = {
+          slug,
+          opts: {
+            force: body.force !== false,
+            includeActive: true,
+            reason: body.reason || 'manual-clean',
+          },
+        };
+        const result = this.tools?._jobQueue?.submitWorkerJob
+          ? await this.tools._jobQueue.submitWorkerJob('graphMaintenance.cleanGraph', payload, {
+              lane: 'maintenance',
+              priority: 35,
+              route: 'graph.janitor.manual',
+              graph: slug,
+            })
+          : await coordinator.cleanGraph(slug, payload.opts);
         return jsonRes(result, result.ok ? 200 : 400);
       } catch (e) {
         return jsonRes({ error: e.message }, 500);
@@ -8632,7 +8664,8 @@ class WebGateway {
     if (urlPath === '/api/maintainer/run' && req.method === 'POST') {
       try {
         const maintainer = this.tools?._maintainer;
-        if (!maintainer) {
+        const coordinator = this.tools?._graphMaintenance;
+        if (!maintainer && !coordinator) {
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'maintainer not available' }));
           return;
@@ -8645,9 +8678,37 @@ class WebGateway {
         this._maintRunJob = { state: 'running', started: Date.now(), error: null, result: null };
         Promise.resolve()
           .then(async () => {
-            const result = { active: await maintainer.runMaintenance({ force: true }) };
+            const result = coordinator
+              ? await (this.tools?._jobQueue?.submitWorkerJob
+                ? this.tools._jobQueue.submitWorkerJob('graphMaintenance.run', {
+                    opts: {
+                      force: true,
+                      includeActive: true,
+                      batchSize: 'all',
+                      reason: 'manual-global',
+                      runMaintainer: true,
+                      runJanitor: false,
+                      runDistill: true,
+                      runBackup: true,
+                    },
+                  }, {
+                    lane: 'maintenance',
+                    priority: 35,
+                    route: 'maintainer.manual',
+                  })
+                : coordinator.run({
+                    force: true,
+                    includeActive: true,
+                    batchSize: 'all',
+                    reason: 'manual-global',
+                    runMaintainer: true,
+                    runJanitor: false,
+                    runDistill: true,
+                    runBackup: true,
+                  }))
+              : { active: await maintainer.runMaintenance({ force: true }) };
             const distiller = this.tools?._channelDistiller;
-            if (distiller?.run) {
+            if (!coordinator && distiller?.run) {
               result.scopedDistill = await distiller.run({ force: true });
             }
             return result;
@@ -8726,20 +8787,49 @@ class WebGateway {
     if (urlPath === '/api/janitor/run' && req.method === 'POST') {
       try {
         const janitor = this.tools?._janitor;
-        if (!janitor) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'janitor not available' })); return; }
+        const coordinator = this.tools?._graphMaintenance;
+        if (!janitor && !coordinator) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'janitor not available' })); return; }
         if (this._janitorRunJob && this._janitorRunJob.state === 'running') {
           res.writeHead(202, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ state: 'running', started: this._janitorRunJob.started }));
           return;
         }
         this._janitorRunJob = { state: 'running', started: Date.now(), error: null, result: null };
-        const run = this.tools?._jobQueue?.submitWorkerJob
-          ? this.tools._jobQueue.submitWorkerJob('janitor.run', { opts: { force: true } }, {
+        const run = coordinator
+          ? (this.tools?._jobQueue?.submitWorkerJob
+            ? this.tools._jobQueue.submitWorkerJob('graphMaintenance.run', {
+                opts: {
+                  force: true,
+                  includeActive: true,
+                  batchSize: 'all',
+                  reason: 'janitor.manual',
+                  runMaintainer: false,
+                  runJanitor: true,
+                  runDistill: false,
+                  runBackup: false,
+                },
+              }, {
+                lane: 'maintenance',
+                priority: 30,
+                route: 'janitor.manual',
+              })
+            : coordinator.run({
+                force: true,
+                includeActive: true,
+                batchSize: 'all',
+                reason: 'janitor.manual',
+                runMaintainer: false,
+                runJanitor: true,
+                runDistill: false,
+                runBackup: false,
+              }))
+          : (this.tools?._jobQueue?.submitWorkerJob
+            ? this.tools._jobQueue.submitWorkerJob('janitor.run', { opts: { force: true } }, {
               lane: 'maintenance',
               priority: 30,
               route: 'janitor.manual',
             })
-          : janitor.runJanitor({ force: true });
+            : janitor.runJanitor({ force: true }));
         Promise.resolve(run)
           .then(r => { this._janitorRunJob = { state: 'done', started: this._janitorRunJob.started, completed: Date.now(), result: r }; })
           .catch(e => { this._janitorRunJob = { state: 'error', started: this._janitorRunJob.started, completed: Date.now(), error: e?.message || String(e) }; });
@@ -8765,6 +8855,7 @@ class WebGateway {
           recycle_bin_ttl_days: this.config.janitorRecycleBinTtlDays || 14,
           enabled: this.config.janitorEnabled !== false,
           stats: janitor?.stats || {},
+          graphMaintenance: this.tools?._graphMaintenance?.getStats?.() || null,
           counts: { binItems: binCount },
         }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
