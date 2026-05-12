@@ -51,9 +51,10 @@ if [ -d /shared/skills ]; then
   chmod g+rw /shared/skills/* 2>/dev/null || true
 fi
 
-mkdir -p "$CRONTAB_PERSIST_DIR" /home/spore 2>/dev/null || true
-chown -R "$SPORE_UID:$SPORE_GID" "$CRONTAB_PERSIST_DIR" /home/spore 2>/dev/null || true
+mkdir -p "$CRONTAB_PERSIST_DIR" /workspace/logs /home/spore 2>/dev/null || true
+chown -R "$SPORE_UID:$SPORE_GID" "$CRONTAB_PERSIST_DIR" /workspace/logs /home/spore 2>/dev/null || true
 chmod 700 "$CRONTAB_PERSIST_DIR" /home/spore 2>/dev/null || true
+chmod 775 /workspace/logs 2>/dev/null || true
 export CRONTAB_PERSIST_DIR
 export HOME="/home/spore"
 

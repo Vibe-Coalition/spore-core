@@ -103,6 +103,20 @@ function listPersistedCrontabs(persistDir) {
   }
 }
 
+function runtimeTimeInfo() {
+  let timezone = process.env.TZ || '';
+  try {
+    timezone = timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    // Keep the fallback below.
+  }
+  return {
+    now: new Date().toISOString(),
+    timezone: timezone || 'container-local',
+    note: 'Cron schedules use the container local timezone. Docker defaults to UTC unless TZ is configured.',
+  };
+}
+
 function readCrontab({ includeLines = false, maxLines = 80 } = {}) {
   const info = commandInfo();
   const user = currentUser();
@@ -148,6 +162,7 @@ function status(input = {}) {
   return {
     ok: true,
     enabledByEnv: String(process.env.SPORE_ENABLE_CRON || 'true').toLowerCase() !== 'false',
+    time: runtimeTimeInfo(),
     commands: commandInfo(),
     daemon: daemonStatus(),
     persistDir: {
@@ -176,12 +191,19 @@ function guide() {
     },
     persistence: {
       crontabs: '/workspace/.crontabs/<user>',
+      runtimeCrontabs: '/var/spool/cron/crontabs/<user>',
       restoredOnBoot: true,
       disabledBy: 'SPORE_ENABLE_CRON=false',
+      note: 'The cron daemon runs as root and correctly reads per-user crontabs. Do not move jobs into root crontab just because the daemon process is root.',
+    },
+    time: {
+      scheduleTimezone: 'container local timezone',
+      note: 'Docker defaults to UTC unless TZ is configured. Convert user-facing times before writing cron schedules.',
     },
     workflow: [
       'Call cron { action:"status" } to check daemon and persisted crontabs.',
-      'Create cron entries with absolute paths, sparse environment assumptions, and explicit log redirection.',
+      'Create cron entries with absolute paths, sparse environment assumptions, and explicit log redirection to an existing directory.',
+      'Create the log directory first, for example mkdir -p /workspace/logs; if the redirect target directory is missing, the shell fails before the job command runs.',
       'Install by replacing the current crontab with a temp file: crontab -l 2>/dev/null > /tmp/spore.cron; append the new line; crontab /tmp/spore.cron.',
       'Call cron { action:"validate", entry:"..." } before installing a new entry.',
       'Use /api/proactive/trigger when a job needs to notify the operator or start an agent turn.',
@@ -189,7 +211,7 @@ function guide() {
     proactiveTrigger: {
       url: PROACTIVE_URL,
       notify: 'POST JSON {"source":"cron:<name>","message":"...","mode":"notify"} for a cheap operator notification. Add channelId/target like "telegram:<chatId>" to send the exact message to that channel instead of the web panel.',
-      agent: 'Use mode:"agent" only when the scheduled event should start a new agent turn. Include channelId when it should target a specific channel, such as telegram:<id>.',
+      agent: 'Use mode:"agent" only when the scheduled event should start a new agent turn. Include channelId/target when it should target a specific channel, such as telegram:<id>. In a Telegram/Discord/Slack conversation, cron action:"example" defaults to the current channel.',
       auth: 'Loopback 127.0.0.1 calls are accepted without auth. External callers need normal web auth.',
     },
     chooseTheRightTool: {
@@ -222,7 +244,37 @@ function normalizeSchedule(schedule) {
   return raw || '0 9 * * *';
 }
 
-function buildExample(input = {}) {
+function currentChannelTarget(ctx = {}) {
+  const raw = String(ctx.channelId || ctx.target || ctx.chatId || '').trim();
+  if (!raw) return '';
+  if (/^[a-z][a-z0-9_-]*:/i.test(raw)) return raw;
+  const platform = String(ctx.platform || '').trim().toLowerCase();
+  if (platform && platform !== 'web' && platform !== 'cli') return `${platform}:${raw}`;
+  if (platform === 'web') return raw.startsWith('web:') ? raw : `web:${raw}`;
+  return raw;
+}
+
+function cleanShellToken(token) {
+  let value = String(token || '').trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value;
+}
+
+function redirectTargets(command) {
+  const targets = [];
+  const re = /(?:^|\s)(?:\d?>{1,2}|&>)\s*("[^"]+"|'[^']+'|[^ \t\r\n]+)/g;
+  let match;
+  while ((match = re.exec(String(command || '')))) {
+    const target = cleanShellToken(match[1]);
+    if (!target || target.startsWith('&') || target.includes('$') || target.includes('`')) continue;
+    targets.push(target);
+  }
+  return targets;
+}
+
+function buildExample(input = {}, ctx = {}) {
   const name = sanitizeName(input.name);
   const schedule = normalizeSchedule(input.schedule);
   const mode = ['notify', 'agent', 'none'].includes(String(input.mode || '').toLowerCase())
@@ -230,6 +282,7 @@ function buildExample(input = {}) {
     : (input.command ? 'none' : 'agent');
   const logPath = input.logPath || `${DEFAULT_LOG_DIR}/cron-${name}.log`;
   let command = String(input.command || '').trim();
+  const channelTarget = String(input.channelId || input.target || currentChannelTarget(ctx) || '').trim();
 
   if (!command) {
     const payload = {
@@ -237,22 +290,31 @@ function buildExample(input = {}) {
       message: String(input.message || `Scheduled cron trigger: ${name}`),
       mode: mode === 'none' ? 'notify' : mode,
     };
-    if (input.channelId) payload.channelId = String(input.channelId);
+    if (channelTarget) payload.channelId = channelTarget;
     command = `/usr/bin/curl -fsS -X POST "${PROACTIVE_URL}" -H "content-type: application/json" --data ${shellSingleQuote(JSON.stringify(payload))}`;
   }
 
   const entry = `${schedule} ${command}${hasRedirect(command) ? '' : ` >>${logPath} 2>&1`}`;
+  const installSketch = [];
+  if (!hasRedirect(command)) {
+    const logDir = path.dirname(String(logPath || ''));
+    if (logDir && logDir !== '.' && logDir !== '/') {
+      installSketch.push(`mkdir -p ${shellSingleQuote(logDir)}`);
+    }
+  }
+  installSketch.push(
+    'tmp="$(mktemp)"',
+    'crontab -l 2>/dev/null > "$tmp" || true',
+    `printf '%s\\n' ${shellSingleQuote(entry)} >> "$tmp"`,
+    'crontab "$tmp"',
+    'rm -f "$tmp"',
+  );
   return {
     ok: true,
     name,
     entry,
-    installSketch: [
-      'tmp="$(mktemp)"',
-      'crontab -l 2>/dev/null > "$tmp" || true',
-      `printf '%s\\n' ${shellSingleQuote(entry)} >> "$tmp"`,
-      'crontab "$tmp"',
-      'rm -f "$tmp"',
-    ],
+    channelTarget: channelTarget || null,
+    installSketch,
     note: 'Run cron { action:"validate", entry:"..." } on the final crontab line before installing it.',
   };
 }
@@ -305,6 +367,13 @@ function validateEntry(input = {}) {
     }
     if (/(^|[^\\])%/.test(parsed.command)) {
       warnings.push({ severity: 'warn', line: idx + 1, message: `${where}: unescaped % has special meaning in crontab commands; escape it as \\% if it is literal.` });
+    }
+    for (const target of redirectTargets(parsed.command)) {
+      if (!target.startsWith('/')) continue;
+      const parent = path.dirname(target);
+      if (parent && parent !== '/' && !exists(parent)) {
+        warnings.push({ severity: 'error', line: idx + 1, message: `${where}: redirect target directory does not exist: ${parent}. Create it before installing the crontab or use an existing log path.` });
+      }
     }
     if (/api\/proactive\/trigger/.test(parsed.command) && !/127\.0\.0\.1|localhost/.test(parsed.command)) {
       warnings.push({ severity: 'warn', line: idx + 1, message: `${where}: proactive trigger calls are auth-free only on loopback; external URLs need normal web auth.` });
@@ -366,7 +435,11 @@ module.exports = function register(api) {
         },
         channelId: {
           type: 'string',
-          description: 'Optional target for proactive agent examples, such as "telegram:123456" or "web:control-panel".',
+          description: 'Optional target for proactive agent examples, such as "telegram:123456" or "web:control-panel". If omitted in a supported channel conversation, the current channel is used.',
+        },
+        target: {
+          type: 'string',
+          description: 'Alias for channelId for action=example.',
         },
         logPath: {
           type: 'string',
@@ -382,7 +455,7 @@ module.exports = function register(api) {
       const action = String(input.action || 'guide').toLowerCase();
       if (action === 'guide') return guide();
       if (action === 'status' || action === 'list') return status({ ...input, action });
-      if (action === 'example') return buildExample(input);
+      if (action === 'example') return buildExample(input, ctx);
       if (action === 'validate') return validateEntry(input);
       return { ok: false, error: `Unknown cron action: ${action}` };
     },
