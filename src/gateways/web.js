@@ -5012,6 +5012,12 @@ class WebGateway {
           }
           // Inject theme CSS vars into <html> so the login overlay is themed before JS runs
           html = html.replace(/<html\s+lang="en">/, `<html lang="en" style="${_buildThemeInlineStyle(this.config.dataDir)}">`);
+          if (!html.includes('favicon.svg')) {
+            html = html.replace(
+              /<\/head>/,
+              '<link rel="icon" type="image/svg+xml" href="favicon.svg?v=260512"><link rel="shortcut icon" href="favicon.ico?v=260512"></head>'
+            );
+          }
           // Inject onboarding flag so the viewer knows to show the wizard before login
           const obFlag = `<script>window.__ONBOARDING__=${JSON.stringify({ needed: _isOnboardingNeeded(this.config.dataDir, this.config) })};</script>`;
           html = html.replace(/<\/head>/, obFlag + '</head>');
@@ -5025,6 +5031,25 @@ class WebGateway {
         const basePath = (this.config.ingressPath || '').replace(/\/$/, '');
         res.writeHead(302, { 'Location': basePath + '/graph' });
         res.end();
+        return;
+      }
+
+      if (urlPath === '/favicon.ico') {
+        const basePath = (this.config.ingressPath || '').replace(/\/$/, '');
+        res.writeHead(302, { 'Location': basePath + '/favicon.svg' });
+        res.end();
+        return;
+      }
+
+      if (urlPath === '/favicon.svg') {
+        try {
+          const iconPath = path.join(__dirname, '..', 'static', 'favicon.svg');
+          res.writeHead(200, {
+            'Content-Type': 'image/svg+xml; charset=utf-8',
+            'Cache-Control': 'public, max-age=86400',
+          });
+          res.end(fs.readFileSync(iconPath, 'utf8'));
+        } catch { res.writeHead(404); res.end('Not found'); }
         return;
       }
 
