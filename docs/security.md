@@ -82,6 +82,14 @@ agents should still prefer isolated project-local setup where possible:
 - Python virtual environments inside the repo are acceptable for coding tasks.
 - Userland installs are preferred when system package installation is not
   required.
+- Package install vetting is configurable in Settings -> Advanced -> Security
+  policy, or with `SPORE_PACKAGE_INSTALL_SECURITY=strict|warn|off`. Strict
+  blocks risky npm, PyPI, and Cargo installs; warn-only logs/notifies but lets
+  the command run; off disables package vetting.
+- Credential write guarding is configurable with
+  `SPORE_CREDENTIAL_GUARD=block|warn|off`. The default blocks files that look
+  like hardcoded secrets and SSH password automation scripts such as
+  `sshpass`, `expect`, or `pexpect`.
 - Destructive filesystem or host-network operations need explicit operator
   intent.
 

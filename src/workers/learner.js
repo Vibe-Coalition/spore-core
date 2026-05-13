@@ -16,6 +16,11 @@ const { DatabaseSync } = require('node:sqlite');
 const graphEvents = require('../graph/events');
 const { embedNodeAsync } = require('../graph');
 const SkillsManager = require('../tools/skills');
+const {
+  makeHardTempExtra,
+  makeCandidateExtra,
+  parseExtra,
+} = require('../graph/node-lifecycle');
 
 const EXTRACTION_PROMPT = `You are a knowledge extraction system. Given a conversation exchange, extract ALL knowledge worth remembering **weeks or months from now**.
 
@@ -75,9 +80,9 @@ Extract every durable fact, preference, plan, relationship, opinion, or event. O
 - Generated project scaffolds during exploration ("exploratory flask project we set up to try X")
 - Content labeled with words like "log", "dump", "capture", "scratch", "draft-N", "temp", "run-N", "batch-N" — these almost always mean task-scoped
 
-**Keep as permanent (ephemeral: false):** people, real projects that will span multiple sessions, products, places, organizations, preferences, skills, durable plans, company processes, anything referenced by a user's ongoing identity.
+**Non-ephemeral entities (ephemeral: false):** people, real projects that will span multiple sessions, products, places, organizations, preferences, skills, durable plans, company processes, anything referenced by a user's ongoing identity. These are not hard temp scratch, but new learned nodes still enter the graph as lifecycle candidates until maintenance promotes them to durable.
 
-**Rule of thumb:** If you'd be surprised to still be talking about this entity in a week, mark it ephemeral. When there's a clean split (log of a run vs. the run's lasting conclusion), the log is temp, the conclusion is durable. Default to ephemeral: false only for entities where you genuinely can't tell if they'll matter later.
+**Rule of thumb:** If you'd be surprised to still be talking about this entity in a week, mark it ephemeral. When there's a clean split (log of a run vs. the run's lasting conclusion), the log is temp, the conclusion is a non-ephemeral candidate that maintenance can promote. Default to ephemeral: false only for entities where you genuinely can't tell if they'll matter later.
 
 Return ONLY valid JSON:
 {
@@ -1489,7 +1494,9 @@ The JSON schema for updates becomes:
             } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
           }
           // If the LLM re-extracts an existing temp node as non-ephemeral
-          // (worth keeping long-term), promote it by clearing the ttl marker.
+          // (worth keeping beyond scratch), move it into candidate lifecycle.
+          // Promotion to durable is handled by maintenance after the graph has
+          // evidence that the node is useful beyond the current turn/session.
           // Plugin lifecycle hook `isNodeManaged` lets a plugin claim
           // ownership of a node so the learner skips the promotion
           // (e.g. spore-code's session-anchor nodes are governed by
@@ -1498,7 +1505,7 @@ The JSON schema for updates becomes:
           if (ent.ephemeral === false) {
             try {
               const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(resolved);
-              let extraObj = {}; try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[learner] JSON.parse failed: ' + e.message); }
+              let extraObj = parseExtra(row?.extra);
               let isManaged = false;
               if (this._pluginManager) {
                 const hooks = this._pluginManager.getLifecycleHooks?.('isNodeManaged') || [];
@@ -1508,9 +1515,9 @@ The JSON schema for updates becomes:
                 }
               }
               if (extraObj.ttl === 'temp' && !isManaged) {
-                delete extraObj.ttl; delete extraObj.tempCreated;
+                extraObj = makeCandidateExtra(extraObj, 'learner', 'temp node re-extracted as non-ephemeral');
                 this.db.prepare('UPDATE nodes SET extra = ? WHERE id = ?').run(JSON.stringify(extraObj), resolved);
-                this.log.info(`[learner] Promoted temp node to permanent: ${resolved}`);
+                this.log.info(`[learner] Moved temp node to candidate lifecycle: ${resolved}`);
               }
             } catch (e) { this.log.warn('[learner] db.prepare failed: ' + e.message); }
           }
@@ -1523,9 +1530,9 @@ The JSON schema for updates becomes:
           // `newNodeIds` and tags them via UPDATE nodes SET extra=...
           let extraObj;
           if (ent.ephemeral === true) {
-            extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
+            extraObj = makeHardTempExtra({}, 'learner');
           } else {
-            extraObj = {};
+            extraObj = makeCandidateExtra({}, 'learner', 'new learned node');
           }
           const extraJson = JSON.stringify(extraObj);
           this.db.prepare(

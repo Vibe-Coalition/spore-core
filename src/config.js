@@ -118,6 +118,7 @@ const DEFAULTS = {
   janitorIntervalMinutes: 360,      // SPORE_JANITOR_INTERVAL_MINUTES — how often the janitor runs
   janitorRecycleBinTtlDays: 14,     // SPORE_JANITOR_RECYCLE_BIN_TTL_DAYS — auto-purge bin rows older than this
   janitorPruneBatchSize: 5,         // SPORE_JANITOR_PRUNE_BATCH — permanent nodes scanned per cycle
+  candidateNodeReviewMinAgeHours: null, // SPORE_CANDIDATE_NODE_REVIEW_MIN_AGE_HOURS — null uses janitor-mode defaults
   janitorBootDelayMinutes: 8,       // first janitor cycle after boot — slightly after maintainer
   janitorEnabled: true,     // SPORE_JANITOR_ENABLED=false to disable entirely
   channelDistillerEnabled: true,       // SPORE_CHANNEL_DISTILLER_ENABLED=false to disable
@@ -303,6 +304,7 @@ tailscaleEnabled: false,           // SPORE_TAILSCALE_ENABLED — start tailscal
 
   // Credential guard for write tools
   credentialGuard: 'block',    // SPORE_CREDENTIAL_GUARD — 'block' | 'warn' | 'off'
+  packageInstallSecurity: 'strict', // SPORE_PACKAGE_INSTALL_SECURITY — 'strict' blocks risky npm/pip/cargo installs; 'warn' warns but allows; 'off' disables package vetting
 
   // Logging
   logLevel: 'info',
@@ -457,6 +459,7 @@ function loadConfigFresh() {
   if (process.env.SPORE_PLUGINS_ENABLED) config.pluginsEnabled = /^(1|true|yes|on)$/i.test(process.env.SPORE_PLUGINS_ENABLED);
   if (process.env.SPORE_PLUGINS_HOT_RELOAD) config.pluginsHotReload = /^(1|true|yes|on)$/i.test(process.env.SPORE_PLUGINS_HOT_RELOAD);
   if (process.env.SPORE_CREDENTIAL_GUARD) config.credentialGuard = process.env.SPORE_CREDENTIAL_GUARD.toLowerCase();
+  if (process.env.SPORE_PACKAGE_INSTALL_SECURITY) config.packageInstallSecurity = process.env.SPORE_PACKAGE_INSTALL_SECURITY.toLowerCase();
   if (process.env.SPORE_INTERMEDIATE_THROTTLE) config.intermediateTextThrottleSeconds = parseInt(process.env.SPORE_INTERMEDIATE_THROTTLE, 10);
 
   // OpenAI
@@ -614,6 +617,10 @@ function loadConfigFresh() {
   if (process.env.SPORE_JANITOR_PRUNE_BATCH) {
     const n = Number(process.env.SPORE_JANITOR_PRUNE_BATCH);
     if (Number.isFinite(n) && n > 0) config.janitorPruneBatchSize = Math.floor(n);
+  }
+  if (process.env.SPORE_CANDIDATE_NODE_REVIEW_MIN_AGE_HOURS) {
+    const n = Number(process.env.SPORE_CANDIDATE_NODE_REVIEW_MIN_AGE_HOURS);
+    if (Number.isFinite(n) && n >= 0) config.candidateNodeReviewMinAgeHours = n;
   }
   if (process.env.SPORE_JANITOR_ENABLED === 'false') config.janitorEnabled = false;
   if (process.env.SPORE_CHANNEL_DISTILLER_ENABLED === 'false') config.channelDistillerEnabled = false;
@@ -959,6 +966,7 @@ function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
     'learnerMinExchangeChars', 'learnerEnabledPlatforms', 'maintainerIdleOnly',
     'tempNodeTtlHours', 'janitorMode', 'janitorIntervalMinutes',
     'janitorRecycleBinTtlDays', 'janitorPruneBatchSize', 'janitorEnabled',
+    'candidateNodeReviewMinAgeHours',
     'channelDistillerEnabled', 'channelDistillerIntervalMinutes',
     'channelDistillerIdleMinutes', 'channelDistillerBootDelayMinutes',
     'channelDistillerBatchSize',
@@ -976,7 +984,7 @@ function _mirrorSettingsIntoLegacyConfig(cfg, settings) {
     'hostReadPaths', 'extraPaths',
     'webPort', 'publicUrl', 'ingressMode', 'ingressDomain', 'ingressPath', 'ingressHttps',
     'webAuthUser', 'webAuthPass', 'inviteKey',
-    'personalityEditable', 'srcEditable', 'credentialGuard',
+    'personalityEditable', 'srcEditable', 'credentialGuard', 'packageInstallSecurity',
     'pluginsEnabled', 'pluginsHotReload', 'embedder',
     'logLevel', 'agentBornDate',
   ]) {

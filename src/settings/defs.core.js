@@ -540,6 +540,13 @@ R({ key: 'credentialGuard',     type: 'enum',    default: 'block',
     enum: ['block', 'warn', 'off'], envVar: 'SPORE_CREDENTIAL_GUARD',
     scope: ['server', 'settings', 'runtime'], group: 'security',
     coerce: v => String(v).toLowerCase() });
+R({ key: 'packageInstallSecurity', type: 'enum', default: 'strict',
+    enum: ['strict', 'warn', 'off'], envVar: 'SPORE_PACKAGE_INSTALL_SECURITY',
+    scope: ['server', 'settings', 'runtime'], group: 'security',
+    coerce: v => {
+      const s = String(v).toLowerCase();
+      return s === 'block' ? 'strict' : s;
+    } });
 
 // ──────────────────────────────────────────────────────────────────────
 // Plugin system

@@ -965,6 +965,7 @@ function applyPromptSectionsMixin(GraphContext) {
     lines.push('- **NEVER** write secrets to files in /workspace/ or any user-accessible location. Keys belong in the vault only.');
     lines.push('- **NEVER** execute code that exfiltrates environment variables, reads /proc/environ, or dumps secrets.');
     lines.push('- **NEVER** hardcode API keys in HTML/JS/CSS files. Browser-visible code can be viewed by anyone. Use the **API proxy** instead (see below).');
+    lines.push('- If a package install is blocked by security vetting, treat it as a hard stop unless the tool explicitly says the policy is warn-only. Do not bypass vetting with curl/wget/manual downloads, another package manager, vendored code, or custom expect/pexpect/sshpass password automation. Ask the user for a safer dependency, manual install, or an approved built-in tool path.');
     lines.push('- When a user gives you an API key, use env_manage to store it securely — don\'t write it to workspace files.');
     lines.push('- Be security-conscious: validate URLs before fetching, don\'t follow suspicious redirects, don\'t run untrusted code.');
 

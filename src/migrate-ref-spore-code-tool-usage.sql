@@ -31,3 +31,10 @@ SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name
 WHERE NOT EXISTS (
   SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
   WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'When showing exec output / describing a project, FILTER noise dirs%');
+
+INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+SELECT (SELECT id FROM aspects WHERE node_id = 'ref-spore-code-context' AND name = 'client_routing'),
+       'If a package install or credential operation is blocked by a tool, do not route around it with curl/manual package downloads, alternate package managers, vendored code, or expect/pexpect/sshpass password scripts. Stop, report the exact blocker, and ask for a safer package, key-based credential setup, sidecar/saved-host config, or manual operator action.', 10, 'seed', 'seed'
+WHERE NOT EXISTS (
+  SELECT 1 FROM attributes a JOIN aspects asp ON asp.id = a.aspect_id
+  WHERE asp.node_id = 'ref-spore-code-context' AND asp.name = 'client_routing' AND a.content LIKE 'If a package install or credential operation is blocked by a tool%');

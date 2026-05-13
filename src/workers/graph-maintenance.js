@@ -44,6 +44,8 @@ class GraphMaintenanceCoordinator {
       graphsCleaned: 0,
       graphsSkipped: 0,
       maintainerRuns: 0,
+      lifecycleReviews: 0,
+      candidatesPromoted: 0,
       embeddings: 0,
       communities: 0,
       overviews: 0,
@@ -117,6 +119,7 @@ class GraphMaintenanceCoordinator {
     batchSize = null,
     reason = 'scheduled',
     runMaintainer = true,
+    runCandidateReview = runMaintainer,
     runJanitor = false,
     runDistill = true,
     runBackup = true,
@@ -156,6 +159,7 @@ class GraphMaintenanceCoordinator {
           includeActive,
           reason,
           runMaintainer,
+          runCandidateReview,
           runJanitor,
           runDistill,
           runBackup,
@@ -187,6 +191,7 @@ class GraphMaintenanceCoordinator {
     includeActive = true,
     reason = 'manual',
     runMaintainer = true,
+    runCandidateReview = runMaintainer,
     runJanitor = true,
     runDistill = true,
     runBackup = true,
@@ -202,12 +207,13 @@ class GraphMaintenanceCoordinator {
     if (!db) return { slug, ok: false, error: 'graph db unavailable' };
 
     const started = Date.now();
-    const maintenanceStarted = runMaintainer || runDistill || runBackup;
+    const maintenanceStarted = runMaintainer || runCandidateReview || runDistill || runBackup;
     const janitorStarted = runJanitor;
     const policy = this.policyFor(graph, { active });
     const summary = {
       role: policy.role,
       maintainer: null,
+      lifecycle: null,
       janitor: null,
       distill: null,
       backup: null,
@@ -238,6 +244,13 @@ class GraphMaintenanceCoordinator {
         this.stats.embeddings += summary.maintainer?.embedded || 0;
         if (summary.maintainer?.clustered) this.stats.communities++;
         if (summary.maintainer?.overviewed) this.stats.overviews++;
+      }
+
+      if (runCandidateReview) {
+        this.log.info(`[graph-maintenance] ${slug} candidate lifecycle review start`);
+        summary.lifecycle = await scoped(() => this._runCandidateReview(graph, db, { force, promoteOnly: true }));
+        if (summary.lifecycle && !summary.lifecycle.skipped) this.stats.lifecycleReviews++;
+        this.stats.candidatesPromoted += summary.lifecycle?.candidatesPromoted || 0;
       }
 
       if (runJanitor) {
@@ -278,6 +291,7 @@ class GraphMaintenanceCoordinator {
           embedded: (summary.maintainer?.embedded || 0) > 0,
           clustered: !!summary.maintainer?.clustered,
           overviewed: !!summary.maintainer?.overviewed,
+          candidatesPromoted: summary.lifecycle?.candidatesPromoted || 0,
           backedUp: !!(summary.backup?.ok && !summary.backup?.skipped),
           communityState: summary.maintainer?.communityState,
           embeddingBacklog: summary.maintainer?.embeddingBacklog,
@@ -401,6 +415,21 @@ class GraphMaintenanceCoordinator {
     );
     janitor.ensureSchema();
     return janitor.runScopedJanitor({ role: _role(graph), force });
+  }
+
+  async _runCandidateReview(graph, db, { force = false, promoteOnly = true } = {}) {
+    const active = graph?.slug === this.registry?.getActiveSlug?.();
+    if (active && this.activeJanitor) {
+      return this.activeJanitor.runCandidateReview({ force, promoteOnly });
+    }
+    const janitor = new Janitor(
+      { ...this.config },
+      this.log,
+      this.client,
+      db,
+    );
+    janitor.ensureSchema();
+    return janitor.runCandidateReview({ force, promoteOnly });
   }
 
   _graphCounts(db) {

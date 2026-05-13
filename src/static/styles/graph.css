@@ -1259,6 +1259,7 @@
   .node-temp { opacity: 0.7; }
   .node-temp .node-circle { animation: graphTempBreathe 3s ease-in-out infinite; }
   .node-temp .node-label { font-style: italic; opacity: 0.7; }
+  .node-candidate .node-label { opacity: 0.86; }
 
   /* ── New node (one-shot appear) ── */
   .node-new .node-circle {

@@ -5,6 +5,8 @@
  *   Phase 1 — Temp node review: LLM judges each temp node that's passed
  *             half its TTL. keep=false → snapshot to recycle_bin + cascade-delete.
  *             keep=true  → refresh tempCreated so the node gets another TTL window.
+ *   Phase 1b — Candidate node review: learned nodes start as candidates;
+ *             promote durable knowledge or trash clear one-off noise.
  *   Phase 2 — Attribute pruning: LLM flags stale state snapshots / low-signal
  *             attributes on permanent nodes (e.g. "Connection status: not connected
  *             as of 2026-04-19") and the janitor moves them to the bin.
@@ -20,6 +22,12 @@
  */
 
 const graphEvents = require('../graph/events');
+const {
+  parseExtra,
+  isCandidate,
+  promoteCandidateExtra,
+  keepCandidateExtra,
+} = require('../graph/node-lifecycle');
 
 const TYPE_BLOCKLIST_WHOLE_NODE = new Set(['self', 'agent', 'person', 'project', 'reference', 'system']);
 const PROTECTED_ATTR_ASPECTS = new Set([
@@ -42,6 +50,9 @@ const PROTECTED_ATTR_ASPECTS = new Set([
 const MODES = {
   conservative: {
     tempKeepFalseMin: 0.85,
+    candidatePromoteMin: 0.75,
+    candidateTrashMin: 1.1,
+    candidateMinAgeHours: 12,
     attrPruneMin: 0.85,
     attrRequireAsOfMarker: true,
     nodePruneEnabled: false,
@@ -54,6 +65,9 @@ const MODES = {
   },
   moderate: {
     tempKeepFalseMin: 0.65,
+    candidatePromoteMin: 0.65,
+    candidateTrashMin: 0.9,
+    candidateMinAgeHours: 6,
     attrPruneMin: 0.65,
     attrRequireAsOfMarker: false,
     nodePruneEnabled: true,
@@ -66,6 +80,9 @@ const MODES = {
   },
   aggressive: {
     tempKeepFalseMin: 0.4,
+    candidatePromoteMin: 0.55,
+    candidateTrashMin: 0.75,
+    candidateMinAgeHours: 2,
     attrPruneMin: 0.4,
     attrRequireAsOfMarker: false,
     nodePruneEnabled: true,
@@ -134,6 +151,7 @@ class Janitor {
     this.stats = {
       cycles: 0,
       tempsReviewed: 0, tempsTrashed: 0, tempsKept: 0,
+      candidatesReviewed: 0, candidatesPromoted: 0, candidatesKept: 0, candidatesTrashed: 0,
       attrsReviewed: 0, attrsTrashed: 0,
       nodesReviewed: 0, nodesTrashed: 0,
       edgesReviewed: 0, prunedByPrior: 0, prunedByTypeMismatch: 0,
@@ -237,6 +255,7 @@ class Janitor {
       this.log.info(`[janitor] Starting cycle — mode=${this.config.janitorMode || 'moderate'}`);
 
       await this._phaseTempReview(mode);
+      await this._phaseCandidateReview(mode);
       await this._phaseAttrPrune(mode);
       if (mode.nodePruneEnabled) {
         await this._phaseWholeNodePrune(mode);
@@ -252,12 +271,17 @@ class Janitor {
       this.log.info(
         `[janitor] Cycle #${this.stats.cycles} done in ${elapsed}s — ` +
         `temps:${this.stats.tempsReviewed - before.tempsReviewed}rev/${this.stats.tempsTrashed - before.tempsTrashed}trash ` +
+        `candidates:${this.stats.candidatesReviewed - before.candidatesReviewed}rev/${this.stats.candidatesPromoted - before.candidatesPromoted}promote/${this.stats.candidatesTrashed - before.candidatesTrashed}trash ` +
         `attrs:${this.stats.attrsReviewed - before.attrsReviewed}rev/${this.stats.attrsTrashed - before.attrsTrashed}trash ` +
         `nodes:${this.stats.nodesReviewed - before.nodesReviewed}rev/${this.stats.nodesTrashed - before.nodesTrashed}trash ` +
         `expired:${this.stats.expired - before.expired}`
       );
       return {
         tempsTrashed: this.stats.tempsTrashed - before.tempsTrashed,
+        candidatesReviewed: this.stats.candidatesReviewed - before.candidatesReviewed,
+        candidatesPromoted: this.stats.candidatesPromoted - before.candidatesPromoted,
+        candidatesKept: this.stats.candidatesKept - before.candidatesKept,
+        candidatesTrashed: this.stats.candidatesTrashed - before.candidatesTrashed,
         attrsTrashed: this.stats.attrsTrashed - before.attrsTrashed,
         nodesTrashed: this.stats.nodesTrashed - before.nodesTrashed,
         expired: this.stats.expired - before.expired,
@@ -274,7 +298,8 @@ class Janitor {
   /**
    * Conservative cleanup for managed/non-active graph scopes. This avoids the
    * risky parts of the full janitor (attribute, whole-node, and inferred-edge
-   * pruning) while still letting temp scratch and recycle-bin state age out.
+   * pruning) while still letting temp scratch age out, learned candidates get
+   * promoted, and recycle-bin state age out.
    */
   async runScopedJanitor({ role = 'custom', force = false } = {}) {
     if (!this.db) return null;
@@ -303,6 +328,11 @@ class Janitor {
       this.log.info(`[janitor] Scoped cycle — role=${normalizedRole}, policy=${policy}`);
       if (policy === 'temp') {
         await this._phaseTempReview(mode);
+        await this._phaseCandidateReview(mode);
+      } else if (policy === 'bin') {
+        // Shared KB graphs avoid destructive pruning in scoped cycles, but
+        // candidates still need a path to become durable.
+        await this._phaseCandidateReview(mode);
       }
       await this._phaseBinHousekeep();
       this.stats.cycles++;
@@ -310,11 +340,58 @@ class Janitor {
       return {
         policy,
         tempsTrashed: this.stats.tempsTrashed - before.tempsTrashed,
+        candidatesReviewed: this.stats.candidatesReviewed - before.candidatesReviewed,
+        candidatesPromoted: this.stats.candidatesPromoted - before.candidatesPromoted,
+        candidatesKept: this.stats.candidatesKept - before.candidatesKept,
+        candidatesTrashed: this.stats.candidatesTrashed - before.candidatesTrashed,
         expired: this.stats.expired - before.expired,
       };
     } catch (e) {
       this.stats.errors++;
       this.log.error('[janitor] Scoped cycle error:', e.message);
+      return { error: e.message };
+    } finally {
+      this._running = false;
+    }
+  }
+
+  async runCandidateReview({ force = false, promoteOnly = true } = {}) {
+    if (!this.db) return null;
+    if (this._running) {
+      this.log.debug('[janitor] Candidate review skip — already running');
+      return { skipped: 'already-running' };
+    }
+    if (this.config.janitorEnabled === false) return { skipped: 'janitor-disabled' };
+    if (!this._hasUsableModel()) {
+      if (!this._warnedNoModel) {
+        this.log.info('[janitor] No model/provider configured — candidate review sleeping until setup is complete.');
+        this._warnedNoModel = true;
+      }
+      return { skipped: 'no-model' };
+    }
+
+    this._running = true;
+    const before = { ...this.stats };
+    try {
+      const baseMode = this._mode();
+      const mode = {
+        ...baseMode,
+        candidateTrashMin: promoteOnly ? 1.1 : baseMode.candidateTrashMin,
+      };
+      if (force && (this.config.candidateNodeReviewMinAgeHours === undefined || this.config.candidateNodeReviewMinAgeHours === null || this.config.candidateNodeReviewMinAgeHours === '')) {
+        mode.candidateMinAgeHours = 0;
+      }
+      await this._phaseCandidateReview(mode);
+      return {
+        candidatesReviewed: this.stats.candidatesReviewed - before.candidatesReviewed,
+        candidatesPromoted: this.stats.candidatesPromoted - before.candidatesPromoted,
+        candidatesKept: this.stats.candidatesKept - before.candidatesKept,
+        candidatesTrashed: this.stats.candidatesTrashed - before.candidatesTrashed,
+        promoteOnly,
+      };
+    } catch (e) {
+      this.stats.errors++;
+      this.log.error('[janitor] Candidate review error:', e.message);
       return { error: e.message };
     } finally {
       this._running = false;
@@ -409,6 +486,157 @@ Delete guidance: crawl/error logs from completed runs, one-off scratch nodes, st
     }
   }
 
+  // -- Phase 1b - Candidate node review -----------------------------------
+
+  async _phaseCandidateReview(mode) {
+    const configuredRaw = this.config.candidateNodeReviewMinAgeHours;
+    const configuredAge = configuredRaw === null || configuredRaw === undefined || configuredRaw === ''
+      ? NaN
+      : Number(configuredRaw);
+    const minAgeHours = Number.isFinite(configuredAge) && configuredAge >= 0
+      ? configuredAge
+      : mode.candidateMinAgeHours;
+    const now = Date.now();
+
+    let rows = [];
+    try {
+      rows = this.db.prepare(`
+        SELECT n.id, n.label, n.type, n.description, n.extra, n.created, n.updated, n.importance, n.mentions,
+               (SELECT COUNT(*) FROM aspects WHERE node_id = n.id) AS aspect_count,
+               (SELECT COUNT(*) FROM attributes a JOIN aspects s ON s.id = a.aspect_id WHERE s.node_id = n.id) AS attr_count,
+               (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) AS edge_count
+        FROM nodes n
+        WHERE n.extra LIKE '%"lifecycle":"candidate"%'
+          AND (n.extra IS NULL OR n.extra NOT LIKE '%"ttl":"temp"%')
+          AND n.type NOT IN ('self', 'agent')
+        ORDER BY n.updated ASC
+        LIMIT ?
+      `).all(Math.max(10, mode.batchSize * 4));
+    } catch (e) {
+      this.log.warn(`[janitor] candidate scan failed: ${e.message}`);
+      return;
+    }
+
+    const candidates = [];
+    for (const row of rows) {
+      const extraObj = parseExtra(row.extra);
+      if (!isCandidate(extraObj)) continue;
+      const refIso = extraObj.candidateReviewedAt || extraObj.candidateCreated || row.created;
+      const refMs = refIso ? Date.parse(refIso) : NaN;
+      if (!Number.isFinite(refMs)) continue;
+      const ageHours = (now - refMs) / 3600_000;
+      if (ageHours < minAgeHours) continue;
+      candidates.push({ ...row, extraObj, ageHours });
+    }
+    if (!candidates.length) return;
+
+    for (let i = 0; i < candidates.length; i += 10) {
+      const batch = candidates.slice(i, i + 10);
+      const summaries = batch.map(n => {
+        const aspects = this.db.prepare('SELECT id, name FROM aspects WHERE node_id = ? ORDER BY weight DESC LIMIT 6').all(n.id);
+        const aspectLines = aspects.map(a => {
+          const attrs = this.db.prepare('SELECT content FROM attributes WHERE aspect_id = ? ORDER BY importance DESC LIMIT 3').all(a.id);
+          const attrLines = attrs.map(x => `      - ${String(x.content).slice(0, 180)}`).join('\n');
+          return `    ${a.name}:\n${attrLines || '      (empty)'}`;
+        }).join('\n');
+        const edges = this.db.prepare(`
+          SELECT e.type AS rel, e.source, e.target,
+                 (SELECT label FROM nodes WHERE id = e.source) AS src_label,
+                 (SELECT label FROM nodes WHERE id = e.target) AS tgt_label
+          FROM edges e WHERE e.source = ? OR e.target = ? LIMIT 8
+        `).all(n.id, n.id);
+        const edgeLines = edges.map(e => {
+          const other = e.source === n.id ? e.tgt_label : e.src_label;
+          const dir = e.source === n.id ? '->' : '<-';
+          return `    ${dir} ${e.rel} ${other || '(unknown)'}`;
+        }).join('\n');
+        return `- id: ${n.id}
+  label: ${n.label}
+  type: ${n.type}
+  candidate_age_hours: ${n.ageHours.toFixed(1)}
+  importance: ${n.importance}
+  mentions: ${n.mentions}
+  counts: aspects=${n.aspect_count}, attrs=${n.attr_count}, edges=${n.edge_count}
+  candidate_reason: ${n.extraObj.candidateReason || '(none)'}
+  description: ${(n.description || '').slice(0, 260)}
+  aspects:
+${aspectLines || '    (none)'}
+  relations:
+${edgeLines || '    (none)'}`;
+      }).join('\n\n');
+
+      const system = `You are the graph lifecycle reviewer. Learned nodes start as CANDIDATE by default so the graph does not permanently keep every casual mention.
+
+For each candidate node, choose:
+- "promote": durable knowledge likely useful across sessions, identity, preferences, real projects, recurring resources, capabilities, user-owned things, or facts with enough context to retrieve later.
+- "keep": plausible future value but not enough evidence yet; leave as candidate for another cycle.
+- "delete": one-off noise, transient scratch, empty/duplicate shell, or information fully captured by a richer node.
+
+Delete is strict. If action is "delete", you must either provide "preserved_in" with an existing node id that already contains the useful information, or set "no_durable_signal": true.
+
+Return ONLY valid JSON:
+{ "verdicts": [ { "id": "...", "action": "promote|keep|delete", "reason": "...", "confidence": 0..1, "preserved_in": null, "no_durable_signal": false } ] }`;
+      const prompt = `Candidate nodes to review:\n\n${summaries}`;
+      this.stats.candidatesReviewed += batch.length;
+
+      let parsed = null;
+      try {
+        const text = await this._callLLM(system, prompt);
+        parsed = this._parseJSON(text, 'candidate-review');
+      } catch (e) {
+        this.log.warn(`[janitor] candidate batch LLM error: ${e.message}`);
+        continue;
+      }
+
+      const verdicts = parsed?.verdicts || [];
+      for (const v of verdicts) {
+        if (!v || typeof v.id !== 'string') continue;
+        const node = batch.find(b => b.id === v.id);
+        if (!node) continue;
+        const action = String(v.action || '').toLowerCase();
+        const conf = Number(v.confidence) || 0;
+        const reason = String(v.reason || '').slice(0, 240);
+
+        if (action === 'promote' && conf >= mode.candidatePromoteMin) {
+          try {
+            const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(node.id);
+            const nextExtra = promoteCandidateExtra(row?.extra || node.extra, 'janitor-candidate', reason || 'candidate promoted');
+            this.db.prepare("UPDATE nodes SET extra = ?, updated = datetime('now') WHERE id = ?").run(JSON.stringify(nextExtra), node.id);
+            this.stats.candidatesPromoted++;
+            graphEvents.emit('change', { op: 'node:update', node: { id: node.id }, source: 'janitor-candidate' });
+            this.log.info(`[janitor] Promoted candidate node ${node.id} (conf ${conf.toFixed(2)}): ${reason}`);
+          } catch (e) {
+            this.log.warn(`[janitor] promote candidate ${node.id}: ${e.message}`);
+          }
+          continue;
+        }
+
+        if (action === 'delete' && conf >= mode.candidateTrashMin) {
+          const preserved = typeof v.preserved_in === 'string' ? v.preserved_in.trim() : '';
+          const preservedOk = preserved && preserved !== node.id && !!this.db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(preserved);
+          const noSignal = v.no_durable_signal === true;
+          if (preservedOk || noSignal) {
+            const suffix = preservedOk ? ` (preserved in ${preserved})` : ' (no durable signal)';
+            this._trashNode(node.id, 'janitor-candidate', reason + suffix, conf);
+            this.stats.candidatesTrashed++;
+            continue;
+          }
+          this.log.debug?.(`[janitor] candidate ${node.id} delete verdict lacked valid preserved_in/no_durable_signal — keeping`);
+        }
+
+        try {
+          const row = this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(node.id);
+          const nextExtra = keepCandidateExtra(row?.extra || node.extra, 'janitor-candidate');
+          this.db.prepare("UPDATE nodes SET extra = ?, updated = datetime('now') WHERE id = ?").run(JSON.stringify(nextExtra), node.id);
+          this.stats.candidatesKept++;
+          graphEvents.emit('change', { op: 'node:update', node: { id: node.id }, source: 'janitor-candidate' });
+        } catch (e) {
+          this.log.warn(`[janitor] keep candidate ${node.id}: ${e.message}`);
+        }
+      }
+    }
+  }
+
   // ── Phase 2 — Attribute pruning on permanent nodes ─────────────────────
 
   async _phaseAttrPrune(mode) {
@@ -418,6 +646,7 @@ Delete guidance: crawl/error logs from completed runs, one-off scratch nodes, st
              (SELECT COUNT(*) FROM attributes a JOIN aspects s ON s.id = a.aspect_id WHERE s.node_id = n.id) AS attr_count
       FROM nodes n
       WHERE (n.extra IS NULL OR n.extra NOT LIKE '%"ttl":"temp"%')
+        AND (n.extra IS NULL OR n.extra NOT LIKE '%"lifecycle":"candidate"%')
         AND n.type NOT IN ('self', 'agent', 'person')
       ORDER BY attr_count DESC, n.updated ASC
       LIMIT ?
@@ -508,6 +737,7 @@ Return {"prune":[]} if nothing should be pruned.`;
              (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) AS edge_count
       FROM nodes n
       WHERE (n.extra IS NULL OR n.extra NOT LIKE '%"ttl":"temp"%')
+        AND (n.extra IS NULL OR n.extra NOT LIKE '%"lifecycle":"candidate"%')
         AND n.type NOT IN ('self', 'agent', 'person')
         AND (n.id NOT LIKE 'system:%' OR n.id LIKE 'system:scratch%')
       ORDER BY n.updated ASC

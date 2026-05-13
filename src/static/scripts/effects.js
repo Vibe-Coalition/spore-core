@@ -1499,14 +1499,14 @@ function _upsertNodeVisuals(nodeSelection) {
   nodeSelection.select('.node-circle')
     .attr('d', d => getNodeShapePath(d.type, d.radius))
     .attr('fill', d => getFillColor(d.type))
-    // Solid family fill on permanent nodes; thin / hollow on temp nodes
-    // so they read as transient even at a glance.
-    .attr('fill-opacity', d => d.extra?.ttl === 'temp' ? 0.25 : 1)
+    // Solid family fill on durable nodes; softer treatment for nodes
+    // still waiting for lifecycle promotion.
+    .attr('fill-opacity', d => d.extra?.ttl === 'temp' ? 0.25 : (d.extra?.lifecycle === 'candidate' ? 0.78 : 1))
     .attr('stroke', d => getColor(d.type))
-    .attr('stroke-width', d => d.extra?.ttl === 'temp' ? 1.2 : 1.6)
+    .attr('stroke-width', d => d.extra?.ttl === 'temp' ? 1.2 : (d.extra?.lifecycle === 'candidate' ? 1.35 : 1.6))
     .attr('stroke-linejoin', 'round')
     .attr('stroke-linecap', 'round')
-    .attr('stroke-dasharray', d => d.extra?.ttl === 'temp' ? '4 3' : null);
+    .attr('stroke-dasharray', d => d.extra?.ttl === 'temp' ? '4 3' : (d.extra?.lifecycle === 'candidate' ? '2 3' : null));
 
   // ── F01 mark — base geometry for self-type nodes. The animation rAF
   // loop (_selfAnim) overrides cx/cy/r every frame; this just sets sane
@@ -1545,7 +1545,9 @@ function _upsertNodeVisuals(nodeSelection) {
     });
     sel.select('.self-center').attr('cx', 0).attr('cy', 0).attr('r', centerR);
   });
-  nodeSelection.classed('node-temp', d => d?.extra?.ttl === 'temp');
+  nodeSelection
+    .classed('node-temp', d => d?.extra?.ttl === 'temp')
+    .classed('node-candidate', d => d?.extra?.ttl !== 'temp' && d?.extra?.lifecycle === 'candidate');
 
   nodeSelection.select('.node-glyph')
     .text(d => getNodeGlyph(d.type))
@@ -1629,10 +1631,12 @@ function _applyGraphSelectionStyles() {
     gNodes.selectAll('.node-circle')
       .attr('stroke-width', d => {
         const tmp = d?.extra?.ttl === 'temp';
+        const candidate = d?.extra?.lifecycle === 'candidate';
         if (tmp) return 1.2;
+        if (candidate) return d.id === primaryId ? 2.2 : (activeIds.has(d.id) ? 1.8 : 1.35);
         return d.id === primaryId ? 2.4 : (activeIds.has(d.id) ? 2 : 1.6);
       })
-      .attr('fill-opacity', d => d?.extra?.ttl === 'temp' ? 0.25 : 1);
+      .attr('fill-opacity', d => d?.extra?.ttl === 'temp' ? 0.25 : (d?.extra?.lifecycle === 'candidate' ? 0.78 : 1));
 
     // Focus halo: design's dashed ring around the focused (non-self)
     // node. Self-node has its own activity animation system, so we skip it.

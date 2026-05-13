@@ -24,6 +24,7 @@ const https = require('https');
 const graphEvents = require('../graph/events');
 const { embedNode, getActive: getActiveEmbedder, buildNodeText } = require('../graph/embedder');
 const { ProactiveEngine } = require('./proactive');
+const { parseExtra } = require('../graph/node-lifecycle');
 
 const DECAY_DAYS = {
   system: 14, process: 14, tool: 21, project: 30, channel: 30,
@@ -1192,7 +1193,13 @@ Do these two nodes refer to the SAME real-world entity/concept? Consider that th
 
           const attrsA = this.db.prepare('SELECT COUNT(*) as c FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = ?').get(pair.a.id).c;
           const attrsB = this.db.prepare('SELECT COUNT(*) as c FROM attributes a JOIN aspects asp ON a.aspect_id = asp.id WHERE asp.node_id = ?').get(pair.b.id).c;
-          const [canonical, duplicate] = attrsA >= attrsB ? [pair.a, pair.b] : [pair.b, pair.a];
+          const extraA = parseExtra(this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(pair.a.id)?.extra);
+          const extraB = parseExtra(this.db.prepare('SELECT extra FROM nodes WHERE id = ?').get(pair.b.id)?.extra);
+          const candidateA = extraA.lifecycle === 'candidate';
+          const candidateB = extraB.lifecycle === 'candidate';
+          const [canonical, duplicate] = candidateA !== candidateB
+            ? (candidateA ? [pair.b, pair.a] : [pair.a, pair.b])
+            : (attrsA >= attrsB ? [pair.a, pair.b] : [pair.b, pair.a]);
           const preferredLabel = this._preferredMergeLabel(canonical, duplicate);
 
           this._mergeNodeInto(canonical.id, duplicate.id);
@@ -1265,7 +1272,7 @@ Do these two nodes refer to the SAME real-world entity/concept? Consider that th
 
       const limit = Math.max(50, Math.min(500, Number(this.config.maintainerMergeInventoryLimit || 350)));
       const rows = this.db.prepare(`
-        SELECT n.id, n.label, n.type, n.description, n.importance, n.embedding,
+        SELECT n.id, n.label, n.type, n.description, n.importance, n.embedding, n.extra,
                COALESCE(n.updated, n.extracted_at, n.created) AS touched_at,
                (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) AS degree
         FROM nodes n
@@ -1273,6 +1280,7 @@ Do these two nodes refer to the SAME real-world entity/concept? Consider that th
           AND n.type NOT IN ('tool', 'reference', 'episode', 'message', 'session')
           AND (n.provenance = 'self' OR n.provenance IS NULL)
         ORDER BY
+          CASE WHEN n.extra LIKE '%"lifecycle":"candidate"%' THEN 0 ELSE 1 END,
           CASE WHEN (SELECT COUNT(*) FROM edges WHERE source = n.id OR target = n.id) <= 4 THEN 0 ELSE 1 END,
           n.importance DESC,
           touched_at DESC
@@ -1350,10 +1358,12 @@ ${nodeList}`
     const aliases = this._nodeAliases(node.id).slice(0, 4).join(', ');
     const aspects = this._nodeAspectNames(node.id).slice(0, 6).join(', ');
     const desc = this._truncate(String(node.description || '').replace(/\s+/g, ' ').trim(), 180);
+    const lifecycle = parseExtra(node.extra).lifecycle || null;
     return [
       `- ${node.id}`,
       `label="${node.label}"`,
       `type=${node.type}`,
+      lifecycle ? `lifecycle=${lifecycle}` : null,
       `importance=${node.importance || 0}`,
       `degree=${node.degree || 0}`,
       desc ? `desc="${desc}"` : null,

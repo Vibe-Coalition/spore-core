@@ -26,6 +26,12 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { buildBuiltinToolHandlers } = require('./builtin-registry');
 const { PlannerAdvisor } = require('../agent/planner-advisor');
 const { searchWeb } = require('../lib/web-search');
+const {
+  makeHardTempExtra,
+  makeCandidateExtra,
+  promoteCandidateExtra,
+  parseExtra,
+} = require('../graph/node-lifecycle');
 
 // Per-tool-call async context. Replaces any notion of a "global current
 // session" — carries sessionKey + userId + channelId + platform through the
@@ -33,6 +39,9 @@ const { searchWeb } = require('../lib/web-search');
 // `_execContext.run(ctx, () => ...)` so concurrent sessions never step on
 // each other.
 const _execContext = new AsyncLocalStorage();
+
+const PACKAGE_VET_HARD_BLOCK_ADVICE =
+  'This is a hard security block. Do not retry the same install, do not use curl/wget or another package manager to bypass vetting, and do not replace the blocked dependency with an ad-hoc credential/password automation script. Stop and ask the user to choose a different dependency, install it manually, or explicitly provide a safer already-approved mechanism.';
 
 // Tools that mutate persistent state. Plan-mode gates these through a
 // proposal queue instead of executing directly. Read-only tools (queries,
@@ -136,6 +145,8 @@ class ToolSystem {
     // Credential guard mode for write tools — 'block' (default) | 'warn' | 'off'
     const rawGuard = (config.credentialGuard || 'block').toLowerCase();
     this._credentialGuardMode = ['block', 'warn', 'off'].includes(rawGuard) ? rawGuard : 'block';
+    const rawPackageInstallSecurity = String(config.packageInstallSecurity || 'strict').toLowerCase();
+    this._packageInstallSecurity = ({ block: 'strict', strict: 'strict', warn: 'warn', off: 'off' })[rawPackageInstallSecurity] || 'strict';
 
     // Global process tracker — caps total child processes to prevent fork bombs
     this._trackedPids = new Set();
@@ -180,6 +191,16 @@ class ToolSystem {
       /while\s+true.*do.*&.*done/, // while true; do cmd & done
       /for\s+.*;\s*do.*&.*done/, // for loop backgrounding
     ];
+  }
+
+  _credentialGuardModeValue() {
+    const raw = String(this.config?.credentialGuard || this._credentialGuardMode || 'block').toLowerCase();
+    return ['block', 'warn', 'off'].includes(raw) ? raw : 'block';
+  }
+
+  _packageInstallSecurityMode() {
+    const raw = String(this.config?.packageInstallSecurity || this._packageInstallSecurity || 'strict').toLowerCase();
+    return ({ block: 'strict', strict: 'strict', warn: 'warn', off: 'off' })[raw] || 'strict';
   }
 
   isCliLocalTool(name) {
@@ -470,7 +491,7 @@ class ToolSystem {
     const all = [
       {
         name: 'exec',
-        description: 'Execute a shell command. ONLY for running scripts, installing packages, git, or commands with no dedicated tool. Do NOT use exec for reading files (use read_file), writing files (use write_file), or searching file contents (use read_file). Use background=true for commands that may keep running, watch, serve, hang after a failure, or produce long output; then inspect with bg_tail and stop with bg_kill.',
+        description: 'Execute a shell command. ONLY for running scripts, installing packages, git, or commands with no dedicated tool. Do NOT use exec for reading files (use read_file), writing files (use write_file), or searching file contents (use read_file). Package installs are security-vetted; if vetting blocks an install, treat it as a hard stop and ask the user for a safe alternative instead of bypassing it. Use background=true for commands that may keep running, watch, serve, hang after a failure, or produce long output; then inspect with bg_tail and stop with bg_kill.',
         input_schema: {
           type: 'object',
           properties: {
@@ -694,7 +715,7 @@ class ToolSystem {
             label: { type: 'string', description: 'Human-readable label' },
             type: { type: 'string', description: 'Node type (person, concept, project, etc.)' },
             description: { type: 'string', description: 'Node description text' },
-            temp: { type: 'boolean', description: 'true = ephemeral scratch node (auto-purges after ~48h); false = promote to permanent; omitted = leave lifetime unchanged.' },
+            temp: { type: 'boolean', description: 'true = ephemeral scratch node (auto-purges after ~48h); false = explicitly promote to durable; omitted = new learned nodes start as lifecycle candidates until maintenance promotes them.' },
             aspects: {
               type: 'array',
               description: 'Aspects (facets) to add to the node',
@@ -2209,6 +2230,9 @@ Set wait:false when you've submitted a long background job and just want to retu
     const crontabBlock = this._directCrontabMutationBlock(command);
     if (crontabBlock) return crontabBlock;
 
+    const credentialAutomationBlock = this._credentialAutomationCommandBlock(command);
+    if (credentialAutomationBlock) return credentialAutomationBlock;
+
     // Check for dangerous patterns
     for (const pattern of this.dangerousPatterns) {
       if (pattern.test(command)) {
@@ -2216,14 +2240,17 @@ Set wait:false when you've submitted a long background job and just want to retu
       }
     }
 
-    // Package install vetting — check registries before allowing installs
+    // Package install vetting — check registries before allowing installs.
+    // Operators can tune this in Settings -> Security policy.
     const parsedPkgs = parseInstallCommand(command);
-    if (parsedPkgs && parsedPkgs.length > 0) {
+    const packageInstallSecurity = this._packageInstallSecurityMode();
+    if (packageInstallSecurity !== 'off' && parsedPkgs && parsedPkgs.length > 0) {
       try {
         const vetResult = await vetPackages(parsedPkgs);
         if (!vetResult.allowed) {
           const blockedNames = vetResult.results.filter(r => r.risk === RISK_LEVEL.BLOCK).map(r => r.name);
-          this.log.warn(`[package-vet] BLOCKED install: ${blockedNames.join(', ')}`);
+          const warnOnly = packageInstallSecurity === 'warn';
+          this.log.warn(`[package-vet] ${warnOnly ? 'WARN-ONLY' : 'BLOCKED'} install: ${blockedNames.join(', ')}`);
           {
             const ctx = this._ctx?.() || {};
             const channelId = ctx.channelId ?? this._currentChannelId;
@@ -2233,17 +2260,27 @@ Set wait:false when you've submitted a long background job and just want to retu
                 const gateway = this.platformManager?.getGateway(platform);
                 if (gateway?.sendMessage) {
                   gateway.sendMessage(channelId,
-                    `🛡️ **Package install blocked**\n${vetResult.summary}`);
+                    warnOnly
+                      ? `⚠️ **Package install warning**\n${vetResult.summary}\n\nProceeding because package install security is set to warn-only.`
+                      : `🛡️ **Package install blocked**\n${vetResult.summary}\n\n${PACKAGE_VET_HARD_BLOCK_ADVICE}`);
                 }
               } catch (e) { this.log.warn('[tools] getGateway failed: ' + e.message); }
             }
           }
-          return {
-            error: `Package install blocked by security vetting:\n${vetResult.summary}\nIf you believe this is safe, ask the user for approval.`,
-            vetResults: vetResult.results,
-          };
+          if (warnOnly) {
+            // Proceed to execution below. The warning is visible in channel
+            // logs and server logs, but the operator chose this policy.
+          } else {
+            return {
+              error: `Package install blocked by security vetting:\n${vetResult.summary}\n${PACKAGE_VET_HARD_BLOCK_ADVICE}`,
+              reason: 'package_security_vetting_block',
+              blocked: true,
+              policy: 'hard_block',
+              vetResults: vetResult.results,
+            };
+          }
         }
-        if (vetResult.warned > 0) {
+        if (vetResult.allowed && vetResult.warned > 0) {
           this.log.warn(`[package-vet] Install warnings: ${vetResult.summary}`);
           const ctx = this._ctx?.() || {};
           const channelId = ctx.channelId ?? this._currentChannelId;
@@ -2363,6 +2400,28 @@ Set wait:false when you've submitted a long background job and just want to retu
         stdout: stdout.substring(0, 2000),
       };
     }
+  }
+
+  _credentialAutomationCommandBlock(command) {
+    if (this._credentialGuardModeValue() !== 'block') return null;
+    const c = String(command || '');
+    const compact = c.replace(/\\\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+    const lower = compact.toLowerCase();
+    const usesSshpass = /\bsshpass\b/.test(lower);
+    const inlineExpectPassword = /\bexpect\b/.test(lower) &&
+      /\b(?:ssh|scp|sftp)\b/.test(lower) &&
+      /\b(?:password|passphrase|sendline|send --|send\s+["']?[^"']*(?:\\r|\\n)?)\b/.test(lower);
+    const inlinePexpectPassword = /\bpexpect\b/.test(lower) &&
+      /\b(?:ssh|scp|sftp)\b/.test(lower) &&
+      /\b(?:password|passphrase|sendline)\b/.test(lower);
+    if (!usesSshpass && !inlineExpectPassword && !inlinePexpectPassword) return null;
+    return {
+      error: 'Blocked: scripted SSH password automation is not allowed. Use saved SSH credentials/sidecar, key-based auth, or ask the user to configure the credential explicitly.',
+      command: c,
+      guidance: 'Do not work around package vetting or credential prompts by writing expect/pexpect/sshpass flows. They are brittle and can expose passwords in process lists, logs, or files.',
+      blocked: true,
+      reason: 'scripted_password_auth',
+    };
   }
 
   _broadProcessKillBlock(command) {
@@ -3703,8 +3762,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         }
         if (setTemp || clearTemp) {
           const row = db.prepare('SELECT extra FROM nodes WHERE id = ?').get(id);
-          let extraObj = {};
-          try { extraObj = row?.extra ? JSON.parse(row.extra) : {}; } catch (e) { this.log.warn('[tools] JSON.parse failed: ' + e.message); }
+          let extraObj = parseExtra(row?.extra);
           // Plugin lifecycle hook `isNodeManaged` lets a plugin claim
           // ownership of a node so core skips manual ttl mutations on
           // it. Plugins return true when the node is part of their
@@ -3723,13 +3781,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           }
           if (!isManaged) {
             if (setTemp) {
-              if (extraObj.ttl !== 'temp') {
-                extraObj.ttl = 'temp';
-                extraObj.tempCreated = new Date().toISOString();
-              }
+              extraObj = makeHardTempExtra(extraObj, 'graph_update');
             } else {
-              delete extraObj.ttl;
-              delete extraObj.tempCreated;
+              extraObj = promoteCandidateExtra(extraObj, 'graph_update', 'explicit temp:false');
             }
             db.prepare('UPDATE nodes SET extra = ?, updated = CURRENT_TIMESTAMP WHERE id = ?')
               .run(JSON.stringify(extraObj), id);
@@ -3744,7 +3798,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
         // is acorn-blind here.
         let extraObj = {};
         if (setTemp) {
-          extraObj = { ttl: 'temp', tempCreated: new Date().toISOString() };
+          extraObj = makeHardTempExtra({}, 'graph_update');
+        } else if (clearTemp) {
+          extraObj = promoteCandidateExtra({}, 'graph_update', 'created with temp:false');
+        } else {
+          extraObj = makeCandidateExtra({}, 'graph_update', 'new graph_update node');
         }
         const extraJson = JSON.stringify(extraObj);
         db.prepare(
@@ -4508,6 +4566,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           '- **Sequential by default.** Only parallelize tool calls when the results are truly independent AND you are confident all branches are needed. Do NOT shotgun multiple approaches hoping one works — pick the best one, try it, and only fall back if it fails.',
           '- **Read output carefully.** If a tool call already gave you the information (e.g., file size in download output), do NOT call another tool to verify the same thing.',
           '- **Check before installing.** Run `which <cmd>` or `pip list | grep <pkg>` BEFORE installing. Never install the same thing multiple ways in parallel.',
+          '- If package install security blocks an install, do NOT bypass it with curl/manual downloads, alternate package managers, vendored code, or expect/pexpect/sshpass password scripts. Stop and report the blocker.',
           '- **Each tool call has cost.** Aim for the fewest calls that accomplish the task. Redundant calls waste tokens and time.',
           '- **API keys:** If you need an API key, ask the parent agent to provide it in the task context. Do NOT try to access keys via exec/printenv/echo/$VAR — they are filtered from subprocesses for security.',
           '',
@@ -4517,6 +4576,7 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
           '- For code/content: write to files using write_file, not inline text.',
           '- For reusable scripts: use save_tool instead of write_file.',
           '- Python: a persistent venv exists at /workspace/.venv. Use /workspace/.venv/bin/pip install <pkg> and /workspace/.venv/bin/python3 to run. System packages (numpy, PIL, opencv, moderngl, av) are pre-installed.',
+          '- Do not script interactive password prompts with expect/pexpect/sshpass. Use saved credentials, key-based auth, built-in SSH/sidecar tools, or ask the user.',
           '- All installs persist: pip, npm global, Go, Cargo, gems, apt packages, and browser binaries (Playwright/Puppeteer) all survive restarts.',
           '- When you finish a meaningful step, write a one-sentence summary of what you accomplished (not what you\'re about to do).',
           '- After calling web_serve to start the server, your task is DONE. Immediately produce your final summary — do not run verification commands.',
@@ -6039,6 +6099,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       } catch (e) { this.log.warn('[tools] fs.statSync failed: ' + e.message); }
     }
 
+    const automationGuard = this._guardCredentialAutomationWrite(safe.path, content);
+    if (automationGuard?.error) return { error: automationGuard.error };
+
     const guard = this._guardCredentialWrite(safe.path, content);
     if (guard?.error) return { error: guard.error };
 
@@ -6090,17 +6153,36 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
     return found.map(f => `${f.type} (×${f.count})`).join(', ');
   }
 
+  _guardCredentialAutomationWrite(filePath, content) {
+    if (this._credentialGuardModeValue() !== 'block') return null;
+    if (typeof content !== 'string' || !content) return null;
+    const lower = content.toLowerCase();
+    const looksLikeCredentialAutomation =
+      /\bsshpass\b/.test(lower) ||
+      (/\b(?:import\s+pexpect|from\s+pexpect\s+import|pexpect\.spawn)\b/.test(lower) &&
+        /\b(?:ssh|scp|sftp)\b/.test(lower) &&
+        /\b(?:password|passphrase|sendline)\b/.test(lower)) ||
+      (/\bexpect\b/.test(lower) &&
+        /\b(?:spawn\s+(?:ssh|scp|sftp)|(?:ssh|scp|sftp)\s+)/.test(lower) &&
+        /\b(?:password|passphrase|send)\b/.test(lower));
+    if (!looksLikeCredentialAutomation) return null;
+    return {
+      error: `Refused to write ${filePath}: scripted SSH password automation is not allowed. Use saved SSH credentials/sidecar, key-based auth, or ask the user to configure the credential explicitly. Do not work around package vetting or credential prompts with expect/pexpect/sshpass scripts.`,
+    };
+  }
+
   // Decides what to do about a write whose content matched _checkForExposedKeys.
   // Returns null to allow, { warning } to allow with a note, { error } to block.
   _guardCredentialWrite(filePath, content) {
-    if (this._credentialGuardMode === 'off') return null;
+    const guardMode = this._credentialGuardModeValue();
+    if (guardMode === 'off') return null;
     const summary = this._checkForExposedKeys(filePath, content);
     if (!summary) return null;
     const advice = `Possible exposed credentials in ${filePath}: ${summary}. ` +
       'API keys in writable files can be stolen or accidentally committed. Two secure alternatives: ' +
       '(1) call web_fetch with the credential parameter for server-side API calls; ' +
       '(2) for webapp frontend calls, write /workspace/web/.api-proxy.json with $VAULT:KEY_NAME headers and call /api/proxy/<route> — keys are injected server-side from the vault.';
-    if (this._credentialGuardMode === 'warn') {
+    if (guardMode === 'warn') {
       this.log.warn(`[security] ${advice}`);
       return { warning: `⚠️ SECURITY: ${advice}` };
     }
@@ -6137,6 +6219,8 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       }
 
       const updated = all ? content.replaceAll(old_text, new_text) : content.replace(old_text, new_text);
+      const automationGuard = this._guardCredentialAutomationWrite(safe.path, updated);
+      if (automationGuard?.error) return { error: automationGuard.error };
       const guard = this._guardCredentialWrite(safe.path, updated);
       if (guard?.error) return { error: guard.error };
       fs.writeFileSync(safe.path, updated, 'utf8');
@@ -7577,6 +7661,9 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
 
     const processKillBlock = this._broadProcessKillBlock(command);
     if (processKillBlock) return processKillBlock;
+
+    const credentialAutomationBlock = this._credentialAutomationCommandBlock(command);
+    if (credentialAutomationBlock) return credentialAutomationBlock;
 
     for (const pattern of this.dangerousPatterns) {
       if (pattern.test(command)) {

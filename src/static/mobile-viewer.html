@@ -992,7 +992,7 @@ build/
           <button class="settings-btn-secondary" id="settings-maintainer-run">Run maintenance cycle</button>
           <span id="settings-maintainer-status" style="font-family:var(--font-body);font-size:.62rem;color:var(--text-dim);opacity:.75"></span>
         </div>
-        <div class="settings-note">Forces an immediate maintainer cycle (bypasses the 15-min interval gate). Triggers gap detection/filling, reflections, stale check, sparse-node connection, dedup, reasoning, and embedding passes.</div>
+        <div class="settings-note">Forces an immediate maintainer cycle (bypasses the interval gate). Triggers gap detection/filling, reflections, stale check, sparse-node connection, candidate promotion, dedup, reasoning, and embedding passes.</div>
 
         <div style="margin-top:18px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <button class="settings-btn-secondary" id="settings-janitor-run">Run janitor now</button>
@@ -1006,7 +1006,7 @@ build/
             <option value="aggressive">aggressive</option>
           </select>
         </div>
-        <div class="settings-note">The LLM janitor evaluates temp nodes before they expire, prunes stale/low-signal attributes, and (outside conservative mode) can remove one-off permanent nodes. Everything goes to the recycling bin first.</div>
+        <div class="settings-note">The LLM janitor evaluates temp nodes before they expire, promotes or recycles candidate learned nodes, prunes stale/low-signal attributes, and (outside conservative mode) can remove one-off permanent nodes. Everything goes to the recycling bin first.</div>
 
         <div style="margin-top:12px">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">

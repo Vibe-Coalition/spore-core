@@ -712,7 +712,7 @@ class WebSettingsService {
       'hostReadPaths', 'extraPaths',
       'webPort', 'publicUrl', 'ingressMode', 'ingressDomain', 'ingressPath', 'ingressHttps',
       'webAuthUser', 'webAuthPass', 'inviteKey',
-      'personalityEditable', 'srcEditable', 'credentialGuard',
+      'personalityEditable', 'srcEditable', 'credentialGuard', 'packageInstallSecurity',
       'pluginsEnabled', 'pluginsHotReload', 'embedder',
       'logLevel',
       'agentBornDate',

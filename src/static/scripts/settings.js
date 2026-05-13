@@ -1020,6 +1020,8 @@ const SETTINGS_LEARNER_PLATFORM_LABELS = {
   api: 'API',
   unknown: 'Unknown',
 };
+const SETTINGS_PACKAGE_SECURITY_LEVELS = new Set(['strict', 'warn', 'off']);
+const SETTINGS_CREDENTIAL_GUARD_LEVELS = new Set(['block', 'warn', 'off']);
 
 function _settingsCheckboxIfPresent(id) {
   const el = document.getElementById(id);
@@ -1033,6 +1035,13 @@ function _settingsPositiveNumberIfPresent(id, fallback, opts = {}) {
   const parsed = raw ? Number(raw) : Number(fallback);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return opts.integer ? Math.floor(parsed) : parsed;
+}
+
+function _settingsChoiceIfPresent(id, allowed, fallback) {
+  const el = document.getElementById(id);
+  if (!el) return undefined;
+  const value = String(el.value || fallback || '').trim().toLowerCase();
+  return allowed.has(value) ? value : fallback;
 }
 
 function _settingsPatchIfPresent(patch, key, value) {
@@ -1267,6 +1276,44 @@ function _settingsEnsureCoreRuntimeControls() {
   `;
 }
 
+function _settingsEnsureSecurityPolicyControls() {
+  if (document.getElementById('settings-security-policy-section')) return;
+  const runtimeSection = document.getElementById('settings-runtime-queue-section')
+    || document.getElementById('settings-runtime-public-url-input')?.closest('.settings-section');
+  if (!runtimeSection) return;
+  const section = document.createElement('div');
+  section.className = 'settings-section wide';
+  section.id = 'settings-security-policy-section';
+  section.setAttribute('data-target-tab', 'advanced');
+  section.innerHTML = `
+    <h4>Security policy</h4>
+    <div class="settings-note">Controls how aggressively Spore blocks risky package installs and credential exposure. Changes apply to new tool calls immediately after Save.</div>
+    <div class="settings-runtime-card">
+      <div class="settings-runtime-grid">
+        <div>
+          <label for="settings-package-install-security">Package install vetting</label>
+          <select id="settings-package-install-security">
+            <option value="strict">Strict: block risky npm/pip/cargo installs</option>
+            <option value="warn">Warn: show warnings but allow installs</option>
+            <option value="off">Off: do not vet package installs</option>
+          </select>
+          <div class="settings-runtime-lane-hint">Strict checks npm, PyPI, and Cargo package names before exec runs install commands. Apt is not package-vetted here.</div>
+        </div>
+        <div>
+          <label for="settings-credential-guard">Credential write guard</label>
+          <select id="settings-credential-guard">
+            <option value="block">Block: refuse secrets and password automation</option>
+            <option value="warn">Warn: allow but annotate risky writes</option>
+            <option value="off">Off: do not inspect file writes</option>
+          </select>
+          <div class="settings-runtime-lane-hint">Default blocks hardcoded keys and SSH password automation scripts such as sshpass/expect/pexpect.</div>
+        </div>
+      </div>
+    </div>
+  `;
+  runtimeSection.insertAdjacentElement('afterend', section);
+}
+
 function _settingsCanonicalValue(data, key, fallback) {
   if (data?.values && Object.prototype.hasOwnProperty.call(data.values, key)) return data.values[key];
   return fallback;
@@ -1302,6 +1349,11 @@ function _populateGraphRuntimeSettings(data) {
   _settingsEnsureGraphRuntimeControls();
   _settingsEnsureLearnerActivationControls();
   _settingsEnsureCoreRuntimeControls();
+  _settingsEnsureSecurityPolicyControls();
+  _settingsSetRuntimeInput('settings-package-install-security',
+    _settingsCanonicalValue(data, 'packageInstallSecurity', 'strict'));
+  _settingsSetRuntimeInput('settings-credential-guard',
+    _settingsCanonicalValue(data, 'credentialGuard', 'block'));
   _settingsSetRuntimeChecked('settings-graph-maintenance-enabled',
     _settingsCanonicalValue(data, 'graphMaintenanceEnabled', true));
   _settingsSetRuntimeInput('settings-graph-maintenance-interval',
@@ -1420,6 +1472,10 @@ function _buildSettingsPatchPayload(modelLimits, models) {
     _settingsRuntimeLaneLimitsPayload());
   _settingsPatchIfPresent(patch, 'nodePerformanceMetricViz',
     _settingsCheckboxIfPresent('settings-node-performance-metric-viz'));
+  _settingsPatchIfPresent(patch, 'packageInstallSecurity',
+    _settingsChoiceIfPresent('settings-package-install-security', SETTINGS_PACKAGE_SECURITY_LEVELS, 'strict'));
+  _settingsPatchIfPresent(patch, 'credentialGuard',
+    _settingsChoiceIfPresent('settings-credential-guard', SETTINGS_CREDENTIAL_GUARD_LEVELS, 'block'));
   _settingsLearnerModePatch(patch);
   _settingsPatchIfPresent(patch, 'learnerIdleDelaySeconds',
     _settingsPositiveNumberIfPresent('settings-learner-idle-delay', 45, { integer: true }));
