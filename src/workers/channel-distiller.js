@@ -2,8 +2,9 @@
  * channel-distiller.js
  *
  * Periodically promotes reusable, non-private lessons from long-lived
- * channel/user graphs into the protected general knowledge base. These
- * scopes do not have a reliable session-end distillation hook.
+ * scoped graphs into the protected general knowledge base. Channels/users
+ * do not have a reliable session-end hook; manual distill can also target
+ * ordinary custom/default graphs.
  */
 
 const graphEvents = require('../graph/events');
@@ -22,6 +23,28 @@ const DEFAULT_BATCH_SIZE = 3;
 
 const ALLOWED_TYPES = new Set(['tool', 'library', 'framework', 'service', 'concept', 'system']);
 const DIGEST_TYPES = new Set([...ALLOWED_TYPES, 'person', 'skill']);
+const DIRECT_PROMOTE_TYPES = new Set(['tool', 'library', 'framework', 'service']);
+const DIRECT_PERSON_ASPECTS = new Set([
+  'public_context',
+  'team_context',
+  'shared_context',
+  'role',
+  'roles',
+  'maintainership',
+  'authorship',
+  'collaboration',
+  'contributions',
+]);
+const BLOCKED_DIGEST_TYPES = new Set(['channel', 'project', 'session', 'event', 'place', 'organization', 'reference', 'self']);
+const BLOCKED_DIGEST_IDS = new Set([
+  'spore',
+  'knowledge-graph',
+  'general-kb-distillation',
+  'general-kb-people',
+  'general-kb-skills',
+  'spore-activity-log',
+  'spore-token-log',
+]);
 
 function _minutes(configValue, fallback) {
   const n = Number(configValue);
@@ -95,6 +118,28 @@ function _isGenericPersonLabel(value) {
   return !label || ['person', 'user', 'unknown', 'anonymous', 'someone', 'operator', 'this-user', 'that-user'].includes(label);
 }
 
+function _distillRole(graph) {
+  const role = String(graph?.role || '').toLowerCase();
+  if (role === 'project' || role === 'user' || role === 'channel') return role;
+  if (role === 'main' || role === 'custom') return 'graph';
+  return role || 'graph';
+}
+
+function _isDistillableGraph(graph) {
+  const role = String(graph?.role || '').toLowerCase();
+  return !!graph?.slug && role !== 'general_kb';
+}
+
+function _isDistillableDigestNode(node) {
+  const id = String(node?.id || '').trim().toLowerCase();
+  const type = String(node?.type || '').trim().toLowerCase();
+  const extractedWith = String(node?.extracted_with || '').trim().toLowerCase();
+  if (!id || id.startsWith('ref-') || BLOCKED_DIGEST_IDS.has(id)) return false;
+  if (BLOCKED_DIGEST_TYPES.has(type) || !DIGEST_TYPES.has(type)) return false;
+  if (extractedWith === 'seed') return false;
+  return true;
+}
+
 function _personNodeId(nodeIdRaw, labelRaw) {
   const id = _nodeId(nodeIdRaw || labelRaw);
   if (!id) return null;
@@ -166,7 +211,7 @@ class ChannelDistiller {
 
     try {
       const graphs = (this.registry.list?.() || [])
-        .filter(g => (g.role === 'project' || g.role === 'channel' || g.role === 'user') && g.distillDirty)
+        .filter(g => _isDistillableGraph(g) && g.distillDirty)
         .filter(g => {
           if (force) return true;
           const lastActivity = Date.parse(g.lastActivityAt || g.distillDirtySince || 0);
@@ -176,7 +221,7 @@ class ChannelDistiller {
 
       for (const graph of graphs) {
         checked++;
-        const result = await this.distillGraph(graph);
+        const result = await this.distillGraph(graph, { force });
         if (result?.distilled) distilled++;
         if (Number.isFinite(result?.promoted)) promoted += result.promoted;
       }
@@ -190,12 +235,13 @@ class ChannelDistiller {
     }
   }
 
-  async distillGraph(graph) {
+  async distillGraph(graph, { force = false } = {}) {
     const slug = graph?.slug;
     if (!slug) return { skipped: 'missing-slug' };
+    if (!_isDistillableGraph(graph)) return { skipped: 'not-distillable' };
     const db = this.learner.getGraphDb?.(slug);
     if (!db) return { skipped: 'missing-db' };
-    const role = graph.role === 'project' ? 'project' : (graph.role === 'user' ? 'user' : 'channel');
+    const role = _distillRole(graph);
     const recordDistill = (meta) => {
       if (this.registry.recordScopedGraphDistill?.(slug, meta)) return true;
       if (role === 'user') return this.registry.recordUserGraphDistill?.(slug, meta);
@@ -205,22 +251,25 @@ class ChannelDistiller {
 
     graphEvents.emit('change', { op: `${role}:distill-start`, graph: slug, source: SOURCE });
     try {
-      const digest = this._collectDigest(db, graph);
+      const fullScan = force || !graph.distillFullScanAt;
+      const digest = this._collectDigest(db, graph, { force, fullScan });
       if (digest.length === 0) {
-        recordDistill({ success: true, promoted: 0, candidates: 0 });
+        recordDistill({ success: true, promoted: 0, candidates: 0, fullScan });
         graphEvents.emit('change', { op: `${role}:distill-done`, graph: slug, promoted: 0, empty: true, source: SOURCE });
-        return { distilled: true, promoted: 0, candidates: 0 };
+        return { distilled: true, promoted: 0, candidates: 0, fullScan };
       }
 
       const parsed = await this._askLlm(graph, digest);
-      const promoted = this._promoteReusable(parsed, slug);
+      const directPromoted = this._promoteDigestReusable(digest, slug);
+      const promoted = directPromoted + this._promoteReusable(parsed, slug);
       recordDistill({
         success: true,
         promoted,
         candidates: digest.length,
+        fullScan,
       });
       graphEvents.emit('change', { op: `${role}:distill-done`, graph: slug, promoted, candidates: digest.length, source: SOURCE });
-      return { distilled: true, promoted, candidates: digest.length };
+      return { distilled: true, promoted, candidates: digest.length, fullScan };
     } catch (e) {
       this.stats.errors++;
       recordDistill({ success: false, error: e.message });
@@ -230,19 +279,20 @@ class ChannelDistiller {
     }
   }
 
-  _collectDigest(db, graph) {
-    const since = graph.distillDirtySince || graph.lastDistilledAt || null;
+  _collectDigest(db, graph, { force = false, fullScan = false } = {}) {
+    const since = (force || fullScan) ? null : (graph.distillDirtySince || graph.lastDistilledAt || null);
     const nodeLimit = Math.max(5, Math.min(50, Number(this.config.channelDistillerNodeLimit) || 24));
     const attrLimit = Math.max(4, Math.min(30, Number(this.config.channelDistillerAttrLimit) || 12));
     const params = since ? [since, since, nodeLimit] : [nodeLimit];
     const whereRecent = since ? 'AND (a.created >= ? OR a.updated_at >= ?)' : '';
     const nodes = db.prepare(`
-      SELECT n.id, n.label, n.type, n.description, n.importance, MAX(a.created) AS last_attr
+      SELECT n.id, n.label, n.type, n.description, n.importance,
+             n.provenance, n.extracted_with, MAX(a.created) AS last_attr
        FROM nodes n
         JOIN aspects asp ON asp.node_id = n.id
         JOIN attributes a ON a.aspect_id = asp.id
        WHERE n.id NOT LIKE 'ref-%'
-         AND n.type NOT IN ('channel', 'project', 'session', 'event', 'place', 'organization')
+         AND n.type NOT IN ('channel', 'project', 'session', 'event', 'place', 'organization', 'reference', 'self')
          ${whereRecent}
        GROUP BY n.id
        ORDER BY datetime(last_attr) DESC, n.importance DESC
@@ -259,7 +309,7 @@ class ChannelDistiller {
     `);
 
     return nodes
-      .filter(n => DIGEST_TYPES.has(String(n.type || '').toLowerCase()))
+      .filter(n => _isDistillableDigestNode(n))
       .map(n => {
         const type = String(n.type || '').toLowerCase();
         const aspects = {};
@@ -267,7 +317,7 @@ class ChannelDistiller {
           const text = String(row.content || '').trim();
           const clean = type === 'person'
             ? _sanitizePersonFact(text)
-            : (!_looksChannelPrivate(text) ? text.slice(0, 500) : null);
+            : _sanitizeLesson(text);
           if (!clean) continue;
           const name = String(row.aspect || 'notes').slice(0, 40);
           if (!aspects[name]) aspects[name] = [];
@@ -287,7 +337,11 @@ class ChannelDistiller {
   }
 
   async _askLlm(graph, digest) {
-    const scopeLabel = graph.role === 'project' ? 'project' : (graph.role === 'user' ? 'web user' : 'chat channel');
+    const scopeLabel = graph.role === 'project'
+      ? 'project'
+      : (graph.role === 'user'
+        ? 'web user'
+        : (graph.role === 'channel' ? 'chat channel' : 'memory graph'));
     const prompt = [
       `You are distilling a long-lived ${scopeLabel} memory graph into reusable general knowledge.`,
       '',
@@ -377,7 +431,7 @@ class ChannelDistiller {
     const kb = kbSlug ? this.learner.getGraphDb?.(kbSlug) : null;
     if (!kb) return 0;
     const sourceGraph = registry?.get?.(sourceSlug);
-    const sourceRole = sourceGraph?.role === 'user' ? 'user' : 'channel';
+    const sourceRole = _distillRole(sourceGraph);
 
     let promoted = 0;
     const upsertPerson = (personRaw) => {
@@ -484,6 +538,96 @@ class ChannelDistiller {
     }
 
     try { registry.refreshStats(kbSlug); } catch {}
+    return promoted;
+  }
+
+  _promoteDigestReusable(digest, sourceSlug) {
+    const registry = this.registry;
+    const sourceGraph = registry?.get?.(sourceSlug);
+    const sourceRole = _distillRole(sourceGraph);
+    const learner = { getGraphDb: this.learner.getGraphDb?.bind(this.learner), _graphRegistry: registry };
+    const directNodes = [];
+    let promoted = 0;
+
+    const pickAspect = (node, names) => {
+      const wanted = new Set(names.map(name => sanitizeAspectName(name, name)));
+      const out = [];
+      for (const [nameRaw, attrsRaw] of Object.entries(node.aspects || {})) {
+        const name = sanitizeAspectName(nameRaw, 'notes');
+        if (!wanted.has(name)) continue;
+        for (const attr of Array.isArray(attrsRaw) ? attrsRaw : []) {
+          if (attr) out.push(attr);
+        }
+      }
+      return out;
+    };
+
+    for (const node of Array.isArray(digest) ? digest : []) {
+      const type = String(node?.type || '').toLowerCase();
+      if (DIRECT_PROMOTE_TYPES.has(type)) {
+        const aspects = Object.entries(node.aspects || {})
+          .map(([name, attributes]) => ({
+            name,
+            attributes: (Array.isArray(attributes) ? attributes : [])
+              .map(v => _sanitizeLesson(v))
+              .filter(Boolean),
+          }))
+          .filter(asp => asp.attributes.length);
+        if (aspects.length) {
+          directNodes.push({
+            nodeId: node.id,
+            label: node.label || node.id,
+            type,
+            description: node.description || '',
+            aspects,
+          });
+        }
+        continue;
+      }
+
+      if (type === 'skill') {
+        const skillSlug = String(node.id || '').replace(/^skill[-_]/i, '');
+        const result = syncSkillToGeneralKb(learner, {
+          slug: skillSlug || node.id,
+          title: node.label || node.id,
+          summary: node.description,
+          applicability: pickAspect(node, ['applicability', 'when_to_use', 'whenToUse', 'use_cases'])[0],
+          prerequisites: pickAspect(node, ['prerequisites', 'requirements', 'setup']),
+          commands: pickAspect(node, ['commands', 'command', 'cli']),
+          steps: pickAspect(node, ['steps', 'procedure', 'workflow', 'instructions']),
+          replay: pickAspect(node, ['replay', 'replay_steps', 'replayCode', 'code', 'script', 'snippets']),
+          examples: pickAspect(node, ['examples', 'example']),
+          gotchas: pickAspect(node, ['gotchas', 'pitfalls', 'warnings']),
+          validation: pickAspect(node, ['validation', 'verification', 'checks', 'tests']),
+          lessons: pickAspect(node, ['lessons', 'notes']),
+          sharedSkill: false,
+        }, { source: SOURCE });
+        if (result.synced && result.changed) promoted++;
+        continue;
+      }
+
+      if (type === 'person') {
+        const aspects = Object.entries(node.aspects || {})
+          .map(([nameRaw, attrsRaw]) => {
+            const name = sanitizeAspectName(nameRaw, 'shared_context');
+            if (!DIRECT_PERSON_ASPECTS.has(name)) return null;
+            const attributes = (Array.isArray(attrsRaw) ? attrsRaw : []).filter(Boolean);
+            return attributes.length ? { name, attributes } : null;
+          })
+          .filter(Boolean);
+        const result = syncPersonToGeneralKb(learner, {
+          nodeId: node.id,
+          label: node.label || node.id,
+          description: node.description,
+          aspects,
+        }, { source: SOURCE, sourceGraph: sourceSlug, sourceRole });
+        if (result.synced && result.changed) promoted++;
+      }
+    }
+
+    for (const node of directNodes) {
+      if (this._promoteReusable({ createNodes: [node] }, sourceSlug) > 0) promoted++;
+    }
     return promoted;
   }
 }

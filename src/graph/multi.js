@@ -313,6 +313,22 @@ function _hashKey(value) {
   return require('crypto').createHash('sha256').update(String(value || '')).digest('hex').slice(0, 12);
 }
 
+function _isWeakChannelName(value) {
+  const s = String(value || '').trim();
+  if (!s) return true;
+  if (/^(channel memory|telegram-dm|cron|system|scheduler|background(?: task)?|task runner)$/i.test(s)) return true;
+  if (/^(telegram|discord|slack)(?: user| channel)?\s*-?\d+$/i.test(s)) return true;
+  return false;
+}
+
+function _shouldUpdateChannelName(existing, nextName, meta = {}) {
+  const next = String(nextName || '').trim();
+  if (!next || next === existing?.name) return false;
+  if (meta.forceNameUpdate === true) return true;
+  if (_isWeakChannelName(next)) return false;
+  return _isWeakChannelName(existing?.name);
+}
+
 function _normalizeProjectRemote(remote) {
   if (!remote || typeof remote !== 'string') return null;
   let s = remote.trim();
@@ -920,11 +936,14 @@ class GraphRegistry {
       existing.managed = true;
       existing.activationLocked = true;
       existing.seedProfile = 'channel';
-      if (meta.name && existing.name !== meta.name) existing.name = meta.name;
+      if (_shouldUpdateChannelName(existing, meta.name, meta)) existing.name = String(meta.name).trim();
       if (meta.description && existing.description !== meta.description) existing.description = meta.description;
       if (meta.platform && existing.platform !== meta.platform) existing.platform = meta.platform;
       if (meta.externalUserId && existing.externalUserId !== meta.externalUserId) existing.externalUserId = meta.externalUserId;
       if (meta.externalChannelId && existing.externalChannelId !== meta.externalChannelId) existing.externalChannelId = meta.externalChannelId;
+      if (meta.ownerUser && existing.ownerUser !== meta.ownerUser) existing.ownerUser = meta.ownerUser;
+      if (meta.ownerRole && existing.ownerRole !== meta.ownerRole) existing.ownerRole = meta.ownerRole;
+      if (meta.userGraphSlug && existing.userGraphSlug !== meta.userGraphSlug) existing.userGraphSlug = meta.userGraphSlug;
       this._applyChannelSeedProfile(existing.slug);
       this.refreshStats(existing.slug);
       this._save();
@@ -945,6 +964,9 @@ class GraphRegistry {
       platform: meta.platform || null,
       externalUserId: meta.externalUserId || null,
       externalChannelId: meta.externalChannelId || null,
+      ownerUser: meta.ownerUser || null,
+      ownerRole: meta.ownerRole || null,
+      userGraphSlug: meta.userGraphSlug || null,
     });
   }
 
@@ -995,7 +1017,7 @@ class GraphRegistry {
 
   recordScopedGraphDistill(slug, meta = {}) {
     const graph = this._registry[slug];
-    if (!graph || (graph.role !== 'project' && graph.role !== 'channel' && graph.role !== 'user')) return false;
+    if (!graph || graph.role === 'general_kb') return false;
     const now = meta.at || new Date().toISOString();
     graph.lastDistillAttemptAt = now;
     graph.lastDistillStatus = meta.success === false ? 'error' : 'ok';
@@ -1013,6 +1035,7 @@ class GraphRegistry {
       delete graph.distillDirtySince;
       delete graph.distillReason;
       graph.lastDistilledAt = now;
+      if (meta.fullScan) graph.distillFullScanAt = now;
     }
     this.refreshStats(slug);
     this._save();

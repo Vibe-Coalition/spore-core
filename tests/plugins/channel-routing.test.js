@@ -188,3 +188,41 @@ test('Telegram session keys match text, voice, proactive, and topic policy', () 
     'private:channel:telegram:-100',
   );
 });
+
+test('Telegram account binding exposes linked web user fields to agent opts', () => {
+  const gateway = new TelegramGateway({
+    channels: { telegram: { sessionMode: 'topic' } },
+  }, logger(), fakeAgent(), {
+    getBinding(channel, id) {
+      if (channel === 'telegram' && id === '12345') {
+        return {
+          id,
+          channel,
+          ownerUser: 'yam',
+          ownerRole: 'webapp',
+          userGraphSlug: 'user-yam',
+          channelGraphSlug: 'channel-yam-telegram',
+        };
+      }
+      return null;
+    },
+  });
+
+  const binding = gateway._bindingForUser('12345', true);
+  assert.equal(binding.ownerUser, 'yam');
+  assert.deepEqual(gateway._bindingAgentFields(binding), {
+    userRole: 'webapp',
+    channelOwnerUser: 'yam',
+    channelOwnerRole: 'webapp',
+    channelOwnerGraphSlug: 'user-yam',
+    channelBinding: {
+      channel: 'telegram',
+      id: '12345',
+      ownerUser: 'yam',
+      ownerRole: 'webapp',
+      userGraphSlug: 'user-yam',
+      channelGraphSlug: 'channel-yam-telegram',
+    },
+  });
+  assert.equal(gateway._bindingForUser('12345', false), null);
+});

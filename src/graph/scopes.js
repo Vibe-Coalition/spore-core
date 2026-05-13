@@ -28,6 +28,10 @@ function _hash(value, len = 12) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex').slice(0, len);
 }
 
+function _isSystemActorName(value) {
+  return /^(cron|system|scheduler|background(?: task)?|task runner|telegram-dm)$/i.test(String(value || '').trim());
+}
+
 function normalizeProjectRoot(root) {
   const raw = String(root || '').trim();
   if (!raw) return '';
@@ -87,14 +91,16 @@ function channelIdentityFromContext(opts = {}) {
   const isDm = opts.isDm !== false;
 
   if (isDm && userId) {
+    const linkedOwner = String(opts.channelOwnerUser || opts.channelBinding?.ownerUser || '').trim();
+    const label = linkedOwner || (!_isSystemActorName(userName) ? userName : '') || `${platform} user ${userId}`;
     return {
       key: `channel-person:${platform}:${userId}`,
-      label: userName || `${platform} user ${userId}`,
+      label,
       basis: 'person',
       platform,
       userId,
       channelId: channelId || userId,
-      description: `${platform} channel memory for ${userName || userId}`,
+      description: `${platform} channel memory for ${label || userId}`,
     };
   }
 
@@ -126,6 +132,24 @@ function webUserIdentityFromContext(opts = {}) {
     label,
     basis: 'web-user',
     username: rawUser,
+    description: `Private web memory for ${label}`,
+  };
+}
+
+function linkedWebUserIdentityFromContext(opts = {}) {
+  const rawUser = opts.channelOwnerUser != null
+    ? String(opts.channelOwnerUser).trim()
+    : String(opts.channelBinding?.ownerUser || '').trim();
+  if (!rawUser || /^operator$/i.test(rawUser) || /^guest$/i.test(rawUser)) return null;
+  const role = String(opts.channelOwnerRole || opts.channelBinding?.ownerRole || 'webapp').trim().toLowerCase() || 'webapp';
+  const label = String(opts.channelOwnerName || rawUser).trim() || rawUser;
+  return {
+    key: `web-user:${_safePart(rawUser, 'user')}`,
+    label,
+    basis: 'linked-web-user',
+    username: rawUser,
+    role,
+    graphSlug: opts.channelOwnerGraphSlug || opts.channelBinding?.userGraphSlug || null,
     description: `Private web memory for ${label}`,
   };
 }
@@ -289,6 +313,7 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
   if (readScopes.length === 0) {
     const identity = channelIdentityFromContext(opts);
     if (identity) {
+      const linkedUser = linkedWebUserIdentityFromContext(opts);
       channelKey = identity.key;
       channelSlug = registry.ensureChannelGraph(identity.key, {
         name: identity.label,
@@ -298,6 +323,9 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
         platform: identity.platform,
         externalUserId: identity.userId,
         externalChannelId: identity.channelId,
+        ownerUser: linkedUser?.username || null,
+        ownerRole: linkedUser?.role || null,
+        userGraphSlug: linkedUser?.graphSlug || null,
       });
       registry.markChannelGraphActivity?.(channelSlug, {
         reason: 'channel-turn',
@@ -308,6 +336,26 @@ function resolveDefaultMemoryEnvelope({ opts = {}, registry, log } = {}) {
       mode = identity.basis === 'person' ? 'channel-person-session' : 'channel-thread-session';
       primarySlug = channelSlug;
       readScopes.push(_scope(registry, channelSlug, 'channel', 'Channel Memory', 18));
+      if (linkedUser) {
+        userKey = linkedUser.key;
+        const requestedSlug = linkedUser.graphSlug && registry.get(linkedUser.graphSlug) ? linkedUser.graphSlug : null;
+        userSlug = requestedSlug || registry.ensureUserGraph(linkedUser.key, {
+          name: `${linkedUser.label} Memory`,
+          description: linkedUser.description,
+          source: 'webapp',
+          createdBy: 'channel-pairing',
+          username: linkedUser.username,
+          userId: linkedUser.username,
+          webappUser: linkedUser.username,
+          owner: linkedUser.username,
+        });
+        registry.markUserGraphActivity?.(userSlug, {
+          reason: 'linked-channel-turn',
+          username: linkedUser.username,
+          userId: linkedUser.username,
+        });
+        readScopes.push(_scope(registry, userSlug, 'user', 'User Memory', 10));
+      }
       readScopes.push(_scope(registry, generalSlug, 'general_kb', 'Reusable Engineering Memory', looksReusableTechnicalQuery(opts.content || opts.messageContent) ? 8 : 4));
     }
   }
@@ -361,6 +409,7 @@ module.exports = {
   projectIdentityFromContext,
   channelIdentityFromContext,
   webUserIdentityFromContext,
+  linkedWebUserIdentityFromContext,
   looksReusableTechnicalQuery,
   resolveDefaultMemoryEnvelope,
   mergeMemoryEnvelope,

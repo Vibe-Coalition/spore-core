@@ -58,13 +58,15 @@ class PairingStore {
   }
 
   _empty() {
-    return { version: 1, pending: {}, approved: {} };
+    return { version: 2, pending: {}, approved: {}, bindings: {} };
   }
 
   _migrate() {
     if (!this._store.version) this._store.version = 1;
     if (!this._store.pending) this._store.pending = {};
     if (!this._store.approved) this._store.approved = {};
+    if (!this._store.bindings) this._store.bindings = {};
+    if (this._store.version < 2) this._store.version = 2;
   }
 
   // ── Queries ─────────────────────────────────────────────────────
@@ -72,6 +74,28 @@ class PairingStore {
   isApproved(channel, id) {
     const list = this._store.approved[channel] || [];
     return list.includes(String(id));
+  }
+
+  getBinding(channel, id) {
+    const ch = String(channel);
+    const normalized = String(id);
+    const binding = this._store.bindings?.[ch]?.[normalized] || null;
+    if (binding) return { ...binding, id: normalized, channel: ch };
+    if (this.isApproved(ch, normalized)) {
+      return {
+        id: normalized,
+        channel: ch,
+        approvedAt: null,
+        approvedBy: null,
+        ownerUser: null,
+        ownerRole: null,
+        userGraphSlug: null,
+        channelGraphSlug: null,
+        meta: {},
+        legacy: true,
+      };
+    }
+    return null;
   }
 
   listPending(channel) {
@@ -90,6 +114,22 @@ class PairingStore {
   listApproved(channel) {
     if (channel) return (this._store.approved[channel] || []).slice();
     return JSON.parse(JSON.stringify(this._store.approved));
+  }
+
+  listApprovedRecords(channel, filter = {}) {
+    const channels = channel ? [String(channel)] : Object.keys(this._store.approved || {});
+    const owner = filter.ownerUser ? String(filter.ownerUser) : null;
+    const out = channel ? [] : {};
+    for (const ch of channels) {
+      const ids = this._store.approved[ch] || [];
+      const rows = ids.map(id => this.getBinding(ch, id)).filter(Boolean).filter(row => {
+        if (!owner) return true;
+        return String(row.ownerUser || '') === owner;
+      });
+      if (channel) out.push(...rows);
+      else if (rows.length) out[ch] = rows;
+    }
+    return out;
   }
 
   // ── Mutations ────────────────────────────────────────────────────
@@ -133,7 +173,7 @@ class PairingStore {
   /**
    * Owner approves a code. Returns { id, channel, meta } or null if not found/expired.
    */
-  approveCode(code) {
+  approveCode(code, bindingMeta = {}) {
     const normalized = String(code).toUpperCase().replace(/[-\s]/g, '');
     for (const [ch, reqs] of Object.entries(this._store.pending)) {
       const idx = reqs.findIndex(r => r.code.replace(/[-\s]/g, '') === normalized);
@@ -145,13 +185,10 @@ class PairingStore {
         return null;
       }
       reqs.splice(idx, 1);
-      if (!this._store.approved[ch]) this._store.approved[ch] = [];
-      if (!this._store.approved[ch].includes(req.id)) {
-        this._store.approved[ch].push(req.id);
-      }
+      this._approveRequest(ch, req, bindingMeta);
       this._scheduleSave();
       this.log.info(`[pairing] Approved ${req.id} on ${ch} (was: ${req.meta?.name || 'unknown'})`);
-      return { id: req.id, channel: ch, meta: req.meta || {} };
+      return { id: req.id, channel: ch, meta: req.meta || {}, binding: this.getBinding(ch, req.id) };
     }
     return null;
   }
@@ -159,7 +196,7 @@ class PairingStore {
   /**
    * Approve by channel + code (for HTTP API that specifies channel).
    */
-  approveCodeForChannel(channel, code) {
+  approveCodeForChannel(channel, code, bindingMeta = {}) {
     const ch = String(channel);
     const normalized = String(code).toUpperCase().replace(/[-\s]/g, '');
     const reqs = this._store.pending[ch] || [];
@@ -172,13 +209,10 @@ class PairingStore {
       return null;
     }
     reqs.splice(idx, 1);
-    if (!this._store.approved[ch]) this._store.approved[ch] = [];
-    if (!this._store.approved[ch].includes(req.id)) {
-      this._store.approved[ch].push(req.id);
-    }
+    this._approveRequest(ch, req, bindingMeta);
     this._scheduleSave();
     this.log.info(`[pairing] Approved ${req.id} on ${ch}`);
-    return { id: req.id, channel: ch, meta: req.meta || {} };
+    return { id: req.id, channel: ch, meta: req.meta || {}, binding: this.getBinding(ch, req.id) };
   }
 
   /**
@@ -191,6 +225,7 @@ class PairingStore {
     const idx = list.indexOf(normalized);
     if (idx < 0) return false;
     list.splice(idx, 1);
+    if (this._store.bindings?.[ch]) delete this._store.bindings[ch][normalized];
     this._scheduleSave();
     this.log.info(`[pairing] Revoked ${normalized} on ${ch}`);
     return true;
@@ -209,7 +244,49 @@ class PairingStore {
     return true;
   }
 
+  updateBinding(channel, id, patch = {}) {
+    const ch = String(channel);
+    const normalized = String(id);
+    if (!this.isApproved(ch, normalized)) return null;
+    if (!this._store.bindings[ch]) this._store.bindings[ch] = {};
+    const existing = this.getBinding(ch, normalized) || { id: normalized, channel: ch, meta: {} };
+    const next = {
+      ...existing,
+      ...patch,
+      id: normalized,
+      channel: ch,
+      meta: { ...(existing.meta || {}), ...(patch.meta || {}) },
+      updatedAt: new Date().toISOString(),
+    };
+    this._store.bindings[ch][normalized] = next;
+    this._scheduleSave();
+    return { ...next };
+  }
+
   // ── Internal ─────────────────────────────────────────────────────
+
+  _approveRequest(channel, req, bindingMeta = {}) {
+    const ch = String(channel);
+    if (!this._store.approved[ch]) this._store.approved[ch] = [];
+    if (!this._store.approved[ch].includes(req.id)) {
+      this._store.approved[ch].push(req.id);
+    }
+    const hasBinding = bindingMeta && Object.values(bindingMeta).some(v => v !== undefined && v !== null && v !== '');
+    if (hasBinding) {
+      if (!this._store.bindings[ch]) this._store.bindings[ch] = {};
+      this._store.bindings[ch][req.id] = {
+        id: req.id,
+        channel: ch,
+        approvedAt: new Date().toISOString(),
+        approvedBy: bindingMeta.approvedBy || bindingMeta.ownerUser || null,
+        ownerUser: bindingMeta.ownerUser || null,
+        ownerRole: bindingMeta.ownerRole || null,
+        userGraphSlug: bindingMeta.userGraphSlug || null,
+        channelGraphSlug: bindingMeta.channelGraphSlug || null,
+        meta: { ...(req.meta || {}), ...(bindingMeta.meta || {}) },
+      };
+    }
+  }
 
   _generateCode(channel) {
     const existing = new Set((this._store.pending[channel] || []).map(r => r.code));

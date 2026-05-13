@@ -138,6 +138,31 @@ function _renderTelegramPairingPanel() {
   </div>`;
 }
 
+function _renderProfileTelegramPairingPanel() {
+  return `<h4 class="settings-section-break-title">Telegram</h4>
+    <div class="settings-note">Pair your Telegram DM with this account. Message the Telegram bot first, then paste the pairing code here.</div>
+    <div class="settings-channel-pairing" data-telegram-self-pairing>
+      <div class="settings-channel-pairing-head">
+        <div>
+          <h6>Your Telegram pairing</h6>
+          <div class="settings-note">Telegram conversations use their own channel memory while reading your private user graph.</div>
+        </div>
+        <button type="button" class="settings-btn-secondary" data-telegram-self-pair-refresh>Refresh</button>
+      </div>
+      <div class="settings-test-row">
+        <input id="settings-telegram-self-code" class="settings-inline-input" type="text" placeholder="XXXX-XXXX" autocomplete="off" />
+        <button type="button" class="settings-test-btn" data-telegram-self-pair-approve>pair</button>
+      </div>
+      <div class="settings-channel-pairing-status" data-telegram-self-pairing-status></div>
+      <div class="settings-channel-pairing-group">
+        <div class="settings-channel-pairing-label">Paired Telegram accounts</div>
+        <div class="settings-channel-pairing-list" data-telegram-self-pairing-approved>
+          <div class="settings-note settings-muted-soft">Loading...</div>
+        </div>
+      </div>
+    </div>`;
+}
+
 function _renderPluginField(pluginId, field, value, meta) {
   const W = window.SettingsWidgets;
   const id = `settings-plugin-${pluginId}-${field.key}`;
@@ -336,15 +361,27 @@ function _settingsRenderTelegramPending(reqs) {
   }).join('');
 }
 
-function _settingsRenderTelegramApproved(ids) {
-  if (!ids.length) return '<div class="settings-note settings-muted-soft">No approved Telegram users.</div>';
-  return ids.map(id => `<div class="settings-channel-pairing-row">
+function _settingsTelegramApprovedId(item) {
+  return typeof item === 'string' ? item : (item?.id || '');
+}
+
+function _settingsRenderTelegramApproved(ids, opts = {}) {
+  if (!ids.length) return `<div class="settings-note settings-muted-soft">${opts.emptyText || 'No approved Telegram users.'}</div>`;
+  return ids.map(item => {
+    const id = _settingsTelegramApprovedId(item);
+    const owner = item && typeof item === 'object' && item.ownerUser ? `Linked to ${item.ownerUser}` : '';
+    const graph = item && typeof item === 'object' && item.channelGraphSlug ? `Channel graph ${item.channelGraphSlug}` : '';
+    const details = [owner, graph].filter(Boolean).join(' - ');
+    const revokeAttr = opts.self ? 'data-telegram-self-pair-revoke' : 'data-telegram-pair-revoke';
+    return `<div class="settings-channel-pairing-row">
     <div class="settings-channel-pairing-main">
       <div class="settings-channel-pairing-title">Telegram user</div>
       <div class="settings-channel-pairing-code">${_escapeHtml(id)}</div>
+      ${details ? `<div class="settings-note">${_escapeHtml(details)}</div>` : ''}
     </div>
-    <button type="button" class="settings-btn-secondary" data-telegram-pair-revoke="${_escapeAttr(id)}">Revoke</button>
-  </div>`).join('');
+    <button type="button" class="settings-btn-secondary" ${revokeAttr}="${_escapeAttr(id)}">Revoke</button>
+  </div>`;
+  }).join('');
 }
 
 async function _settingsFetchPairingJson(path, options = {}) {
@@ -379,6 +416,33 @@ async function _settingsRefreshTelegramPairing() {
     pendingEl.innerHTML = '<div class="settings-note settings-muted-soft">Unable to load pairing requests.</div>';
     approvedEl.innerHTML = '<div class="settings-note settings-muted-soft">Unable to load approved users.</div>';
     _settingsTelegramPairingStatus(err?.message || 'Pairing API unavailable', 'err');
+  }
+}
+
+function _settingsTelegramSelfPairingStatus(message, kind = '') {
+  const el = document.querySelector('[data-telegram-self-pairing-status]');
+  if (!el) return;
+  el.textContent = message || '';
+  el.setAttribute('data-kind', kind || '');
+}
+
+async function _settingsRefreshTelegramSelfPairing() {
+  const panel = document.querySelector('[data-telegram-self-pairing]');
+  if (!panel) return;
+  const approvedEl = panel.querySelector('[data-telegram-self-pairing-approved]');
+  if (!approvedEl) return;
+  approvedEl.innerHTML = '<div class="settings-note settings-muted-soft">Loading...</div>';
+  _settingsTelegramSelfPairingStatus('', '');
+  try {
+    const data = await _settingsFetchPairingJson('/api/pairing/me?channel=telegram');
+    const approved = Array.isArray(data?.telegram) ? data.telegram : [];
+    approvedEl.innerHTML = _settingsRenderTelegramApproved(approved, {
+      self: true,
+      emptyText: 'No Telegram account paired yet.',
+    });
+  } catch (err) {
+    approvedEl.innerHTML = '<div class="settings-note settings-muted-soft">Unable to load your Telegram pairing.</div>';
+    _settingsTelegramSelfPairingStatus(err?.message || 'Pairing API unavailable', 'err');
   }
 }
 
@@ -441,6 +505,69 @@ document.addEventListener('click', async (e) => {
   const pairRefresh = t.closest?.('[data-telegram-pair-refresh]');
   if (pairRefresh) {
     await _settingsRefreshTelegramPairing();
+    return;
+  }
+
+  const selfPairRefresh = t.closest?.('[data-telegram-self-pair-refresh]');
+  if (selfPairRefresh) {
+    await _settingsRefreshTelegramSelfPairing();
+    return;
+  }
+
+  const selfPairApprove = t.closest?.('[data-telegram-self-pair-approve]');
+  if (selfPairApprove) {
+    const input = document.getElementById('settings-telegram-self-code');
+    const code = input?.value?.trim() || '';
+    if (!code) {
+      _settingsTelegramSelfPairingStatus('Enter the code Telegram gave you.', 'err');
+      return;
+    }
+    selfPairApprove.disabled = true;
+    _settingsTelegramSelfPairingStatus('Pairing...', '');
+    try {
+      const data = await _settingsFetchPairingJson('/api/pairing/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'telegram', code, bindToSelf: true }),
+      });
+      if (input) input.value = '';
+      toast(`Paired Telegram user ${data.id || ''}`.trim());
+      await _settingsRefreshTelegramSelfPairing();
+      _settingsTelegramSelfPairingStatus('Paired.', 'ok');
+    } catch (err) {
+      const msg = err?.message || 'Pairing failed';
+      _settingsTelegramSelfPairingStatus(msg, 'err');
+      toast(msg, true);
+    } finally {
+      selfPairApprove.disabled = false;
+    }
+    return;
+  }
+
+  const selfPairRevoke = t.closest?.('[data-telegram-self-pair-revoke]');
+  if (selfPairRevoke) {
+    const id = selfPairRevoke.getAttribute('data-telegram-self-pair-revoke') || '';
+    if (!id) return;
+    if (!confirm(`Revoke Telegram user "${id}" from your account?`)) return;
+    selfPairRevoke.disabled = true;
+    _settingsTelegramSelfPairingStatus('Revoking...', '');
+    try {
+      const data = await _settingsFetchPairingJson('/api/pairing/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'telegram', id }),
+      });
+      if (!data.ok) throw new Error('Revoke failed');
+      toast(`Revoked Telegram user ${id}`);
+      await _settingsRefreshTelegramSelfPairing();
+      _settingsTelegramSelfPairingStatus('Revoked.', 'ok');
+    } catch (err) {
+      const msg = err?.message || 'Revoke failed';
+      _settingsTelegramSelfPairingStatus(msg, 'err');
+      toast(msg, true);
+    } finally {
+      selfPairRevoke.disabled = false;
+    }
     return;
   }
 
@@ -699,6 +826,12 @@ async function _populateProfileSection() {
     const note = document.getElementById('settings-profile-username-note');
     if (note) note.textContent = `Logged in as ${d.username || _currentUserName || 'unknown'}.`;
   } catch {}
+  const telegram = document.getElementById('settings-profile-telegram');
+  if (telegram && !telegram.dataset.rendered) {
+    telegram.innerHTML = _renderProfileTelegramPairingPanel();
+    telegram.dataset.rendered = '1';
+  }
+  try { await _settingsRefreshTelegramSelfPairing(); } catch {}
   if (!section.dataset.bound) {
     section.dataset.bound = '1';
     document.getElementById('settings-profile-pw-save')?.addEventListener('click', _settingsChangePassword);
@@ -2138,6 +2271,26 @@ async function renderSettingsGraphsList() {
         : (g.janitorStatus === 'running'
           ? 'running'
           : (g.lastCleanedAt ? 'ok' : 'stale'));
+      const canDistillGraph = role !== 'general_kb';
+      const distillPromoted = Number.isFinite(Number(g.lastDistillPromoted)) ? Number(g.lastDistillPromoted) : null;
+      const distillCandidates = Number.isFinite(Number(g.lastDistillCandidates)) ? Number(g.lastDistillCandidates) : null;
+      const distillStats = distillCandidates !== null
+        ? `${distillPromoted ?? 0}/${distillCandidates} promoted`
+        : '';
+      const distillLabel = canDistillGraph
+        ? (g.distillDirty
+          ? 'distill pending'
+          : (g.lastDistillStatus === 'error'
+            ? 'distill failed'
+            : (g.lastDistilledAt
+              ? `distilled ${new Date(g.lastDistilledAt).toLocaleDateString()}${distillStats ? ` · ${distillStats}` : ''}`
+              : 'not distilled')))
+        : '';
+      const distillTone = !canDistillGraph
+        ? ''
+        : (g.lastDistillStatus === 'error'
+          ? 'error'
+          : (g.distillDirty || !g.lastDistilledAt ? 'stale' : 'ok'));
       const inspectOnly = typeof _isInspectOnlyGraph === 'function'
         ? _isInspectOnlyGraph(g)
         : !!(g.inspectOnly || g.activationLocked || g.managed || g.protected || _settingsGraphIsManagedMemoryRole(role));
@@ -2156,10 +2309,12 @@ async function renderSettingsGraphsList() {
           ${badgeLabel ? `<span class="sg-badge">${esc(badgeLabel)}</span>` : ''}
           <span class="sg-maintenance ${maintenanceTone}" title="${esc(g.maintenanceError || maintenanceLabel)}">${esc(maintenanceLabel)}</span>
           <span class="sg-maintenance ${cleanTone}" title="${esc(g.janitorError || cleanLabel)}">${esc(cleanLabel)}</span>
+          ${canDistillGraph ? `<span class="sg-maintenance ${distillTone}" title="${esc(g.lastDistillError || distillLabel)}">${esc(distillLabel)}</span>` : ''}
         </div>
         <div class="sg-actions">
           ${canManage ? `<button type="button" class="sg-action" data-graph-maintain="${esc(g.slug)}">maintain</button>` : ''}
           ${canManage ? `<button type="button" class="sg-action" data-graph-clean="${esc(g.slug)}">clean</button>` : ''}
+          ${canManage && canDistillGraph ? `<button type="button" class="sg-action" data-graph-distill="${esc(g.slug)}">distill</button>` : ''}
           ${canResearchGeneralKb ? `<button type="button" class="sg-action" data-graph-research-general-kb="${esc(g.slug)}">research</button>` : ''}
           ${canReset ? `<button type="button" class="sg-action" data-graph-reset="${esc(g.slug)}">reset</button>` : ''}
           ${canDelete ? `<button type="button" class="sg-action danger" data-graph-delete="${esc(g.slug)}">delete</button>` : ''}
@@ -2222,6 +2377,9 @@ async function renderSettingsGraphsList() {
     container.querySelectorAll('[data-graph-clean]').forEach(btn => {
       btn.addEventListener('click', () => _cleanSettingsGraph(btn.dataset.graphClean, graphs.find(g => g.slug === btn.dataset.graphClean)));
     });
+    container.querySelectorAll('[data-graph-distill]').forEach(btn => {
+      btn.addEventListener('click', () => _distillSettingsGraph(btn.dataset.graphDistill, graphs.find(g => g.slug === btn.dataset.graphDistill)));
+    });
     container.querySelectorAll('[data-graph-research-general-kb]').forEach(btn => {
       btn.addEventListener('click', () => _researchSettingsGeneralKb(btn.dataset.graphResearchGeneralKb, graphs.find(g => g.slug === btn.dataset.graphResearchGeneralKb), btn));
     });
@@ -2268,6 +2426,34 @@ async function _cleanSettingsGraph(slug, graph) {
     if (typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === slug && typeof inspectGraph === 'function') inspectGraph(slug);
   } catch (e) {
     toast(`Clean failed: ${e.message || e}`, true);
+    await renderSettingsGraphsList();
+  }
+}
+
+async function _distillSettingsGraph(slug, graph) {
+  if (!slug) return;
+  const name = graph?.name || slug;
+  try {
+    const res = await fetch(API + `/api/graphs/${encodeURIComponent(slug)}/distill/run`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true, reason: 'settings' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) throw new Error(data.error || 'distill failed');
+    const summary = data.summary?.distill || data.distill || data.result?.summary?.distill || data;
+    const promoted = Number.isFinite(summary?.promoted) ? summary.promoted : null;
+    const candidates = Number.isFinite(summary?.candidates) ? summary.candidates : null;
+    const details = [
+      promoted !== null ? `${promoted} promoted` : '',
+      candidates !== null ? `${candidates} candidates` : '',
+    ].filter(Boolean).join(' · ');
+    toast(`Distilled ${name}${details ? `: ${details}` : ''}`);
+    if (typeof loadGraphsList === 'function') loadGraphsList();
+    await renderSettingsGraphsList();
+    if (typeof _viewedGraphSlug !== 'undefined' && _viewedGraphSlug === slug && typeof inspectGraph === 'function') inspectGraph(slug);
+  } catch (e) {
+    toast(`Distill failed: ${e.message || e}`, true);
     await renderSettingsGraphsList();
   }
 }

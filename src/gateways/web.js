@@ -5423,34 +5423,107 @@ class WebGateway {
       // the pairing endpoints here so operators can approve/revoke channel
       // pairings from Settings without routing the action through the agent.
       if (urlPath.startsWith('/api/pairing/')) {
-        if (!(await checkAuth(req, res))) return;
+        const authContext = await requireGraphApiAuth(req, res);
+        if (!authContext) return;
+        const isCreator = _graphAuthIsCreator(authContext);
+        const authUsername = _graphAuthUsername(authContext);
+        const authRole = String(authContext.role || authContext.type || '').toLowerCase() || 'webapp';
         const gatewayManager = this.tools?.platformManager;
         const pairing = gatewayManager?.pairing;
         const sendJson = (status, body) => {
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(body, null, 2));
         };
+        const ownerMeta = (channel = 'telegram') => {
+          if (!authUsername) return null;
+          const role = authRole === 'creator' || authRole === 'admin' ? authRole : 'webapp';
+          const userGraphSlug = role === 'webapp'
+            ? ensureAndPersistWebUserGraph(authUsername, { reason: `${channel}-self-pairing` })
+            : (authContext.userRecord?.userGraphSlug || null);
+          return {
+            ownerUser: authUsername,
+            ownerRole: role,
+            userGraphSlug,
+            approvedBy: authUsername,
+            meta: {
+              webappUser: authUsername,
+              ownerRole: role,
+            },
+          };
+        };
+        const ensureTelegramChannelGraph = (telegramUserId, binding = {}) => {
+          const registry = this.tools?._graphRegistry;
+          if (!registry?.ensureChannelGraph || !telegramUserId) return null;
+          const meta = binding.meta || {};
+          const label = meta.name || (meta.username ? `@${meta.username}` : null) || `Telegram ${telegramUserId}`;
+          try {
+            const slug = registry.ensureChannelGraph(`channel-person:telegram:${telegramUserId}`, {
+              name: label,
+              description: `Telegram DM memory for ${label}`,
+              source: 'telegram',
+              createdBy: 'telegram',
+              platform: 'telegram',
+              externalUserId: String(telegramUserId),
+              externalChannelId: String(telegramUserId),
+              ownerUser: binding.ownerUser || null,
+              ownerRole: binding.ownerRole || null,
+              userGraphSlug: binding.userGraphSlug || null,
+            });
+            if (slug && binding && binding.channel === 'telegram' && binding.channelGraphSlug !== slug && typeof pairing?.updateBinding === 'function') {
+              pairing.updateBinding('telegram', telegramUserId, { channelGraphSlug: slug });
+            }
+            return slug;
+          } catch (e) {
+            this.log.warn?.(`[pairing] Failed to ensure Telegram channel graph for ${telegramUserId}: ${e.message}`);
+            return null;
+          }
+        };
         if (!pairing) {
           sendJson(503, { ok: false, error: 'Pairing store unavailable' });
           return;
         }
         try {
+          if (urlPath === '/api/pairing/me' && req.method === 'GET') {
+            if (!authUsername) {
+              sendJson(403, { ok: false, error: 'Authenticated user is required.' });
+              return;
+            }
+            const query = (() => {
+              try { return new URL(req.url || '', 'http://localhost').searchParams; }
+              catch { return new URLSearchParams(); }
+            })();
+            const channel = String(query.get('channel') || 'telegram');
+            sendJson(200, { ok: true, [channel]: pairing.listApprovedRecords?.(channel, { ownerUser: authUsername }) || [] });
+            return;
+          }
           if (urlPath === '/api/pairing/pending' && req.method === 'GET') {
-            sendJson(200, pairing.listPending());
+            sendJson(200, isCreator ? pairing.listPending() : { telegram: [] });
             return;
           }
           if (urlPath === '/api/pairing/approved' && req.method === 'GET') {
-            sendJson(200, pairing.listApproved());
+            if (isCreator) sendJson(200, pairing.listApproved());
+            else if (authUsername) sendJson(200, { telegram: pairing.listApprovedRecords?.('telegram', { ownerUser: authUsername }) || [] });
+            else sendJson(403, { ok: false, error: 'Authenticated user is required.' });
             return;
           }
           if (urlPath === '/api/pairing/approve' && req.method === 'POST') {
-            const { channel, code, notify = true, message } = await _readJsonBody(req);
+            const { channel = 'telegram', code, notify = true, message, bindToSelf = false } = await _readJsonBody(req);
+            const bindOwner = !isCreator || bindToSelf === true;
+            const binding = bindOwner ? ownerMeta(channel) : {};
+            if (bindOwner && !binding) {
+              sendJson(403, { ok: false, error: 'Authenticated user is required for self-pairing.' });
+              return;
+            }
             const result = channel
-              ? pairing.approveCodeForChannel(channel, code)
-              : pairing.approveCode(code);
+              ? pairing.approveCodeForChannel(channel, code, binding)
+              : pairing.approveCode(code, binding);
             if (!result) {
               sendJson(404, { ok: false, error: 'Code not found or expired' });
               return;
+            }
+            if (result.channel === 'telegram') {
+              const slug = ensureTelegramChannelGraph(result.id, result.binding || binding);
+              if (slug && result.binding) result.binding.channelGraphSlug = slug;
             }
             const out = { ok: true, ...result };
             if (notify !== false && result.channel === 'telegram') {
@@ -5472,6 +5545,13 @@ class WebGateway {
           }
           if (urlPath === '/api/pairing/revoke' && req.method === 'POST') {
             const { channel, id } = await _readJsonBody(req);
+            if (!isCreator) {
+              const binding = pairing.getBinding?.(channel, id);
+              if (!binding || !authUsername || String(binding.ownerUser || '') !== String(authUsername)) {
+                sendJson(403, { ok: false, error: 'You can only revoke channel pairings linked to your account.' });
+                return;
+              }
+            }
             const ok = pairing.revokeApproved(channel, id);
             sendJson(200, { ok, channel, id });
             return;
@@ -8407,6 +8487,47 @@ class WebGateway {
             })
           : await coordinator.cleanGraph(slug, payload.opts);
         return jsonRes(result, result.ok ? 200 : 400);
+      } catch (e) {
+        return jsonRes({ error: e.message }, 500);
+      }
+    }
+
+    if (action === 'distill/run' && req.method === 'POST') {
+      if (!requireGraphManager()) return;
+      try {
+        const g = registry.get(slug);
+        if (!g) return jsonRes({ error: 'Not found' }, 404);
+        if (String(g.role || '') === 'general_kb') {
+          return jsonRes({ error: 'Distill is not available for the General Knowledge Base graph' }, 400);
+        }
+        const body = await jsonBody().catch(() => ({}));
+        const coordinator = this.tools?._graphMaintenance;
+        const distiller = this.tools?._channelDistiller;
+        if (!coordinator && !distiller) return jsonRes({ error: 'graph distiller not available' }, 503);
+        const payload = {
+          slug,
+          opts: {
+            force: body.force !== false,
+            includeActive: true,
+            reason: body.reason || 'manual-distill',
+            runMaintainer: false,
+            runCandidateReview: false,
+            runJanitor: false,
+            runDistill: true,
+            runBackup: false,
+          },
+        };
+        const result = coordinator
+          ? (this.tools?._jobQueue?.submitWorkerJob
+            ? await this.tools._jobQueue.submitWorkerJob('graphMaintenance.maintainGraph', payload, {
+                lane: 'maintenance',
+                priority: 40,
+                route: 'graph.distill.manual',
+                graph: slug,
+              })
+            : await coordinator.maintainGraph(slug, payload.opts))
+          : await distiller.distillGraph(g, { force: payload.opts.force });
+        return jsonRes(result, result?.ok === false ? 400 : 200);
       } catch (e) {
         return jsonRes({ error: e.message }, 500);
       }

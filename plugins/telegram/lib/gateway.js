@@ -58,6 +58,30 @@ class TelegramGateway {
     });
   }
 
+  _bindingForUser(userId, isDm = true) {
+    if (!isDm || !userId || !this.pairing?.getBinding) return null;
+    const binding = this.pairing.getBinding('telegram', String(userId));
+    return binding && binding.ownerUser ? binding : null;
+  }
+
+  _bindingAgentFields(binding) {
+    if (!binding?.ownerUser) return {};
+    return {
+      userRole: binding.ownerRole || 'webapp',
+      channelOwnerUser: binding.ownerUser,
+      channelOwnerRole: binding.ownerRole || 'webapp',
+      channelOwnerGraphSlug: binding.userGraphSlug || null,
+      channelBinding: {
+        channel: 'telegram',
+        id: binding.id,
+        ownerUser: binding.ownerUser,
+        ownerRole: binding.ownerRole || 'webapp',
+        userGraphSlug: binding.userGraphSlug || null,
+        channelGraphSlug: binding.channelGraphSlug || null,
+      },
+    };
+  }
+
   async connect() {
     this.channelConfig = this.config.channels?.telegram || {};
     this.token = this.channelConfig.botToken || this.config.telegramBotToken;
@@ -153,6 +177,7 @@ class TelegramGateway {
     const policy = resolveSourcePolicy(this.config, 'telegram', chatId);
     const targetId = threadId ? `${chatId}:topic:${threadId}` : chatId;
     const sessionKey = this._sessionKey(chatId, isDm, userId, threadId, policy);
+    const accountBinding = this._bindingForUser(userId, isDm);
 
     const cmd = content.trim().toLowerCase();
     if (cmd === '/new' || cmd === '/reset') {
@@ -211,6 +236,7 @@ class TelegramGateway {
         platform: 'telegram',
         sourceId: targetId,
         suppressLearning: !policy.learn,
+        ...this._bindingAgentFields(accountBinding),
       };
       result = this.agent._jobQueue?.submitAgentTurn
         ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
@@ -437,6 +463,7 @@ class TelegramGateway {
     const userId = isDm ? String(target.chatId) : 'cron';
     const channelName = isDm ? 'telegram-dm' : `telegram:${target.chatId}`;
     const policy = resolveSourcePolicy(this.config, 'telegram', String(target.chatId));
+    const accountBinding = this._bindingForUser(userId, isDm);
     const prompt = `[proactive thought: ${context}${topic ? ` (topic: ${topic})` : ''}]`;
 
     setImmediate(async () => {
@@ -456,6 +483,7 @@ class TelegramGateway {
           platform: 'telegram',
           sourceId: targetId,
           suppressLearning: true,
+          ...this._bindingAgentFields(accountBinding),
         };
         const result = this.agent._jobQueue?.submitAgentTurn
           ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
@@ -498,6 +526,7 @@ class TelegramGateway {
     const isDm = taskEntry?.isDm ?? !String(target.chatId).startsWith('-');
     const userId = taskEntry?.userId || (isDm ? String(target.chatId) : 'system');
     const channelName = taskEntry?.channelName || (isDm ? 'telegram-dm' : `telegram:${target.chatId}`);
+    const accountBinding = taskEntry?.channelBinding || this._bindingForUser(userId, isDm);
     const elapsed = Math.round(((taskEntry?.completedAt || Date.now()) - (taskEntry?.startedAt || Date.now())) / 1000);
     const status = taskEntry?.status === 'done' ? 'completed successfully' : `failed: ${taskEntry?.result?.error || 'unknown error'}`;
     const resultSummary = taskEntry?.status === 'done' && taskEntry?.result?.result
@@ -531,6 +560,7 @@ class TelegramGateway {
           platform: 'telegram',
           sourceId: targetId,
           suppressLearning: true,
+          ...this._bindingAgentFields(accountBinding),
         };
         const result = this.agent._jobQueue?.submitAgentTurn
           ? await this.agent._jobQueue.submitAgentTurn(agentOpts, {
@@ -784,6 +814,7 @@ class TelegramGateway {
 
     const targetId = threadId ? `${chatId}:topic:${threadId}` : chatId;
     const sessionKey = this._sessionKey(chatId, isDm, userId, threadId, policy);
+    const accountBinding = this._bindingForUser(userId, isDm);
 
     // Run the full voice pipeline: STT → agent → TTS
     const result = await pipeline.process(audioBuffer, mimeType, this.agent, {
@@ -798,6 +829,7 @@ class TelegramGateway {
       platform: 'telegram',
       sourceId: targetId,
       suppressLearning: !policy.learn,
+      ...this._bindingAgentFields(accountBinding),
     });
 
     if (result.error) {

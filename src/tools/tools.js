@@ -4526,6 +4526,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
       userId:              _dctx.userId              ?? this._currentUserId          ?? 'operator',
       originalUserMessage: _dctx.userMessage         ?? this._currentUserMessage     ?? task,
       originalUserName:    _dctx.userName            ?? this._currentUserName        ?? null,
+      channelOwnerUser:    _dctx.channelOwnerUser    ?? null,
+      channelOwnerRole:    _dctx.channelOwnerRole    ?? null,
+      channelOwnerGraphSlug: _dctx.channelOwnerGraphSlug ?? null,
+      channelBinding:      _dctx.channelBinding      ?? null,
       // Snapshot so the completion-delivery turn (see
       // _deliverTaskResult) can re-feed the same acorn project
       // context to processMessage. Without this the wake-up turn
@@ -4989,6 +4993,10 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                 platformMeta: taskEntry.platformMeta || null,
                 userId: taskEntry.userId || null,
                 userName: taskEntry.originalUserName || null,
+                channelOwnerUser: taskEntry.channelOwnerUser || null,
+                channelOwnerRole: taskEntry.channelOwnerRole || null,
+                channelOwnerGraphSlug: taskEntry.channelOwnerGraphSlug || null,
+                channelBinding: taskEntry.channelBinding || null,
                 userMessage: taskEntry.originalUserMessage || null,
                 projectContext: taskEntry.projectContext || null,
                 memoryEnvelope: taskEntry.memoryEnvelope || null,
@@ -5221,6 +5229,11 @@ Be specific — cite facts, dates, and patterns. If the answer involves reasonin
                 channelName: taskEntry.channelName || (isCli ? `cli:${deliveryUserId}` : 'control-panel'),
                 userId: deliveryUserId,
                 userName: taskEntry.originalUserName || 'System',
+                userRole: taskEntry.channelOwnerRole || null,
+                channelOwnerUser: taskEntry.channelOwnerUser || null,
+                channelOwnerRole: taskEntry.channelOwnerRole || null,
+                channelOwnerGraphSlug: taskEntry.channelOwnerGraphSlug || null,
+                channelBinding: taskEntry.channelBinding || null,
                 trigger: 'task_complete',
                 platform: isCli ? 'cli' : 'web',
                 isDm: !isCli, // CLI sessions aren't DM — preserves per-session isolation

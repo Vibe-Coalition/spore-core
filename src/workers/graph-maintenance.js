@@ -73,7 +73,7 @@ class GraphMaintenanceCoordinator {
       maintainer: active && !managed ? 'active' : 'scoped',
       janitor: active && !managed ? 'active' : (!managed ? 'full' : 'scoped'),
       backup: true,
-      distill: role === 'project' || role === 'channel' || role === 'user',
+      distill: role !== 'general_kb',
     };
   }
 
@@ -268,7 +268,7 @@ class GraphMaintenanceCoordinator {
       }
 
       if (runDistill && policy.distill && this.scopedDistiller?.distillGraph && (force || graph.distillDirty)) {
-        summary.distill = await scoped(() => this.scopedDistiller.distillGraph(graph));
+        summary.distill = await scoped(() => this.scopedDistiller.distillGraph(graph, { force }));
       }
 
       if (runBackup && policy.backup && this.backup?.runBackupForGraph) {

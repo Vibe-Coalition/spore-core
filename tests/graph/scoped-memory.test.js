@@ -150,6 +150,70 @@ test('project identity honors explicit project identity key', () => {
   assert.equal(identity.root, '/app');
 });
 
+test('linked Telegram DM reads channel graph plus paired web user graph', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-linked-telegram-'));
+  const registry = new GraphRegistry(dir, { agentId: 'spore', displayName: 'Spore' }, quietLog());
+  registry.init();
+
+  const env = resolveDefaultMemoryEnvelope({
+    registry,
+    opts: {
+      platform: 'telegram',
+      channelId: '12345',
+      userId: '12345',
+      userName: 'Telegram Yam',
+      isDm: true,
+      channelOwnerUser: 'yam',
+      channelOwnerRole: 'webapp',
+      messageContent: 'remind me every morning',
+    },
+  });
+
+  assert.equal(env.mode, 'channel-person-session');
+  assert.ok(env.channelSlug);
+  assert.ok(env.userSlug);
+  assert.equal(env.primarySlug, env.channelSlug);
+  assert.equal(env.writeScopes.defaultSlug, env.channelSlug);
+  assert.equal(env.writeScopes.channelSlug, env.channelSlug);
+  assert.equal(env.writeScopes.userSlug, env.userSlug);
+  assert.deepEqual(env.readScopes.map(s => s.role), ['channel', 'user', 'general_kb']);
+});
+
+test('cron/proactive Telegram turns do not rename existing person channel graph', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-channel-name-'));
+  const registry = new GraphRegistry(dir, { agentId: 'spore', displayName: 'Spore' }, quietLog());
+  registry.init();
+
+  const first = resolveDefaultMemoryEnvelope({
+    registry,
+    opts: {
+      platform: 'telegram',
+      channelId: '697706930',
+      userId: '697706930',
+      userName: 'PirateKing',
+      isDm: true,
+      messageContent: 'hello',
+    },
+  });
+  assert.equal(registry.get(first.channelSlug).name, 'PirateKing');
+
+  const second = resolveDefaultMemoryEnvelope({
+    registry,
+    opts: {
+      platform: 'telegram',
+      channelId: '697706930',
+      userId: '697706930',
+      userName: 'Cron',
+      isDm: true,
+      trigger: 'proactive',
+      messageContent: '[proactive thought: send the report]',
+    },
+  });
+
+  assert.equal(second.channelSlug, first.channelSlug);
+  assert.equal(registry.get(first.channelSlug).name, 'PirateKing');
+});
+
 test('distilled project memory is shared across users on the same git remote', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spore-project-collab-'));
   const log = quietLog();
@@ -2039,4 +2103,170 @@ test('channel distiller digest includes safe people facts for general kb promoti
   assert.equal(person.type, 'person');
   assert.deepEqual(person.aspects.public_context, ['Test User maintains Spore Core integration work.']);
   assert.doesNotMatch(JSON.stringify(person), /private@example/);
+});
+
+test('channel distiller backfills pre-dirty graph content once before incremental scans', () => {
+  const db = newDb();
+  db.prepare(`
+    INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
+    VALUES ('cron-plugin', 'Cron Plugin', 'system', 'Scheduled job integration', 7, 'test', 'test')
+  `).run();
+  const asp = db.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES ('cron-plugin', 'gotchas', 7, 'test')
+  `).run().lastInsertRowid;
+  db.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with, created, updated_at)
+    VALUES (?, 'Use named job upserts instead of replacing the entire crontab.', 7, 'test', 'test', '2026-05-12 10:00:00', '2026-05-12 10:00:00')
+  `).run(asp);
+
+  const distiller = new ChannelDistiller({}, quietLog(), null, {}, {});
+  const dirtyAfterContent = {
+    slug: 'channel-test',
+    role: 'channel',
+    distillDirtySince: '2026-05-13T10:00:00.000Z',
+  };
+  const firstDigest = distiller._collectDigest(db, dirtyAfterContent, { fullScan: true });
+  assert.ok(firstDigest.some(n => n.id === 'cron-plugin'));
+
+  const incrementalAfterFullScan = distiller._collectDigest(db, {
+    ...dirtyAfterContent,
+    distillFullScanAt: '2026-05-13T10:30:00.000Z',
+  });
+  assert.equal(incrementalAfterFullScan.length, 0);
+
+  const forcedDigest = distiller._collectDigest(db, {
+    ...dirtyAfterContent,
+    distillFullScanAt: '2026-05-13T10:30:00.000Z',
+  }, { force: true });
+  assert.ok(forcedDigest.some(n => n.id === 'cron-plugin'));
+});
+
+test('distiller can digest default graph lessons without ref or seed scaffolding', () => {
+  const db = newDb();
+  const insertNode = (id, label, type, description, provenance = 'learner', extractedWith = 'learner') => {
+    db.prepare(`
+      INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
+      VALUES (?, ?, ?, ?, 7, ?, ?)
+    `).run(id, label, type, description, provenance, extractedWith);
+    const asp = db.prepare(`
+      INSERT INTO aspects (node_id, name, weight, extracted_with)
+      VALUES (?, 'notes', 7, ?)
+    `).run(id, extractedWith).lastInsertRowid;
+    db.prepare(`
+      INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+      VALUES (?, ?, 7, 'test', ?)
+    `).run(asp, `${label} has a reusable implementation lesson for future agents.`, extractedWith);
+  };
+
+  insertNode('learned-retry-pattern', 'Retry Pattern', 'concept', 'Use bounded retries with jitter.', 'self', 'spore-learner');
+  insertNode('ref-cron-runtime', 'Cron Runtime Reference', 'reference', 'Seed reference node.', 'seed', 'seed');
+  insertNode('spore', 'Spore', 'self', 'Agent identity.', 'self', 'seed');
+  insertNode('knowledge-graph', 'Knowledge Graph', 'system', 'Seed graph schema docs.', 'seed', 'seed');
+
+  const distiller = new ChannelDistiller({}, quietLog(), null, {}, {});
+  const digest = distiller._collectDigest(db, { slug: 'default', role: 'custom' }, { fullScan: true });
+  assert.deepEqual(digest.map(n => n.id), ['learned-retry-pattern']);
+});
+
+test('distiller deterministically promotes reusable default graph tools', () => {
+  const source = newDb();
+  const kb = newDb();
+  source.prepare(`
+    INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
+    VALUES ('tool-market-data', 'market-data', 'tool', 'Reusable market data extractor.', 7, 'self', 'save_tool')
+  `).run();
+  const asp = source.prepare(`
+    INSERT INTO aspects (node_id, name, weight, extracted_with)
+    VALUES ('tool-market-data', 'commands', 7, 'save_tool')
+  `).run().lastInsertRowid;
+  source.prepare(`
+    INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+    VALUES (?, 'quote TICKER:EXCHANGE returns quote data for a stock symbol.', 7, 'test', 'save_tool')
+  `).run(asp);
+
+  const registry = {
+    getGeneralKnowledgeSlug: () => 'spore-knowledge-base',
+    get: slug => (slug === 'default' ? { slug: 'default', role: 'custom' } : null),
+    refreshStats() {},
+  };
+  const learner = {
+    getGraphDb(slug) {
+      if (slug === 'spore-knowledge-base') return kb;
+      return null;
+    },
+  };
+  const distiller = new ChannelDistiller({}, quietLog(), null, learner, registry);
+  const digest = distiller._collectDigest(source, { slug: 'default', role: 'custom' }, { fullScan: true });
+  const promoted = distiller._promoteDigestReusable(digest, 'default');
+
+  assert.equal(promoted, 1);
+  assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'tool-market-data'").get().type, 'tool');
+  assert.ok(kb.prepare(`
+    SELECT 1 FROM edges
+    WHERE source = 'tool-market-data' AND target = 'general-kb-distillation' AND type = 'distilled_into'
+  `).get());
+});
+
+test('distiller deterministically promotes replayable skills and safe people only', () => {
+  const source = newDb();
+  const kb = newDb();
+  const insertNode = (id, label, type, description) => {
+    source.prepare(`
+      INSERT INTO nodes (id, label, type, description, importance, provenance, extracted_with)
+      VALUES (?, ?, ?, ?, 7, 'self', 'spore-learner')
+    `).run(id, label, type, description);
+  };
+  const addAttr = (nodeId, aspectName, content) => {
+    let asp = source.prepare('SELECT id FROM aspects WHERE node_id = ? AND name = ?').get(nodeId, aspectName);
+    if (!asp) {
+      const res = source.prepare(`
+        INSERT INTO aspects (node_id, name, weight, extracted_with)
+        VALUES (?, ?, 7, 'spore-learner')
+      `).run(nodeId, aspectName);
+      asp = { id: res.lastInsertRowid };
+    }
+    source.prepare(`
+      INSERT INTO attributes (aspect_id, content, importance, source, extracted_with)
+      VALUES (?, ?, 7, 'test', 'spore-learner')
+    `).run(asp.id, content);
+  };
+
+  insertNode('skill-debug-cron', 'Debug Cron Delivery', 'skill', 'Diagnose cron jobs that do not send expected channel messages.');
+  addAttr('skill-debug-cron', 'commands', 'crontab -l && tail -n 50 /var/log/cron checks installed jobs and recent daemon output.');
+  addAttr('skill-debug-cron', 'steps', 'Verify the job exists in the crontab for the daemon user.');
+  addAttr('skill-debug-cron', 'steps', 'Run the command manually with the same environment and inspect logs.');
+  addAttr('skill-debug-cron', 'validation', 'Confirm the expected message lands in the target channel after the next scheduled tick.');
+
+  insertNode('ada-lovelace', 'Ada Lovelace', 'person', 'Computing pioneer and collaborator.');
+  addAttr('ada-lovelace', 'public_context', 'Ada Lovelace is known for early computing work and analytical engine collaboration.');
+  addAttr('ada-lovelace', 'preferences', 'Ada prefers private daily reminders.');
+  addAttr('ada-lovelace', 'contact', 'ada@example.com');
+
+  const registry = {
+    getGeneralKnowledgeSlug: () => 'spore-knowledge-base',
+    get: slug => (slug === 'default' ? { slug: 'default', role: 'custom' } : null),
+    refreshStats() {},
+  };
+  const learner = {
+    getGraphDb(slug) {
+      if (slug === 'spore-knowledge-base') return kb;
+      return null;
+    },
+  };
+  const distiller = new ChannelDistiller({}, quietLog(), null, learner, registry);
+  const digest = distiller._collectDigest(source, { slug: 'default', role: 'custom' }, { fullScan: true });
+  const promoted = distiller._promoteDigestReusable(digest, 'default');
+
+  assert.equal(promoted, 2);
+  assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'skill-debug-cron'").get().type, 'skill');
+  assert.equal(kb.prepare("SELECT type FROM nodes WHERE id = 'ada-lovelace'").get().type, 'person');
+  const personText = JSON.stringify(kb.prepare(`
+    SELECT a.content
+      FROM attributes a
+      JOIN aspects asp ON asp.id = a.aspect_id
+     WHERE asp.node_id = 'ada-lovelace'
+  `).all());
+  assert.match(personText, /early computing work/);
+  assert.doesNotMatch(personText, /daily reminders|ada@example/);
 });
